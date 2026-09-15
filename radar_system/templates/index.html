@@ -21,7 +21,7 @@
 }
 @media(max-width:1100px){.workspace{padding:18px 16px 12px}.main-grid{grid-template-columns:minmax(0,1fr) 264px;gap:12px}.panel{padding:13px}.viewer-toolbar{padding:9px}.mode-btn{padding:7px 9px}.mode-btn svg{display:none}.app-header{padding:0 18px}.metric{padding:13px}.metric-symbol{display:none}.metric .value{font-size:23px}.metric-note{font-size:9px}.view-badge{display:none}}
 .follower-card-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;margin-bottom:8px}.follower-stat-cell{background:#111a23;border:1px solid #2b3846;border-radius:6px;padding:8px 5px;text-align:center}.follower-stat-cell span{display:block;font-size:10px;color:var(--muted);margin-bottom:4px}.follower-stat-cell strong{font-size:12px;font-weight:600}.follower-alert{padding:8px 10px;border-radius:6px;font-size:11px;font-weight:500;margin-top:8px;line-height:1.4}.follower-alert.danger{background:#402630;border:1px solid #9f525a;color:#ff8c91;animation:pulse 1s infinite}.follower-alert.warn{background:#362e21;border:1px solid #7b6341;color:#f6c879}.f-badge{padding:3px 8px;border-radius:4px;font-size:10px;font-weight:600;letter-spacing:.3px}.f-badge-running{background:#193830;color:#69dec4;border:1px solid #336a5c}.f-badge-tracking{background:#133a2f;color:#7cf6da;border:1px solid #3ca88d}.f-badge-aeb{background:#40232a;color:#ff8c91;border:1px solid #8e3e48;animation:pulse 1s infinite}.f-badge-lost{background:#383120;color:#f6c879;border:1px solid #78623b}.f-badge-idle{background:#18222d;color:#8fa0b3;border:1px solid #2d3e50}@keyframes pulse{0%{opacity:1}50%{opacity:.6}100%{opacity:1}}
-.dpad-container{display:flex;flex-direction:column;align-items:center;gap:9px;touch-action:none}.dpad-speed-bar{display:flex;gap:5px;width:100%;max-width:280px}.speed-btn{flex:1;padding:5px 6px;font-size:11px;border-radius:6px;border:1px solid #303c4b;background:#18222d;color:var(--muted);touch-action:manipulation}.speed-btn.active{background:#233d39;border-color:#69dec4;color:#69dec4;font-weight:600}.dpad-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;width:100%;max-width:280px;margin:0 auto;touch-action:none}.dpad-btn{min-height:50px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;padding:6px 2px;border-radius:8px;border:1px solid #364858;background:#1a2734;color:var(--text);font-size:12px;font-weight:600;touch-action:none!important;user-select:none!important;-webkit-user-select:none!important;-webkit-touch-callout:none!important;transition:transform .08s,background .1s,border-color .1s}.dpad-btn:active,.dpad-btn.pressed{transform:scale(.94);box-shadow:inset 0 2px 6px #0008}.dpad-btn.diagonal{background:#152731;border-color:#2a5057;color:#8be3d4}.dpad-btn.diagonal:active,.dpad-btn.diagonal.pressed{background:#1e464c;border-color:#69dec4;color:#fff}.dpad-btn.fwd{background:#193430;border-color:#2f685c;color:#7bf3d9}.dpad-btn.fwd:active,.dpad-btn.fwd.pressed{background:#255c51;border-color:#69dec4;color:#fff}.dpad-btn.stop{background:#421d23;border-color:#8a323f;color:#ff98a0}.dpad-btn.stop:active,.dpad-btn.stop.pressed{background:#672530;border-color:#ff8c91;color:#fff}.dpad-btn.rev{background:#262130;border-color:#4d3d5f;color:#cfb5ee}.dpad-btn.rev:active,.dpad-btn.rev.pressed{background:#3f3253;border-color:#b58bf8;color:#fff}.dpad-hint{font-size:10px;color:var(--muted);text-align:center;line-height:1.4;margin-top:2px}
+.dpad-container{display:flex;flex-direction:column;align-items:center;gap:9px;touch-action:none}.dpad-speed-bar{display:flex;gap:5px;width:100%;max-width:280px}.speed-btn,.steer-btn{flex:1;padding:5px 6px;font-size:11px;border-radius:6px;border:1px solid #303c4b;background:#18222d;color:var(--muted);touch-action:manipulation}.speed-btn.active,.steer-btn.active{background:#233d39;border-color:#69dec4;color:#69dec4;font-weight:600}.dpad-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;width:100%;max-width:280px;margin:0 auto;touch-action:none}.dpad-btn{min-height:50px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;padding:6px 2px;border-radius:8px;border:1px solid #364858;background:#1a2734;color:var(--text);font-size:12px;font-weight:600;touch-action:none!important;user-select:none!important;-webkit-user-select:none!important;-webkit-touch-callout:none!important;transition:transform .08s,background .1s,border-color .1s}.dpad-btn:active,.dpad-btn.pressed{transform:scale(.94);box-shadow:inset 0 2px 6px #0008}.dpad-btn.diagonal{background:#152731;border-color:#2a5057;color:#8be3d4}.dpad-btn.diagonal:active,.dpad-btn.diagonal.pressed{background:#1e464c;border-color:#69dec4;color:#fff}.dpad-btn.fwd{background:#193430;border-color:#2f685c;color:#7bf3d9}.dpad-btn.fwd:active,.dpad-btn.fwd.pressed{background:#255c51;border-color:#69dec4;color:#fff}.dpad-btn.stop{background:#421d23;border-color:#8a323f;color:#ff98a0}.dpad-btn.stop:active,.dpad-btn.stop.pressed{background:#672530;border-color:#ff8c91;color:#fff}.dpad-btn.rev{background:#262130;border-color:#4d3d5f;color:#cfb5ee}.dpad-btn.rev:active,.dpad-btn.rev.pressed{background:#3f3253;border-color:#b58bf8;color:#fff}.dpad-hint{font-size:10px;color:var(--muted);text-align:center;line-height:1.4;margin-top:2px}
 @media(max-width:820px){.app-header{height:68px}.device-tag{display:none}.workspace-heading h2{font-size:20px}.main-grid{grid-template-columns:minmax(0,1fr)}.canvas-stage{height:520px;min-height:420px}.sidebar{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));align-items:start;gap:12px}.follower-panel{grid-column:1/-1}.manual-panel{grid-column:1/-1}.layers-panel{grid-column:2;grid-row:auto}.pose-panel{grid-column:1}.metrics{gap:8px}.metric .value{font-size:21px}.metric-label{font-size:11px}.metric-label svg{display:none}.bottom-bar{flex-wrap:wrap}.brand h1{font-size:15px}.heading-actions{flex-wrap:wrap}.heading-actions .button{padding:8px 10px}.header-right{gap:10px}.render-info{gap:8px}}
 @media(max-width:520px){.workspace{padding:12px 10px 10px}.app-header{padding:0 12px;gap:8px}.brand{gap:8px}.brand-mark{width:32px;height:32px}.brand h1{font-size:13px}.brand p{font-size:9px;letter-spacing:0}.connection{font-size:10px;gap:6px}.workspace-heading{flex-direction:column;align-items:stretch;gap:10px;margin-bottom:12px}.eyebrow{font-size:9px}.workspace-heading h2{font-size:18px}.heading-actions{display:grid;grid-template-columns:repeat(2,1fr);gap:6px;width:100%}.heading-actions .button{padding:8px 4px;min-height:38px;font-size:11px;justify-content:center}.heading-actions .icon{display:none}#followerToggleBtn{grid-column:1/-1;font-size:13px;min-height:42px;font-weight:700}.metrics{grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin-bottom:12px}.metric{padding:10px;gap:5px}.metric-note{font-size:9px}.metric .value{font-size:21px}.viewer-toolbar{flex-wrap:wrap;gap:6px;padding:8px}.mode-selector{flex:1}.mode-btn{padding:7px 5px;flex:1;min-height:32px;font-size:11px}.viewer-tools{gap:4px}.viewer-tools .icon-button{width:32px;height:36px}.canvas-stage{height:420px;min-height:360px}.stage-meta{left:10px;top:12px}.stage-description{font-size:9px;max-width:180px}.stage-bottom{left:10px;bottom:14px}.viewer-footer{align-items:flex-start;flex-direction:column;gap:5px;font-size:9px;padding:8px 10px}.sidebar{grid-template-columns:minmax(0,1fr);gap:10px}.layers-panel,.pose-panel{grid-column:auto;grid-row:auto}.pose-grid{gap:6px}.pose-cell{padding:10px}.directional-grid{max-width:270px;margin:auto}.dir-badge{min-height:50px}.layer-row{min-height:38px}.panel{padding:13px}.bottom-bar{font-size:9px}.bottom-bar span:last-child{display:none}.zoom-tools .icon-button{width:32px;height:32px}.workspace.focus .canvas-stage{height:calc(100dvh - 270px)}.dpad-grid{max-width:100%;gap:8px}.dpad-btn{min-height:54px;font-size:13px}}
 @media(prefers-reduced-motion:reduce){*,*:before,*:after{animation:none!important;transition:none!important}}
@@ -127,9 +127,14 @@
     </div>
     <div class="dpad-container">
      <div class="dpad-speed-bar">
-      <button class="speed-btn" data-speed="low">标准 0.50m/s</button>
-      <button class="speed-btn active" data-speed="med">疾速 0.85m/s</button>
-      <button class="speed-btn" data-speed="high">狂暴 1.20m/s</button>
+      <button class="speed-btn" data-speed="low">慢速 0.30m/s</button>
+      <button class="speed-btn active" data-speed="med">常速 0.55m/s</button>
+      <button class="speed-btn" data-speed="high">快速 0.85m/s</button>
+     </div>
+     <div class="dpad-speed-bar">
+      <button class="steer-btn" data-steer="gentle">缓转 8&deg;</button>
+      <button class="steer-btn active" data-steer="normal">常规 14&deg;</button>
+      <button class="steer-btn" data-steer="full">满舵 20&deg;</button>
      </div>
      <div class="dpad-grid">
       <button class="dpad-btn diagonal" id="btnFwdLeft" data-action="forward_left" title="前左加速开">
@@ -712,41 +717,14 @@ if ($('fQuickToggleBtn')) $('fQuickToggleBtn').addEventListener('click', toggleF
 
 // ==================== 🕹️ 手动强行介入控制 (双模：点击微调点动 + 长按持续开动) ====================
 let currentSpeedTier = 'med';
-const SPEED_TIERS = {
-  low: {
-    forward: { vx: 0.50, wz: 0.0 },
-    forward_left: { vx: 0.45, wz: 0.50 },
-    forward_right: { vx: 0.45, wz: -0.50 },
-    left: { vx: 0.35, wz: 0.60 },
-    right: { vx: 0.35, wz: -0.60 },
-    reverse: { vx: -0.45, wz: 0.0 },
-    reverse_left: { vx: -0.38, wz: -0.45 },
-    reverse_right: { vx: -0.38, wz: 0.45 },
-    stop: { vx: 0.0, wz: 0.0 }
-  },
-  med: {
-    forward: { vx: 0.85, wz: 0.0 },
-    forward_left: { vx: 0.75, wz: 0.65 },
-    forward_right: { vx: 0.75, wz: -0.65 },
-    left: { vx: 0.50, wz: 0.80 },
-    right: { vx: 0.50, wz: -0.80 },
-    reverse: { vx: -0.70, wz: 0.0 },
-    reverse_left: { vx: -0.55, wz: -0.55 },
-    reverse_right: { vx: -0.55, wz: 0.55 },
-    stop: { vx: 0.0, wz: 0.0 }
-  },
-  high: {
-    forward: { vx: 1.20, wz: 0.0 },
-    forward_left: { vx: 1.00, wz: 0.80 },
-    forward_right: { vx: 1.00, wz: -0.80 },
-    left: { vx: 0.65, wz: 0.95 },
-    right: { vx: 0.65, wz: -0.95 },
-    reverse: { vx: -0.90, wz: 0.0 },
-    reverse_left: { vx: -0.70, wz: -0.65 },
-    reverse_right: { vx: -0.70, wz: 0.65 },
-    stop: { vx: 0.0, wz: 0.0 }
-  }
-};
+let currentSteerTier = 'normal';
+
+// 速度与转角现在由后端 resolve_drive() 权威换算,前端只报「哪个方向 + 哪两个档」。
+//
+// 为什么不再在前端写死 (vx, wz):阿克曼底盘的前轮转角由固件按 TurnR = Vx/Vz 解算,
+// 转角只取决于比值。旧版三个速度档的「左拐」(0.35/0.60、0.50/0.80、0.65/0.95)
+// 换算出来全是 20.1 度,一律撞在舵机 20 度限位上 —— 三档手感完全一样;
+// 而斜向键只有 13 度,又转不动。现在速度档和转角档互不干扰。
 
 const ACTION_NAMES = {
   forward_left: '↖ 前左加速',
@@ -768,17 +746,16 @@ let heartbeatTimer = null;
 let pulseStopTimer = null;
 let lastTouchTime = 0;
 
-function sendManualDrive(action, vx, wz) {
+function sendManualDrive(action) {
   return fetch('/api/manual_drive', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ action, vx: Number(vx), wz: Number(wz) })
+    body: JSON.stringify({
+      direction: action,
+      speed_tier: currentSpeedTier,
+      steer_tier: currentSteerTier
+    })
   }).catch(() => {});
-}
-
-function getActionSpeed(action) {
-  const tier = SPEED_TIERS[currentSpeedTier] || SPEED_TIERS.med;
-  return tier[action] || { vx: 0.0, wz: 0.0 };
 }
 
 function updateBadgeStatus(text, color) {
@@ -806,7 +783,7 @@ function executeStop() {
   }
   document.querySelectorAll('.dpad-btn').forEach(b => b.classList.remove('pressed'));
 
-  sendManualDrive('stop', 0.0, 0.0);
+  sendManualDrive('stop');
   updateBadgeStatus('已刹停 (点击微调 / 长按持续开)', 'var(--muted)');
 }
 
@@ -839,17 +816,16 @@ function handlePressStart(action, btnEl) {
   if (btnEl) btnEl.classList.add('pressed');
   if (navigator.vibrate) navigator.vibrate(20);
 
-  const speed = getActionSpeed(action);
   const actionText = ACTION_NAMES[action] || action;
   updateBadgeStatus(`已接管: ${actionText} (按住开动)`, '#ff8c91');
 
   // 1. 立即下发初始推力
-  sendManualDrive(action, speed.vx, speed.wz);
+  sendManualDrive(action);
 
   // 2. 开启 120ms 心跳（配合后端 20Hz 自动维持平滑推力，网络不丢包）
   heartbeatTimer = setInterval(() => {
     if (isPressing && currentAction === action) {
-      sendManualDrive(action, speed.vx, speed.wz);
+      sendManualDrive(action);
       updateBadgeStatus(`已接管: ${actionText} (持续推进中)`, '#ff8c91');
     }
   }, 120);
@@ -961,7 +937,17 @@ document.querySelectorAll('.speed-btn').forEach(btn => {
     document.querySelectorAll('.speed-btn').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
     currentSpeedTier = btn.dataset.speed || 'med';
-    notify(`手动介入速度已设为: ${btn.textContent}`);
+    notify(`速度档已设为: ${btn.textContent}`);
+  });
+});
+
+// 转向挡位选择器 —— 与速度档互相独立,换速度不会改变转弯半径
+document.querySelectorAll('.steer-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.steer-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    currentSteerTier = btn.dataset.steer || 'normal';
+    notify(`转向档已设为: ${btn.textContent}`);
   });
 });
 

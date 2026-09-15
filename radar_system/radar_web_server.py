@@ -24,7 +24,57 @@ from geometry_msgs.msg import PoseStamped, Twist
 from std_msgs.msg import String, Float32
 from std_srvs.srv import SetBool, Trigger
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from motion_safety import ChassisGeometry, yaw_from_steer, steer_from_yaw, clamp
+
 PORT = 8088
+
+# =============================================================================
+# 手动遥控:速度档与转向档解耦
+# =============================================================================
+# 改造前前端把 (vx, wz) 成对硬编码成九宫格 x 三档,但阿克曼底盘的前轮转角由
+# 固件按 TurnR = Vx / Vz 解算 (见 wheeltec_protocol/PROTOCOL.md 8.1),也就是说
+# 转角只取决于**比值**。实测三个速度档的「左拐」换算出来都是 20.1 度,全部撞在
+# 舵机 20 度限位上 —— 三档完全一样,而斜向键只有 13 度,所以手感又钝又不跟手。
+#
+# 现在速度和转角是两个独立维度:UI 指定「开多快」和「方向盘打多少度」,
+# 角速度由后端按当前车速实时换算,换速度档不会改变转弯半径。
+CHASSIS = ChassisGeometry()
+
+SPEED_TIERS_MPS = {'low': 0.30, 'med': 0.55, 'high': 0.85}
+REVERSE_SCALE = 0.6                      # 倒车是盲区方向,统一降速
+STEER_TIERS_DEG = {'gentle': 8.0, 'normal': 14.0, 'full': 20.0}
+
+# 每个方向键:(前进符号, 转角占该档的比例, 车速折扣)
+# 急转时降速,既是安全考虑,也让小半径转弯真的转得过来
+DIRECTIONS = {
+    'forward':       (+1,  0.0, 1.00),
+    'forward_left':  (+1, +0.6, 0.85),
+    'forward_right': (+1, -0.6, 0.85),
+    'left':          (+1, +1.0, 0.60),
+    'right':         (+1, -1.0, 0.60),
+    'reverse':       (-1,  0.0, 1.00),
+    'reverse_left':  (-1, +1.0, 0.70),
+    'reverse_right': (-1, -1.0, 0.70),
+    'stop':          (0,   0.0, 0.00),
+}
+
+
+def resolve_drive(direction, speed_tier='med', steer_tier='normal'):
+    """把 (方向键, 速度档, 转角档) 解析成 (vx, wz, 实际转角度数)。"""
+    spec = DIRECTIONS.get(direction)
+    if spec is None or direction == 'stop':
+        return 0.0, 0.0, 0.0
+    sign, steer_ratio, speed_scale = spec
+
+    base = SPEED_TIERS_MPS.get(speed_tier, SPEED_TIERS_MPS['med'])
+    vx = sign * base * speed_scale * (REVERSE_SCALE if sign < 0 else 1.0)
+
+    steer_deg = STEER_TIERS_DEG.get(steer_tier, STEER_TIERS_DEG['normal']) * steer_ratio
+    steer_rad = clamp(math.radians(steer_deg), -CHASSIS.max_steer_rad, CHASSIS.max_steer_rad)
+
+    wz = yaw_from_steer(vx, steer_rad, CHASSIS)
+    return round(vx, 4), round(wz, 4), round(math.degrees(steer_rad), 1)
 TEMPLATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'templates', 'index.html')
 
 data_lock = threading.Lock()
@@ -459,6 +509,15 @@ class RadarHTTPHandler(http.server.BaseHTTPRequestHandler):
             except Exception as e:
                 self._send_json({'ok': False, 'error': str(e)}, status=500)
 
+        elif self.path == '/api/drive_profile':
+            self._send_json({
+                'speed_tiers': SPEED_TIERS_MPS,
+                'steer_tiers': STEER_TIERS_DEG,
+                'reverse_scale': REVERSE_SCALE,
+                'min_turn_radius_m': round(CHASSIS.min_turn_radius_m, 3),
+                'max_steer_deg': round(math.degrees(CHASSIS.max_steer_rad), 1),
+            })
+
         elif self.path == '/api/follower/start':
             ok, msg = start_follower()
             self._send_json({'ok': ok, 'message': msg, 'running': is_follower_running()})
@@ -480,8 +539,23 @@ class RadarHTTPHandler(http.server.BaseHTTPRequestHandler):
             try:
                 req = json.loads(body.decode('utf-8'))
                 action = req.get('action', 'custom')
-                vx = float(req.get('vx', 0.0))
-                wz = float(req.get('wz', 0.0))
+                steer_deg = 0.0
+
+                if 'direction' in req:
+                    # 新接口:前端只报方向键与两个档位,速度/角速度由后端权威换算
+                    vx, wz, steer_deg = resolve_drive(
+                        req.get('direction', 'stop'),
+                        req.get('speed_tier', 'med'),
+                        req.get('steer_tier', 'normal'))
+                    action = req.get('direction', action)
+                else:
+                    # 旧接口保留兼容,但要把物理上做不到的角速度掐掉:
+                    # 超过满舵能达到的 wz 只会让固件把舵机打死,反而丢失档位区分度
+                    vx = float(req.get('vx', 0.0))
+                    wz = float(req.get('wz', 0.0))
+                    steer_rad = steer_from_yaw(vx, wz, CHASSIS)
+                    wz = yaw_from_steer(vx, steer_rad, CHASSIS)
+                    steer_deg = round(math.degrees(steer_rad), 1)
 
                 # 强行介入：若自动跟随正在运行，强行介入必须先停掉自动跟随！
                 if check_follower_running_cached():
@@ -496,10 +570,12 @@ class RadarHTTPHandler(http.server.BaseHTTPRequestHandler):
                         'action': action,
                         'vx': vx,
                         'wz': wz,
+                        'steer_deg': steer_deg,
                         'time': time.time()
                     }
 
-                self._send_json({'ok': True, 'action': action, 'vx': vx, 'wz': wz})
+                self._send_json({'ok': True, 'action': action, 'vx': vx,
+                                 'wz': wz, 'steer_deg': steer_deg})
             except Exception as e:
                 self._send_json({'ok': False, 'error': str(e)}, status=500)
         else:

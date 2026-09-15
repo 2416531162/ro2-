@@ -2,11 +2,47 @@
 # -*- coding: utf-8 -*-
 """
 「电子跟屁虫」—— 人体 3D 视觉 + 激光雷达智能跟随控制节点 (Person Follower)
-- 视觉感知: 订阅 /camera/ai_detection/targets (Astra S + YOLOv8/FaceNet 3D 目标)
-- 雷达防撞: 订阅 /scan (N10P 前向 ±35° 扇区, 障碍物 < 0.45m 毫秒级 AEB 急停)
-- 电量监控: 订阅 /voltage (6S 动力电池保护, < 21.0V 自动驻车)
-- 运动控制: 发布 /cmd_vel (Twist 速度指令, 极速限幅 0.15 m/s, 舒适跟随距离 1.2m)
-- 状态遥测: 发布 /follower/status (JSON 实时运行状态)
+
+订阅
+    /camera/ai_detection/targets   String(JSON)  Astra S + YOLOv8 3D 目标
+    /scan                          LaserScan     N10P 激光雷达
+    /voltage                       Float32       6S 动力电池
+    /wheeltec/status               String(JSON)  底盘驱动状态 (含实测车速)
+发布
+    /cmd_vel                       Twist         速度指令
+    /follower/status               String(JSON)  遥测
+
+=============================================================================
+本次重写解决的问题:接近目标不减速,直接撞上
+=============================================================================
+
+旧版速度律是一个断崖:
+
+    if z > 0.80:  vx = clamp(0.25 + 0.45*(z-0.65), 0.25, 0.65)
+    else:         vx = 0.0
+
+`MIN_SPEED_MPS = 0.25` 被写成了**全程速度下限**,于是不管离人多近,
+只要还在死区外,车速就永远不低于 0.32 m/s,然后在 0.80 m 处要求瞬间归零。
+中间没有任何减速过程。而实际刹停需要:
+
+    感知死时间 (相机+推理+EMA滞后+控制周期) ≈ 0.35 s   -> 0.11 m
+    阿克曼车无主动刹车,松油门惯性滑行             -> 0.15~0.30 m
+                                             合计 ≈ 0.26~0.41 m
+
+0.80 - 0.4 = 0.40 m,正好撞在 AEB 线上;若此前车速更高则直接撞人。
+0.4 m 的 AEB 是布尔锁存,触发时同样只发一个 0,没有任何提前量,救不了。
+
+现在改为三层:
+    1. 刹车包络 (主力)  距离换算成允许速度,1.5 m 外就开始收油,0.70 m 自然为零
+    2. 分级雷达限速     前方障碍物同样走包络,越近上限越低
+    3. 硬急停 (兜底)    越过 0.40 m 无条件发 0
+
+另外把 EMA 换成 alpha-beta 滤波器:EMA 只平滑位置并引入约 240 ms 相位滞后
+(读到的距离比真实值偏大),alpha-beta 显式维护速度项,对匀速目标零稳态滞后,
+并且顺手给出目标速度用于前馈跟速 —— 车会去**匹配**人的步速,而不是追一下停一下。
+
+转向也一并改了:阿克曼车的前轮转角由固件按 R = Vx/Vz 解算,所以角速度指令
+的含义随车速漂移。现在改为先定前轮转角,再按车速反算角速度,转弯半径与车速解耦。
 """
 
 import sys
@@ -16,6 +52,7 @@ import time
 import json
 import signal
 import argparse
+from dataclasses import dataclass, field
 
 import rclpy
 from rclpy.node import Node
@@ -25,372 +62,515 @@ from std_msgs.msg import String, Float32
 from geometry_msgs.msg import Twist
 from std_srvs.srv import SetBool, Trigger
 
-# ================= 控制参数配置 =================
-AEB_STOP_DISTANCE_M = 0.40      # 激光雷达主动防撞硬刹停阈值: 0.40 米 (前方 0.4m 扫到物体立马停止)
-AEB_RELEASE_DISTANCE_M = 0.48   # 激光雷达防撞解除回差: 0.48 米 (消除临界抖动抽搐)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from motion_safety import (  # noqa: E402
+    ChassisGeometry, BrakeProfile, brake_envelope, stopping_distance,
+    yaw_from_steer, AlphaBetaTracker, SlewLimiter, BreakawayKick, clamp,
+)
 
-TARGET_DISTANCE_M = 0.65        # 目标保持距离: 0.65 米 (舒适贴身智能跟随)
-DEADBAND_MIN_M = 0.50           # 跟随死区下限: 0.50 米 (人靠近 50cm 小车自动停步待命，距 40cm 防撞有 10cm 安全缓冲)
-DEADBAND_MAX_M = 0.80           # 跟随死区上限: 0.80 米 (人离开超 80cm 小车顺滑起步跟进)
-MAX_FOLLOW_DISTANCE_M = 3.50    # 最大有效跟随距离: 3.50 米 (超过视为超出视线)
-MIN_TARGET_Z_M = 0.35           # 最小有效目标深度: 0.35 米
 
-MAX_SPEED_MPS = 0.65            # 最大前进速度限幅: 0.65 m/s (充沛动力跟随)
-MIN_SPEED_MPS = 0.25            # 最小启步速度: 0.25 m/s (强劲破除轮胎静摩擦)
-KP_SPEED = 0.45                 # 纵向距离 P 控制增益
-ACCEL_LIMIT_MPS2 = 1.50         # 平滑加速度限制: 1.50 m/s^2 (充沛加速，反应迅捷)
+# =============================================================================
+# 控制参数
+# =============================================================================
 
-MAX_TURN_RADPS = 0.30           # 最大转弯角速度限幅: 0.30 rad/s
-KP_TURN = 0.65                 # 横向航向角 P 控制增益
-ANGLE_DEADBAND_RAD = 0.08       # 转向死区: ~4.6° (身体微晃绝不摇摆打舵)
+@dataclass
+class FollowerConfig:
+    """全部可调参数集中在这里。带 ★ 的必须实车标定。"""
 
-MIN_CONFIDENCE = 0.55           # 目标置信度阈值: 低于 0.55 的疑似噪点直接丢弃
-TARGET_CONFIRM_FRAMES = 2       # 目标确认帧数: 连续检测到 2 帧才起步，防止单帧误检抽动
-TARGET_LOST_FRAMES = 3          # 目标丢失判定: 连续 3 帧 (约 0.15 秒) 无人，立马停步，绝不盲动！
-BATTERY_MIN_V = 21.0            # 6S 动力电池保护电压: 21.0 V
+    # ---- 跟随几何 ----
+    follow_distance_m: float = 0.90     # 期望保持的距离
+    follow_stop_m: float = 0.70         # 刹车包络归零点,车头应停在这里
+    deadband_m: float = 0.12            # 距离死区半宽,±12cm 内不动,防止前后抽搐
+    max_follow_distance_m: float = 4.00 # 超过视为脱离
+    min_target_depth_m: float = 0.30    # 小于此深度的观测判为噪点
+
+    # ---- 避障 ----
+    obstacle_stop_m: float = 0.50       # 雷达包络归零点
+    aeb_hard_stop_m: float = 0.40       # 硬急停线
+    aeb_release_m: float = 0.52         # 急停解除回差,消除临界抖动
+    scan_cone_deg: float = 30.0         # 前向检测扇区半角
+    scan_min_valid_m: float = 0.15      # 滤掉雷达本体盲区与车架反射
+
+    # ---- 速度 ----
+    max_speed_mps: float = 0.55         # ★ 保守起步值,实车验证后再往上加
+    creep_floor_mps: float = 0.08       # 低于此速度直接停,避免电机嗡嗡不转
+    kick_mps: float = 0.22              # 静摩擦破除脉冲幅值
+    kick_duration_s: float = 0.25       # 脉冲时长
+    kp_distance: float = 0.60           # 距离误差 P 增益
+    kd_feedforward: float = 0.90        # 目标速度前馈系数,1.0 = 完全跟速
+    accel_limit_mps2: float = 0.90      # 加速斜坡
+    decel_limit_mps2: float = 2.50      # 减速斜坡,刹车永远比加速陡
+
+    # ---- 转向 ----
+    max_steer_rad: float = 0.35         # 舵机物理限位
+    kp_steer: float = 1.10              # 视线角 -> 前轮转角 增益
+    steer_deadband_rad: float = 0.06    # ~3.4°,身体微晃不打舵
+    steer_rate_radps: float = 1.20      # 转角变化率限制
+
+    # ---- 刹车物理 ----
+    decel_capability_mps2: float = 1.00 # ★ 实测减速度,阿克曼车无主动刹车,别乐观
+    control_latency_s: float = 0.35     # ★ 感知到轮子响应的总死时间
+
+    # ---- 目标管理 ----
+    min_confidence: float = 0.55
+    confirm_frames: int = 2             # 连续 N 帧才起步
+    target_timeout_s: float = 0.30      # 超过这么久没有新观测即视为丢失
+    lost_grace_s: float = 0.40          # 短暂遮挡的宽限期,期间减速而非急停
+
+    # ---- 其他 ----
+    battery_min_v: float = 21.0
+    control_hz: float = 20.0
+    enable_pre_steer: bool = False      # 静止预打舵 (见 PROTOCOL.md 8.3),需实车验证
+    pre_steer_creep_mps: float = 0.005
+
+    geometry: ChassisGeometry = field(default_factory=ChassisGeometry)
+
+    def __post_init__(self):
+        if self.follow_stop_m >= self.follow_distance_m:
+            raise ValueError("follow_stop_m 必须小于 follow_distance_m")
+        if self.aeb_hard_stop_m > self.obstacle_stop_m:
+            raise ValueError("aeb_hard_stop_m 必须小于等于 obstacle_stop_m")
+        self.geometry.max_steer_rad = self.max_steer_rad
+
+    @property
+    def follow_profile(self):
+        return BrakeProfile(decel_mps2=self.decel_capability_mps2,
+                            latency_s=self.control_latency_s,
+                            stop_m=self.follow_stop_m,
+                            hard_stop_m=self.aeb_hard_stop_m)
+
+    @property
+    def obstacle_profile(self):
+        return BrakeProfile(decel_mps2=self.decel_capability_mps2,
+                            latency_s=self.control_latency_s,
+                            stop_m=self.obstacle_stop_m,
+                            hard_stop_m=self.aeb_hard_stop_m)
 
 
 class PersonFollowerNode(Node):
-    def __init__(self, dry_run=False, target_class="person"):
+
+    def __init__(self, config, dry_run=False, target_class="person"):
         super().__init__('person_follower_node')
+        self.cfg = config
         self.dry_run = dry_run
         self.target_class = target_class.lower()
 
-        # 状态变量
-        self.state = "STANDBY"
-        self.latest_target = None
+        # ---- 感知状态 ----
+        self.tracker_z = AlphaBetaTracker(alpha=0.45, beta=0.10)
+        self.tracker_x = AlphaBetaTracker(alpha=0.50, beta=0.08)
+        self.latest_raw = None
         self.last_target_seen = 0.0
         self.consecutive_seen = 0
-        self.consecutive_lost = 0
-        self.smooth_x = None
-        self.smooth_z = None
         self.min_front_scan = 99.0
-        self.voltage = 23.0
-        self.aeb_active = False
-        self.running = True
+        self.scan_stamp = 0.0
+        self.voltage = 24.0
 
+        # ---- 执行状态 ----
+        self.state = "STANDBY"
+        self.limit_reason = "-"
+        self.aeb_latched = False
+        self.speed_slew = SlewLimiter(config.accel_limit_mps2, config.decel_limit_mps2)
+        self.kick = BreakawayKick(config.kick_mps, config.kick_duration_s,
+                                  config.creep_floor_mps)
         self.cmd_vx = 0.0
         self.cmd_wz = 0.0
+        self.cmd_steer = 0.0
+        self.chassis_speed = 0.0
+        self.speed_cap = 0.0
 
-        # ROS 2 订阅者
-        self.sub_targets = self.create_subscription(
-            String, '/camera/ai_detection/targets', self.on_targets, 10)
-        self.sub_scan = self.create_subscription(
-            LaserScan, '/scan', self.on_scan,
-            QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT))
-        self.sub_voltage = self.create_subscription(
-            Float32, '/voltage', self.on_voltage, 10)
-
-        # ROS 2 发布者
-        self.pub_cmd_vel = self.create_publisher(Twist, '/cmd_vel', 10)
-        self.pub_status = self.create_publisher(String, '/follower/status', 10)
-
-        # 底盘安全使能客户端与驱动器状态看门狗
-        self.cli_arm = self.create_client(SetBool, '/wheeltec/arm')
-        self.cli_stop = self.create_client(Trigger, '/wheeltec/stop')
+        # ---- 底盘使能 ----
         self.driver_armed = False
         self.driver_ready = False
         self.last_arm_request = 0.0
-        self.sub_driver_status = self.create_subscription(
-            String, '/wheeltec/status', self.on_driver_status, 10)
+
+        qos_scan = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT)
+        self.create_subscription(String, '/camera/ai_detection/targets', self.on_targets, 10)
+        self.create_subscription(LaserScan, '/scan', self.on_scan, qos_scan)
+        self.create_subscription(Float32, '/voltage', self.on_voltage, 10)
+        self.create_subscription(String, '/wheeltec/status', self.on_driver_status, 10)
+
+        self.pub_cmd_vel = self.create_publisher(Twist, '/cmd_vel', 10)
+        self.pub_status = self.create_publisher(String, '/follower/status', 10)
+
+        self.cli_arm = self.create_client(SetBool, '/wheeltec/arm')
+        self.cli_stop = self.create_client(Trigger, '/wheeltec/stop')
         if not self.dry_run:
             self.arm_chassis(True)
 
-        # 20 Hz 控制决策定时器 (50ms)
-        self.timer = self.create_timer(0.05, self.control_loop)
+        self.dt = 1.0 / config.control_hz
+        self.timer = self.create_timer(self.dt, self.control_loop)
         self.last_print_time = 0.0
 
-        mode_str = "【仿真演练模式 (DRY RUN - 不发物理指令)】" if self.dry_run else "【实车控制模式 (ACTIVE DRIVING)】"
-        self.get_logger().info(f">>> 电子跟屁虫节点初始化就绪 {mode_str}")
-        self.get_logger().info(f">>> 目标类别: [{self.target_class}], 保持距离: {TARGET_DISTANCE_M}m, 极速: {MAX_SPEED_MPS}m/s, AEB防撞阈值: {AEB_STOP_DISTANCE_M}m")
+        mode = "【仿真演练 DRY-RUN】" if dry_run else "【实车控制 ACTIVE】"
+        self.get_logger().info(f">>> 电子跟屁虫就绪 {mode} 目标类别=[{self.target_class}]")
+        self.get_logger().info(
+            f">>> 保持 {config.follow_distance_m:.2f}m / 包络归零 {config.follow_stop_m:.2f}m "
+            f"/ 硬急停 {config.aeb_hard_stop_m:.2f}m / 极速 {config.max_speed_mps:.2f}m/s")
+        self.get_logger().info(
+            f">>> 按 a={config.decel_capability_mps2:.2f}m/s^2, T={config.control_latency_s:.2f}s 估算: "
+            f"满速刹停需 {stopping_distance(config.max_speed_mps, config.follow_profile):.2f}m")
+
+    # ------------------------------------------------------------------
+    # 订阅回调
+    # ------------------------------------------------------------------
 
     def on_driver_status(self, msg):
         try:
             d = json.loads(msg.data)
             self.driver_armed = bool(d.get('armed', False))
             self.driver_ready = (d.get('ready', '') == 'ready')
+            telemetry = d.get('telemetry') or {}
+            vel = telemetry.get('velocity')
+            if isinstance(vel, (list, tuple)) and vel:
+                self.chassis_speed = float(vel[0])
             now = time.monotonic()
-            if not self.dry_run and not self.driver_armed and self.driver_ready:
-                if now - self.last_arm_request > 1.5:
-                    self.last_arm_request = now
-                    self.arm_chassis(True)
+            if (not self.dry_run and not self.driver_armed and self.driver_ready
+                    and now - self.last_arm_request > 1.5):
+                self.arm_chassis(True)
         except Exception:
             pass
 
     def arm_chassis(self, enable=True):
-        if self.dry_run:
-            return
-        if not self.cli_arm.service_is_ready():
+        if self.dry_run or not self.cli_arm.service_is_ready():
             return
         req = SetBool.Request()
         req.data = enable
         self.last_arm_request = time.monotonic()
         self.cli_arm.call_async(req)
-        self.get_logger().info(f">>> 已向底盘发送安全使能请求: Arm={enable}")
 
     def trigger_chassis_stop(self):
-        if self.dry_run:
-            return
-        if self.cli_stop.service_is_ready():
-            req = Trigger.Request()
-            self.cli_stop.call_async(req)
+        if not self.dry_run and self.cli_stop.service_is_ready():
+            self.cli_stop.call_async(Trigger.Request())
+
+    def _matches(self, label):
+        lbl = (label or '').lower()
+        if self.target_class == 'any':
+            return True
+        if self.target_class in ('person', 'human'):
+            return lbl in ('person', 'face')
+        return lbl == self.target_class
 
     def on_targets(self, msg):
         try:
             items = json.loads(msg.data)
-            now = time.monotonic()
-            best_target = None
-            best_score = 999.0
-
-            if isinstance(items, list):
-                for item in items:
-                    lbl = item.get('label', '').lower()
-                    if self.target_class == 'any':
-                        is_match = True
-                    elif self.target_class in ('person', 'human'):
-                        is_match = lbl in ('person', 'face')
-                    else:
-                        is_match = (lbl == self.target_class)
-
-                    if not is_match:
-                        continue
-
-                    conf = item.get('conf', 0.0)
-                    if conf < MIN_CONFIDENCE:
-                        continue
-
-                    z = item.get('z', 0.0)
-                    x = item.get('x', 0.0)
-                    if not (MIN_TARGET_Z_M <= z <= MAX_FOLLOW_DISTANCE_M):
-                        continue
-
-                    score = abs(x) * 1.5 + abs(z - TARGET_DISTANCE_M)
-                    if score < best_score:
-                        best_score = score
-                        best_target = {
-                            'label': item.get('label'),
-                            'conf': conf,
-                            'x': round(x, 3),
-                            'y': round(item.get('y', 0.0), 3),
-                            'z': round(z, 3),
-                            'distance': round(item.get('distance', math.hypot(x, z)), 3),
-                            'time': now
-                        }
-
-            if best_target is not None:
-                self.consecutive_seen += 1
-                self.consecutive_lost = 0
-                if self.consecutive_seen >= TARGET_CONFIRM_FRAMES:
-                    # 坐标低通平滑 (EMA)，彻底滤除画面微抖导致的转向抽搐
-                    if self.smooth_x is None or self.smooth_z is None:
-                        self.smooth_x = best_target['x']
-                        self.smooth_z = best_target['z']
-                    else:
-                        self.smooth_x = 0.65 * self.smooth_x + 0.35 * best_target['x']
-                        self.smooth_z = 0.65 * self.smooth_z + 0.35 * best_target['z']
-                    best_target['smooth_x'] = round(self.smooth_x, 3)
-                    best_target['smooth_z'] = round(self.smooth_z, 3)
-                    self.latest_target = best_target
-                    self.last_target_seen = now
-            else:
-                self.consecutive_seen = 0
-                self.consecutive_lost += 1
-                # 连续 TARGET_LOST_FRAMES 帧 (约 0.15s) 无有效目标，立刻清空并停步，绝不盲动！
-                if self.consecutive_lost >= TARGET_LOST_FRAMES:
-                    self.latest_target = None
-                    self.smooth_x = None
-                    self.smooth_z = None
         except Exception:
-            pass
+            return
+        if not isinstance(items, list):
+            return
+
+        now = time.monotonic()
+        best, best_score = None, float('inf')
+        for item in items:
+            if not self._matches(item.get('label')):
+                continue
+            conf = float(item.get('conf', 0.0) or 0.0)
+            if conf < self.cfg.min_confidence:
+                continue
+            z = float(item.get('z', 0.0) or 0.0)
+            x = float(item.get('x', 0.0) or 0.0)
+            if not (self.cfg.min_target_depth_m <= z <= self.cfg.max_follow_distance_m):
+                continue
+            # 优先选正前方、且距离最接近期望值的目标
+            score = abs(x) * 1.5 + abs(z - self.cfg.follow_distance_m)
+            if score < best_score:
+                best_score, best = score, (x, z, conf, item.get('label'))
+
+        if best is None:
+            self.consecutive_seen = 0
+            return
+
+        x, z, conf, label = best
+        # 目标中断过久,滤波器里的速度估计已失效,重新起算
+        if now - self.last_target_seen > self.cfg.lost_grace_s:
+            self.tracker_z.reset()
+            self.tracker_x.reset()
+
+        self.consecutive_seen += 1
+        if self.consecutive_seen < self.cfg.confirm_frames:
+            return
+
+        self.tracker_z.update(z, now)
+        self.tracker_x.update(x, now)
+        self.last_target_seen = now
+        self.latest_raw = {'label': label, 'conf': round(conf, 3),
+                           'x': round(x, 3), 'z': round(z, 3)}
 
     def on_scan(self, msg):
         n = len(msg.ranges)
         if n == 0:
             return
+        # 用 LaserScan 自带的角度字段,不再假设一定是 360 等分
+        angle_min = msg.angle_min
+        angle_inc = msg.angle_increment
+        if angle_inc == 0.0:
+            angle_inc = 2.0 * math.pi / n
+            angle_min = -math.pi
+        cone = math.radians(self.cfg.scan_cone_deg)
 
-        front_dists = []
-        step_deg = 360.0 / n
-        cone_deg = 30.0
-
+        nearest = 99.0
         for i, r in enumerate(msg.ranges):
-            if not (msg.range_min <= r <= msg.range_max) or not math.isfinite(r):
+            if not math.isfinite(r) or not (msg.range_min <= r <= msg.range_max):
                 continue
-            deg = (i * step_deg) % 360.0
-            if deg > 180.0:
-                deg -= 360.0
-            # 严格前向 ±30° 扇区，且过滤掉雷达本体盲区与车架反射噪点 (r >= 0.15m)
-            if abs(deg) <= cone_deg and r >= 0.15:
-                front_dists.append(r)
+            if r < self.cfg.scan_min_valid_m:
+                continue
+            ang = angle_min + i * angle_inc
+            ang = math.atan2(math.sin(ang), math.cos(ang))
+            if abs(ang) <= cone and r < nearest:
+                nearest = r
 
-        min_d = min(front_dists) if front_dists else 99.0
-        self.min_front_scan = min_d
-
-        # 雷达前方 0.40 米主动防撞急停
-        if min_d < AEB_STOP_DISTANCE_M:
-            self.aeb_active = True
-        elif min_d >= AEB_RELEASE_DISTANCE_M:
-            self.aeb_active = False
+        self.min_front_scan = nearest
+        self.scan_stamp = time.monotonic()
+        if nearest < self.cfg.aeb_hard_stop_m:
+            self.aeb_latched = True
+        elif nearest >= self.cfg.aeb_release_m:
+            self.aeb_latched = False
 
     def on_voltage(self, msg):
         self.voltage = float(msg.data)
 
+    # ------------------------------------------------------------------
+    # 控制主循环
+    # ------------------------------------------------------------------
+
     def control_loop(self):
         now = time.monotonic()
-        target = self.latest_target
-        target_valid = (target is not None and (now - self.last_target_seen <= 0.30))
+        cfg = self.cfg
+        age = now - self.last_target_seen if self.last_target_seen else 1e9
+        have_target = self.tracker_z.initialized and age <= cfg.target_timeout_s
 
-        target_vx = 0.0
-        target_wz = 0.0
+        desired_vx = 0.0
+        desired_steer = 0.0
+        self.limit_reason = "-"
 
-        # 优先级 1: 动力电池欠压保护
-        if self.voltage < BATTERY_MIN_V and self.voltage > 10.0:
+        # ---- 优先级 1: 欠压保护 ----
+        if 10.0 < self.voltage < cfg.battery_min_v:
             self.state = "LOW_BATTERY"
+            self.limit_reason = "battery"
 
-        # 优先级 2: 激光雷达 0.4 米主动防撞急停 (毫秒级硬刹停)
-        elif self.aeb_active:
+        # ---- 优先级 2: 硬急停 (最后一道保险,正常不该被触发) ----
+        elif self.aeb_latched:
             self.state = "AEB_EMERGENCY"
+            self.limit_reason = "aeb_hard"
+            self.speed_slew.reset(0.0)
+
+        # ---- 优先级 3: 目标丢失 ----
+        elif not have_target:
+            if age <= cfg.lost_grace_s:
+                self.state = "TARGET_BLINK"      # 短暂遮挡,靠斜坡减速滑停
+                self.limit_reason = "blink"
+            else:
+                self.state = "SEARCHING_LOST"
+                self.limit_reason = "lost"
+                self.speed_slew.reset(0.0)
+                self.tracker_z.reset()
+                self.tracker_x.reset()
+                self.latest_raw = None
+
+        # ---- 优先级 4: 正常跟随 ----
+        else:
+            # 用速度估计外推,补掉剩余的感知死时间
+            z = self.tracker_z.predict(cfg.control_latency_s * 0.5) or self.tracker_z.position
+            x = self.tracker_x.position
+            z = max(z, 0.05)
+
+            # 目标对地速度 ≈ 本车速度 + 相对接近率
+            target_ground_speed = self.chassis_speed + self.tracker_z.velocity
+
+            error = z - cfg.follow_distance_m
+            if abs(error) <= cfg.deadband_m and abs(target_ground_speed) < 0.10:
+                desired_vx = 0.0
+                self.state = "HOLDING"
+            else:
+                # 前馈跟速 + 距离误差反馈
+                desired_vx = (cfg.kd_feedforward * max(0.0, target_ground_speed)
+                              + cfg.kp_distance * error)
+                desired_vx = max(0.0, desired_vx)   # 绝不倒车,身后是盲区
+                self.state = "TRACKING" if desired_vx > 0 else "HOLDING"
+
+            # 视线角 -> 前轮转角
+            bearing = math.atan2(-x, z)
+            if abs(bearing) > cfg.steer_deadband_rad:
+                desired_steer = clamp(cfg.kp_steer * bearing,
+                                      -cfg.max_steer_rad, cfg.max_steer_rad)
+
+        # ---------- 速度上限:两条刹车包络取小 ----------
+        cap = cfg.max_speed_mps
+        if have_target:
+            cap_follow = brake_envelope(self.tracker_z.position, cfg.follow_profile)
+            if cap_follow < cap:
+                cap, self.limit_reason = cap_follow, "follow_envelope"
+
+        scan_fresh = (now - self.scan_stamp) < 0.5 if self.scan_stamp else False
+        if scan_fresh:
+            cap_obstacle = brake_envelope(self.min_front_scan, cfg.obstacle_profile)
+            if cap_obstacle < cap:
+                cap, self.limit_reason = cap_obstacle, "obstacle_envelope"
+        elif self.scan_stamp:
+            cap, self.limit_reason = min(cap, 0.15), "scan_stale"
+
+        if self.state in ("LOW_BATTERY", "AEB_EMERGENCY", "SEARCHING_LOST",
+                          "TARGET_BLINK"):
+            cap = 0.0
+
+        self.speed_cap = cap
+        desired_vx = min(desired_vx, cap)
+
+        # ---------- 静摩擦破除脉冲 (受包络约束,绝不越界) ----------
+        moving = abs(self.chassis_speed) > 0.03 or self.speed_slew.value > 0.05
+        desired_vx = self.kick.apply(desired_vx, moving, cap, now)
+
+        # ---------- 斜坡限幅 ----------
+        self.cmd_vx = self.speed_slew.step(desired_vx, self.dt)
+
+        # ---------- 转角限速 + 角速度换算 ----------
+        max_dsteer = cfg.steer_rate_radps * self.dt
+        self.cmd_steer += clamp(desired_steer - self.cmd_steer, -max_dsteer, max_dsteer)
+
+        if self.cmd_vx > 1e-4:
+            self.cmd_wz = yaw_from_steer(self.cmd_vx, self.cmd_steer, cfg.geometry)
+        elif (cfg.enable_pre_steer and have_target
+              and abs(self.cmd_steer) > cfg.steer_deadband_rad
+              and self.state == "HOLDING"):
+            # 静止预打舵:5mm/s 无法驱动车身,但固件会据此解算舵机角度
+            # 依据 wheeltec_protocol/PROTOCOL.md 第 8.3 节实测结论
+            self.cmd_vx = cfg.pre_steer_creep_mps
+            self.cmd_wz = yaw_from_steer(self.cmd_vx, self.cmd_steer, cfg.geometry)
+        else:
+            # 固件在 Vx==0 时会强制舵机归中,且驱动层拒绝原地转向指令,
+            # 这里必须把角速度清零,否则会触发驱动器锁停
             self.cmd_vx = 0.0
             self.cmd_wz = 0.0
+            self.cmd_steer *= 0.5
 
-        # 优先级 3: 前方无人或目标丢失 (立刻停步)
-        elif not target_valid:
-            self.state = "SEARCHING_LOST"
-
-        # 优先级 4: 锁定目标，执行阿克曼平滑跟随控制律
-        else:
-            x = target.get('smooth_x', target['x'])
-            z = target.get('smooth_z', target['z'])
-            # 相机光学坐标系到车体转向轴映射：目标在左(x<0)向左转(wz>0)，目标在右(x>0)向右转(wz<0)
-            theta = math.atan2(-x, z)
-
-            # 4.1 横向转向控制 (带死区滤波，拒绝身体晃动时抽搐打舵)
-            if abs(theta) > ANGLE_DEADBAND_RAD:
-                raw_turn = KP_TURN * theta
-                target_wz = max(-MAX_TURN_RADPS, min(MAX_TURN_RADPS, raw_turn))
-            else:
-                target_wz = 0.0
-
-            # 4.2 纵向速度控制 (保持 0.65m 距离，在 0.50~0.80m 死区内完全静止)
-            if z > DEADBAND_MAX_M:
-                e_z = z - TARGET_DISTANCE_M
-                raw_speed = MIN_SPEED_MPS + KP_SPEED * e_z
-                target_vx = max(MIN_SPEED_MPS, min(MAX_SPEED_MPS, raw_speed))
-                self.state = "TRACKING_FORWARD"
-            elif z < DEADBAND_MIN_M:
-                # 人员靠得过近 (< 0.50m)，坚决停步，严禁倒车碾压后方
-                target_vx = 0.0
-                target_wz = 0.0
-                self.state = "WAITING_TOO_CLOSE"
-            else:
-                # 处于 0.50m ~ 0.80m 舒适死区内
-                target_vx = 0.0
-                target_wz = 0.0
-                self.state = "WAITING_IN_DEADBAND"
-
-        # 核心防闭锁保护：静止时角速度严格清零，绝不触发驱动器原地打舵闭锁
-        if abs(target_vx) < 1e-4:
-            target_vx = 0.0
-            target_wz = 0.0
-
-        # 平滑加减速斜坡控制 (Slew Rate Limiter): 起步平稳渐进，刹车迅速果断
-        dt = 0.05
-        max_dv = ACCEL_LIMIT_MPS2 * dt
-        if target_vx > self.cmd_vx:
-            self.cmd_vx = min(target_vx, self.cmd_vx + max_dv)
-        else:
-            # 减速/急停时快速刹车 (加倍制动)
-            self.cmd_vx = max(target_vx, self.cmd_vx - max_dv * 3.0)
-
-        if abs(self.cmd_vx) < 1e-4:
-            self.cmd_vx = 0.0
-            self.cmd_wz = 0.0
-        else:
-            self.cmd_wz = target_wz
-
-        # 发送 Twist 指令
         if not self.dry_run:
             cmd = Twist()
             cmd.linear.x = float(self.cmd_vx)
             cmd.angular.z = float(self.cmd_wz)
             self.pub_cmd_vel.publish(cmd)
 
-        # 发布状态 JSON 供大屏与监控读取
-        status_payload = {
+        self.publish_status(now, have_target, age)
+
+    def publish_status(self, now, have_target, age):
+        target = None
+        if have_target and self.latest_raw:
+            target = dict(self.latest_raw)
+            target['smooth_z'] = round(self.tracker_z.position, 3)
+            target['smooth_x'] = round(self.tracker_x.position, 3)
+            target['closing_rate'] = round(self.tracker_z.velocity, 3)
+            target['distance'] = target['smooth_z']
+
+        payload = {
             "state": self.state,
             "dry_run": self.dry_run,
-            "target": target if target_valid else None,
-            "target_seen_age_ms": round((now - self.last_target_seen) * 1000, 1) if self.last_target_seen else None,
+            "target": target,
+            "target_seen_age_ms": round(age * 1000, 1) if age < 1e8 else None,
             "aeb_min_scan_m": round(self.min_front_scan, 2),
-            "aeb_active": self.aeb_active,
+            "aeb_active": self.aeb_latched,
+            "speed_cap_mps": round(self.speed_cap, 3),
+            "limit_reason": self.limit_reason,
             "voltage_v": round(self.voltage, 2),
             "cmd_vx": round(self.cmd_vx, 3),
             "cmd_wz": round(self.cmd_wz, 3),
-            "timestamp": round(now, 3)
+            "cmd_steer_deg": round(math.degrees(self.cmd_steer), 1),
+            "chassis_speed": round(self.chassis_speed, 3),
+            "timestamp": round(now, 3),
         }
-        self.pub_status.publish(String(data=json.dumps(status_payload, ensure_ascii=False)))
+        self.pub_status.publish(String(data=json.dumps(payload, ensure_ascii=False)))
 
-        # 终端单行仪表盘输出 (5 Hz 刷新)
         if now - self.last_print_time >= 0.20:
             self.last_print_time = now
-            self.print_dashboard(status_payload)
+            self.print_dashboard(payload)
 
     def print_dashboard(self, s):
-        state_colors = {
-            "TRACKING_FORWARD": "\033[1;32m[ 跟踪追随 ]\033[0m",
-            "WAITING_IN_DEADBAND": "\033[1;36m[ 距离锁定 ]\033[0m",
-            "WAITING_TOO_CLOSE": "\033[1;33m[ 距离过近 ]\033[0m",
+        colors = {
+            "TRACKING":       "\033[1;32m[ 跟踪追随 ]\033[0m",
+            "HOLDING":        "\033[1;36m[ 距离锁定 ]\033[0m",
+            "TARGET_BLINK":   "\033[1;33m[ 目标闪断 ]\033[0m",
             "SEARCHING_LOST": "\033[1;35m[ 搜索目标 ]\033[0m",
-            "AEB_EMERGENCY": "\033[1;41;37m[ AEB紧急防撞 ]\033[0m",
-            "LOW_BATTERY": "\033[1;31m[ 低电量停车 ]\033[0m",
-            "STANDBY": "\033[1;30m[ 原地待命 ]\033[0m"
+            "AEB_EMERGENCY":  "\033[1;41;37m[ 硬急停 ]\033[0m",
+            "LOW_BATTERY":    "\033[1;31m[ 低电量 ]\033[0m",
+            "STANDBY":        "\033[1;30m[ 待命 ]\033[0m",
         }
-        st_tag = state_colors.get(s['state'], f"[{s['state']}]")
-        tgt = s['target']
-        if tgt:
-            tgt_info = f"{tgt['label']} X:{tgt['x']:+.2f}m Z:{tgt['z']:.2f}m (dist:{tgt['distance']:.2f}m conf:{tgt['conf']:.2f})"
-        else:
-            tgt_info = "未发现匹配人体目标"
-
-        aeb_col = "\033[1;31m" if s['aeb_active'] else "\033[1;32m"
-        aeb_info = f"{aeb_col}雷达前向: {s['aeb_min_scan_m']:.2f}m\033[0m"
-        cmd_info = f"\033[1;37mvx={s['cmd_vx']:+.2f}m/s wz={s['cmd_wz']:+.2f}rad/s\033[0m"
-        dry_tag = "\033[1;33m[DRY-RUN]\033[0m " if s['dry_run'] else "\033[1;32m[ACTIVE]\033[0m "
-
-        sys.stdout.write(f"\r{dry_tag}{st_tag} 目标: {tgt_info:<42} | {aeb_info} | {cmd_info} | {s['voltage_v']:.1f}V   ")
+        tag = colors.get(s['state'], f"[{s['state']}]")
+        t = s['target']
+        info = (f"{t['label']} X:{t['smooth_x']:+.2f} Z:{t['smooth_z']:.2f}m "
+                f"v:{t['closing_rate']:+.2f}m/s" if t else "未发现目标")
+        cap_col = "\033[1;31m" if s['speed_cap_mps'] < 0.2 else "\033[1;32m"
+        line = (f"\r{'[DRY]' if s['dry_run'] else '[RUN]'} {tag} "
+                f"{info:<44} | 雷达 {s['aeb_min_scan_m']:5.2f}m "
+                f"| {cap_col}上限 {s['speed_cap_mps']:.2f}\033[0m ({s['limit_reason']:<17}) "
+                f"| vx={s['cmd_vx']:+.2f} 舵={s['cmd_steer_deg']:+5.1f}° "
+                f"| {s['voltage_v']:.1f}V   ")
+        sys.stdout.write(line)
         sys.stdout.flush()
 
     def stop_robot(self):
-        self.get_logger().info(">>> 正在发送紧急停机指令...")
-        if not self.dry_run:
-            stop_cmd = Twist()
-            for _ in range(15):
-                self.pub_cmd_vel.publish(stop_cmd)
-                time.sleep(0.02)
-            self.trigger_chassis_stop()
-            self.arm_chassis(False)
+        self.get_logger().info(">>> 安全刹停中...")
+        if self.dry_run:
+            return
+        stop = Twist()
+        for _ in range(15):
+            self.pub_cmd_vel.publish(stop)
+            time.sleep(0.02)
+        self.trigger_chassis_stop()
+        self.arm_chassis(False)
+
+
+def build_config(args):
+    cfg = FollowerConfig()
+    for name in ('follow_distance_m', 'follow_stop_m', 'max_speed_mps',
+                 'decel_capability_mps2', 'control_latency_s',
+                 'aeb_hard_stop_m', 'obstacle_stop_m'):
+        value = getattr(args, name, None)
+        if value is not None:
+            setattr(cfg, name, value)
+    cfg.enable_pre_steer = bool(getattr(args, 'pre_steer', False))
+    if getattr(args, 'safe_mode', False):
+        # 首次实车验证用:速度压到最低,停车距离放大,先确认逻辑正确再放开
+        cfg.max_speed_mps = min(cfg.max_speed_mps, 0.30)
+        cfg.follow_distance_m = max(cfg.follow_distance_m, 1.20)
+        cfg.follow_stop_m = max(cfg.follow_stop_m, 0.90)
+        cfg.obstacle_stop_m = max(cfg.obstacle_stop_m, 0.65)
+        cfg.decel_capability_mps2 = min(cfg.decel_capability_mps2, 0.70)
+    cfg.__post_init__()
+    return cfg
 
 
 def main():
-    parser = argparse.ArgumentParser(description="RK3588 电子跟屁虫 - 人体 3D 视觉 + 激光雷达跟随")
-    parser.add_argument('--dry-run', action='store_true', default=False,
-                        help='仿真演练模式：计算并输出所有跟踪与防撞数据，但不向底盘发送驱动指令')
-    parser.add_argument('--target', type=str, default='person',
-                        help='追踪类别：person (默认), face, 或 any')
-    args, unknown = parser.parse_known_args()
+    p = argparse.ArgumentParser(description="RK3588 电子跟屁虫 - 人体跟随控制节点")
+    p.add_argument('--dry-run', action='store_true',
+                   help='仿真演练:照常计算与打印,但不向底盘发指令')
+    p.add_argument('--safe-mode', action='store_true',
+                   help='首次实车验证用的保守参数组 (低速 + 大停车距离)')
+    p.add_argument('--target', type=str, default='person',
+                   help='追踪类别: person (默认) / face / any')
+    p.add_argument('--follow-distance-m', type=float, default=None, dest='follow_distance_m')
+    p.add_argument('--follow-stop-m', type=float, default=None, dest='follow_stop_m')
+    p.add_argument('--max-speed-mps', type=float, default=None, dest='max_speed_mps')
+    p.add_argument('--decel-mps2', type=float, default=None, dest='decel_capability_mps2',
+                   help='★ 实测减速度,标定方法见 docs/TUNING.md')
+    p.add_argument('--latency-s', type=float, default=None, dest='control_latency_s',
+                   help='★ 实测感知到执行的总死时间')
+    p.add_argument('--aeb-hard-stop-m', type=float, default=None, dest='aeb_hard_stop_m')
+    p.add_argument('--obstacle-stop-m', type=float, default=None, dest='obstacle_stop_m')
+    p.add_argument('--pre-steer', action='store_true',
+                   help='静止时用微速度触发预打舵 (PROTOCOL.md 8.3),需实车确认')
+    args, _ = p.parse_known_args()
 
+    cfg = build_config(args)
     rclpy.init()
-    node = PersonFollowerNode(dry_run=args.dry_run, target_class=args.target)
+    node = PersonFollowerNode(cfg, dry_run=args.dry_run, target_class=args.target)
 
-    def sig_handler(sig, frame):
-        print("\n\n>>> 捕获中断信号，安全刹停中...")
+    def shutdown(_sig=None, _frame=None):
+        print("\n\n>>> 捕获中断,安全刹停...")
         node.stop_robot()
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
         sys.exit(0)
 
-    signal.signal(signal.SIGINT, sig_handler)
-    signal.signal(signal.SIGTERM, sig_handler)
+    signal.signal(signal.SIGINT, shutdown)
+    signal.signal(signal.SIGTERM, shutdown)
 
     try:
         rclpy.spin(node)

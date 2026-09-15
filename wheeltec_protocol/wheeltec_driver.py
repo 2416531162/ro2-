@@ -94,6 +94,14 @@ class Config:
     feedback_timeout_s: float = 0.30
     startup_stop_s: float = 3.0
     tx_hz: float = 50.0
+    # Transient-fault handling. A recoverable fault holds output at zero while
+    # staying armed; only after the grace window does it become a hard disarm
+    # that requires stationary telemetry to clear. Without this, a single USB-CDC
+    # write backlog or one stuttered telemetry frame disarmed the chassis
+    # mid-drive, and re-arming demanded the car be physically stopped first --
+    # which is what made web driving feel "extremely slow" and jerky.
+    feedback_grace_s: float = 1.00
+    backlog_tolerance: int = 8
 
     def __post_init__(self):
         if self.protocol not in ("unconfigured", "twist", "steering_angle"):
@@ -114,6 +122,10 @@ class Config:
             raise ValueError("invalid deadline")
         if not 3 <= self.startup_stop_s <= 10 or not 10 <= self.tx_hz <= 50:
             raise ValueError("invalid startup or transmit rate")
+        if not 0 <= self.feedback_grace_s <= 3:
+            raise ValueError("invalid feedback grace")
+        if not 0 <= self.backlog_tolerance <= 100:
+            raise ValueError("invalid backlog tolerance")
 
 
 class ControlPolicy:
@@ -129,12 +141,43 @@ class ControlPolicy:
         self.last_tick = now
         self.output = (0.0, 0.0)
         self.last_received = None
+        # Recoverable-fault bookkeeping: see Config.feedback_grace_s.
+        self.hold_reason = None
+        self.hold_since = None
 
     def stop(self, reason):
+        """Hard disarm. Recovery requires stationary telemetry, so reserve this
+        for genuine safety faults -- not for transient I/O hiccups."""
         self.armed = False
         self.latest = None
         self.output = (0.0, 0.0)
         self.reason = reason
+        self.hold_reason = None
+        self.hold_since = None
+
+    def reject(self, reason):
+        """Refuse one command without disarming. The chassis stays armed and
+        simply receives no new setpoint; tick() ramps it down via cmd_timeout_s."""
+        self.latest = None
+        self.output = (0.0, 0.0)
+        self.reason = reason
+        raise ValueError(reason)
+
+    def hold(self, reason, now):
+        """Recoverable fault: command zero but stay armed. If the fault persists
+        past feedback_grace_s it escalates to a hard stop in tick()."""
+        if self.hold_since is None:
+            self.hold_since = now
+        self.hold_reason = reason
+        self.output = (0.0, 0.0)
+
+    def release_hold(self):
+        self.hold_reason = None
+        self.hold_since = None
+
+    @property
+    def holding(self):
+        return self.hold_reason is not None
 
     def link(self, connected, now):
         self.connected = connected
@@ -183,8 +226,7 @@ class ControlPolicy:
             raise
         c = self.config
         if abs(lateral) > 1e-9:
-            self.stop("lateral_command_rejected")
-            raise ValueError("Ackermann does not accept lateral velocity")
+            self.reject("lateral_command_rejected")
         if not self.armed:
             raise ValueError("not armed")
         speed = max(-c.max_speed_m_s, min(c.max_speed_m_s, speed))
@@ -194,8 +236,7 @@ class ControlPolicy:
                 value = steering
             else:
                 if abs(speed) < 1e-6 and abs(steering) > 1e-6:
-                    self.stop("stationary_steering_needs_angle_protocol")
-                    raise ValueError(self.reason)
+                    self.reject("stationary_steering_needs_angle_protocol")
                 if c.wheelbase_m <= 0:
                     self.stop("wheelbase_unconfigured")
                     raise ValueError(self.reason)
@@ -203,8 +244,7 @@ class ControlPolicy:
         elif kind == "twist":
             yaw = max(-c.max_yaw_rate_rad_s, min(c.max_yaw_rate_rad_s, turn))
             if abs(speed) < 1e-6 and abs(yaw) > 1e-6:
-                self.stop("use_ackermann_cmd_for_stationary_steering")
-                raise ValueError(self.reason)
+                self.reject("use_ackermann_cmd_for_stationary_steering")
             if c.protocol == "steering_angle":
                 if c.wheelbase_m <= 0:
                     self.stop("wheelbase_unconfigured")
@@ -223,10 +263,27 @@ class ControlPolicy:
 
     def tick(self, now):
         c = self.config
-        dt = min(max(now - self.last_tick, 0.0), 1 / c.tx_hz)
+        # The old cap was `1 / c.tx_hz`, the *nominal* period. Whenever the I/O
+        # loop ran even slightly slower than nominal -- routine under Python plus
+        # USB-CDC on an RK3588 -- elapsed time was silently under-counted and the
+        # acceleration ramp stretched out in wall-clock terms. Cap at a few
+        # periods instead, so a genuine stall is still bounded.
+        dt = min(max(now - self.last_tick, 0.0), 3 / c.tx_hz)
         self.last_tick = now
-        if self.armed and (self.last_rx is None or now - self.last_rx > c.feedback_timeout_s):
-            self.stop("feedback_stale")
+
+        # Telemetry gap: hold at zero first, escalate to disarm only if it lasts.
+        if self.armed:
+            stale = self.last_rx is None or now - self.last_rx > c.feedback_timeout_s
+            if stale:
+                self.hold("feedback_stale", now)
+                if now - self.hold_since > c.feedback_grace_s:
+                    self.stop("feedback_lost")
+            elif self.hold_reason == "feedback_stale":
+                self.release_hold()
+
+        if self.armed and self.holding and now - self.hold_since > c.feedback_grace_s:
+            self.stop(self.hold_reason or "hold_expired")
+
         if self.armed and self.latest and now - self.latest[0] > c.cmd_timeout_s:
             self.latest = None
             self.output = (0.0, 0.0)
@@ -234,7 +291,7 @@ class ControlPolicy:
         if not self.armed and self.reason not in ("operator_stop", "operator_disarmed") and self.ready(now) == "ready":
             self.armed = True
             self.reason = "armed_waiting_command"
-        if not self.connected or not self.armed or not self.latest:
+        if not self.connected or not self.armed or not self.latest or self.holding:
             self.output = (0.0, 0.0)
             return STOP_FRAME
         _, speed, turn = self.latest
@@ -298,6 +355,7 @@ class WheeltecDriver(Node):
         self.tx_packets = self.tx_bytes = self.rx_bytes = self.io_errors = 0
         self.last_tx_hex = ""
         self.last_error = ""
+        self.backlog_streak = 0
         self.started = time.monotonic()
         self.last_odom = None
         self.position = [0.0, 0.0, 0.0]
@@ -333,13 +391,31 @@ class WheeltecDriver(Node):
         response.success, response.message = True, "stop latched; check telemetry and physical stop"
         return response
 
+    # Rejecting one malformed command is not a safety fault -- ignoring that
+    # command is. Latching a hard stop here meant a single stray message (say a
+    # stationary-steering Twist from a UI) disarmed the chassis and demanded a
+    # full stationary re-arm cycle. These reasons are recoverable: drop the
+    # command, keep the arm.
+    RECOVERABLE_REJECTS = (
+        "use_ackermann_cmd_for_stationary_steering",
+        "stationary_steering_needs_angle_protocol",
+        "ackermann_timestamp_stale",
+        "lateral_command_rejected",
+    )
+
     def submit(self, kind, speed, turn, lateral=0.0):
         with self.lock:
             try:
                 self.policy.command(kind, speed, turn, time.monotonic(), lateral)
             except ValueError as exc:
-                self.policy.stop(str(exc))
-                self.last_error = str(exc)
+                reason = str(exc)
+                self.last_error = reason
+                if reason in self.RECOVERABLE_REJECTS:
+                    self.policy.latest = None
+                    self.policy.output = (0.0, 0.0)
+                    self.policy.reason = "armed_waiting_command"
+                else:
+                    self.policy.stop(reason)
 
     def on_twist(self, message):
         self.submit("twist", message.linear.x, message.angular.z, message.linear.y)
@@ -349,15 +425,30 @@ class WheeltecDriver(Node):
         age = self.get_clock().now().nanoseconds / 1e9 - stamp
         if stamp <= 0 or not -0.1 <= age <= self.config.cmd_timeout_s:
             with self.lock:
-                self.policy.stop("ackermann_timestamp_stale")
+                self.policy.latest = None
+                self.policy.output = (0.0, 0.0)
+                self.policy.reason = "ackermann_timestamp_stale"
             return
         self.submit("ackermann", message.drive.speed, message.drive.steering_angle)
 
     def write_frame(self, frame):
+        # An 11-byte frame at 115200 baud drains in under 1 ms, against a 20 ms
+        # transmit period -- so out_waiting is normally 0. But USB-CDC on the
+        # RK3588 buffers in the host stack and reports a non-zero backlog now and
+        # then for entirely benign reasons. Latching a stop on the first one was
+        # the main cause of the stuttering, near-motionless web driving: stop ->
+        # disarm -> car coasts to rest -> 5 stationary frames -> re-arm -> repeat.
+        # Tolerate isolated backlogs; only a sustained run means the link is sick.
         if self.ser.out_waiting:
-            self.ser.reset_output_buffer()
-            self.policy.stop("serial_output_backlog")
-            frame = STOP_FRAME
+            self.backlog_streak += 1
+            if self.backlog_streak > self.config.backlog_tolerance:
+                self.ser.reset_output_buffer()
+                self.policy.hold("serial_output_backlog", time.monotonic())
+                frame = STOP_FRAME
+        else:
+            if self.backlog_streak and self.policy.hold_reason == "serial_output_backlog":
+                self.policy.release_hold()
+            self.backlog_streak = 0
         n = self.ser.write(frame)
         if n != len(frame):
             raise IOError("partial serial write")
@@ -466,7 +557,10 @@ class WheeltecDriver(Node):
             p = self.policy
             hz = (len(self.rx_times) - 1) / (self.rx_times[-1] - self.rx_times[0]) if len(self.rx_times) > 1 and self.rx_times[-1] > self.rx_times[0] and p.last_rx and now - p.last_rx < self.config.feedback_timeout_s else 0.0
             age = now - p.last_rx if p.last_rx is not None else None
-            data = {"connected": p.connected, "armed": p.armed, "reason": p.reason,
+            data = {"connected": p.connected, "armed": p.armed,
+                    "reason": p.hold_reason or p.reason,
+                    "holding": p.holding, "hold_reason": p.hold_reason,
+                    "backlog_streak": self.backlog_streak,
                     "ready": p.ready(now), "port": self.port, "device": os.path.realpath(self.port),
                     "baud": 115200, "config": vars(self.config), "hz": round(hz, 2),
                     "frames_ok": self.parser.good, "frames_bad": self.parser.bad,
