@@ -1,0 +1,185 @@
+[
+  {
+    "stage": "BASELINE",
+    "command": [
+      "adb",
+      "-s",
+      "03801aa8f417ee51",
+      "shell",
+      "bash",
+      "-c",
+      "'source /opt/ros/jazzy/setup.bash; export QT_QPA_PLATFORM=offscreen; python3 /root/radar_system/ui_refactor_20260915/test_ui.py /root/radar_system/ui_refactor_20260915/BASELINE.py --appearance'"
+    ],
+    "stdout": "FAIL appearance: light_background=false rtk_details_collapsed=false\n",
+    "stderr": "QStandardPaths: XDG_RUNTIME_DIR not set, defaulting to '/tmp/runtime-root'\nThis plugin does not support propagateSizeHints()\n",
+    "exit_status": 1
+  },
+  {
+    "stage": "BASELINE_INTERACTIONS",
+    "command": [
+      "adb",
+      "-s",
+      "03801aa8f417ee51",
+      "shell",
+      "bash",
+      "-c",
+      "'source /opt/ros/jazzy/setup.bash; export QT_QPA_PLATFORM=offscreen; python3 /root/radar_system/ui_refactor_20260915/test_ui.py /root/radar_system/ui_refactor_20260915/BASELINE.py '"
+    ],
+    "stdout": "GUI_INTERACTIONS passed=15/15 raw_measurements_unchanged=true\n",
+    "stderr": "QStandardPaths: XDG_RUNTIME_DIR not set, defaulting to '/tmp/runtime-root'\nThis plugin does not support propagateSizeHints()\nThis plugin does not support propagateSizeHints()\nThis plugin does not support propagateSizeHints()\nThis plugin does not support propagateSizeHints()\n",
+    "exit_status": 0
+  },
+  {
+    "stage": "ROLLBACK_ACTION",
+    "command": [
+      "./ROLLBACK.sh",
+      "/Users/Admin1/Desktop/正点原子rk3588/radar_system/ui_refactor_20260915/rollback_probe.py"
+    ],
+    "stdout": "ROLLBACK_RESTORED_BASELINE\n",
+    "stderr": "",
+    "exit_status": 0
+  },
+  {
+    "stage": "MODIFIED",
+    "command": [
+      "adb",
+      "-s",
+      "03801aa8f417ee51",
+      "shell",
+      "bash",
+      "-c",
+      "'source /opt/ros/jazzy/setup.bash; export QT_QPA_PLATFORM=offscreen; python3 /root/radar_system/ui_refactor_20260915/test_ui.py /root/radar_system/ui_refactor_20260915/MODIFIED_FILE.py --appearance'"
+    ],
+    "stdout": "PASS appearance: light_background=true rtk_details_collapsed=true\n",
+    "stderr": "QStandardPaths: XDG_RUNTIME_DIR not set, defaulting to '/tmp/runtime-root'\nThis plugin does not support propagateSizeHints()\n",
+    "exit_status": 0
+  },
+  {
+    "stage": "MODIFIED_INTERACTIONS",
+    "command": [
+      "adb",
+      "-s",
+      "03801aa8f417ee51",
+      "shell",
+      "bash",
+      "-c",
+      "'source /opt/ros/jazzy/setup.bash; export QT_QPA_PLATFORM=offscreen; python3 /root/radar_system/ui_refactor_20260915/test_ui.py /root/radar_system/ui_refactor_20260915/MODIFIED_FILE.py '"
+    ],
+    "stdout": "GUI_INTERACTIONS passed=18/18 raw_measurements_unchanged=true\n",
+    "stderr": "QStandardPaths: XDG_RUNTIME_DIR not set, defaulting to '/tmp/runtime-root'\nThis plugin does not support propagateSizeHints()\nThis plugin does not support propagateSizeHints()\nThis plugin does not support propagateSizeHints()\n",
+    "exit_status": 0
+  },
+  {
+    "stage": "ROLLBACK",
+    "command": [
+      "adb",
+      "-s",
+      "03801aa8f417ee51",
+      "shell",
+      "bash",
+      "-c",
+      "'source /opt/ros/jazzy/setup.bash; export QT_QPA_PLATFORM=offscreen; python3 /root/radar_system/ui_refactor_20260915/test_ui.py /root/radar_system/ui_refactor_20260915/rollback_probe.py --appearance'"
+    ],
+    "stdout": "FAIL appearance: light_background=false rtk_details_collapsed=false\n",
+    "stderr": "QStandardPaths: XDG_RUNTIME_DIR not set, defaulting to '/tmp/runtime-root'\nThis plugin does not support propagateSizeHints()\n",
+    "exit_status": 1
+  },
+  {
+    "stage": "BASELINE_CONTRAST",
+    "command": [
+      "adb",
+      "-s",
+      "03801aa8f417ee51",
+      "shell",
+      "bash",
+      "-c",
+      "'source /opt/ros/jazzy/setup.bash; export QT_QPA_PLATFORM=offscreen; python3 /root/radar_system/ui_refactor_20260915/test_ui.py /root/radar_system/ui_refactor_20260915/BASELINE.py --contrast'"
+    ],
+    "stdout": "FAIL contrast: muted_background=false dark_radar=true minimum_return_contrast=7.18:1 rtk_details_collapsed=false\n",
+    "stderr": "QStandardPaths: XDG_RUNTIME_DIR not set, defaulting to '/tmp/runtime-root'\nThis plugin does not support propagateSizeHints()\n",
+    "exit_status": 1
+  },
+  {
+    "stage": "PRE_ADJUSTMENT_CONTRAST",
+    "command": [
+      "adb",
+      "-s",
+      "03801aa8f417ee51",
+      "shell",
+      "bash",
+      "-c",
+      "'source /opt/ros/jazzy/setup.bash; export QT_QPA_PLATFORM=offscreen; python3 /root/radar_system/ui_refactor_20260915/test_ui.py /root/radar_system/ui_refactor_20260915/LIGHT_VERSION.py --contrast'"
+    ],
+    "stdout": "FAIL contrast: muted_background=false dark_radar=false minimum_return_contrast=1.00:1 rtk_details_collapsed=true\n",
+    "stderr": "QStandardPaths: XDG_RUNTIME_DIR not set, defaulting to '/tmp/runtime-root'\nThis plugin does not support propagateSizeHints()\n",
+    "exit_status": 1
+  },
+  {
+    "stage": "MODIFIED_CONTRAST",
+    "command": [
+      "adb",
+      "-s",
+      "03801aa8f417ee51",
+      "shell",
+      "bash",
+      "-c",
+      "'source /opt/ros/jazzy/setup.bash; export QT_QPA_PLATFORM=offscreen; python3 /root/radar_system/ui_refactor_20260915/test_ui.py /root/radar_system/ui_refactor_20260915/MODIFIED_FILE.py --contrast'"
+    ],
+    "stdout": "PASS contrast: muted_background=true dark_radar=true minimum_return_contrast=5.66:1 rtk_details_collapsed=true\n",
+    "stderr": "QStandardPaths: XDG_RUNTIME_DIR not set, defaulting to '/tmp/runtime-root'\nThis plugin does not support propagateSizeHints()\n",
+    "exit_status": 0
+  },
+  {
+    "stage": "MODIFIED_INTERACTIONS_FINAL",
+    "command": [
+      "adb",
+      "-s",
+      "03801aa8f417ee51",
+      "shell",
+      "bash",
+      "-c",
+      "'source /opt/ros/jazzy/setup.bash; export QT_QPA_PLATFORM=offscreen; python3 /root/radar_system/ui_refactor_20260915/test_ui.py /root/radar_system/ui_refactor_20260915/MODIFIED_FILE.py '"
+    ],
+    "stdout": "GUI_INTERACTIONS passed=18/18 raw_measurements_unchanged=true\n",
+    "stderr": "QStandardPaths: XDG_RUNTIME_DIR not set, defaulting to '/tmp/runtime-root'\nThis plugin does not support propagateSizeHints()\nThis plugin does not support propagateSizeHints()\nThis plugin does not support propagateSizeHints()\n",
+    "exit_status": 0
+  },
+  {
+    "stage": "ROLLBACK_FINAL_ACTION",
+    "command": [
+      "/Users/Admin1/Desktop/正点原子rk3588/radar_system/ui_refactor_20260915/ROLLBACK.sh",
+      "/Users/Admin1/Desktop/正点原子rk3588/radar_system/ui_refactor_20260915/rollback_probe.py"
+    ],
+    "stdout": "ROLLBACK_RESTORED_BASELINE\n",
+    "stderr": "",
+    "exit_status": 0
+  },
+  {
+    "stage": "ROLLBACK_FINAL_CONTRAST",
+    "command": [
+      "adb",
+      "-s",
+      "03801aa8f417ee51",
+      "shell",
+      "bash",
+      "-c",
+      "'source /opt/ros/jazzy/setup.bash; export QT_QPA_PLATFORM=offscreen; python3 /root/radar_system/ui_refactor_20260915/test_ui.py /root/radar_system/ui_refactor_20260915/rollback_probe.py --contrast'"
+    ],
+    "stdout": "FAIL contrast: muted_background=false dark_radar=true minimum_return_contrast=7.18:1 rtk_details_collapsed=false\n",
+    "stderr": "QStandardPaths: XDG_RUNTIME_DIR not set, defaulting to '/tmp/runtime-root'\nThis plugin does not support propagateSizeHints()\n",
+    "exit_status": 1
+  },
+  {
+    "stage": "LIVE_FINAL",
+    "command": [
+      "adb",
+      "-s",
+      "03801aa8f417ee51",
+      "shell",
+      "systemctl is-active rk3588-perception@gui.service rk3588-perception@camera.service rk3588-perception@lidar.service rk3588-wheeltec.service; sha256sum /root/radar_system/board_radar_gui.py"
+    ],
+    "stdout": "active\nactive\nactive\nactive\n13682890981e4b88d5bf1880125eb88df880d1bedb2a77a75259b7a803a72e0a  /root/radar_system/board_radar_gui.py\n",
+    "stderr": "",
+    "exit_status": 0
+  }
+]

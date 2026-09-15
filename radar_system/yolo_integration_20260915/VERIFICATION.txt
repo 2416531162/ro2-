@@ -1,0 +1,229 @@
+RK3588 YOLOv8n NPU integration verification
+Date: 2026-09-15
+Target: /root/radar_system/ai_3d_detector.py; service rk3588-perception@ai.service
+Changed branch/fields: AI3DDetectorNode.__init__ loads YoloRKNN instead of MobileNet-SSD; inference_loop invokes YOLOv8n (80 COCO classes), retains periodic ResNet face detection and existing RGB-D metric geometry; adds /camera/ai_detection/status; loop cap 20 Hz; main joins worker before releasing NPU.
+YOLOv8n: RGB letterbox 640x640, raw six heads, DFL decode (16 bins), sigmoid scores, confidence >=0.40, class-aware NMS IoU 0.45, exact padding removal and clipping to source image.
+FP16 conversion: original ONNX opset20 -> onnx.version_converter opset19 -> RKNN 2.3.2, target rk3588; raw convolution heads moved to NPU and decoded on CPU. No quantization calibration or retraining.
+Runtime path correction: created /usr/lib/librknnrt.so symlink to existing /usr/lib/aarch64-linux-gnu/librknnrt.so (2.3.2). No original shared library changed.
+New persistent model: /root/radar_system/models/yolov8n_rk3588_fp16.rknn
+
+ARTIFACTS
+/Users/Admin1/Desktop/正点原子rk3588/radar_system/yolo_integration_20260915/MODIFIED_FILE.py
+/Users/Admin1/Desktop/正点原子rk3588/radar_system/yolo_integration_20260915/DIFF_FILE.patch
+/Users/Admin1/Desktop/正点原子rk3588/radar_system/yolo_integration_20260915/VERIFICATION.txt
+/Users/Admin1/Desktop/正点原子rk3588/radar_system/yolo_integration_20260915/ROLLBACK.sh
+
+SHA256
+BASELINE.py 15e9af5b3fb1e443b1a8f760be6a9735b2bdff20fa0282bb638a3d6a04d2030c
+MODIFIED_FILE.py 0dd9971b5cb141fdd090d53b7941618f22680616c918b14b597e8bfd92e9486a
+rollback_probe.py 15e9af5b3fb1e443b1a8f760be6a9735b2bdff20fa0282bb638a3d6a04d2030c
+yolov8n_rk3588_fp16.rknn a94a3a3a75bf97f02349a47f357e0272469fd6af8b88bd4f35a4b3d2e8957894
+Original yolov8n.onnx b2bc52f40e8e1c532427d5bde3575a5d5b571b739fab2c6df443733ed1589cbd
+
+INPUT AND TEST RESULTS
+Fixture: /root/radar_system/yolo_integration_20260915/fixture.npz; captured 640x480 RGB-D and camera intrinsics; same RGB optical frame; observed timestamp difference 39.3 ms. Tests use isolated publishers rather than publishing replayed data into live ROS topics.
+Baseline and rollback: MobileNet-SSD detects Chair in this fixture, original metric geometry passes.
+Modified: YOLOv8n on RKNN NPU detects Suitcase in the same fixture, metric geometry passes and raw depth remains unchanged.
+Original ONNX reference vs RKNN: Suitcase box IoU 0.9954; confidence delta 0.0023; identical number of detections in the test image. This is a single-image conversion check, not a general accuracy benchmark.
+Synthetic tests PASS: landscape/portrait letterbox, class-aware NMS including overlapping different classes, empty input, empty detection heads, DFL coordinate decoding.
+Live 15-second check PASS: RGB, annotated image, targets, model-status and LiDAR topics are updating; NPU inference median 51.3 ms; subscribed rates AI images 8.6 Hz, status 11.0 Hz, targets 11.7 Hz, RGB 22.6 Hz, LiDAR 10.0 Hz. Subscriber rates can differ due to test load and message loss.
+Actual native screenshot after.png shows 30 FPS camera display, 10.0 Hz radar and Suitcase 0.38 m. Camera display FPS is not the YOLO inference rate.
+Model output remains on existing /camera/ai_detection/image and /camera/ai_detection/targets; GUI overlays targets onto live RGB without a GUI source change.
+System services ai/camera/gui/lidar/wheeltec are active; AI NRestarts=0.
+3D measurement/drawing/output block remains byte-identical to baseline. Distances are existing depth estimates; this task does not recalibrate the depth camera.
+
+RECOVERED ISSUES
+Initial board-side compiler preparation was followed by unresponsive USB/network. User restarted the board. Some staged files were zero-byte after restart; they were re-transferred, synced and hash-verified. Model conversion was completed in the computer Docker environment, not on the board.
+Computer conversion fixed missing setuptools/pkg_resources and converted ONNX opset20 to supported opset19.
+Initial RKNN runtime test could not locate the installed shared library; the documented /usr/lib lookup symlink corrected this. Subsequent tests and live service pass.
+RKNN static-model dynamic-range query warning is emitted by runtime and documented there as ignorable for a static model; inference succeeds.
+
+EXACT COMMANDS / INPUTS / LITERAL OUTPUTS / EXIT STATUS
+
+BASELINE
+Command: adb -s 03801aa8f417ee51 shell 'bash -c '"'"'source /opt/ros/jazzy/setup.bash; python3 /root/radar_system/yolo_integration_20260915/test_pipeline.py /root/radar_system/yolo_integration_20260915/BASELINE.py'"'"''
+Input: fixture.npz for pipeline/NPU tests; explicit file path for rollback; live ROS topics for LIVE; exact paths in command for hash/service checks.
+stdout:
+
+stderr:
+Traceback (most recent call last):
+  File "/root/radar_system/yolo_integration_20260915/test_pipeline.py", line 31, in <module>
+    with patch.object(m.Node, '__init__', lambda *_: None), \
+                      ^^^^^^
+AttributeError: module 'detector_test' has no attribute 'Node'
+Error in sys.excepthook:
+Traceback (most recent call last):
+  File "/usr/lib/python3/dist-packages/apport_python_hook.py", line 228, in partial_apport_excepthook
+    return apport_excepthook(binary, exc_type, exc_obj, exc_tb)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3/dist-packages/apport_python_hook.py", line 66, in apport_excepthook
+    import apport.report
+  File "/usr/lib/python3/dist-packages/apport/__init__.py", line 7, in <module>
+    from apport.packaging_impl import impl as packaging
+  File "/usr/lib/python3/dist-packages/apport/packaging_impl/__init__.py", line 33, in <module>
+    impl = load_packaging_implementation()
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3/dist-packages/apport/packaging_impl/__init__.py", line 28, in load_packaging_implementation
+    f"apport.packaging_impl.{determine_packaging_implementation()}"
+                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3/dist-packages/apport/packaging_impl/__init__.py", line 19, in determine_packaging_implementation
+    raise RuntimeError(
+RuntimeError: Could not determine system package manager. Please file a bug and provide /etc/os-release!
+
+Original exception was:
+Traceback (most recent call last):
+  File "/root/radar_system/yolo_integration_20260915/test_pipeline.py", line 31, in <module>
+    with patch.object(m.Node, '__init__', lambda *_: None), \
+                      ^^^^^^
+AttributeError: module 'detector_test' has no attribute 'Node'
+Exit status: 1
+
+ROLLBACK
+Command: adb -s 03801aa8f417ee51 shell 'bash -c '"'"'source /opt/ros/jazzy/setup.bash; python3 /root/radar_system/yolo_integration_20260915/test_pipeline.py /root/radar_system/yolo_integration_20260915/rollback_probe.py'"'"''
+Input: fixture.npz for pipeline/NPU tests; explicit file path for rollback; live ROS topics for LIVE; exact paths in command for hash/service checks.
+stdout:
+PIPELINE_REPLAY {"backend": "OpenCV CPU", "elapsed_ms": 214.2, "labels": ["Chair"], "metric_geometry": "PASS", "model": "MobileNet-SSD", "published_topics": ["/camera/ai_detection/image", "/camera/ai_detection/targets"], "raw_depth_unchanged": true, "result": "PASS"}
+stderr:
+
+Exit status: 0
+
+BASELINE_FINAL
+Command: adb -s 03801aa8f417ee51 shell 'bash -c '"'"'source /opt/ros/jazzy/setup.bash; python3 /root/radar_system/yolo_integration_20260915/test_pipeline.py /root/radar_system/yolo_integration_20260915/BASELINE.py'"'"''
+Input: fixture.npz for pipeline/NPU tests; explicit file path for rollback; live ROS topics for LIVE; exact paths in command for hash/service checks.
+stdout:
+PIPELINE_REPLAY {"backend": "OpenCV CPU", "elapsed_ms": 224.9, "labels": ["Chair"], "metric_geometry": "PASS", "model": "MobileNet-SSD", "published_topics": ["/camera/ai_detection/image", "/camera/ai_detection/targets"], "raw_depth_unchanged": true, "result": "PASS"}
+stderr:
+
+Exit status: 0
+
+NPU_REFERENCE
+Command: adb -s 03801aa8f417ee51 shell 'bash -c '"'"'source /opt/ros/jazzy/setup.bash; python3 /root/radar_system/yolo_integration_20260915/test_yolo.py --reference'"'"''
+Input: fixture.npz for pipeline/NPU tests; explicit file path for rollback; live ROS topics for LIVE; exact paths in command for hash/service checks.
+stdout:
+YOLO_GEOMETRY PASS letterbox_landscape portrait class_nms empty_heads dfl_decode
+stderr:
+W rknn-toolkit-lite2 version: 2.3.2
+E Catch exception when init runtime!
+E Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/dist-packages/rknnlite/api/rknn_lite.py", line 148, in init_runtime
+    self.rknn_runtime = RKNNRuntime(root_dir=self.root_dir, target=target, device_id=device_id,
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "rknnlite/api/rknn_runtime.py", line 363, in rknnlite.api.rknn_runtime.RKNNRuntime.__init__
+  File "rknnlite/api/rknn_runtime.py", line 607, in rknnlite.api.rknn_runtime.RKNNRuntime._load_library
+  File "rknnlite/api/rknn_runtime.py", line 583, in rknnlite.api.rknn_runtime.RKNNRuntime._get_rknn_api_lib_path
+Exception: Can not find dynamic library on RK3588!
+Please download the librknnrt.so from https://github.com/airockchip/rknn-toolkit2/tree/master/rknpu2/runtime/Linux/librknn_api/aarch64 and move it to directory /usr/lib/
+
+
+Traceback (most recent call last):
+  File "/root/radar_system/yolo_integration_20260915/test_yolo.py", line 37, in <module>
+    detector=m.YoloRKNN(str(p/'yolov8n_rk3588_fp16.rknn'))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/radar_system/yolo_integration_20260915/MODIFIED_FILE.py", line 153, in __init__
+    raise RuntimeError('RK3588 NPU initialization failed')
+RuntimeError: RK3588 NPU initialization failed
+Error in sys.excepthook:
+Traceback (most recent call last):
+  File "/usr/lib/python3/dist-packages/apport_python_hook.py", line 228, in partial_apport_excepthook
+    return apport_excepthook(binary, exc_type, exc_obj, exc_tb)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3/dist-packages/apport_python_hook.py", line 66, in apport_excepthook
+    import apport.report
+  File "/usr/lib/python3/dist-packages/apport/__init__.py", line 7, in <module>
+    from apport.packaging_impl import impl as packaging
+  File "/usr/lib/python3/dist-packages/apport/packaging_impl/__init__.py", line 33, in <module>
+    impl = load_packaging_implementation()
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3/dist-packages/apport/packaging_impl/__init__.py", line 28, in load_packaging_implementation
+    f"apport.packaging_impl.{determine_packaging_implementation()}"
+                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3/dist-packages/apport/packaging_impl/__init__.py", line 19, in determine_packaging_implementation
+    raise RuntimeError(
+RuntimeError: Could not determine system package manager. Please file a bug and provide /etc/os-release!
+
+Original exception was:
+Traceback (most recent call last):
+  File "/root/radar_system/yolo_integration_20260915/test_yolo.py", line 37, in <module>
+    detector=m.YoloRKNN(str(p/'yolov8n_rk3588_fp16.rknn'))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/radar_system/yolo_integration_20260915/MODIFIED_FILE.py", line 153, in __init__
+    raise RuntimeError('RK3588 NPU initialization failed')
+RuntimeError: RK3588 NPU initialization failed
+Exit status: 1
+
+NPU_REFERENCE_FINAL
+Command: adb -s 03801aa8f417ee51 shell 'bash -c '"'"'source /opt/ros/jazzy/setup.bash; python3 /root/radar_system/yolo_integration_20260915/test_yolo.py --reference'"'"''
+Input: fixture.npz for pipeline/NPU tests; explicit file path for rollback; live ROS topics for LIVE; exact paths in command for hash/service checks.
+stdout:
+YOLO_GEOMETRY PASS letterbox_landscape portrait class_nms empty_heads dfl_decode
+YOLO_NPU {"result": "PASS", "model": "YOLOv8n", "backend": "RKNN NPU", "inference_plus_postprocess_median_ms": 62.5, "labels": ["Suitcase"], "detections": [["Suitcase", 0.820900559425354, 14, 287, 456, 475, [0, 242, 254]]], "onnx_reference": [{"label": "Suitcase", "iou": 0.9954, "confidence_delta": 0.0023}]}
+I RKNN: [13:06:16.510] RKNN Runtime Information, librknnrt version: 2.3.2 (429f97ae6b@2025-04-09T09:09:27)
+I RKNN: [13:06:16.511] RKNN Driver Information, version: 0.9.8
+I RKNN: [13:06:16.515] RKNN Model Information, version: 6, toolkit version: 2.3.2(compiler version: 2.3.2 (@2025-04-03T08:26:16)), target: RKNPU v2, target platform: rk3588, framework name: ONNX, framework layout: NCHW, model inference type: static_shape
+W RKNN: [13:06:16.556] query RKNN_QUERY_INPUT_DYNAMIC_RANGE error, rknn model is static shape type, please export rknn with dynamic_shapes
+stderr:
+W rknn-toolkit-lite2 version: 2.3.2
+W Query dynamic range failed. Ret code: RKNN_ERR_MODEL_INVALID. (If it is a static shape RKNN model, please ignore the above warning message.)
+Exit status: 0
+
+MODIFIED
+Command: adb -s 03801aa8f417ee51 shell 'bash -c '"'"'source /opt/ros/jazzy/setup.bash; python3 /root/radar_system/yolo_integration_20260915/test_pipeline.py /root/radar_system/yolo_integration_20260915/MODIFIED_FILE.py'"'"''
+Input: fixture.npz for pipeline/NPU tests; explicit file path for rollback; live ROS topics for LIVE; exact paths in command for hash/service checks.
+stdout:
+PIPELINE_REPLAY {"backend": "RKNN NPU", "elapsed_ms": 199.3, "labels": ["Suitcase"], "metric_geometry": "PASS", "model": "YOLOv8n", "published_topics": ["/camera/ai_detection/image", "/camera/ai_detection/status", "/camera/ai_detection/targets"], "raw_depth_unchanged": true, "result": "PASS"}
+I RKNN: [13:06:19.104] RKNN Runtime Information, librknnrt version: 2.3.2 (429f97ae6b@2025-04-09T09:09:27)
+I RKNN: [13:06:19.104] RKNN Driver Information, version: 0.9.8
+I RKNN: [13:06:19.104] RKNN Model Information, version: 6, toolkit version: 2.3.2(compiler version: 2.3.2 (@2025-04-03T08:26:16)), target: RKNPU v2, target platform: rk3588, framework name: ONNX, framework layout: NCHW, model inference type: static_shape
+W RKNN: [13:06:19.120] query RKNN_QUERY_INPUT_DYNAMIC_RANGE error, rknn model is static shape type, please export rknn with dynamic_shapes
+stderr:
+W rknn-toolkit-lite2 version: 2.3.2
+W Query dynamic range failed. Ret code: RKNN_ERR_MODEL_INVALID. (If it is a static shape RKNN model, please ignore the above warning message.)
+Exit status: 0
+
+LIVE
+Command: adb -s 03801aa8f417ee51 shell 'bash -c '"'"'source /opt/ros/jazzy/setup.bash; export ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST; python3 /root/radar_system/yolo_integration_20260915/live_check.py'"'"''
+Input: fixture.npz for pipeline/NPU tests; explicit file path for rollback; live ROS topics for LIVE; exact paths in command for hash/service checks.
+stdout:
+LIVE_YOLO {"backend": "RKNN NPU", "classes": 80, "frame_size": [640, 480], "labels": ["Suitcase", "Tv"], "latest_targets": [{"conf": 0.41, "distance": 0.38, "label": "Suitcase", "x": -0.06, "x1": 4, "x2": 458, "y": 0.09, "y1": 283, "y2": 476, "z": 0.36}, {"conf": 0.79, "distance": 0.38, "label": "Suitcase", "x": -0.06, "x1": 13, "x2": 454, "y": 0.09, "y1": 287, "y2": 476, "z": 0.36}, {"conf": 0.62, "distance": 0.38, "label": "Suitcase", "x": -0.06, "x1": 12, "x2": 454, "y": 0.09, "y1": 287, "y2": 475, "z": 0.36}, {"conf": 0.58, "distance": 0.38, "label": "Suitcase", "x": -0.06, "x1": 12, "x2": 453, "y": 0.09, "y1": 288, "y2": 475, "z": 0.36}, {"conf": 0.54, "distance": 0.38, "label": "Suitcase", "x": -0.06, "x1": 13, "x2": 454, "y": 0.09, "y1": 287, "y2": 476, "z": 0.36}, {"conf": 0.52, "distance": 0.38, "label": "Suitcase", "x": -0.06, "x1": 12, "x2": 453, "y": 0.09, "y1": 288, "y2": 476, "z": 0.36}], "model": "YOLOv8n", "npu_inference_median_ms": 51.3, "observed_hz": {"ai": 8.6, "lidar": 10.0, "rgb": 22.6, "status": 11.0, "targets": 11.7}, "result": "PASS"}
+stderr:
+
+Exit status: 0
+
+ROLLBACK_ACTION_FINAL
+Command: '/Users/Admin1/Desktop/正点原子rk3588/radar_system/yolo_integration_20260915/ROLLBACK.sh' '/Users/Admin1/Desktop/正点原子rk3588/radar_system/yolo_integration_20260915/rollback_probe.py'
+Input: fixture.npz for pipeline/NPU tests; explicit file path for rollback; live ROS topics for LIVE; exact paths in command for hash/service checks.
+stdout:
+ROLLBACK_RESTORED_BASELINE
+stderr:
+
+Exit status: 0
+
+LIVE_FINAL_SERVICES
+Command: adb -s 03801aa8f417ee51 shell 'systemctl is-active rk3588-perception@ai.service rk3588-perception@camera.service rk3588-perception@gui.service rk3588-perception@lidar.service rk3588-wheeltec.service; systemctl show rk3588-perception@ai.service -p NRestarts; sha256sum /root/radar_system/ai_3d_detector.py /root/radar_system/models/yolov8n_rk3588_fp16.rknn'
+Input: fixture.npz for pipeline/NPU tests; explicit file path for rollback; live ROS topics for LIVE; exact paths in command for hash/service checks.
+stdout:
+active
+active
+active
+active
+active
+NRestarts=0
+0dd9971b5cb141fdd090d53b7941618f22680616c918b14b597e8bfd92e9486a  /root/radar_system/ai_3d_detector.py
+a94a3a3a75bf97f02349a47f357e0272469fd6af8b88bd4f35a4b3d2e8957894  /root/radar_system/models/yolov8n_rk3588_fp16.rknn
+stderr:
+
+Exit status: 0
+
+PATCH_RECONSTRUCTION
+Command: patch '/Users/Admin1/Desktop/正点原子rk3588/radar_system/yolo_integration_20260915/patch_probe.py' '/Users/Admin1/Desktop/正点原子rk3588/radar_system/yolo_integration_20260915/DIFF_FILE.patch'
+Input: fixture.npz for pipeline/NPU tests; explicit file path for rollback; live ROS topics for LIVE; exact paths in command for hash/service checks.
+stdout:
+patching file '/Users/Admin1/Desktop/正点原子rk3588/radar_system/yolo_integration_20260915/patch_probe.py'
+stderr:
+
+Exit status: 0
+
+RESTORED BEHAVIOR
+ROLLBACK.sh on a fresh independent modified copy returns ROLLBACK_RESTORED_BASELINE (exit 0). Restored copy matches BASELINE SHA256, and replay gives original MobileNet-SSD Chair detection and PASS metric geometry. The deployed target remains MODIFIED_FILE (YOLOv8n NPU).
+Board rollback (prepared, not run on live board): '/Users/Admin1/Desktop/正点原子rk3588/radar_system/yolo_integration_20260915/ROLLBACK.sh' --board. It restores the original detector and restarts only AI. Added model file and runtime lookup symlink are retained but not used by the original detector.
+No chassis command topic or serial motion output is written by the integration/tests.

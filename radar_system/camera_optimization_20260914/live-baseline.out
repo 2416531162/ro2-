@@ -1,0 +1,8 @@
+rgb {"w": 640, "h": 480, "encoding": "rgb8", "step": 1920, "bigendian": 0, "frame_id": "camera_rgb_optical_frame", "stamp": 1789367685.048214}
+rgb_info {"w": 640, "h": 480, "frame_id": "camera_rgb_optical_frame", "k": [570.3422241210938, 0.0, 319.5, 0.0, 570.3422241210938, 239.5, 0.0, 0.0, 1.0], "p": [570.3422241210938, 0.0, 319.5, 0.0, 0.0, 570.3422241210938, 239.5, 0.0, 0.0, 0.0, 1.0, 0.0], "d": [0.0, 0.0, 0.0, 0.0, 0.0], "model": "plumb_bob"}
+depth {"w": 640, "h": 480, "encoding": "16UC1", "step": 1280, "bigendian": 0, "frame_id": "camera_rgb_optical_frame", "stamp": 1789367685.0590205}
+depth_info {"w": 640, "h": 480, "frame_id": "camera_rgb_optical_frame", "k": [570.3422241210938, 0.0, 319.5, 0.0, 570.3422241210938, 239.5, 0.0, 0.0, 1.0], "p": [570.3422241210938, 0.0, 319.5, 0.0, 0.0, 570.3422241210938, 239.5, 0.0, 0.0, 0.0, 1.0, 0.0], "d": [0.0, 0.0, 0.0, 0.0, 0.0], "model": "plumb_bob"}
+rate rgb 24.83 frames 172
+rate depth 25.06 frames 174
+nearest_sync_ms_median_max 5.967617034912109 40.78221321105957
+ai_rate 8.55 last_targets []

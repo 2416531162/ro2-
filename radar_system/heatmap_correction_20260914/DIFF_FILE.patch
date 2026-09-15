@@ -1,0 +1,319 @@
+--- a/board_radar_gui.py
++++ b/board_radar_gui.py
+@@ -34,96 +34,79 @@
+ 
+ DEPTH_VALID_MIN_MM = 200
+ DEPTH_VALID_MAX_MM = 5500
+-HEAT_BG_RGB = (18, 14, 24)
+-
+-
+-def depth_auto_range(valid_mm, prev_near=None, prev_far=None, alpha=0.18):
+-    """Percentile range for display; EMA-smoothed so the legend does not flicker."""
+-    near = float(np.percentile(valid_mm, 2))
+-    far = float(np.percentile(valid_mm, 98))
+-    if far - near < 300:
+-        mid = 0.5 * (near + far)
+-        near, far = mid - 150.0, mid + 150.0
+-    near = max(float(DEPTH_VALID_MIN_MM), near)
+-    far = min(float(DEPTH_VALID_MAX_MM), max(far, near + 300.0))
+-    if prev_near is None or prev_far is None:
+-        return near, far
+-    return ((1.0 - alpha) * prev_near + alpha * near,
+-            (1.0 - alpha) * prev_far + alpha * far)
++HEAT_BG_RGB = (20, 25, 34)
++HEAT_DEFAULT_NEAR_MM = 200.0
++HEAT_DEFAULT_FAR_MM = 2000.0
++
++
++def _heat_lut():
++    # Near red -> yellow -> green -> cyan -> blue far; identical LUT in legend.
++    stops=np.array([[255,55,45],[255,215,40],[60,220,95],[30,205,240],[45,75,225]],np.float32)
++    t=np.linspace(0,4,256)
++    return np.stack([np.interp(t,np.arange(5),stops[:,i]) for i in range(3)],axis=1).round().astype(np.uint8)
++
++
++HEAT_LUT = _heat_lut()
++
++
++def decode_depth_mm(msg):
++    encoding=msg.encoding.lower()
++    if encoding in ('16uc1','mono16'):
++        dtype=np.dtype('>u2' if msg.is_bigendian else '<u2'); multiplier=1.0
++    elif encoding=='32fc1':
++        dtype=np.dtype('>f4' if msg.is_bigendian else '<f4'); multiplier=1000.0
++    else:raise ValueError('unsupported depth encoding: '+msg.encoding)
++    if msg.step<msg.width*dtype.itemsize or len(msg.data)<msg.step*msg.height:
++        raise ValueError('invalid depth stride/buffer')
++    depth=np.ndarray((msg.height,msg.width),dtype=dtype,buffer=msg.data,
++                     strides=(msg.step,dtype.itemsize)).astype(np.float32)*multiplier
++    depth[~np.isfinite(depth)]=0
++    return depth
++
++
++def depth_center_mm(depth):
++    h,w=depth.shape;roi=depth[max(0,h//2-5):h//2+6,max(0,w//2-5):w//2+6]
++    values=roi[(roi>=DEPTH_VALID_MIN_MM)&(roi<=DEPTH_VALID_MAX_MM)&np.isfinite(roi)]
++    if values.size<max(12,roi.size*.35):return 0
++    q25,median,q75=np.percentile(values,[25,50,75])
++    if q75-q25>max(120,median*.1):return 0
++    return int(round(median))
+ 
+ 
+ def _draw_heatmap_legend(rgb, near_mm, far_mm):
+-    bar_h = 36
+-    h, w = rgb.shape[:2]
+-    canvas = np.empty((h + bar_h, w, 3), np.uint8)
+-    canvas[:h] = rgb
+-    canvas[h:] = HEAT_BG_RGB
+-    lut = cv2.applyColorMap(np.arange(255, -1, -1, dtype=np.uint8).reshape(1, 256), cv2.COLORMAP_TURBO)
+-    lut = cv2.cvtColor(lut, cv2.COLOR_BGR2RGB)
+-    x0 = 12 if w > 40 else 2
+-    bar_w = max(8, w - x0 * 2)
+-    bar = cv2.resize(lut, (bar_w, 10), interpolation=cv2.INTER_LINEAR)
+-    canvas[h + 6:h + 16, x0:x0 + bar_w] = bar
+-    cv2.putText(canvas, f'{near_mm / 1000.0:.2f}m', (x0, h + 32),
+-                cv2.FONT_HERSHEY_SIMPLEX, 0.42, (205, 216, 230), 1, cv2.LINE_AA)
+-    far = f'{far_mm / 1000.0:.2f}m'
+-    tx = max(x0, w - 7 * len(far) - 4)
+-    cv2.putText(canvas, far, (tx, h + 32),
+-                cv2.FONT_HERSHEY_SIMPLEX, 0.42, (205, 216, 230), 1, cv2.LINE_AA)
++    h,w=rgb.shape[:2];canvas=np.empty((h+54,w,3),np.uint8)
++    canvas[:h]=rgb;canvas[h:]=HEAT_BG_RGB
++    x0=12;bar_w=max(8,w-24)
++    bar=HEAT_LUT[np.rint(np.linspace(0,255,bar_w)).astype(int)]
++    canvas[h+5:h+17,x0:x0+bar_w]=bar
++    for fraction in [0,.25,.5,.75,1]:
++        value=(near_mm+(far_mm-near_mm)*fraction)/1000
++        text=f'{value:.2f} m';size=cv2.getTextSize(text,cv2.FONT_HERSHEY_SIMPLEX,.40,1)[0][0]
++        tx=int(x0+fraction*bar_w-size*fraction)
++        cv2.putText(canvas,text,(tx,h+35),cv2.FONT_HERSHEY_SIMPLEX,.40,(225,233,242),1,cv2.LINE_AA)
++    cv2.putText(canvas,'NEAR / RED    DEPTH Z (m)    FAR / BLUE    DARK = NO RETURN',
++                (x0,h+49),cv2.FONT_HERSHEY_SIMPLEX,.31,(169,185,204),1,cv2.LINE_AA)
+     return canvas
+ 
+ 
+ def render_depth_heatmap(depth_mm, rgb=None, near_mm=None, far_mm=None, scale=1):
+-    """Display-only Turbo heatmap. Never mutates depth_mm (measurement stays on source).
+-
+-    Astra S leaves large IR holes; painting those black fragments the picture into
+-    mosaic tiles. Valid pixels get a percentile-stretched colormap, small holes are
+-    filled for display, and remaining gaps keep a dim RGB underlay so the scene stays whole.
++    """Pure metric depth colors. rgb is ignored for backwards API compatibility.
++
++    Never fill missing measurements; never normalize colors per-frame. Scale is
++    nearest-neighbor so no intermediate colors masquerade as measured depths.
+     """
+-    depth = np.asarray(depth_mm)
+-    h, w = depth.shape[:2]
+-    valid = (depth > DEPTH_VALID_MIN_MM) & (depth <= DEPTH_VALID_MAX_MM)
+-    if near_mm is None or far_mm is None:
+-        if np.any(valid):
+-            near_mm, far_mm = depth_auto_range(depth[valid])
+-        else:
+-            near_mm, far_mm = 350.0, 4500.0
+-    span = max(300.0, float(far_mm) - float(near_mm))
+-    far_mm = float(near_mm) + span
+-
+-    unit = np.zeros((h, w), np.float32)
+-    if np.any(valid):
+-        unit[valid] = np.clip((far_mm - depth[valid].astype(np.float32)) / span, 0.0, 1.0)
+-    u8 = np.clip(unit * 255.0, 0, 255).astype(np.uint8)
+-    mask = valid.astype(np.uint8) * 255
+-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+-    closed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+-    holes = (closed > 0) & (~valid)
+-    if np.any(holes):
+-        u8 = np.where(holes, cv2.dilate(u8, kernel), u8).astype(np.uint8)
+-    if np.any(closed):
+-        u8 = cv2.bilateralFilter(u8, d=5, sigmaColor=22, sigmaSpace=5)
+-
+-    out_w, out_h = int(w * scale), int(h * scale)
+-    interp = cv2.INTER_CUBIC if scale > 1 else cv2.INTER_LINEAR
+-    u8_up = u8 if scale == 1 else cv2.resize(u8, (out_w, out_h), interpolation=interp)
+-    alpha = closed if scale == 1 else cv2.resize(closed, (out_w, out_h), interpolation=cv2.INTER_LINEAR)
+-    alpha = np.clip((alpha.astype(np.float32) / 255.0 - 0.12) / 0.55, 0.0, 1.0)
+-    alpha = cv2.GaussianBlur(alpha, (0, 0), 0.8)
+-
+-    heat = cv2.cvtColor(cv2.applyColorMap(u8_up, cv2.COLORMAP_TURBO), cv2.COLOR_BGR2RGB).astype(np.float32)
+-    bg = np.empty_like(heat)
+-    bg[:] = HEAT_BG_RGB
+-    if rgb is not None:
+-        rgb_arr = np.asarray(rgb)
+-        if rgb_arr.ndim == 3 and rgb_arr.shape[0] == h and rgb_arr.shape[1] == w:
+-            rgb_up = cv2.resize(rgb_arr, (out_w, out_h), interpolation=cv2.INTER_LINEAR).astype(np.float32)
+-            heat = heat * 0.72 + rgb_up * 0.28
+-            bg = rgb_up * 0.22
+-    out = heat * alpha[..., None] + bg * (1.0 - alpha[..., None])
+-    out = np.ascontiguousarray(np.clip(out, 0, 255).astype(np.uint8))
+-    out = _draw_heatmap_legend(out, near_mm, far_mm)
+-    return out, float(near_mm), float(far_mm)
++    depth=np.asarray(depth_mm)
++    near_mm=HEAT_DEFAULT_NEAR_MM if near_mm is None else float(near_mm)
++    far_mm=HEAT_DEFAULT_FAR_MM if far_mm is None else float(far_mm)
++    if not 0<=near_mm<far_mm<=DEPTH_VALID_MAX_MM:raise ValueError('invalid metric color range')
++    valid=np.isfinite(depth)&(depth>=DEPTH_VALID_MIN_MM)&(depth<=DEPTH_VALID_MAX_MM)
++    normalized=np.clip((np.where(valid,depth,near_mm)-near_mm)/(far_mm-near_mm),0,1)
++    out=HEAT_LUT[np.rint(normalized*255).astype(np.uint8)]
++    out[~valid]=HEAT_BG_RGB
++    if scale!=1:
++        h,w=depth.shape
++        out=cv2.resize(out,(int(w*scale),int(h*scale)),interpolation=cv2.INTER_NEAREST)
++    return _draw_heatmap_legend(out,near_mm,far_mm),near_mm,far_mm
+ 
+ 
+ class ROSThread(QThread):
+@@ -142,8 +125,7 @@
+         self.display_mode = 'ai'
+         self.latest_scan = None
+         self.latest_rgb = None
+-        self.heat_near = None
+-        self.heat_far = None
++        self.latest_depth = None
+ 
+     def run(self):
+         try:
+@@ -182,26 +164,14 @@
+                 pass
+ 
+         def depth_callback(msg):
+-            if self.display_mode != 'depth':
+-                return
+-            now = time.time()
+-            if now - self.last_depth_time < 0.015:
+-                return
+-            self.last_depth_time = now
++            if self.display_mode != 'depth':return
+             try:
+-                depth_arr = np.frombuffer(msg.data, dtype=np.uint16).reshape((msg.height, msg.width))
+-                center_val = int(depth_arr[msg.height // 2, msg.width // 2])
+-                valid = (depth_arr > DEPTH_VALID_MIN_MM) & (depth_arr <= DEPTH_VALID_MAX_MM)
+-                if np.any(valid):
+-                    self.heat_near, self.heat_far = depth_auto_range(
+-                        depth_arr[valid], self.heat_near, self.heat_far)
+-                colored_rgb, near_mm, far_mm = render_depth_heatmap(
+-                    depth_arr, self.latest_rgb, self.heat_near, self.heat_far)
+-                qimg = QImage(colored_rgb.data, colored_rgb.shape[1], colored_rgb.shape[0],
+-                              colored_rgb.shape[1] * 3, QImage.Format_RGB888).copy()
+-                self.depth_signal.emit(qimg, center_val, int(near_mm), int(far_mm))
+-            except Exception:
+-                pass
++                depth=decode_depth_mm(msg)
++                stamp=msg.header.stamp.sec+msg.header.stamp.nanosec/1e9
++                age=node.get_clock().now().nanoseconds/1e9-stamp
++                self.latest_depth=dict(array=depth,received=time.monotonic(),age=max(0,age))
++            except (ValueError,TypeError) as exc:
++                node.get_logger().warn('depth: '+str(exc),throttle_duration_sec=5.0)
+ 
+         def ai_callback(msg):
+             if self.display_mode != 'ai':
+@@ -231,7 +201,7 @@
+         node.create_subscription(String, '/rtk/status', rtk_callback, 10)
+         node.create_subscription(LaserScan, '/scan', scan_callback, QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT))
+         node.create_subscription(Image, '/camera/rgb/image_raw', rgb_callback, 10)
+-        node.create_subscription(Image, '/camera/depth_raw/image', depth_callback, 10)
++        node.create_subscription(Image, '/camera/depth_raw/image', depth_callback, QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT))
+         node.create_subscription(Image, '/camera/ai_detection/image', ai_callback, 10)
+         node.create_subscription(String, '/camera/ai_detection/targets', targets_callback, 10)
+ 
+@@ -594,7 +564,10 @@
+         self._lidar_timer.timeout.connect(self.refresh_lidar)
+         self._lidar_timer.start(50)
+         self.ros_thread.rgb_signal.connect(self.on_rgb_frame)
+-        self.ros_thread.depth_signal.connect(self.on_depth_frame)
++        self._depth_shown = None
++        self._depth_timer = QTimer(self)
++        self._depth_timer.timeout.connect(self.refresh_depth)
++        self._depth_timer.start(40)
+         self.ros_thread.ai_signal.connect(self.on_ai_frame)
+         self.ros_thread.targets_signal.connect(self.on_targets_data)
+         self.ros_thread.rtk_signal.connect(self.on_rtk_data)
+@@ -696,7 +669,7 @@
+         # 视频画面显示容器 (固定比例自适应缩放)
+         self.video_box = QLabel("正在接收相机画面...")
+         self.video_box.setAlignment(Qt.AlignCenter)
+-        self.video_box.setMinimumHeight(360)
++        self.video_box.setMinimumHeight(280)
+         self.video_box.setMinimumWidth(1)
+         self.video_box.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
+         self.video_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+@@ -723,6 +696,17 @@
+         mode_layout.addWidget(self.btn_depth)
+         
+         cam_layout.addLayout(mode_layout)
++        depth_controls=QHBoxLayout()
++        self.depth_hint=QLabel('深度距离图 · 非温度图 · 暗灰表示无回波')
++        self.depth_hint.setStyleSheet('font-size:12px; color:#c5d2e0; background:transparent; border:none; padding:2px;')
++        depth_controls.addWidget(self.depth_hint,1)
++        self.depth_range=QComboBox()
++        for label,value in [('近景 0.2–2.0 m',2000),('室内 0.2–4.5 m',4500),('全程 0.2–5.5 m',5500)]:
++            self.depth_range.addItem(label,value)
++        self.depth_range.setStyleSheet('font-size:12px; color:#e2e8f0; background:#162435; border:1px solid #385167; border-radius:6px; padding:5px;')
++        self.depth_range.currentIndexChanged.connect(self.change_depth_range)
++        depth_controls.addWidget(self.depth_range)
++        cam_layout.addLayout(depth_controls)
+         right_panel.addWidget(cam_card, 1)
+         self.update_mode_buttons()
+ 
+@@ -983,6 +967,12 @@
+     def switch_cam_mode(self, mode):
+         self.cam_mode = mode
+         self.ros_thread.display_mode = mode
++        self.depth_range.setEnabled(mode=='depth')
++        self._depth_shown=None
++        if mode=='depth':
++            self.latest_depth_pixmap=None
++            self.video_box.clear()
++            self.video_box.setText('等待新的深度帧…')
+         self._fps_times = []
+         self.update_mode_buttons()
+         if mode == 'ai':
+@@ -1030,13 +1020,33 @@
+             return pix
+         return pix.scaled(box, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+ 
++    def change_depth_range(self, index):
++        self._depth_shown=None
++
++    def refresh_depth(self):
++        if self.cam_mode!='depth':return
++        record=self.ros_thread.latest_depth
++        now=time.monotonic()
++        if record is None or now-record['received']+record['age']>.6:
++            self.video_box.clear();self.video_box.setText('深度数据中断 · 等待新帧')
++            self.cam_dist_badge.setText('测距 -- · 深度数据未就绪')
++            self.depth_hint.setText('当前无新深度帧；旧颜色与距离已清除')
++            self.cam_fps_badge.setText('-- FPS')
++            self._depth_shown=None
++            return
++        if record is self._depth_shown:return
++        self._depth_shown=record
++        depth=record['array'];far=float(self.depth_range.currentData())
++        colored,near,far=render_depth_heatmap(depth,near_mm=200,far_mm=far)
++        h,w=colored.shape[:2]
++        qimage=QImage(colored.data,w,h,w*3,QImage.Format_RGB888).copy()
++        valid=np.isfinite(depth)&(depth>=DEPTH_VALID_MIN_MM)&(depth<=DEPTH_VALID_MAX_MM)
++        ratio=float(np.mean(valid))
++        self.depth_hint.setText(f'纯深度 Z · 有效 {ratio:.0%} / 无回波 {1-ratio:.0%} · 红近蓝远 · 超色标截断')
++        self.on_depth_frame(qimage,depth_center_mm(depth),int(near),int(far))
++
+     def _set_depth_badge(self, center_val_mm, near_mm=0, far_mm=0):
+-        if center_val_mm > 0:
+-            text = f"中心物距: {center_val_mm} mm ({center_val_mm/1000.0:.2f}m)"
+-        else:
+-            text = "中心物距: 超出范围 / 盲区"
+-        if near_mm > 0 and far_mm > near_mm:
+-            text += f"  ·  色标 {near_mm/1000.0:.2f}–{far_mm/1000.0:.2f}m"
++        text=f'中心区域 Z {center_val_mm/1000:.2f} m' if center_val_mm>0 else '中心区域 -- · 无回波或跨物体边缘'
+         self.cam_dist_badge.setText(text)
+ 
+     def on_ai_frame(self, qimage):
+@@ -1070,7 +1080,8 @@
+         self.center_depth_mm = center_val_mm
+         self.heat_near_mm = near_mm
+         self.heat_far_mm = far_mm
+-        scaled_pix = self._scale_camera_pixmap(qimage)
++        available=QSize(max(1,self.video_box.width()-24),max(1,self.video_box.height()-24))
++        scaled_pix = QPixmap.fromImage(qimage).scaled(available, Qt.KeepAspectRatio, Qt.FastTransformation)
+         self.latest_depth_pixmap = scaled_pix
+         if self.cam_mode == 'depth':
+             self._set_depth_badge(center_val_mm, near_mm, far_mm)

@@ -1,0 +1,146 @@
+RK3588 轮趣阿克曼适配与 ROS 2 启动验证
+记录时间：2026-09-15T12:22:29.433214+08:00
+工作目录：/Users/Admin1/Desktop/正点原子rk3588/wheeltec_protocol/ackermann_adaptation_20260915
+
+当前：rk3588-wheeltec.service 已启动并设置开机自启；真实遥测已验收；运动协议尚待具体型号/固件核验。
+修改分支/字段：原 watchdog 一次性停车改为 ControlPolicy.tick 连续零帧；增加指令/反馈超时、单一串口读写线程、重连清指令、显式 arm、ackermann 转角接口和配置。
+当前板端字段：receive_only=true, protocol=unconfigured, protocol_confirmed=false, wheelbase_m=0.0, armed=false, tx_packets=0。
+原地打方向的编码已在模拟串口验证；mode_byte、steering_scale、轴距均未当作本车已知参数，实车尚未发送转向/行驶命令。
+所查两个第三方源码分支字段含义不同；参考路径与 blob URL 见 reference/sources.json，参考源码不等于板端固件。
+
+四个交付文件：
+/Users/Admin1/Desktop/正点原子rk3588/wheeltec_protocol/ackermann_adaptation_20260915/MODIFIED_FILE.py
+/Users/Admin1/Desktop/正点原子rk3588/wheeltec_protocol/ackermann_adaptation_20260915/DIFF_FILE.patch
+/Users/Admin1/Desktop/正点原子rk3588/wheeltec_protocol/ackermann_adaptation_20260915/VERIFICATION.txt
+/Users/Admin1/Desktop/正点原子rk3588/wheeltec_protocol/ackermann_adaptation_20260915/ROLLBACK.sh
+
+原始 SHA256：675d7b8360a3697476c9de37f2b7366a6fa2aff33b3052adadb7072f0cf3be45
+修改版 SHA256：6f0c59f8b7cfda2719f6f3e76abd3fdad163f65c28bee52ca8adc1237524d572
+已部署：/root/wheeltec/wheeltec_driver.py；板端 SHA256 与修改版相同。
+部署辅助文件：/root/wheeltec/wheeltec.yaml, /root/wheeltec/run_driver.sh, /root/wheeltec/control.py, /etc/systemd/system/rk3588-wheeltec.service。
+更新旧辅助脚本：estop.py 通过运行中的 ROS 服务停车，monitor 采用独占串口；原文件均已备份。
+新增系统依赖：ros-jazzy-ackermann-msgs 2.0.2-6noble.20260902.115749；没有升级其他软件包。
+服务初次启动因 ROS 日志目录解析失败退出，已用 LogsDirectory 与 ROS_LOG_DIR 修复；修复后 MainPID=9049 持续运行，后续遥测验证通过。
+ROS discovery 限本机，TF 默认不发布，避免与既有定位节点重复发布。
+
+BASELINE/MODIFIED/ROLLBACK 共同输入：已启用的模拟通道先接收 0.1 m/s 指令，指令超时后检查 10 次、间隔 20 ms 的输出。
+BASELINE 与回滚版本应复现旧缺陷，因此 watchdog 回归测试 exit=1 为预期；MODIFIED 应 exit=0。
+ROLLBACK 仅在 rollback_probe.py 副本执行：哈希恢复为原始文件，并复现一次性停车旧行为。正式 MODIFIED_FILE 和板端服务保留修改后的状态。
+ROLLBACK.sh --board 分支已准备但未在运行中的板端执行；执行后停用新增服务、恢复原驱动及旧脚本，保留审计文件和 ackermann_msgs 依赖。
+
+逐项命令、字面输出和退出状态：
+
+BASELINE
+COMMAND: python3 test_adapter.py BASELINE.py --watchdog
+CWD: /Users/Admin1/Desktop/正点原子rk3588/wheeltec_protocol/ackermann_adaptation_20260915
+STDOUT:
+FAIL watchdog: zero_frames=1/10 after command timeout
+STDERR:
+(empty)
+EXIT_STATUS: 1
+
+MODIFIED
+COMMAND: python3 test_adapter.py MODIFIED_FILE.py --watchdog
+CWD: /Users/Admin1/Desktop/正点原子rk3588/wheeltec_protocol/ackermann_adaptation_20260915
+STDOUT:
+PASS watchdog: zero_frames=10/10 after command timeout
+STDERR:
+(empty)
+EXIT_STATUS: 0
+
+CORE
+COMMAND: python3 test_adapter.py MODIFIED_FILE.py
+CWD: /Users/Admin1/Desktop/正点原子rk3588/wheeltec_protocol/ackermann_adaptation_20260915
+STDOUT:
+CORE_TESTS passed=20/20
+STDERR:
+....................
+----------------------------------------------------------------------
+Ran 20 tests in 0.002s
+
+OK
+EXIT_STATUS: 0
+
+ROLLBACK_ACTION
+COMMAND: ./ROLLBACK.sh '/Users/Admin1/Desktop/正点原子rk3588/wheeltec_protocol/ackermann_adaptation_20260915/rollback_probe.py'
+CWD: /Users/Admin1/Desktop/正点原子rk3588/wheeltec_protocol/ackermann_adaptation_20260915
+STDOUT:
+ROLLBACK_RESTORED_BASELINE
+STDERR:
+(empty)
+EXIT_STATUS: 0
+
+ROLLBACK
+COMMAND: python3 test_adapter.py rollback_probe.py --watchdog
+CWD: /Users/Admin1/Desktop/正点原子rk3588/wheeltec_protocol/ackermann_adaptation_20260915
+STDOUT:
+FAIL watchdog: zero_frames=1/10 after command timeout
+STDERR:
+(empty)
+EXIT_STATUS: 1
+
+ROLLBACK_HASH
+RESULT: PASS restored_copy_matches_original_sha256=675d7b8360a3697476c9de37f2b7366a6fa2aff33b3052adadb7072f0cf3be45 modified_file_remains_changed=true
+
+ESTOP_SERVICE
+COMMAND: adb -s 03801aa8f417ee51 shell 'python3 /root/wheeltec/estop.py 1'
+CWD: /Users/Admin1/Desktop/正点原子rk3588/wheeltec_protocol/ackermann_adaptation_20260915
+STDOUT:
+{"success": true, "message": "stop latched; check telemetry and physical stop"}
+STDERR:
+(empty)
+EXIT_STATUS: 0
+
+LIVE_FINAL
+COMMAND: adb -s 03801aa8f417ee51 shell 'bash -c '"'"'source /opt/ros/jazzy/setup.bash; export ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST; python3 /root/wheeltec/ackermann_adaptation_20260915/check_live.py'"'"''
+CWD: /Users/Admin1/Desktop/正点原子rk3588/wheeltec_protocol/ackermann_adaptation_20260915
+STDOUT:
+LIVE_ROS {"counts": {"imu": 100, "odom": 101, "status": 25, "voltage": 100}, "state": {"age_ms": 28.3, "armed": false, "baud": 115200, "bytes_in": 82176, "config": {"acceleration_m_s2": 0.2, "cmd_timeout_s": 0.3, "feedback_timeout_s": 0.3, "max_speed_m_s": 0.15, "max_steering_rad": 0.35, "max_yaw_rate_rad_s": 0.35, "mode_byte": 0, "protocol": "unconfigured", "protocol_confirmed": false, "receive_only": true, "startup_stop_s": 3.0, "steering_rate_rad_s": 0.5, "steering_scale": 1.0, "tx_hz": 50.0, "wheelbase_m": 0.0}, "connected": true, "device": "/dev/ttyACM0", "frames_bad": 0, "frames_ok": 3424, "hz": 20.01, "io_errors": 0, "last_error": "", "last_tx_hex": "", "output_speed_turn": [0.0, 0.0], "port": "/dev/serial/by-id/usb-WCH.CN_USB_Single_Serial_0002-if00", "ready": "receive_only", "reason": "operator_stop", "steering_feedback_available": false, "stop_confirmed": true, "telemetry": {"acceleration": [-0.06818834338214183, -0.053832902670111975, 9.799980859412385], "gyro": [-0.00186508, 0.00026644, 0.00053288], "stop_flag_raw": 0, "velocity": [0.0, 0.0, 0.0], "voltage": 22.418}, "tx_bytes": 0, "tx_packets": 0}}
+LIVE_ROS_RESULT=PASS telemetry_only=true tx_packets=0
+STDERR:
+(empty)
+EXIT_STATUS: 0
+
+SERVICE_FINAL
+COMMAND: adb -s 03801aa8f417ee51 shell 'systemctl is-active rk3588-wheeltec.service; systemctl is-enabled rk3588-wheeltec.service; systemctl show rk3588-wheeltec.service -p MainPID -p ActiveState -p SubState; sha256sum /root/wheeltec/wheeltec_driver.py'
+CWD: /Users/Admin1/Desktop/正点原子rk3588/wheeltec_protocol/ackermann_adaptation_20260915
+STDOUT:
+active
+enabled
+MainPID=9049
+ActiveState=active
+SubState=running
+6f0c59f8b7cfda2719f6f3e76abd3fdad163f65c28bee52ca8adc1237524d572  /root/wheeltec/wheeltec_driver.py
+STDERR:
+(empty)
+EXIT_STATUS: 0
+
+ROS_PTY
+COMMAND: adb -s 03801aa8f417ee51 shell 'bash -c '"'"'source /opt/ros/jazzy/setup.bash; export ROS_DOMAIN_ID=86 ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST; python3 /root/wheeltec/ackermann_adaptation_20260915/test_ros_pty.py /root/wheeltec/ackermann_adaptation_20260915/MODIFIED_FILE.py'"'"''
+STDOUT:
+ROS_PTY {"deadman_persistent_stop": "PASS", "shutdown_persistent_stop": "PASS", "stale_timestamp_rejected": "PASS", "stationary_steering_no_drive": "PASS", "telemetry_loss_stops_with_live_commands": "PASS"}
+ROS_PTY_RESULT=PASS physical_device_access=0
+STDERR:
+(empty)
+EXIT_STATUS: 0
+
+PATCH_APPLY
+COMMAND: patch -p1 -i '/Users/Admin1/Desktop/正点原子rk3588/wheeltec_protocol/ackermann_adaptation_20260915/DIFF_FILE.patch'
+CWD: /var/folders/gx/9gmqtr_1025fsvtrwt506m_m0000gq/T/wheeltec-patch-check-92iibjln
+STDOUT:
+patching file wheeltec_driver.py
+patching file estop.py
+patching file wheeltec_monitor.py
+patching file README.md
+patching file control.py
+patching file wheeltec.yaml
+patching file run_driver.sh
+patching file rk3588-wheeltec.service
+STDERR:
+(empty)
+EXIT_STATUS: 0
+RESULT: PASS patched copy matches delivered files
+
+实车验收范围：3424 帧有效遥测，0 校验错误，0 I/O 错误，20.01 Hz；最近 5 秒 odom=101, imu=100, voltage=100, status=25。
+实车末次电压 22.418 V、速度 [0,0,0]，控制发送 0 字节。遥测速度归零不提供舵机位置确认，也不证明物理制动有效。
+继续动作验收所需信息：轮趣底盘/电机板具体型号、固件或对应串口协议、轴距；实车动作前架空驱动轮并确认物理断电开关可随时操作（交接文档第 7 节已有意外前冲记录）。

@@ -1,0 +1,174 @@
+Lifted-wheel reverse commissioning — 2026-09-15
+User confirmed drive wheels lifted and immediate physical power disconnect available.
+Changed field: PULSE_SPEED 0.0 -> -0.05 m/s in a separate one-shot bench script. PULSE_SECONDS=1.0. This does not modify, confirm, or enable the production firmware profile.
+Original production driver and YAML are unchanged; temporarily stopped their receive-only service to ensure sole serial ownership, then restored it.
+Original driver SHA256: 6f0c59f8b7cfda2719f6f3e76abd3fdad163f65c28bee52ca8adc1237524d572
+Original YAML SHA256: 65557e5ab0192b7362d4afdb429849eb0ceaaea532c5b18efabb2d825a7e4f2e
+
+ARTIFACTS
+/Users/Admin1/Desktop/正点原子rk3588/wheeltec_protocol/reverse_bench_20260915/MODIFIED_FILE.py
+/Users/Admin1/Desktop/正点原子rk3588/wheeltec_protocol/reverse_bench_20260915/DIFF_FILE.patch
+/Users/Admin1/Desktop/正点原子rk3588/wheeltec_protocol/reverse_bench_20260915/VERIFICATION.txt
+/Users/Admin1/Desktop/正点原子rk3588/wheeltec_protocol/reverse_bench_20260915/ROLLBACK.sh
+
+SCRIPT HASHES
+BASELINE.py 61931d76a049e8543549531431e3ea6408a8d2a1170627fc7c8772e0ac333ee2
+MODIFIED_FILE.py 0adc24d8024d971cf65c7c297c5cc273e70eeac3ad53d1dde03d8570957c894d
+rollback_probe.py 61931d76a049e8543549531431e3ea6408a8d2a1170627fc7c8772e0ac333ee2
+
+LIVE RESULT
+{"errors": [], "feedback_max_vx": 0.001, "feedback_min_vx": -0.001, "final_stop_confirmed": true, "nonzero_frames": 48, "pulse_window_s": 1.0015, "reverse_feedback_observed": false, "stop_frames": 618}
+Actual nonzero frame: 7b0000ffce000000004a7d; bytes 5..8 are zero (no lateral or steering request).
+Nonzero frames: 48; first-to-last nonzero TX span 0.9785 s; command phase window 1.0015 s including scheduler overhead.
+Bench stop frames: 618 across 3-second startup and 10-second final stop phases. Independent ExecStopPost cleanup sent 194 additional stop frames over 4.1 seconds and restored the telemetry-only service.
+Reverse motion was not verified: encoder vx remained -0.001 to +0.001 m/s. Do not infer that the wheels reversed from successful writes. No automatic higher-speed or longer-duration retry.
+Final telemetry: receive_only=true, armed=false, stop_confirmed=true. Production control configuration remains protocol=unconfigured, protocol_confirmed=false.
+One-shot attempt.started marker prevents accidental replay. systemd Type=oneshot, Restart=no, TimeoutStartSec=35s, TimeoutStopSec=15s, stop-only ExecStopPost independent of the calling ADB session.
+
+LIVE EXECUTION COMMAND
+adb -s 03801aa8f417ee51 shell 'set -e; test ! -e /root/wheeltec/reverse_bench_20260915/attempt.started; systemctl stop rk3588-wheeltec.service; if ! systemd-run --unit=rk3588-reverse-bench-20260915 --property=Type=oneshot --property=Restart=no --property=TimeoutStartSec=35s --property=TimeoutStopSec=15s --property=KillSignal=SIGTERM --property=ExecStopPost=/root/wheeltec/reverse_bench_20260915/finish.sh /usr/bin/python3 -u /root/wheeltec/reverse_bench_20260915/MODIFIED_FILE.py --execute-one-shot; then systemctl start rk3588-wheeltec.service; exit 1; fi; timeout 23s journalctl -fu rk3588-reverse-bench-20260915.service -n 8 -o cat --no-pager'
+Live process ExecMainStatus=0; stop cleanup exit=0; wrapper exits 124 because the journal follower reaches its 23-second timeout after the successful test.
+
+BASELINE/MODIFIED/ROLLBACK TEST INPUTS
+Five virtual-clock serial cases: normal response, 1.2-second delayed response, unexpected forward response, feedback loss, output backlog. Baseline and rolled-back scripts transmit only zero frames. Modified transmits only -0.05 m/s and zero turning for no more than the one-second phase; abnormal feedback aborts; >=10 seconds stop tail is verified. These simulations are separate from hardware motion observation.
+Rollback on an independent modified copy restored exact baseline bytes, PULSE_SPEED=0.0 and zero-only behavior; live driver restoration verified separately.
+Patch reconstruction on another baseline copy matches MODIFIED_FILE.py byte-for-byte.
+
+EXACT COMMANDS AND LITERAL OUTPUT/EXIT STATUS
+
+ROLLBACK_ACTION
+Command: '/Users/Admin1/Desktop/正点原子rk3588/wheeltec_protocol/reverse_bench_20260915/ROLLBACK.sh' '/Users/Admin1/Desktop/正点原子rk3588/wheeltec_protocol/reverse_bench_20260915/rollback_probe.py'
+Input: explicit script path and five synthetic cases for regression tests; live ROS/serial-service state for live checks.
+stdout:
+ROLLBACK_RESTORED_ZERO_ONLY
+stderr:
+
+Exit status: 0
+
+BASELINE
+Command: python3 '/Users/Admin1/Desktop/正点原子rk3588/wheeltec_protocol/reverse_bench_20260915/test_bench.py' '/Users/Admin1/Desktop/正点原子rk3588/wheeltec_protocol/reverse_bench_20260915/BASELINE.py'
+Input: explicit script path and five synthetic cases for regression tests; live ROS/serial-service state for live checks.
+stdout:
+BENCH_TEST PASS cases=normal,delayed,forward,stale,backlog speed=0.0 duration=1.0 zero_tail>=10s
+stderr:
+
+Exit status: 0
+
+MODIFIED
+Command: python3 '/Users/Admin1/Desktop/正点原子rk3588/wheeltec_protocol/reverse_bench_20260915/test_bench.py' '/Users/Admin1/Desktop/正点原子rk3588/wheeltec_protocol/reverse_bench_20260915/MODIFIED_FILE.py'
+Input: explicit script path and five synthetic cases for regression tests; live ROS/serial-service state for live checks.
+stdout:
+BENCH_TEST PASS cases=normal,delayed,forward,stale,backlog speed=-0.05 duration=1.0 zero_tail>=10s
+stderr:
+
+Exit status: 0
+
+ROLLBACK
+Command: python3 '/Users/Admin1/Desktop/正点原子rk3588/wheeltec_protocol/reverse_bench_20260915/test_bench.py' '/Users/Admin1/Desktop/正点原子rk3588/wheeltec_protocol/reverse_bench_20260915/rollback_probe.py'
+Input: explicit script path and five synthetic cases for regression tests; live ROS/serial-service state for live checks.
+stdout:
+BENCH_TEST PASS cases=normal,delayed,forward,stale,backlog speed=0.0 duration=1.0 zero_tail>=10s
+stderr:
+
+Exit status: 0
+
+LIVE_SERVICE
+Command: adb -s 03801aa8f417ee51 shell 'systemctl show rk3588-reverse-bench-20260915.service -p ActiveState -p SubState -p ExecMainStatus; journalctl -u rk3588-reverse-bench-20260915.service --no-pager -o cat'
+Input: explicit script path and five synthetic cases for regression tests; live ROS/serial-service state for live checks.
+stdout:
+ExecMainStatus=0
+ActiveState=inactive
+SubState=dead
+Starting rk3588-reverse-bench-20260915.service - /usr/bin/python3 -u /root/wheeltec/reverse_bench_20260915/MODIFIED_FILE.py --execute-one-shot...
+START_REVERSE_PULSE -0.05 1.0
+STOP_PHASE 10.0
+BENCH_RESULT {"errors": [], "feedback_max_vx": 0.001, "feedback_min_vx": -0.001, "final_stop_confirmed": true, "nonzero_frames": 48, "pulse_window_s": 1.0015, "reverse_feedback_observed": false, "stop_frames": 618}
+停车帧: 7b 00 00 00 00 00 00 00 00 7b 7d
+打开 /dev/serial/by-id/usb-WCH.CN_USB_Single_Serial_0002-if00 @ 115200，持续发 3.0 秒 ...
+✅ 共发送 194 个停车帧（4.1 秒）
+rk3588-reverse-bench-20260915.service: Deactivated successfully.
+active
+Finished rk3588-reverse-bench-20260915.service - /usr/bin/python3 -u /root/wheeltec/reverse_bench_20260915/MODIFIED_FILE.py --execute-one-shot.
+STOP_CLEANUP_EXIT=0
+stderr:
+
+Exit status: 0
+
+RESTORED_STATUS
+Command: adb -s 03801aa8f417ee51 shell 'bash -c '"'"'source /opt/ros/jazzy/setup.bash; export ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST; python3 /root/wheeltec/control.py status'"'"''
+Input: explicit script path and five synthetic cases for regression tests; live ROS/serial-service state for live checks.
+stdout:
+{
+  "connected": true,
+  "armed": false,
+  "reason": "startup",
+  "ready": "receive_only",
+  "port": "/dev/serial/by-id/usb-WCH.CN_USB_Single_Serial_0002-if00",
+  "device": "/dev/ttyACM0",
+  "baud": 115200,
+  "config": {
+    "protocol": "unconfigured",
+    "protocol_confirmed": false,
+    "receive_only": true,
+    "mode_byte": 0,
+    "steering_scale": 1.0,
+    "wheelbase_m": 0.0,
+    "max_speed_m_s": 0.15,
+    "max_steering_rad": 0.35,
+    "max_yaw_rate_rad_s": 0.35,
+    "acceleration_m_s2": 0.2,
+    "steering_rate_rad_s": 0.5,
+    "cmd_timeout_s": 0.3,
+    "feedback_timeout_s": 0.3,
+    "startup_stop_s": 3.0,
+    "tx_hz": 50.0
+  },
+  "hz": 20.0,
+  "frames_ok": 2060,
+  "frames_bad": 0,
+  "bytes_in": 49440,
+  "age_ms": 8.5,
+  "telemetry": {
+    "velocity": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "acceleration": [
+      -0.07058091683414681,
+      -0.01435544071202986,
+      9.789214278878362
+    ],
+    "gyro": [
+      -0.0015986400000000001,
+      0.0,
+      0.00106576
+    ],
+    "voltage": 22.013,
+    "stop_flag_raw": 0
+  },
+  "output_speed_turn": [
+    0.0,
+    0.0
+  ],
+  "tx_packets": 0,
+  "tx_bytes": 0,
+  "last_tx_hex": "",
+  "io_errors": 0,
+  "last_error": "",
+  "steering_feedback_available": false,
+  "stop_confirmed": true
+}
+stderr:
+
+Exit status: 0
+
+ORIGINAL_HASHES
+Command: adb -s 03801aa8f417ee51 shell 'sha256sum /root/wheeltec/wheeltec_driver.py /root/wheeltec/wheeltec.yaml'
+Input: explicit script path and five synthetic cases for regression tests; live ROS/serial-service state for live checks.
+stdout:
+6f0c59f8b7cfda2719f6f3e76abd3fdad163f65c28bee52ca8adc1237524d572  /root/wheeltec/wheeltec_driver.py
+65557e5ab0192b7362d4afdb429849eb0ceaaea532c5b18efabb2d825a7e4f2e  /root/wheeltec/wheeltec.yaml
+stderr:
+
+Exit status: 0

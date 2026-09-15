@@ -1,0 +1,31 @@
+{
+  "result": "PASS",
+  "model": "YOLOv8n",
+  "backend": "RKNN NPU",
+  "inference_plus_postprocess_median_ms": 62.5,
+  "labels": [
+    "Suitcase"
+  ],
+  "detections": [
+    [
+      "Suitcase",
+      0.820900559425354,
+      14,
+      287,
+      456,
+      475,
+      [
+        0,
+        242,
+        254
+      ]
+    ]
+  ],
+  "onnx_reference": [
+    {
+      "label": "Suitcase",
+      "iou": 0.9954,
+      "confidence_delta": 0.0023
+    }
+  ]
+}

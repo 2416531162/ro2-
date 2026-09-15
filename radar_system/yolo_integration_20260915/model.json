@@ -1,0 +1,18 @@
+{
+  "source_sha256": "b2bc52f40e8e1c532427d5bde3575a5d5b571b739fab2c6df443733ed1589cbd",
+  "rknn_sha256": "a94a3a3a75bf97f02349a47f357e0272469fd6af8b88bd4f35a4b3d2e8957894",
+  "platform": "rk3588",
+  "toolkit": "2.3.2",
+  "precision": "FP16",
+  "input": "RGB uint8 NHWC 1x640x640x3; mean=0; std=255",
+  "output_heads": [
+    "/model.22/cv2.0/cv2.0.2/Conv_output_0",
+    "/model.22/cv3.0/cv3.0.2/Conv_output_0",
+    "/model.22/cv2.1/cv2.1.2/Conv_output_0",
+    "/model.22/cv3.1/cv3.1.2/Conv_output_0",
+    "/model.22/cv2.2/cv2.2.2/Conv_output_0",
+    "/model.22/cv3.2/cv3.2.2/Conv_output_0"
+  ],
+  "class_scores": "logits",
+  "dfl_bins": 16
+}

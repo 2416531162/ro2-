@@ -1,0 +1,57 @@
+专业显示选择：深度距离图（非温度热力图）
+CHANGED: btn_depth.text / depth_hint.text / depth_quality / _draw_heatmap_legend
+板端已部署专业深度距离图；默认固定0.2–2m，近红远蓝，原始数据直接着色，保持真实物体边界与空洞。量程可选4.5m/5.5m。
+本轮统一名称和物理单位Z/m；区分有效、无效（非有限数/零值/FFFF）、超配置范围（0.2–5.5m以外）以及色标饱和（仍有效但超过当前色标）的像素占比。
+前三类互斥相加100%；色标饱和是有效像素的子集，占比以全图为分母。
+色标暗区说明改为INVALID / OUT OF RANGE，避免把所有暗区都称为无回波。
+保留：RadarCanvas、CorsConfigDialog、render_depth_heatmap、decode_depth_mm、depth_center_mm AST与上一版相同；未修改AI算法。
+
+MODIFIED_FILE: /Users/Admin1/Desktop/正点原子rk3588/radar_system/heatmap_correction_20260914/professional_v2/MODIFIED_FILE.py
+DIFF_FILE: /Users/Admin1/Desktop/正点原子rk3588/radar_system/heatmap_correction_20260914/professional_v2/DIFF_FILE.patch
+VERIFICATION: /Users/Admin1/Desktop/正点原子rk3588/radar_system/heatmap_correction_20260914/professional_v2/VERIFICATION.txt
+ROLLBACK: /Users/Admin1/Desktop/正点原子rk3588/radar_system/heatmap_correction_20260914/professional_v2/ROLLBACK.sh
+BASELINE_SHA256: 66da92851d6d749c6c9f70c1fd59c0ffdabd4ca2c81fe9950f01fe0bb87caa78
+MODIFIED_SHA256: 2656ae6001febdae8da057e2ef776ecfa981c7090f9a2e8d8e6a63eedc984891
+LOCAL_ACTIVE: /Users/Admin1/Desktop/正点原子rk3588/radar_system/board_radar_gui.py
+BOARD_ACTIVE: /root/radar_system/board_radar_gui.py
+BOARD_BACKUP: /root/radar_system/board_radar_gui.py.before-professional-v2
+
+BASELINE_COMMAND: adb shell 'python3 /tmp/depth-professional/test.py /tmp/depth-professional/BASELINE.py'
+BASELINE_INPUT: UI命名/单位/色标源码检查；合成[0,65535,NaN,100,6000,200,1000,3000]毫米数组，色标2000毫米。
+BASELINE_LITERAL_OUTPUT:
+FAIL professional_name
+FAIL quality_partition
+FAIL invalid_legend
+checks=4 passed=1 failed=3
+BASELINE_EXIT: 1
+MODIFIED_COMMAND: adb shell 'python3 /tmp/depth-professional/test.py /tmp/depth-professional/MODIFIED_FILE.py'
+MODIFIED_INPUT: 相同合成数组和源码契约。
+MODIFIED_LITERAL_OUTPUT:
+checks=4 passed=4 failed=0
+MODIFIED_EXIT: 0
+COMMAND_PREFIX: D="/Users/Admin1/Desktop/正点原子rk3588/radar_system/heatmap_correction_20260914/professional_v2"
+ROLLBACK_PREPARE: cp "$D/MODIFIED_FILE.py" "$D/rollback_test.py"
+ROLLBACK_COMMAND: "$D/ROLLBACK.sh" "$D/rollback_test.py"
+ROLLBACK_INPUT: 独立修改副本，不触碰活动程序。
+ROLLBACK_LITERAL_OUTPUT: restored=baseline hash_verified=1
+ROLLBACK_EXIT: 0
+RESTORED_BEHAVIOR_COMMAND: adb shell 'python3 /tmp/depth-professional/test.py /tmp/depth-professional/rollback_test.py'
+RESTORED_BEHAVIOR_LITERAL_OUTPUT:
+FAIL professional_name
+FAIL quality_partition
+FAIL invalid_legend
+checks=4 passed=1 failed=3
+RESTORED_BEHAVIOR_EXIT: 1
+RESTORED_STATUS: 副本哈希与BASELINE一致，测试结果回到1通过/3失败（上一版不含本轮新命名和分类）；修改交付文件及活动版本保持更改。
+ROLLBACK_USAGE: 本脚本接受一个本地修改版文件路径，检查哈希后恢复到本轮起点；板端恢复备份另存，未执行板端回滚。
+
+GUI_COMMAND: adb shell "bash -c 'source /opt/ros/jazzy/setup.bash; QT_QPA_PLATFORM=offscreen python3 /tmp/depth-professional/test_gui.py /tmp/depth-professional/MODIFIED_FILE.py'"
+GUI_INPUT: 已捕获的真实深度矩阵，固定量程切换、超时清屏/恢复、RGB/AI模式切换、雷达/CORS保留断言。
+GUI_LITERAL_OUTPUT: GUI checks=8 passed=8 range=ok stale_recovery=ok mode_switch=ok radar_cors=preserved
+GUI_EXIT: 0
+DEPLOY: 哈希校验上一版本匹配后备份并原子替换；仅重启GUI，启动--cam-mode=depth。
+FINAL_BOARD_SHA256: 2656ae6001febdae8da057e2ef776ecfa981c7090f9a2e8d8e6a63eedc984891
+FINAL_GUI_PID: 27017
+现场截图: /Users/Admin1/Desktop/正点原子rk3588/radar_system/heatmap_correction_20260914/professional_v2/depth-professional-live.png
+
+SCREENSHOT_REVIEW: 最终截图当前选中AI 3D测距，右侧模式按钮已显示“深度距离图 · Z / m”；深度分类说明已更新。未强制覆盖用户当前模式选择。

@@ -1,0 +1,947 @@
+--- a/board_radar_gui.py
++++ b/board_radar_gui.py
+@@ -16,12 +16,14 @@
+ import time
+ from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, 
+                              QLabel, QPushButton, QFrame, QGridLayout, QSizePolicy)
+-from PyQt5.QtCore import Qt, pyqtSignal, QThread, QPointF, QSize
++from PyQt5.QtCore import Qt, pyqtSignal, QThread, QPointF, QSize, QTimer, QRectF
+ from PyQt5.QtGui import QPainter, QColor, QPen, QBrush, QFont, QImage, QPixmap, QFontMetrics
+ 
+ import json
+ import rclpy
+ from rclpy.node import Node
++from rclpy.qos import QoSProfile, ReliabilityPolicy
++from n10p_pipeline import scan_payload, project_point
+ from sensor_msgs.msg import LaserScan, Image
+ from std_msgs.msg import String
+ import numpy as np
+@@ -41,6 +43,7 @@
+         self.last_depth_time = 0
+         self.last_ai_time = 0
+         self.display_mode = 'ai'
++        self.latest_scan = None
+ 
+     def run(self):
+         try:
+@@ -50,39 +53,13 @@
+         node = Node('board_radar_gui_node')
+ 
+         def scan_callback(msg):
+-            n = len(msg.ranges)
+-            if n == 0: return
+-
+-            def get_min_range(start_deg, end_deg):
+-                dists = []
+-                for deg in range(start_deg, end_deg + 1):
+-                    idx = int((deg % 360) / 360.0 * n)
+-                    if 0 <= idx < n:
+-                        r = msg.ranges[idx]
+-                        if msg.range_min < r < msg.range_max:
+-                            dists.append(r)
+-                return min(dists) if dists else 99.0
+-
+-            front_d = min(get_min_range(345, 360), get_min_range(0, 15))
+-            left_d = get_min_range(75, 105)
+-            back_d = get_min_range(165, 195)
+-            right_d = get_min_range(255, 285)
+-
+-            valid_ranges = [r for r in msg.ranges if msg.range_min < r < msg.range_max]
+-            min_d = min(valid_ranges) if valid_ranges else 99.0
+-
+-            payload = {
+-                'ranges': list(msg.ranges),
+-                'range_min': msg.range_min,
+-                'range_max': msg.range_max,
+-                'front': front_d,
+-                'left': left_d,
+-                'back': back_d,
+-                'right': right_d,
+-                'min': min_d,
+-                'count': n
+-            }
+-            self.scan_signal.emit(payload)
++            age = (node.get_clock().now().nanoseconds / 1e9 -
++                   msg.header.stamp.sec - msg.header.stamp.nanosec / 1e9)
++            payload = scan_payload(msg.ranges, msg.range_min, msg.range_max,
++                                   msg.angle_min, msg.angle_increment, msg.scan_time, age)
++            payload['received'] = time.monotonic()
++            # A single latest-value mailbox prevents queued scan signal backlog.
++            self.latest_scan = payload
+ 
+         def rgb_callback(msg):
+             if self.display_mode not in ('rgb', 'ai'):
+@@ -145,7 +122,7 @@
+                 pass
+ 
+         node.create_subscription(String, '/rtk/status', rtk_callback, 10)
+-        node.create_subscription(LaserScan, '/scan', scan_callback, 10)
++        node.create_subscription(LaserScan, '/scan', scan_callback, QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT))
+         node.create_subscription(Image, '/camera/rgb/image_raw', rgb_callback, 10)
+         node.create_subscription(Image, '/camera/depth_raw/image', depth_callback, 10)
+         node.create_subscription(Image, '/camera/ai_detection/image', ai_callback, 10)
+@@ -171,189 +148,95 @@
+         super().__init__(parent)
+         self.ranges = []
+         self.max_range = 5.0
++        self.angle_min = 0.0
++        self.angle_increment = math.pi / 360
+         self.rtk_data = None
++        self.paused = False
++        self.stale = True
++        self.range_min = 0.15
++        self._grid_key = None
++        self.setMinimumSize(360, 340)
+         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+ 
+     def set_rtk(self, data):
++        # RTK belongs in its own card, not in the metric LiDAR plane.
+         self.rtk_data = data
+-        self.update()
+ 
+     def set_range(self, meters):
+         self.max_range = float(meters)
+         self.update()
+ 
+-    def set_scan(self, scan_data):
+-        self.ranges = scan_data.get('ranges', [])
++    def set_scan(self, data):
++        self.stale = data.get('stale', False)
++        if not self.paused or self.stale:
++            self.ranges = [] if self.stale else data.get('ranges', [])
++            self.angle_min = data.get('angle_min', 0.0)
++            self.angle_increment = data.get('angle_increment', math.pi / 360)
++            self.range_min = data.get('range_min', 0.15)
+         self.update()
+ 
+     def paintEvent(self, event):
++        w, h = self.width(), self.height()
++        cx, cy = w / 2, h / 2
++        radius = max(20, min(w, h) / 2 - 34)
++        key = (w, h, self.max_range, self.devicePixelRatioF())
++        if key != self._grid_key:
++            dpr = self.devicePixelRatioF()
++            self._grid = QPixmap(round(w*dpr), round(h*dpr))
++            self._grid.setDevicePixelRatio(dpr)
++            self._grid.fill(QColor('#0b1220'))
++            g = QPainter(self._grid)
++            g.setRenderHint(QPainter.Antialiasing)
++            g.setFont(QFont('sans-serif', 10))
++            for i in range(1, 6):
++                rr = radius * i / 5
++                g.setPen(QPen(QColor('#385167' if i == 5 else '#25364a'), 1,
++                              Qt.SolidLine if i == 5 else Qt.DashLine))
++                g.drawEllipse(QPointF(cx, cy), rr, rr)
++                if i < 5:
++                    g.setPen(QColor('#aebfd0'))
++                    g.drawText(int(cx + 9), int(cy - rr - 5), f'{self.max_range*i/5:g} m')
++            for deg in range(0, 360, 30):
++                angle = math.radians(deg)
++                x, y = project_point(angle, 1, cx, cy, radius)
++                g.setPen(QPen(QColor('#354b62' if deg % 90 == 0 else '#1d2c3e'), 1))
++                g.drawLine(QPointF(cx, cy), QPointF(x, y))
++            g.setPen(QColor('#d0deea'))
++            labels = [(cx-60, cy-radius-27, '前 0°'),
++                      (cx-60, cy+radius+8, '后 180°')]
++            for x, y, label in labels:
++                g.drawText(QRectF(x, y, 120, 20), Qt.AlignCenter, label)
++            # Keep horizontal labels outside the circle, rotated for narrow panes.
++            for x, text in [(cx-radius-20, '左 90°'), (cx+radius+20, '右 270°')]:
++                g.save(); g.translate(x, cy); g.rotate(-90 if x < cx else 90)
++                g.drawText(QRectF(-50, -10, 100, 20), Qt.AlignCenter, text); g.restore()
++            g.end()
++            self._grid_key = key
+         painter = QPainter(self)
++        painter.drawPixmap(0, 0, self._grid)
+         painter.setRenderHint(QPainter.Antialiasing)
+-
+-        w = self.width()
+-        h = self.height()
+-        cx = w / 2.0
+-        cy = h / 2.0
+-        radius = min(w, h) / 2.0 - 24.0
+-
+-        # 背景深邃黑
+-        painter.fillRect(self.rect(), QColor("#080c14"))
+-
+-        # 1. 雷达圆形暗底与外圈高亮环
+-        painter.setPen(QPen(QColor(0, 242, 254, 180), 2))
+-        painter.setBrush(QBrush(QColor(11, 17, 30, 240)))
+-        painter.drawEllipse(QPointF(cx, cy), radius, radius)
+-
+-        # 2. 同心距离刻度环 (5层)
+-        ring_count = 5
+-        for i in range(1, ring_count):
+-            r = (radius / ring_count) * i
+-            painter.setPen(QPen(QColor(0, 242, 254, 45), 1, Qt.DashLine))
+-            painter.setBrush(Qt.NoBrush)
+-            painter.drawEllipse(QPointF(cx, cy), r, r)
+-
+-            # 刻度文字
+-            label = f"{round((self.max_range / ring_count) * i, 1)}m"
+-            painter.setPen(QColor(148, 163, 184, 200))
+-            painter.setFont(QFont("monospace", 10, QFont.Bold))
+-            painter.drawText(int(cx + 8), int(cy - r + 14), label)
+-
+-        # 3. 极坐标十字轴与 30 度方位线
+-        for deg in range(0, 360, 30):
+-            rad = deg * math.pi / 180.0
+-            x2 = cx + radius * math.sin(rad)
+-            y2 = cy - radius * math.cos(rad)
+-
+-            painter.setPen(QPen(QColor(0, 242, 254, 80 if deg % 90 == 0 else 25), 1.5 if deg % 90 == 0 else 1))
+-            painter.drawLine(QPointF(cx, cy), QPointF(x2, y2))
+-
+-            # 方位文字
+-            if deg % 90 == 0:
+-                deg_map = {0: "0° (前)", 90: "90° (右)", 180: "180° (后)", 270: "270° (左)"}
+-                tx = cx + (radius - 36) * math.sin(rad)
+-                ty = cy - (radius - 36) * math.cos(rad)
+-                painter.setPen(QColor(0, 242, 254, 220))
+-                painter.setFont(QFont("sans-serif", 10, QFont.Bold))
+-                painter.drawText(int(tx - 25), int(ty + 5), deg_map[deg])
+-
+-        # 4. 真实激光点云
+-        if self.ranges:
+-            n = len(self.ranges)
+-            angle_inc = (2.0 * math.pi) / n
+-            for i, r in enumerate(self.ranges):
+-                if r != r or r <= 0.05 or r > self.max_range:
+-                    continue
+-                theta = i * angle_inc - math.pi / 2.0
+-                px = cx + (r / self.max_range) * radius * math.cos(theta)
+-                py = cy + (r / self.max_range) * radius * math.sin(theta)
+-
+-                if r < 0.8:
+-                    color = QColor(239, 68, 68)   # 危险红色
+-                elif r < 1.5:
+-                    color = QColor(245, 158, 11)  # 警告黄色
+-                else:
+-                    color = QColor(0, 242, 254)   # 安全青色
+-
+-                painter.setPen(Qt.NoPen)
+-                painter.setBrush(QBrush(color))
+-                painter.drawEllipse(QPointF(px, py), 4, 4)
+-
+-        # 5. 中心机器人朝向图标
+-        painter.setPen(Qt.NoPen)
+-        painter.setBrush(QBrush(QColor(16, 185, 129)))
+-        painter.drawEllipse(QPointF(cx, cy), 9, 9)
+-
+-        # 6. RTK 卫星状态 HUD 视窗与指北针
+-        if self.rtk_data:
+-            sats = self.rtk_data.get('sats_used', 0)
+-            tracked = self.rtk_data.get('sats_tracked', 0)
+-            ant1_used = self.rtk_data.get('ant1_used', sats)
+-            ant1_trk = self.rtk_data.get('ant1_tracked', tracked)
+-            ant2_used = self.rtk_data.get('ant2_used', sats)
+-            ant2_trk = self.rtk_data.get('ant2_tracked', tracked)
+-            common_sats = self.rtk_data.get('heading_sats_common', 0)
+-            sats_left = self.rtk_data.get('sats_left', 0)
+-            sats_right = self.rtk_data.get('sats_right', 0)
+-            sat_list = self.rtk_data.get('satellites', [])
+-            fix_str = self.rtk_data.get('fix_type_str', '未定位')
+-            fix_q = self.rtk_data.get('fix_quality', 0)
+-            hdop = self.rtk_data.get('hdop', 99.0)
+-            heading = self.rtk_data.get('heading', 0.0)
+-            has_heading = self.rtk_data.get('has_heading', False)
+-
+-            # (1) 雷达盘左上角 HUD 浮窗 (扩充至双天线左右分布)
+-            painter.setPen(QPen(QColor(0, 242, 254, 110), 1))
+-            painter.setBrush(QBrush(QColor(11, 17, 30, 230)))
+-            painter.drawRoundedRect(14, 14, 290, 62, 8, 8)
+-
+-            # 卫星状态与星数
+-            if fix_q == 4:
+-                status_color = QColor(16, 185, 129) # RTK固定解 绿色
+-            elif fix_q in [1, 2, 5]:
+-                status_color = QColor(56, 189, 248) # 单点定位 蓝色
+-            else:
+-                status_color = QColor(251, 191, 36) # 搜星中 黄色
+-            
+-            painter.setPen(status_color)
+-            painter.setFont(QFont("sans-serif", 9, QFont.Bold))
+-            painter.drawText(22, 32, f"🛰️ 双天线: 左(主) {ant1_used}/{ant1_trk} · 右(辅) {ant2_used}/{ant2_trk}")
+-
+-            painter.setPen(QColor(0, 242, 254))
+-            painter.setFont(QFont("sans-serif", 9, QFont.Bold))
+-            painter.drawText(22, 50, f"🌌 左右天空: ◀左 {sats_left}颗 · 右 {sats_right}颗▶")
+-
+-            painter.setPen(QColor(148, 163, 184))
+-            painter.setFont(QFont("sans-serif", 8))
+-            hdg_txt = f"🧭 航向 {heading:.1f}° (共视 {common_sats}颗)" if has_heading else "🧭 航向: 待锁定"
+-            painter.drawText(22, 67, f"{hdg_txt} | {fix_str[:8]}")
+-
+-            # (2) 在雷达盘两侧动态标绘「左天线/左侧空域」与「右天线/右侧空域」指示标
+-            painter.setFont(QFont("sans-serif", 9, QFont.Bold))
+-            # 左侧 (270°)
+-            painter.setPen(QColor(0, 242, 254, 220))
+-            painter.drawText(int(cx - radius + 10), int(cy - 12), f"◀ 左天线/左空")
+-            painter.drawText(int(cx - radius + 10), int(cy + 6), f"  {ant1_used}解算 · {sats_left}颗")
+-            # 右侧 (90°)
+-            painter.drawText(int(cx + radius - 95), int(cy - 12), f"右天线/右空 ▶")
+-            painter.drawText(int(cx + radius - 95), int(cy + 6), f"{ant2_used}解算 · {sats_right}颗")
+-
+-            # (3) 天幕卫星真实投影 (按相对机体方位角绘制在雷达外环天幕)
+-            for sat in sat_list:
+-                rel_az = sat.get('rel_az', 0.0)
+-                el = sat.get('el', 45.0)
+-                sys_p = sat.get('sys', 'GP')
+-                # 将仰角 0°~90° 映射在雷达外环区 (0.78 * radius ~ 0.98 * radius)
+-                sat_r = radius * (0.80 + (90.0 - el) / 90.0 * 0.18)
+-                th_rad = math.radians(rel_az - 90.0)
+-                sx = cx + sat_r * math.cos(th_rad)
+-                sy = cy + sat_r * math.sin(th_rad)
+-
+-                # 按系统着色：北斗青蓝、GPS绿色、GLONASS黄色、Galileo紫色
+-                if sys_p in ['GB', 'BD']:
+-                    c_sat = QColor(0, 242, 254, 200) # 北斗
+-                elif sys_p == 'GP':
+-                    c_sat = QColor(52, 211, 153, 200) # GPS
+-                elif sys_p == 'GL':
+-                    c_sat = QColor(251, 191, 36, 200) # GLONASS
+-                else:
+-                    c_sat = QColor(192, 132, 252, 200) # Galileo
+-
+-                painter.setPen(Qt.NoPen)
+-                painter.setBrush(QBrush(c_sat))
+-                painter.drawEllipse(QPointF(sx, sy), 3, 3)
+-
+-            # (4) 若已获取真实双天线航向，在雷达盘外环绘制正北 (N) 标
+-            if has_heading:
+-                north_deg = (360.0 - heading) % 360.0
+-                n_rad = math.radians(north_deg)
+-                nx = cx + (radius - 12) * math.sin(n_rad)
+-                ny = cy - (radius - 12) * math.cos(n_rad)
+-                painter.setPen(Qt.NoPen)
+-                painter.setBrush(QBrush(QColor(239, 68, 68)))
+-                painter.drawEllipse(QPointF(nx, ny), 7, 7)
+-                painter.setPen(QColor(255, 255, 255))
+-                painter.setFont(QFont("sans-serif", 8, QFont.Bold))
+-                painter.drawText(int(nx - 4), int(ny + 4), "N")
++        # No glow, connecting lines or temporal accumulation: preserve geometry.
++        groups = [[], [], []]
++        for i, distance in enumerate(self.ranges):
++            if not math.isfinite(distance) or not self.range_min <= distance <= self.max_range:
++                continue
++            x, y = project_point(self.angle_min + i*self.angle_increment,
++                                 distance, cx, cy, radius/self.max_range)
++            groups[0 if distance < 0.6 else 1 if distance < 1.2 else 2].append(QPointF(x, y))
++        for color, points in zip(['#ff747f', '#ffc66a', '#61d8e8'], groups):
++            painter.setPen(QPen(QColor(color), 3.2, Qt.SolidLine, Qt.RoundCap))
++            if points:
++                painter.drawPoints(*points)
++        painter.setPen(QPen(QColor('#e3eef9'), 2))
++        painter.drawLine(QPointF(cx-5, cy+4), QPointF(cx, cy-7))
++        painter.drawLine(QPointF(cx, cy-7), QPointF(cx+5, cy+4))
++        painter.drawLine(QPointF(cx-5, cy+4), QPointF(cx+5, cy+4))
++        if self.stale or self.paused:
++            painter.setPen(QColor('#ffc66a'))
++            painter.setFont(QFont('sans-serif', 12, QFont.Bold))
++            painter.drawText(QRectF(0, h/2+20, w, 30), Qt.AlignCenter,
++                             '数据中断 · 等待新扫描' if self.stale else '点云已暂停 · 测距仍在更新')
++        painter.end()
+ 
+ class BoardRadarMainWindow(QWidget):
+     def __init__(self):
+@@ -372,7 +255,11 @@
+         self.init_ui()
+ 
+         self.ros_thread = ROSThread()
+-        self.ros_thread.scan_signal.connect(self.on_scan_data)
++        self._shown_scan = None
++        self._last_scan_received = 0.0
++        self._lidar_timer = QTimer(self)
++        self._lidar_timer.timeout.connect(self.refresh_lidar)
++        self._lidar_timer.start(50)
+         self.ros_thread.rgb_signal.connect(self.on_rgb_frame)
+         self.ros_thread.depth_signal.connect(self.on_depth_frame)
+         self.ros_thread.ai_signal.connect(self.on_ai_frame)
+@@ -391,13 +278,30 @@
+         # 左侧面板：雷达盘 + C-RTK 2HP 卫星数据监控卡片
+         left_panel = QVBoxLayout()
+         left_panel.setSpacing(10)
++        lidar_title = QLabel('N10P  /  360° 激光雷达')
++        lidar_title.setStyleSheet('font-size: 18px; font-weight: bold; color: #e3eef9; padding: 4px;')
++        left_panel.addWidget(lidar_title)
++        self.lidar_status = QLabel('等待 N10P 扫描数据…')
++        self.lidar_status.setStyleSheet('font-size: 13px; color: #aebfd0; padding: 4px;')
++        left_panel.addWidget(self.lidar_status)
+         self.canvas = RadarCanvas(self)
+         left_panel.addWidget(self.canvas, 1)
++        lidar_tools = QHBoxLayout()
++        legend = QLabel('<span style="color:#ff747f">● &lt;0.6m</span> 近距　<span style="color:#ffc66a">● &lt;1.2m</span> 注意　<span style="color:#61d8e8">● 回波</span> / 无拖影')
++        legend.setStyleSheet('color: #aebfd0; font-size: 12px;')
++        lidar_tools.addWidget(legend, 1)
++        self.pause_lidar = QPushButton('暂停点云')
++        self.pause_lidar.setCheckable(True)
++        self.pause_lidar.setMinimumHeight(36)
++        self.pause_lidar.setStyleSheet('QPushButton {background:#162435; color:#d0deea; border:1px solid #385167; border-radius:6px; padding:4px 12px; font-size:13px;} QPushButton:checked {background:#155e75;}')
++        self.pause_lidar.clicked.connect(self.toggle_lidar_pause)
++        lidar_tools.addWidget(self.pause_lidar)
++        left_panel.addLayout(lidar_tools)
+ 
+         self.rtk_card = self.create_rtk_card()
+         left_panel.addWidget(self.rtk_card)
+ 
+-        main_layout.addLayout(left_panel, 35)
++        main_layout.addLayout(left_panel, 44)
+ 
+         # 右侧相机与控制面板
+         right_panel = QVBoxLayout()
+@@ -420,7 +324,7 @@
+         h_layout.addLayout(title_box)
+ 
+         # 设备状态徽章
+-        self.dev_badge = QLabel("🟢 双传感器在线")
++        self.dev_badge = QLabel("RTK 等待数据")
+         self.dev_badge.setStyleSheet("background: rgba(16, 185, 129, 0.2); border: 1px solid #10b981; color: #10b981; font-weight: bold; border-radius: 6px; padding: 6px 10px; font-size: 12px;")
+         h_layout.addWidget(self.dev_badge)
+         right_panel.addWidget(header_frame)
+@@ -443,7 +347,7 @@
+         self.cam_dist_badge.setStyleSheet("color: #fbbf24; font-weight: bold; font-size: 12px; background: rgba(251, 191, 36, 0.15); border: 1px solid rgba(251, 191, 36, 0.3); border-radius: 4px; padding: 3px 8px;")
+         cam_top.addWidget(self.cam_dist_badge)
+ 
+-        self.cam_fps_badge = QLabel("30 FPS")
++        self.cam_fps_badge = QLabel("-- FPS")
+         self.cam_fps_badge.setStyleSheet("color: #34d399; font-weight: bold; font-size: 11px; background: rgba(52, 211, 153, 0.15); border-radius: 4px; padding: 3px 6px;")
+         cam_top.addWidget(self.cam_fps_badge)
+         cam_layout.addLayout(cam_top)
+@@ -451,7 +355,9 @@
+         # 视频画面显示容器 (固定比例自适应缩放)
+         self.video_box = QLabel("正在接收相机画面...")
+         self.video_box.setAlignment(Qt.AlignCenter)
+-        self.video_box.setMinimumHeight(520)
++        self.video_box.setMinimumHeight(360)
++        self.video_box.setMinimumWidth(1)
++        self.video_box.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
+         self.video_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+         self.video_box.setStyleSheet("background: #020617; border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 8px; color: #64748b; font-size: 13px;")
+         cam_layout.addWidget(self.video_box, 1)
+@@ -494,7 +400,7 @@
+         right_panel.addLayout(grid)
+ 
+         # 4. 危险状态横幅
+-        self.alarm_box = QLabel("✅ 安全状态: 周围障碍物正常")
++        self.alarm_box = QLabel("雷达等待数据 · 环境状态未知")
+         self.alarm_box.setAlignment(Qt.AlignCenter)
+         self.alarm_box.setFont(QFont("sans-serif", 12, QFont.Bold))
+         self.alarm_box.setStyleSheet("padding: 9px; border-radius: 8px; background: rgba(16, 185, 129, 0.2); border: 1px solid #10b981; color: #10b981;")
+@@ -504,11 +410,16 @@
+         bottom_bar = QHBoxLayout()
+         bottom_bar.setSpacing(8)
+ 
++        self.range_buttons = {}
+         for r in [3, 5, 8, 12]:
+             b = QPushButton(f"{r}m")
+             b.setFont(QFont("sans-serif", 10, QFont.Bold))
+             b.setStyleSheet("background: rgba(0, 242, 254, 0.12); border: 1px solid rgba(0, 242, 254, 0.35); color: #fff; padding: 7px 12px; border-radius: 6px;")
+-            b.clicked.connect(lambda _, val=r: self.canvas.set_range(val))
++            b.setCheckable(True)
++            b.setChecked(r == 5)
++            b.setStyleSheet('QPushButton {background:#162435; color:#d0deea; border:1px solid #385167; border-radius:6px; padding:8px;} QPushButton:checked {background:#155e75; border:2px solid #61d8e8; color:white;}')
++            self.range_buttons[r] = b
++            b.clicked.connect(lambda _, val=r: self.set_lidar_range(val))
+             bottom_bar.addWidget(b)
+ 
+         self.btn_fs = QPushButton("🖥️ 退出全屏")
+@@ -524,7 +435,7 @@
+         bottom_bar.addWidget(btn_exit)
+ 
+         right_panel.addLayout(bottom_bar)
+-        main_layout.addLayout(right_panel, 65)
++        main_layout.addLayout(right_panel, 56)
+ 
+     def _create_card(self, title, val):
+         frame = QFrame()
+@@ -672,7 +583,7 @@
+ 
+         # 顶部标题栏徽章联动
+         stat_label = "已定位" if fix_q > 0 else "搜星中"
+-        self.dev_badge.setText(f"🟢 雷达 | 🟢 3D相机 | 🛰️ 左天线 {ant1_used}星 · 右天线 {ant2_used}星 ({stat_label})")
++        self.dev_badge.setText(f"RTK | 左天线 {ant1_used}星 · 右天线 {ant2_used}星 ({stat_label})")
+ 
+     def _note_fps(self):
+         now = time.time()
+@@ -769,22 +680,54 @@
+             self.video_box.setPixmap(scaled_pix)
+             self._note_fps()
+ 
++    def set_lidar_range(self, meters):
++        self.canvas.set_range(meters)
++        for value, button in self.range_buttons.items():
++            button.setChecked(value == meters)
++
++    def toggle_lidar_pause(self, checked):
++        self.canvas.paused = checked
++        self.pause_lidar.setText('继续点云' if checked else '暂停点云')
++        if not checked and self._shown_scan:
++            self.canvas.set_scan(self._shown_scan)
++        self.canvas.update()
++
++    def refresh_lidar(self):
++        data = self.ros_thread.latest_scan
++        now = time.monotonic()
++        if data is not None and data is not self._shown_scan:
++            self._shown_scan = data
++            self._last_scan_received = data['received']
++            self.on_scan_data(data)
++        age = now-self._last_scan_received if self._last_scan_received else math.inf
++        if age > 0.5 or (data and age+data.get('source_age', 0) > 0.65):
++            self.canvas.set_scan({'stale': True})
++            self.lidar_status.setText('N10P 数据中断 · 请检查 USB / 雷达供电')
++            for card in [self.front_lbl, self.left_lbl, self.right_lbl, self.back_lbl]:
++                card.val_label.setText('--')
++            self.alarm_box.setText('雷达数据过期 · 环境状态未知')
++            self.alarm_box.setStyleSheet('padding:9px; background:#3d301d; color:#ffc66a; border-radius:8px;')
++        elif data:
++            period = data.get('scan_time', 0)
++            hz = 1/period if period > 0 else 0
++            delay_ms = (age + data.get('source_age', 0)) * 1000
++            self.lidar_status.setText(f"实时  {hz:.1f} Hz   ·   有效 {data['count']}/{data['total']} 点   ·   帧龄 {delay_ms:.0f} ms")
++
+     def on_scan_data(self, data):
+         self.canvas.set_scan(data)
+-        self.front_lbl.val_label.setText(f"{data['front']:.2f} m" if data['front'] < 50 else "> 10m")
+-        self.left_lbl.val_label.setText(f"{data['left']:.2f} m" if data['left'] < 50 else "> 10m")
+-        self.right_lbl.val_label.setText(f"{data['right']:.2f} m" if data['right'] < 50 else "> 10m")
+-        self.back_lbl.val_label.setText(f"{data['back']:.2f} m" if data['back'] < 50 else "> 10m")
+-
+-        if data['min'] < 0.6:
+-            self.alarm_box.setText(f"⚠️ 碰撞警报: 最近障碍物 {data['min']:.2f}m (< 0.6m)!")
+-            self.alarm_box.setStyleSheet("padding: 9px; border-radius: 8px; background: rgba(239, 68, 68, 0.3); border: 1px solid #ef4444; color: #ef4444; font-weight: bold;")
++        for name, card in [('front', self.front_lbl), ('left', self.left_lbl),
++                           ('right', self.right_lbl), ('back', self.back_lbl)]:
++            card.val_label.setText(f"{data[name]:.2f} m" if math.isfinite(data[name]) else '--')
++        if data['count'] == 0:
++            text, color, bg = '本圈无有效回波 · 环境状态未知', '#ffc66a', '#3d301d'
++        elif data['min'] < 0.6:
++            text, color, bg = f"近距回波 {data['min']:.2f} m · 小于 0.6 m", '#ff8790', '#41232d'
+         elif data['min'] < 1.2:
+-            self.alarm_box.setText(f"⚡ 注意减速: 存在较近障碍物 {data['min']:.2f}m")
+-            self.alarm_box.setStyleSheet("padding: 9px; border-radius: 8px; background: rgba(245, 158, 11, 0.25); border: 1px solid #f59e0b; color: #f59e0b; font-weight: bold;")
++            text, color, bg = f"注意近障 {data['min']:.2f} m · 小于 1.2 m", '#ffc66a', '#3d301d'
+         else:
+-            self.alarm_box.setText("✅ 安全状态: 周围障碍物正常")
+-            self.alarm_box.setStyleSheet("padding: 9px; border-radius: 8px; background: rgba(16, 185, 129, 0.2); border: 1px solid #10b981; color: #10b981; font-weight: bold;")
++            text, color, bg = f"最近有效回波 {data['min']:.2f} m · 当前未见近距回波", '#73dcc3', '#173a36'
++        self.alarm_box.setText(text)
++        self.alarm_box.setStyleSheet(f'padding:9px; border-radius:8px; background:{bg}; color:{color}; font-weight:bold;')
+ 
+     def toggle_fullscreen(self):
+         if self.isFullScreen():
+--- /dev/null
++++ b/n10p_pipeline.py
+@@ -0,0 +1,126 @@
++"""N10P 108-byte dual-echo decoding; ROS/Qt-independent replayable pipeline.
++
++Wire reference: Lslidar/Lslidar_ROS2_driver, M10P/N10P branch.
++No invented angles, interpolation of missing returns, or temporal smoothing.
++"""
++import math
++
++FRAME = 108
++BINS = 720
++RANGE_MIN = 0.15
++RANGE_MAX = 12.0
++
++
++def be16(packet, offset):
++    return int.from_bytes(packet[offset:offset + 2], 'big')
++
++
++class N10PDecoder:
++    def __init__(self):
++        self.buffer = bytearray()
++        self.bytes_received = self.frames = self.crc_errors = 0
++        self.angle_errors = self.discarded_bytes = self.echo_fallbacks = 0
++
++    def feed(self, data):
++        self.bytes_received += len(data)
++        self.buffer.extend(data)
++        while len(self.buffer) >= 2:
++            offset = self.buffer.find(b'\xa5\x5a')
++            if offset < 0:
++                keep = 1 if self.buffer[-1] == 0xa5 else 0
++                self.discarded_bytes += len(self.buffer) - keep
++                self.buffer[:] = self.buffer[-1:] if keep else b''
++                return
++            if offset:
++                self.discarded_bytes += offset
++                del self.buffer[:offset]
++            if len(self.buffer) < FRAME:
++                return
++            packet = bytes(self.buffer[:FRAME])
++            if packet[2] != FRAME or packet[3] != 16 or sum(packet[:-1]) & 255 != packet[-1]:
++                self.crc_errors += 1
++                self.discarded_bytes += 1
++                del self.buffer[0]  # search again, not a blind 108-byte skip
++                continue
++            del self.buffer[:FRAME]
++            start, end = be16(packet, 5) / 100, be16(packet, 105) / 100
++            span = (end - start) % 360
++            if not (0 <= start <= 360 and 0 <= end <= 360 and 0.2 < span <= 40):
++                self.angle_errors += 1
++                continue
++            self.frames += 1
++            points = []
++            for i in range(16):
++                off = 7 + i * 6
++                first, second = be16(packet, off) / 1000, be16(packet, off + 3) / 1000
++                intensity = packet[off + 2]
++                # Preserve first-return semantics. Second echo is used only when
++                # first has no valid measurement; zero/FFFF never become hits.
++                distance = first
++                if not RANGE_MIN <= first <= RANGE_MAX:
++                    if RANGE_MIN <= second <= RANGE_MAX:
++                        distance, intensity = second, packet[off + 5]
++                        self.echo_fallbacks += 1
++                    else:
++                        distance, intensity = math.inf, 0
++                points.append(((start + span * i / 15) % 360, distance, intensity))
++            yield points
++
++
++class SweepAssembler:
++    def __init__(self):
++        self.last_angle = self.started = self.last_packet = None
++        self.bins = {}
++        self.sweeps = self.gap_resets = 0
++
++    def add(self, points, now):
++        scans = []
++        if self.last_packet is not None and now - self.last_packet > 0.3:
++            self.last_angle = self.started = None
++            self.bins = {}
++            self.gap_resets += 1
++        self.last_packet = now
++        for angle, distance, intensity in points:
++            if self.last_angle is not None and self.last_angle > 300 and angle < 60:
++                if self.started is not None:
++                    duration = now - self.started
++                    if 0.03 <= duration <= 0.3:
++                        ranges, intensities = [math.inf] * BINS, [0.0] * BINS
++                        for key, (r, quality) in self.bins.items():
++                            ranges[key], intensities[key] = r, float(quality)
++                        self.sweeps += 1
++                        scans.append({'ranges': ranges, 'intensities': intensities,
++                                      'scan_time': duration, 'received': now})
++                self.bins = {}
++                self.started = now
++            self.last_angle = angle
++            if self.started is not None:
++                key = round(((360 - angle) % 360) * 2) % BINS
++                old = self.bins.get(key)
++                if old is None or distance < old[0]:
++                    self.bins[key] = (distance, intensity)
++        return scans
++
++
++def scan_payload(ranges, range_min, range_max, angle_min=0.0,
++                 angle_increment=math.pi / 360, scan_time=0.0, age=0.0):
++    sectors = {'front': [], 'left': [], 'back': [], 'right': []}
++    valid = []
++    for i, distance in enumerate(ranges):
++        if not math.isfinite(distance) or not range_min <= distance <= range_max:
++            continue
++        valid.append(distance)
++        angle = math.degrees(angle_min + i * angle_increment) % 360
++        for name, center in [('front', 0), ('left', 90), ('back', 180), ('right', 270)]:
++            if abs((angle - center + 180) % 360 - 180) <= 15:
++                sectors[name].append(distance)
++    return dict(ranges=list(ranges), range_min=range_min, range_max=range_max,
++                angle_min=angle_min, angle_increment=angle_increment,
++                scan_time=scan_time, source_age=max(0.0, age),
++                min=min(valid, default=math.inf), count=len(valid), total=len(ranges),
++                **{k: min(v, default=math.inf) for k, v in sectors.items()})
++
++
++def project_point(angle, distance, cx, cy, scale):
++    # ROS +Y is left: 90 degrees must agree with the left distance card.
++    return cx - math.sin(angle) * distance * scale, cy - math.cos(angle) * distance * scale
+--- a/real_lidar_node.py
++++ b/real_lidar_node.py
+@@ -1,180 +1,117 @@
+ #!/usr/bin/env python3
+-# -*- coding: utf-8 -*-
+-"""LSLIDAR N10P: 108-byte dual-echo frames on /dev/ttyACM0 @ 460800."""
+-
++"""N10P real-time reader: one complete revolution = one /scan message."""
++import json
+ import math
++import os
+ import time
+-
+ import serial
+ import rclpy
+ from rclpy.node import Node
++from rclpy.qos import QoSProfile
+ from sensor_msgs.msg import LaserScan
++from std_msgs.msg import String
++from n10p_pipeline import N10PDecoder, SweepAssembler, BINS, RANGE_MIN, RANGE_MAX
+ 
+-PORT = "/dev/ttyACM0"
++PORT = os.environ.get('N10P_PORT', '/dev/ttyACM0')
+ BAUD = 460800
+-HEADER = b"\xa5\x5a"
+-FRAME = 108
+-POINTS = 16
+-RANGE_MIN = 0.15
+-RANGE_MAX = 12.0
+-DATA_START = 7
+-DEGREE_START = 5
+-END_DEGREE = 105
+-
+-
+-def n10_crc8(pkt):
+-    return sum(pkt) & 0xFF
+-
+-
+-def be16(pkt, offset):
+-    return (pkt[offset] << 8) | pkt[offset + 1]
+ 
+ 
+ class RealLidarNode(Node):
+     def __init__(self):
+-        super().__init__("real_lidar_node")
+-        self.pub = self.create_publisher(LaserScan, "/scan", 10)
++        super().__init__('real_lidar_node')
++        self.pub = self.create_publisher(LaserScan, '/scan', QoSProfile(depth=1))
++        self.status_pub = self.create_publisher(String, '/lidar/status', 1)
++        self.decoder, self.assembler = N10PDecoder(), SweepAssembler()
+         self.ser = None
+-        self.buf = bytearray()
+-        self.bins = {}
+-        self.display_bins = {}
+-        self.rev_start = time.time()
+-        self.last_ang = None
+-        self.last_reconnect = 0.0
++        self.last_reconnect = -math.inf
++        self.last_scan = None
++        self.scan_time = 0.0
++        self.valid = 0
++        self.overruns = 0
+         self.open_serial()
+         self.timer = self.create_timer(0.01, self.spin_serial)
+-        self.pub_timer = self.create_timer(0.1, self.publish_scan)
+-        self.get_logger().info(">>> [N10P] decoder ready")
++        self.status_timer = self.create_timer(1.0, self.publish_status)
+ 
+     def open_serial(self):
+         if self.ser:
+-            try:
++            self.ser.close()
++        self.ser = None
++        self.decoder.buffer.clear()
++        self.assembler = SweepAssembler()
++        self.last_scan = None
++        self.last_reconnect = time.monotonic()
++        try:
++            self.ser = serial.Serial(PORT, BAUD, timeout=0, exclusive=True)
++            self.ser.dtr = True
++            self.ser.rts = True
++            self.ser.reset_input_buffer()
++            self.get_logger().info('N10P opened %s @ %d' % (PORT, BAUD))
++        except (serial.SerialException, OSError) as exc:
++            if self.ser:
+                 self.ser.close()
+-            except Exception:
+-                pass
+             self.ser = None
+-        try:
+-            ser = serial.Serial(PORT, BAUD, timeout=0.2)
+-            ser.dtr = True
+-            ser.rts = True
+-            time.sleep(0.05)
+-            ser.reset_input_buffer()
+-            self.ser = ser
+-            self.buf = bytearray()
+-            self.get_logger().info("opened %s @ %d" % (PORT, BAUD))
+-            return True
+-        except Exception as exc:
+-            self.get_logger().warn("open %s failed: %s" % (PORT, exc), throttle_duration_sec=2.0)
+-            return False
++            self.get_logger().warn(str(exc), throttle_duration_sec=2.0)
+ 
+     def spin_serial(self):
+         if self.ser is None:
+-            now = time.time()
+-            if now - self.last_reconnect < 1.0:
+-                return
+-            self.last_reconnect = now
+-            self.open_serial()
++            if time.monotonic() - self.last_reconnect >= 1.0:
++                self.open_serial()
+             return
+         try:
+             waiting = self.ser.in_waiting
+-            if waiting:
+-                self.buf.extend(self.ser.read(waiting))
+-        except Exception as exc:
+-            self.get_logger().warn("serial I/O: %s, reconnecting" % exc)
++            if waiting > 16384:
++                # Discard a stale backlog rather than replaying it as live scans.
++                self.ser.reset_input_buffer()
++                self.decoder.buffer.clear()
++                self.assembler = SweepAssembler()
++                self.overruns += 1
++                self.last_scan = None
++                return
++            if not waiting:
++                return
++            data = self.ser.read(min(waiting, 8192))
++        except (serial.SerialException, OSError) as exc:
++            self.get_logger().warn('N10P I/O: %s' % exc)
+             self.open_serial()
+             return
+-        while True:
+-            idx = self.buf.find(HEADER)
+-            if idx < 0:
+-                if len(self.buf) > FRAME:
+-                    del self.buf[: len(self.buf) - 1]
+-                return
+-            if idx:
+-                del self.buf[:idx]
+-            if len(self.buf) < FRAME:
+-                return
+-            pkt = bytes(self.buf[:FRAME])
+-            del self.buf[:FRAME]
+-            self.handle_frame(pkt)
++        now = time.monotonic()
++        for points in self.decoder.feed(data):
++            for scan in self.assembler.add(points, now):
++                self.publish_scan(scan)
+ 
+-    def handle_frame(self, pkt):
+-        if pkt[0] != 0xA5 or pkt[1] != 0x5A:
+-            return
+-        if n10_crc8(pkt[: FRAME - 1]) != pkt[FRAME - 1]:
+-            return
+-        start = (be16(pkt, DEGREE_START) / 100.0) % 360.0
+-        end = (be16(pkt, END_DEGREE) / 100.0) % 360.0
+-        if start > end:
+-            span = end + 360.0 - start
+-        else:
+-            span = end - start
+-        if span <= 0.2 or span > 40.0:
+-            span = 15.0
++    def publish_scan(self, scan):
++        msg = LaserScan()
++        # Host receive estimate of sweep start, not a hardware clock timestamp.
++        start_ns = self.get_clock().now().nanoseconds - int(scan['scan_time'] * 1e9)
++        msg.header.stamp.sec, msg.header.stamp.nanosec = divmod(start_ns, 10**9)
++        msg.header.frame_id = 'laser'
++        msg.angle_min = 0.0
++        msg.angle_increment = 2 * math.pi / BINS
++        msg.angle_max = (BINS - 1) * msg.angle_increment
++        msg.scan_time = scan['scan_time']
++        # Bins are reversed/resampled into ROS angular order, not time order.
++        msg.time_increment = 0.0
++        msg.range_min, msg.range_max = RANGE_MIN, RANGE_MAX
++        msg.ranges, msg.intensities = scan['ranges'], scan['intensities']
++        self.pub.publish(msg)
++        self.last_scan = scan['received']
++        self.scan_time = scan['scan_time']
++        self.valid = sum(math.isfinite(r) for r in scan['ranges'])
+ 
+-        wrapped = (
+-            self.last_ang is not None
+-            and self.last_ang > 300.0
+-            and start < 60.0
+-        )
+-        timed_out = (time.time() - self.rev_start) > 0.18 and len(self.bins) >= 80
+-        if wrapped or timed_out:
+-            if len(self.bins) >= 80:
+-                self.display_bins = self.bins
+-                self.bins = {}
+-                self.rev_start = time.time()
+-                self.publish_scan()
+-        self.last_ang = start
+-
+-        denom = max(1, POINTS - 1)
+-        kept = 0
+-        for i in range(POINTS):
+-            off = DATA_START + i * 6
+-            dist_code = be16(pkt, off)
+-            if dist_code == 0xFFFF:
+-                continue
+-            rng = dist_code / 1000.0
+-            if rng < RANGE_MIN or rng > RANGE_MAX:
+-                continue
+-            inten = pkt[off + 2]
+-            ang = (start + span * i / float(denom)) % 360.0
+-            disp = (360.0 - ang) % 360.0
+-            key = int(round(disp * 2.0)) % 720
+-            self.bins[key] = (rng, float(inten))
+-            kept += 1
+-        if kept == 0:
+-            return
+-
+-    def publish_scan(self):
+-        n = 720
+-        msg = LaserScan()
+-        msg.header.stamp = self.get_clock().now().to_msg()
+-        msg.header.frame_id = "laser"
+-        msg.angle_min = 0.0
+-        msg.angle_max = 2.0 * math.pi - (2.0 * math.pi / n)
+-        msg.angle_increment = 2.0 * math.pi / n
+-        now = time.time()
+-        msg.scan_time = max(0.05, min(1.0, now - self.rev_start if self.rev_start else 0.1))
+-        msg.time_increment = msg.scan_time / n
+-        msg.range_min = RANGE_MIN
+-        msg.range_max = RANGE_MAX
+-        ranges = []
+-        intens = []
+-        src = self.display_bins if self.display_bins else self.bins
+-        if not src:
+-            return
+-        for i in range(n):
+-            item = src.get(i)
+-            if item is None:
+-                ranges.append(float("inf"))
+-                intens.append(0.0)
+-            else:
+-                ranges.append(item[0])
+-                intens.append(item[1])
+-        msg.ranges = ranges
+-        msg.intensities = intens
+-        self.pub.publish(msg)
+-        valid = sum(1 for r in ranges if r < RANGE_MAX)
+-        self.get_logger().info("N10P scan valid=%d/%d dt=%.3f" % (valid, n, msg.scan_time), throttle_duration_sec=2.0)
++    def publish_status(self):
++        age = time.monotonic() - self.last_scan if self.last_scan is not None else None
++        d = self.decoder
++        status = dict(model='N10P', connected=self.ser is not None,
++                      stale=age is None or age > 0.5, age_ms=round(age*1000) if age is not None else None,
++                      hz=round(1/self.scan_time, 2) if self.scan_time and age is not None and age < 0.5 else 0,
++                      valid=self.valid if age is not None and age < 0.5 else 0, bins=BINS,
++                      bytes=d.bytes_received, frames=d.frames, crc_errors=d.crc_errors,
++                      angle_errors=d.angle_errors, discarded_bytes=d.discarded_bytes,
++                      echo_fallbacks=d.echo_fallbacks, overruns=self.overruns)
++        msg = String()
++        msg.data = json.dumps(status)
++        self.status_pub.publish(msg)
++        self.get_logger().info('N10P '+msg.data, throttle_duration_sec=5.0)
+ 
+ 
+ def main():
+@@ -184,14 +121,12 @@
+         rclpy.spin(node)
+     except KeyboardInterrupt:
+         pass
+-    if node.ser:
+-        try:
++    finally:
++        if node.ser:
+             node.ser.close()
+-        except Exception:
+-            pass
+-    node.destroy_node()
+-    rclpy.shutdown()
++        node.destroy_node()
++        rclpy.shutdown()
+ 
+ 
+-if __name__ == "__main__":
++if __name__ == '__main__':
+     main()

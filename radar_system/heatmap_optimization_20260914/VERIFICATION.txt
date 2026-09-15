@@ -1,0 +1,15 @@
+深度热力图去马赛克 — 2026-09-14
+CHANGED: render_depth_heatmap / depth_auto_range / rgb_callback 常驻最新 RGB / depth_callback / on_depth_frame KeepAspectRatio
+原因: 固定 350–4500mm 色标把室内近景压成大色块；无效像素涂黑把画面撕成色块；IgnoreAspectRatio 再拉扁。
+显示: 当前帧 2–98 分位自适应色标（EMA）、小孔填充、双边平滑、Turbo 近暖远冷、无效区保留变暗 RGB、底部色条、原始宽高比。
+测距: 中心物距仍读源像素，不读渲染图。
+
+BASELINE_SHA256 board_radar_gui.py: 091d6c77492e96d0b981f3641a26c3af3ea5af477df0bf43c11f0131d6072e4e
+MODIFIED_SHA256 board_radar_gui.py: 6d0d8c9b45df829c5373264af2f7715377db075c09ddac6930218fb12ad8ecf6
+BOARD: /root/radar_system/board_radar_gui.py 同源哈希
+BACKUP: /root/radar_system/.heatmap-before-20260914/board_radar_gui.py
+
+UNIT: checks=6 passed=6 failed=0
+GUI: checks=6 passed=6 depth_mode=ok badge=ok aspect=ok render=ok
+LIVE: 21 FPS · 色标随场景 · 椅子/箱子轮廓可见，不再是纯色马赛克块
+ROLLBACK: heatmap_optimization_20260914/ROLLBACK.sh

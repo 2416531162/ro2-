@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#10151c">
+<title>RK3588 · 空间建模工作台</title>
+<style>
+:root{color-scheme:dark;--bg:#10151c;--panel:#181f29;--canvas:#111923;--line:#303c4b;--muted:#a1afc0;--text:#ecf2f8;--mint:#69dec4;--amber:#f6c879;--red:#ff8c91;--radius:12px;font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-size:13px}button,input,select{font:inherit}button{cursor:pointer}button:disabled{opacity:.45;cursor:default}button,a,input,select{touch-action:manipulation}button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,canvas:focus-visible,summary:focus-visible{outline:2px solid var(--mint);outline-offset:3px}button{color:inherit}button:hover:not(:disabled){border-color:#65817f;background:#273740}button:active:not(:disabled){background:#31444b}a{color:var(--mint)}svg.icon{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.65;stroke-linecap:round;stroke-linejoin:round;flex-shrink:0}.svg-library{display:none}.mono,output,.value{font-family:"SFMono-Regular",Consolas,"Liberation Mono",monospace;font-variant-numeric:tabular-nums}.muted{color:var(--muted)}
+.app-header{height:76px;padding:0 26px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--line);gap:20px}.brand{display:flex;align-items:center;gap:12px}.brand-mark{width:38px;height:38px;display:grid;place-items:center;border:1px solid #3b635e;color:var(--mint);border-radius:10px;background:#1c3534}.brand-mark svg{width:24px;height:24px}.brand h1{font-size:17px;letter-spacing:.3px;margin:0;font-weight:650}.brand p{font-size:11px;color:var(--muted);margin:5px 0 0;letter-spacing:.6px}.header-right{display:flex;align-items:center;gap:18px}.device-tag{font-size:11px;letter-spacing:1px;color:var(--muted);border-right:1px solid var(--line);padding-right:18px}.connection{display:flex;align-items:center;gap:8px;font-size:12px;white-space:nowrap}.status-dot{width:7px;height:7px;border-radius:50%;background:var(--amber)}.connection[data-status="live"] .status-dot{background:var(--mint);box-shadow:0 0 0 4px #69dec410}.connection[data-status="offline"] .status-dot{background:var(--red)}
+.workspace{max-width:2100px;padding:22px 24px 14px;margin:0 auto}.workspace-heading{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:18px}.eyebrow{font-size:10px;font-weight:600;color:var(--mint);letter-spacing:1.8px;margin:0 0 6px}.workspace-heading h2{font-size:23px;letter-spacing:.3px;font-weight:600;margin:0}.heading-actions{display:flex;gap:8px}.button{display:inline-flex;justify-content:center;align-items:center;gap:7px;min-height:36px;padding:8px 12px;border:1px solid var(--line);background:#1b232e;border-radius:7px;white-space:nowrap;transition:background .15s,border-color .15s}.button.primary{color:#102a25;background:var(--mint);border-color:var(--mint);font-weight:650}.button.primary:hover:not(:disabled){background:#8fe9d3;border-color:#8fe9d3}.button[aria-pressed="true"]{color:var(--mint);border-color:#48766b;background:#223b38}
+.metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:18px}.metric{border:1px solid var(--line);border-radius:var(--radius);background:var(--panel);padding:14px 17px;display:grid;grid-template-columns:1fr auto;gap:8px;min-width:0}.metric-label{color:var(--muted);font-size:12px;display:flex;gap:7px;align-items:center}.metric-label svg{width:15px;height:15px}.metric .value{font-size:25px;font-weight:500;letter-spacing:-.5px;line-height:1.2}.metric .unit{font-size:12px;color:var(--muted);margin-left:5px;letter-spacing:0}.metric-note{color:var(--muted);font-size:10px;grid-column:1/-1;line-height:1.5}.metric-symbol{align-self:center;color:var(--mint);grid-column:2;grid-row:1/3}.metric-symbol svg{width:28px;height:28px;opacity:.65}
+.main-grid{display:grid;grid-template-columns:minmax(0,1fr) 288px;gap:16px;align-items:stretch}.viewer{min-width:0;display:flex;flex-direction:column;border:1px solid var(--line);background:var(--canvas);border-radius:var(--radius);overflow:hidden}.viewer-toolbar{display:flex;justify-content:space-between;align-items:center;padding:10px 12px;gap:10px;background:#181f29;border-bottom:1px solid var(--line)}.mode-selector{display:flex;gap:3px;padding:3px;background:#111820;border:1px solid #283440;border-radius:8px}.mode-btn{border:0;background:transparent;border-radius:5px;display:flex;align-items:center;justify-content:center;gap:7px;color:var(--muted);padding:7px 11px;font-size:12px;min-height:32px;white-space:nowrap}.mode-btn.active{background:#2b403e;color:#9eefd9}.mode-btn:hover{background:#25303c}.mode-btn svg{width:16px;height:16px}.viewer-tools{display:flex;gap:5px}.icon-button{width:34px;height:34px;display:grid;place-items:center;padding:0;background:transparent;border:1px solid var(--line);border-radius:6px;color:var(--muted)}
+.canvas-stage{position:relative;flex:1;height:clamp(470px,calc(100dvh - 367px),930px);min-height:470px;isolation:isolate;overflow:hidden}#mainCanvas{position:absolute;inset:0;display:block;width:100%;height:100%;touch-action:none;cursor:grab}#mainCanvas:active{cursor:grabbing}.stage-meta{pointer-events:none;position:absolute;left:20px;top:18px;z-index:1}.stage-title{font-size:12px;font-weight:600;display:flex;align-items:center;gap:7px}.live-label{font:9px "SFMono-Regular",Consolas,monospace;letter-spacing:1px;color:var(--mint);padding:3px 5px;background:#203735;border:1px solid #31564f;border-radius:3px}.stage-description{font-size:10px;color:var(--muted);margin:7px 0 0;line-height:1.6;max-width:260px}.view-badge{position:absolute;right:16px;top:18px;font-size:10px;color:var(--muted);background:#101821dd;border:1px solid #33404c;border-radius:5px;padding:6px 8px;pointer-events:none}.stage-bottom{pointer-events:none;position:absolute;bottom:18px;left:20px;display:flex;flex-direction:column;gap:8px}.scale-line{height:7px;width:64px;border:solid #adbec7;border-width:0 1px 1px}.scale-label{font-size:10px;color:#bac8d3}.zoom-tools{position:absolute;right:14px;bottom:16px;display:flex;gap:5px;align-items:center;background:#18222ddd;border:1px solid var(--line);border-radius:8px;padding:5px}.zoom-tools .icon-button{border:0;color:#d8e2ec}.zoom-value{min-width:45px;text-align:center;color:var(--muted);font-size:10px}.empty-state{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;pointer-events:none;background:#111923c9;color:var(--muted);z-index:2}.empty-state svg{width:38px;height:38px;color:var(--mint)}.empty-state strong{font-size:15px;color:var(--text)}[hidden]{display:none!important}.viewer-footer{display:flex;justify-content:space-between;align-items:center;gap:12px;min-height:40px;padding:9px 15px;border-top:1px solid var(--line);font-size:10px;color:var(--muted);background:#171f29}.interaction-hint{display:flex;gap:5px;align-items:center}.viewer-footer svg{width:13px;height:13px}.render-info{white-space:nowrap;display:flex;gap:14px}.sidebar{display:flex;flex-direction:column;gap:12px;min-width:0}.panel{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:16px}.panel-heading{display:flex;justify-content:space-between;align-items:center;margin:0 0 15px}.panel-heading h3{font-size:13px;font-weight:600;margin:0}.panel-heading span{font-size:10px;color:var(--muted)}
+.directional-grid{display:grid;grid-template-areas:". front ." "left center right" ". back .";grid-template-columns:repeat(3,minmax(0,1fr));gap:7px;align-items:center;justify-items:center}.dir-badge{width:100%;min-height:48px;text-align:center;padding:6px 2px;display:flex;flex-direction:column;gap:4px;border:1px solid #35444d;border-radius:6px;background:#1b2a30}.dir-badge.front{grid-area:front}.dir-badge.left{grid-area:left}.dir-badge.right{grid-area:right}.dir-badge.back{grid-area:back}.dir-name{font-size:9px;color:var(--muted)}.dir-val{font-size:13px;font-weight:600}.safe{color:var(--mint)}.warn{color:var(--amber);border-color:#7b6341;background:#312c24}.danger{color:var(--red);border-color:#9f525a;background:#38242c}.unknown{color:var(--muted);background:#202832}.dir-center{grid-area:center;display:grid;place-items:center;width:40px;height:40px;border:1px solid #506b6a;border-radius:50%;background:#293f3d;color:var(--mint)}.dir-center svg{width:24px;height:24px}.distance-summary{display:flex;justify-content:space-between;border-top:1px solid var(--line);padding-top:11px;margin-top:14px;font-size:11px;color:var(--muted)}.distance-summary strong{font-size:12px;color:var(--text)}.danger-banner{margin-top:10px;padding:8px;background:#402630;border:1px solid #7e414c;border-radius:6px;color:#ffb4b7;font-size:11px}
+.pose-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}.pose-cell{background:#111a23;border:1px solid #2b3846;border-radius:6px;padding:9px 8px}.pose-cell span{display:block;color:var(--muted);font-size:10px;margin-bottom:7px}.pose-cell strong{font-size:12px;font-weight:500}.layer-list{display:flex;flex-direction:column;gap:3px}.layer-row{display:flex;align-items:center;justify-content:space-between;gap:8px;min-height:31px;cursor:pointer;font-size:11px;color:#c4cfdb}.layer-row input{appearance:none;-webkit-appearance:none;flex-shrink:0;width:27px;height:16px;border-radius:12px;background:#33404f;border:1px solid #6b798a;position:relative;cursor:pointer;margin:0}.layer-row input:after{content:"";position:absolute;width:10px;height:10px;top:2px;left:2px;border-radius:50%;background:#c1ccd8;transition:transform .15s}.layer-row input:checked{background:#69dec4;border-color:#69dec4}.layer-row input:checked:after{background:#13352e;transform:translateX(11px)}.layer-label{display:flex;align-items:center;gap:8px}.swatch{width:8px;height:8px;border-radius:2px;background:var(--mint);border:1px solid #8dd6c7}.swatch.free{background:#254a4b;border-color:#577e7c}.swatch.path{height:2px;background:var(--amber);border:0}.swatch.scan{border-radius:50%;background:#adf7ea}.swatch.grid{background:transparent;border-color:#7b91a2}.swatch.beam{background:#446d71;border-color:#688f92}.height-control{border-top:1px solid var(--line);margin-top:12px;padding-top:12px}.height-control label{font-size:11px;display:flex;justify-content:space-between;color:var(--muted);margin-bottom:8px}.height-control input{width:100%;accent-color:var(--mint);height:16px}.panel-details{padding:0;border:0;color:var(--muted);font-size:10px}.panel-details summary{cursor:pointer;padding:9px 0;min-height:30px;color:#c0ccda}.panel-details p{line-height:1.7;margin:3px 0 9px}.bottom-bar{display:flex;justify-content:space-between;gap:12px;color:#93a3b6;font-size:10px;margin-top:14px;line-height:1.7}.bottom-bar .mono{letter-spacing:.3px}.toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);padding:12px 20px;background:#263a38;border:1px solid #537f75;color:#d6fff2;border-radius:9px;box-shadow:0 10px 30px #0005;z-index:10;max-width:calc(100% - 32px);font-size:12px}.workspace.focus .metrics,.workspace.focus .sidebar{display:none}.workspace.focus .main-grid{grid-template-columns:minmax(0,1fr)}.workspace.focus .canvas-stage{height:calc(100dvh - 272px);min-height:400px}.viewer:fullscreen{border:0;border-radius:0}.viewer:fullscreen .canvas-stage{height:auto;min-height:0}.viewer:fullscreen .viewer-toolbar{flex-shrink:0}.viewer:fullscreen .viewer-footer{flex-shrink:0}
+@media(min-width:1600px){.main-grid{grid-template-columns:minmax(0,1fr) 320px}.panel{padding:19px}.dir-badge{min-height:57px}.sidebar{gap:16px}.layer-row{min-height:35px}.canvas-stage{min-height:585px}}
+@media(min-width:821px) and (min-height:620px){
+.app-header{height:64px}.workspace{height:calc(100dvh - 64px);display:flex;flex-direction:column;padding:14px 20px 10px}.workspace-heading{margin-bottom:12px;flex-shrink:0}.workspace-heading h2{font-size:21px}.eyebrow{font-size:9px;margin-bottom:4px}.metrics{margin-bottom:14px;flex-shrink:0}.metric{padding:10px 15px;gap:5px}.metric .value{font-size:24px}.metric-note{font-size:9px}.main-grid{flex:1;min-height:0;align-items:stretch}.viewer{min-height:0}.canvas-stage{height:auto;min-height:0}.sidebar{height:100%;min-height:0;overflow-y:auto;scrollbar-width:thin;scrollbar-color:#455567 transparent;padding-right:2px}.sidebar .panel{flex-shrink:0}.bottom-bar{margin-top:9px;flex-shrink:0}.workspace.focus .canvas-stage{height:auto;min-height:0}.workspace.focus .main-grid{flex:1}.dir-badge{min-height:44px}.panel{padding:14px}.panel-heading{margin-bottom:12px}.layer-row{min-height:30px}
+}
+@media(max-width:1100px){.workspace{padding:18px 16px 12px}.main-grid{grid-template-columns:minmax(0,1fr) 264px;gap:12px}.panel{padding:13px}.viewer-toolbar{padding:9px}.mode-btn{padding:7px 9px}.mode-btn svg{display:none}.app-header{padding:0 18px}.metric{padding:13px}.metric-symbol{display:none}.metric .value{font-size:23px}.metric-note{font-size:9px}.view-badge{display:none}}
+@media(max-width:820px){.app-header{height:68px}.device-tag{display:none}.workspace-heading h2{font-size:20px}.main-grid{grid-template-columns:minmax(0,1fr)}.canvas-stage{height:560px;min-height:450px}.sidebar{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));align-items:start}.layers-panel{grid-column:2;grid-row:1/3}.pose-panel{grid-column:1}.metrics{gap:8px}.metric .value{font-size:21px}.metric-label{font-size:11px}.metric-label svg{display:none}.bottom-bar{flex-wrap:wrap}.brand h1{font-size:15px}.heading-actions .button{padding:8px 10px}.header-right{gap:10px}.render-info{gap:8px}}
+@media(max-width:520px){.workspace{padding:15px 12px 12px}.app-header{padding:0 14px;gap:8px}.brand{gap:9px}.brand-mark{width:32px;height:32px}.brand h1{font-size:13px}.brand p{font-size:9px;letter-spacing:0}.connection{font-size:10px;gap:6px}.workspace-heading{align-items:flex-end;margin-bottom:14px}.eyebrow{font-size:9px}.workspace-heading h2{font-size:19px}.heading-actions{gap:6px}.heading-actions .button{padding:8px;min-height:36px;font-size:11px}.heading-actions .icon{display:none}.metrics{grid-template-columns:repeat(2,minmax(0,1fr));margin-bottom:14px}.metric{padding:12px;gap:6px}.metric-note{font-size:9px}.metric .value{font-size:23px}.viewer-toolbar{flex-wrap:wrap;gap:8px}.mode-selector{flex:1}.mode-btn{padding:8px 7px;flex:1;min-height:34px;font-size:11px}.viewer-tools{gap:4px}.viewer-tools .icon-button{width:32px;height:38px}.canvas-stage{height:470px;min-height:400px}.stage-meta{left:14px;top:15px}.stage-description{font-size:9px}.stage-bottom{left:14px;bottom:18px}.viewer-footer{align-items:flex-start;flex-direction:column;gap:5px;font-size:9px;padding:8px 12px}.sidebar{grid-template-columns:minmax(0,1fr);gap:12px}.layers-panel,.pose-panel{grid-column:auto;grid-row:auto}.pose-grid{gap:8px}.pose-cell{padding:12px}.directional-grid{max-width:270px;margin:auto}.dir-badge{min-height:54px}.layer-row{min-height:40px}.panel{padding:16px}.bottom-bar{font-size:9px}.bottom-bar span:last-child{display:none}.zoom-tools .icon-button{width:34px;height:34px}.workspace.focus .canvas-stage{height:calc(100dvh - 290px)}}
+@media(prefers-reduced-motion:reduce){*,*:before,*:after{animation:none!important;transition:none!important}}
+</style>
+</head>
+<body>
+<svg class="svg-library" aria-hidden="true" xmlns="http://www.w3.org/2000/svg"><defs>
+<symbol id="i-cube" viewBox="0 0 24 24"><path d="m12 3 9 5v8l-9 5-9-5V8zM3 8l9 5 9-5M12 13v8M7.5 5.5l9 5"/></symbol>
+<symbol id="i-grid" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M3 15h18M9 3v18M15 3v18"/></symbol>
+<symbol id="i-radar" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><path d="M12 12V3M12 12l6-6"/><circle cx="12" cy="12" r="1"/></symbol>
+<symbol id="i-pause" viewBox="0 0 24 24"><path d="M8 5v14M16 5v14"/></symbol>
+<symbol id="i-play" viewBox="0 0 24 24"><path d="m8 4 12 8-12 8z"/></symbol>
+<symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5"/></symbol>
+<symbol id="i-target" viewBox="0 0 24 24"><circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></symbol>
+<symbol id="i-expand" viewBox="0 0 24 24"><path d="M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5"/></symbol>
+<symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+<symbol id="i-minus" viewBox="0 0 24 24"><path d="M5 12h14"/></symbol>
+<symbol id="i-signal" viewBox="0 0 24 24"><path d="M3 12h4l3-8 4 16 3-8h4"/></symbol>
+<symbol id="i-points" viewBox="0 0 24 24"><circle cx="5" cy="5" r="1"/><circle cx="12" cy="4" r="1"/><circle cx="19" cy="5" r="1"/><circle cx="7" cy="12" r="1"/><circle cx="16" cy="11" r="1"/><circle cx="4" cy="19" r="1"/><circle cx="12" cy="18" r="1"/><circle cx="20" cy="19" r="1"/></symbol>
+<symbol id="i-area" viewBox="0 0 24 24"><path d="M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5M8 8h8v8H8z"/></symbol>
+<symbol id="i-compass" viewBox="0 0 24 24"><path d="m12 3 8 18-8-5-8 5z"/></symbol>
+<symbol id="i-mouse" viewBox="0 0 24 24"><rect x="6" y="2" width="12" height="20" rx="6"/><path d="M12 6v4"/></symbol>
+<symbol id="i-image" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8" cy="8" r="1"/><path d="m3 17 5-5 4 4 4-7 5 8"/></symbol>
+<symbol id="i-panel" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M16 4v16"/></symbol>
+</defs></svg>
+<header class="app-header">
+ <div class="brand"><div class="brand-mark"><svg class="icon" aria-hidden="true"><use href="#i-cube"/></svg></div><div><h1>RK3588 <span class="muted">/</span> 空间感知</h1><p>ATK-DLRK3588 · ROS 2 JAZZY</p></div></div>
+ <div class="header-right"><span class="device-tag">SPATIAL MAPPING CONSOLE</span><div class="connection" id="connection" data-status="waiting" role="status"><span class="status-dot"></span><span id="connectionText">正在连接</span></div></div>
+</header>
+<main class="workspace" id="workspace">
+ <div class="workspace-heading"><div><p class="eyebrow">MAPPING WORKSPACE</p><h2>实时建模工作台</h2></div><div class="heading-actions"><button class="button" id="pauseBtn" aria-pressed="false"><svg class="icon" aria-hidden="true"><use href="#i-pause" id="pauseIcon"/></svg><span id="pauseText">暂停画面</span></button><button class="button primary" id="exportBtn" disabled><svg class="icon" aria-hidden="true"><use href="#i-download"/></svg>导出数据</button></div></div>
+ <section class="metrics" aria-label="实时建模指标">
+  <div class="metric"><span class="metric-label"><svg class="icon" aria-hidden="true"><use href="#i-signal"/></svg>扫描频率</span><div class="value"><span id="hzBadge">--</span><span class="unit">Hz</span></div><span class="metric-symbol"><svg class="icon" aria-hidden="true"><use href="#i-signal"/></svg></span><span class="metric-note">激光扫描 · /scan</span></div>
+  <div class="metric"><span class="metric-label"><svg class="icon" aria-hidden="true"><use href="#i-points"/></svg>有效扫描点</span><div class="value"><span id="pointsVal">--</span><span class="unit">pts</span></div><span class="metric-symbol"><svg class="icon" aria-hidden="true"><use href="#i-points"/></svg></span><span class="metric-note" id="pointsNote">等待扫描数据</span></div>
+  <div class="metric"><span class="metric-label"><svg class="icon" aria-hidden="true"><use href="#i-area"/></svg>已知区域 · 估算</span><div class="value"><span id="mappedAreaVal">--</span><span class="unit">m²</span></div><span class="metric-symbol"><svg class="icon" aria-hidden="true"><use href="#i-area"/></svg></span><span class="metric-note" id="progressVal">依据稀疏栅格采样估算</span></div>
+  <div class="metric"><span class="metric-label"><svg class="icon" aria-hidden="true"><use href="#i-grid"/></svg>地图分辨率</span><div class="value"><span id="resolutionVal">--</span><span class="unit">cm</span></div><span class="metric-symbol"><svg class="icon" aria-hidden="true"><use href="#i-grid"/></svg></span><span class="metric-note" id="mapSizeVal">等待栅格地图</span></div>
+ </section>
+ <div class="main-grid">
+  <section class="viewer" id="viewer" aria-label="空间建模视图">
+   <div class="viewer-toolbar"><div class="mode-selector" role="group" aria-label="显示模式">
+    <button class="mode-btn" id="btnModeSlam" data-mode="slam" aria-pressed="false"><svg class="icon" aria-hidden="true"><use href="#i-grid"/></svg>2D 栅格</button>
+    <button class="mode-btn active" id="btnMode3D" data-mode="3d" aria-pressed="true"><svg class="icon" aria-hidden="true"><use href="#i-cube"/></svg>3D 示意</button>
+    <button class="mode-btn" id="btnModePolar" data-mode="polar" aria-pressed="false"><svg class="icon" aria-hidden="true"><use href="#i-radar"/></svg>雷达点云</button>
+   </div><div class="viewer-tools"><button class="icon-button" id="snapshotBtn" title="保存视图 PNG" aria-label="保存视图 PNG" disabled><svg class="icon" aria-hidden="true"><use href="#i-image"/></svg></button><button class="icon-button" id="focusBtn" title="专注视图" aria-label="专注视图" aria-pressed="false"><svg class="icon" aria-hidden="true"><use href="#i-panel"/></svg></button><button class="icon-button" id="fullscreenBtn" title="全屏视图" aria-label="全屏视图"><svg class="icon" aria-hidden="true"><use href="#i-expand"/></svg></button></div></div>
+   <div class="canvas-stage" id="canvasStage"><canvas id="mainCanvas" tabindex="0" aria-label="实时地图，可用方向键调整视角，加减键缩放，0 键复位">实时栅格地图与激光点云；对应数值可在侧栏查看。</canvas>
+    <div class="stage-meta"><div class="stage-title"><span class="live-label" id="liveLabel">WAIT</span><span id="viewModeTitle">空间立体示意</span></div><p class="stage-description" id="viewDescription">2D 栅格挤出 · 高度为显示参数，非实测</p></div><div class="view-badge mono" id="viewBadge">MAP FRAME / ISOMETRIC</div>
+    <div class="stage-bottom"><div class="scale-line" id="scaleLine"></div><span class="scale-label mono" id="scaleLabel">1 m · 地面参考</span></div>
+    <div class="zoom-tools"><button class="icon-button" id="zoomOutBtn" aria-label="缩小" title="缩小 (-)"><svg class="icon" aria-hidden="true"><use href="#i-minus"/></svg></button><output class="zoom-value" id="zoomVal" aria-label="缩放比例">100%</output><button class="icon-button" id="zoomInBtn" aria-label="放大" title="放大 (+)"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg></button><button class="icon-button" id="fitBtn" aria-label="视角复位" title="视角复位 (0)"><svg class="icon" aria-hidden="true"><use href="#i-target"/></svg></button></div>
+    <div class="empty-state" id="emptyState"><svg class="icon" aria-hidden="true"><use href="#i-radar"/></svg><strong id="emptyTitle">正在接入空间数据</strong><span id="emptyHint">等待 /api/stream 首帧</span></div>
+   </div>
+   <div class="viewer-footer"><span class="interaction-hint"><svg class="icon" aria-hidden="true"><use href="#i-mouse"/></svg><span id="interactionHint">拖动旋转 · Shift 拖动平移 · 滚轮缩放</span></span><div class="render-info mono"><span id="frameVal">-- FPS</span><span id="updateVal">等待数据</span></div></div>
+  </section>
+  <aside class="sidebar" aria-label="测距与显示设置">
+   <section class="panel"><div class="panel-heading"><h3>四向测距</h3><span>机体坐标 · m</span></div>
+    <div class="directional-grid"><div class="dir-badge front unknown" id="frontBadge"><span class="dir-name">前 · 0°</span><span class="dir-val mono" id="frontVal">--</span></div><div class="dir-badge left unknown" id="leftBadge"><span class="dir-name">左 · 90°</span><span class="dir-val mono" id="leftVal">--</span></div><div class="dir-center"><svg class="icon" aria-hidden="true"><use href="#i-compass"/></svg></div><div class="dir-badge right unknown" id="rightBadge"><span class="dir-name">右 · 270°</span><span class="dir-val mono" id="rightVal">--</span></div><div class="dir-badge back unknown" id="backBadge"><span class="dir-name">后 · 180°</span><span class="dir-val mono" id="backVal">--</span></div></div>
+    <div class="distance-summary"><span>最近障碍物</span><strong class="mono" id="minDistVal">-- m</strong></div><div id="dangerBanner" class="danger-banner" role="status" hidden>近距提示：障碍物距离小于 0.6 m</div>
+   </section>
+   <section class="panel pose-panel"><div class="panel-heading"><h3>机器人位姿</h3><span>map 坐标系</span></div><div class="pose-grid"><div class="pose-cell"><span>X / m</span><strong class="mono" id="robotXVal">--</strong></div><div class="pose-cell"><span>Y / m</span><strong class="mono" id="robotYVal">--</strong></div><div class="pose-cell"><span>Yaw / °</span><strong class="mono" id="robotYawVal">--</strong></div></div></section>
+   <section class="panel layers-panel"><div class="panel-heading"><h3>显示图层</h3><span>仅调整可视化</span></div><div class="layer-list">
+    <label class="layer-row"><span class="layer-label"><span class="swatch"></span>障碍物边界</span><input id="layerObstacles" type="checkbox" checked aria-label="障碍物边界"></label>
+    <label class="layer-row"><span class="layer-label"><span class="swatch free"></span>已知自由空间</span><input id="layerFree" type="checkbox" checked aria-label="已知自由空间"></label>
+    <label class="layer-row"><span class="layer-label"><span class="swatch path"></span>运动轨迹</span><input id="layerPath" type="checkbox" checked aria-label="运动轨迹"></label>
+    <label class="layer-row"><span class="layer-label"><span class="swatch scan"></span>实时扫描点</span><input id="layerScan" type="checkbox" checked aria-label="实时扫描点"></label>
+    <label class="layer-row"><span class="layer-label"><span class="swatch beam"></span>扫描射线</span><input id="layerBeam" type="checkbox" aria-label="扫描射线"></label>
+    <label class="layer-row"><span class="layer-label"><span class="swatch grid"></span>坐标网格</span><input id="layerGrid" type="checkbox" checked aria-label="坐标网格"></label>
+   </div><div class="height-control" id="heightControl"><label for="wallHeight">挤出示意高度<output id="heightVal">0.8 m</output></label><input id="wallHeight" type="range" min="0.2" max="2" step="0.1" value="0.8"></div><details class="panel-details"><summary>数据与显示说明</summary><p>立体视图由 2D 占据栅格挤出，不代表实测三维结构。已知面积按当前每 2 格采样估算，并非精确测绘面积。暂停仅冻结画面，后台数据仍在接收。</p><p>JSON 导出包含当前显示帧的稀疏地图、扫描点、位姿和轨迹，不是 ROS 原始完整地图文件。</p><p>键盘：方向键旋转或平移，+ / − 缩放，0 复位。雷达视图以机体前方为上、左侧为左。</p></details></section>
+  </aside>
+ </div>
+ <footer class="bottom-bar"><span class="mono">RK3588 EDGE PLATFORM <span class="muted"> / </span> <span id="endpointVal">SSE · /api/stream</span></span><span>栅格地图 + 激光扫描 + 机器人位姿</span></footer>
+</main><div class="toast" id="toast" role="status" hidden></div>
+<script>
+'use strict';
+const $ = id => document.getElementById(id);
+const canvas = $('mainCanvas'), ctx = canvas.getContext('2d', {alpha:false});
+const mapCache = document.createElement('canvas'), mapCtx = mapCache.getContext('2d', {alpha:false});
+const number = (value, fallback=0) => typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+const validPoints = list => Array.isArray(list) ? list.filter(p => Array.isArray(p) && Number.isFinite(p[0]) && Number.isFinite(p[1])) : [];
+const format = (v, digits=2) => typeof v === 'number' && Number.isFinite(v) ? v.toFixed(digits) : '--';
+let currentMode='3d', state=null, latestState=null, paused=false, lastReceived=0, lastDisplayed=0, streamStatus='waiting', stream=null;
+let viewW=1, viewH=1, dpr=1, dirty=true, cacheDirty=true, mapSignature='', frameCount=0, frameAt=0, lastRender=0;
+let camera={zoom:1, panX:0, panY:0, yaw:-Math.PI/5, pitch:0.55}, drag=null, toastTimer=0;
+const layers={obstacles:true, free:true, path:true, scan:true, beam:false, grid:true};
+let wallHeight=.8;
+
+function normalizeState(d) {
+ if (!d || typeof d !== 'object' || Array.isArray(d)) throw new Error('Invalid stream payload');
+ return {...d, robot_x:number(d.robot_x),robot_y:number(d.robot_y),robot_yaw:number(d.robot_yaw),map_origin_x:number(d.map_origin_x,-4),map_origin_y:number(d.map_origin_y,-3.5),map_res:Math.max(.001,number(d.map_res,.05)),map_width:clamp(Math.floor(number(d.map_width)),0,100000),map_height:clamp(Math.floor(number(d.map_height)),0,100000),map_obstacles:validPoints(d.map_obstacles),map_frees:validPoints(d.map_frees),trajectory:validPoints(d.trajectory).slice(-2000),ranges:Array.isArray(d.ranges)?d.ranges.map(r=>number(r)):[],map_sample_step:clamp(Math.floor(number(d.map_sample_step,2)),1,16)};
+}
+function mapStats(d) {
+ const step=d.map_sample_step, samples=Math.ceil(d.map_width/step)*Math.ceil(d.map_height/step);
+ const count=Math.min(samples,d.map_obstacles.length+d.map_frees.length);
+ return {area:Math.min(d.map_width*d.map_height,count*step*step)*d.map_res*d.map_res,coverage:samples?count/samples*100:0};
+}
+function updateBadge(valueId,badgeId,value) {
+ const el=$(badgeId); el.classList.remove('safe','warn','danger','unknown');
+ if (!Number.isFinite(value) || value<=0 || value>=50){$(valueId).textContent='--';el.classList.add('unknown');return;}
+ $(valueId).textContent=value.toFixed(2);el.classList.add(value<.6?'danger':value<1.2?'warn':'safe');
+}
+function updateUI(d) {
+ $('hzBadge').textContent=format(d.hz,1);
+ const valid=d.ranges.filter(r=>r>0).length;
+ $('pointsVal').textContent=valid.toLocaleString();$('pointsNote').textContent=`本帧 ${d.ranges.length} 个采样 · 有效 ${d.ranges.length?Math.round(valid/d.ranges.length*100):0}%`;
+ const stats=mapStats(d);$('mappedAreaVal').textContent=d.map_width?stats.area.toFixed(1):'--';$('progressVal').textContent=d.map_width?`约 ${stats.coverage.toFixed(1)}% 栅格已知 · 抽样估算`:'等待栅格地图';
+ $('resolutionVal').textContent=(d.map_res*100).toFixed(1);$('mapSizeVal').textContent=`${d.map_width} × ${d.map_height} 格 · ${(d.map_width*d.map_res).toFixed(1)} × ${(d.map_height*d.map_res).toFixed(1)} m`;
+ $('robotXVal').textContent=format(d.robot_x);$('robotYVal').textContent=format(d.robot_y);$('robotYawVal').textContent=format(d.robot_yaw*180/Math.PI,1);
+ $('minDistVal').textContent=Number.isFinite(d.min_dist)&&d.min_dist>0&&d.min_dist<50?`${format(d.min_dist)} m`:'-- m';
+ for(const dir of ['front','left','right','back'])updateBadge(dir+'Val',dir+'Badge',d[dir+'_dist']);
+ $('dangerBanner').hidden=!(Number.isFinite(d.min_dist)&&d.min_dist>0&&d.min_dist<.6);
+ $('exportBtn').disabled=false;$('snapshotBtn').disabled=false;
+}
+function applyState(d) {
+ const signature=JSON.stringify([d.map_width,d.map_height,d.map_origin_x,d.map_origin_y,d.map_res,d.map_sample_step,d.map_obstacles,d.map_frees]);
+ if(signature!==mapSignature){mapSignature=signature;cacheDirty=true;}
+ state=d;lastDisplayed=lastReceived;dirty=true;updateUI(d);
+ $('emptyState').hidden=Boolean(d.map_width || d.ranges.some(r=>r>0));
+ if(!$('emptyState').hidden){$('emptyTitle').textContent='数据流已连接，等待地图与扫描';$('emptyHint').textContent='尚未收到有效的空间数据';}
+}
+function receiveFrame(event) {
+ try{latestState=normalizeState(JSON.parse(event.data));lastReceived=performance.now();streamStatus='live';if(!paused)applyState(latestState);updateConnection();}
+ catch(error){streamStatus='invalid';updateConnection();}
+}
+function updateConnection() {
+ const age=lastReceived?performance.now()-lastReceived:Infinity;
+ const live=streamStatus==='live'&&age<3000;
+ $('connection').dataset.status=live?'live':streamStatus==='waiting'?'waiting':'offline';
+ $('connectionText').textContent=live?'数据流已连接':streamStatus==='invalid'?'数据格式异常':streamStatus==='waiting'?'正在连接':'数据流中断 · 重连中';
+ $('liveLabel').textContent=paused?'PAUSED':live?'LIVE':state?'STALE':'WAIT';
+ $('liveLabel').style.color=paused||!live?'#f6c879':'#69dec4';
+ $('updateVal').textContent=lastDisplayed?paused?'画面已冻结':`${Math.max(0,(performance.now()-lastDisplayed)/1000).toFixed(1)}s 前更新`:'等待数据';
+ if(!live&&age>=3000&&streamStatus==='live'){streamStatus='stale';$('connectionText').textContent='数据流超时 · 等待更新';}
+ if(!state&&streamStatus!=='waiting'){ $('emptyTitle').textContent='等待数据连接恢复';$('emptyHint').textContent='保留当前视角，连接恢复后自动显示'; }
+}
+function connectStream(){stream=new EventSource('/api/stream');stream.onmessage=receiveFrame;stream.onerror=()=>{streamStatus='offline';updateConnection();};}
+function setMode(mode) {
+ if(!['slam','3d','polar'].includes(mode))return;
+ currentMode=mode;frameAt=performance.now();frameCount=0;document.querySelectorAll('.mode-btn').forEach(b=>{const active=b.dataset.mode===mode;b.classList.toggle('active',active);b.setAttribute('aria-pressed',String(active));});
+ const titles={slam:['二维占据栅格','正交俯视 · 原始地图坐标与实时扫描','MAP FRAME / TOP VIEW','拖动平移 · 滚轮缩放 · 0 复位'], '3d':['空间立体示意','2D 栅格挤出 · 高度为显示参数，非实测','MAP FRAME / ISOMETRIC','拖动旋转 · Shift 拖动平移 · 滚轮缩放'],polar:['机体坐标点云','前方朝上 · 左侧朝左 · 距离以环线标尺为准','LASER FRAME / POLAR','滚轮缩放量程 · 0 复位 · 方向固定于机体']};
+ const t=titles[mode];$('viewModeTitle').textContent=t[0];$('viewDescription').textContent=t[1];$('viewBadge').textContent=t[2];$('interactionHint').textContent=t[3];$('heightControl').hidden=mode!=='3d';
+ for(const id of ['layerObstacles','layerFree','layerPath'])$(id).disabled=mode==='polar';
+ resetView(false);
+}
+function notify(message){$('toast').textContent=message;$('toast').hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>{$('toast').hidden=true;},3200);}
+function resetView(message=true){camera={zoom:1,panX:0,panY:0,yaw:-Math.PI/5,pitch:.55};invalidate();if(message)notify('视角已复位，地图数据保持不变');}
+function invalidate(){dirty=true;cacheDirty=true;$('zoomVal').textContent=`${Math.round(camera.zoom*100)}%`;}
+function zoomBy(factor){camera.zoom=clamp(camera.zoom*factor,.35,5);invalidate();}
+function togglePause(){paused=!paused;frameAt=performance.now();frameCount=0;$('pauseBtn').setAttribute('aria-pressed',String(paused));$('pauseText').textContent=paused?'继续显示':'暂停画面';$('pauseIcon').setAttribute('href',paused?'#i-play':'#i-pause');if(!paused&&latestState)applyState(latestState);updateConnection();}
+function resizeCanvas(){const r=canvas.getBoundingClientRect();viewW=Math.max(1,r.width);viewH=Math.max(1,r.height);dpr=Math.min(window.devicePixelRatio||1,2);canvas.width=Math.round(viewW*dpr);canvas.height=Math.round(viewH*dpr);mapCache.width=canvas.width;mapCache.height=canvas.height;ctx.setTransform(dpr,0,0,dpr,0,0);mapCtx.setTransform(dpr,0,0,dpr,0,0);invalidate();}
+
+// World coordinates remain metric; CSS pixels and physical canvas pixels are separated.
+function getBounds(){if(!state||!state.map_width||!state.map_height)return{x:-4,y:-3.5,w:8,h:7};return{x:state.map_origin_x,y:state.map_origin_y,w:Math.max(.2,state.map_width*state.map_res),h:Math.max(.2,state.map_height*state.map_res)};}
+function projection(){
+ const b=getBounds(),cx=b.x+b.w/2,cy=b.y+b.h/2,cos=Math.cos(camera.yaw),sin=Math.sin(camera.yaw),tilt=Math.sin(camera.pitch),up=Math.cos(camera.pitch);
+ const raw=(x,y,z=0)=>{x-=cx;y-=cy;return[(x*cos-y*sin),(x*sin+y*cos)*tilt-z*up];};
+ const corners=[];for(const x of [b.x,b.x+b.w])for(const y of [b.y,b.y+b.h])for(const z of [0,wallHeight])corners.push(raw(x,y,z));
+ const x0=Math.min(...corners.map(p=>p[0])),x1=Math.max(...corners.map(p=>p[0])),y0=Math.min(...corners.map(p=>p[1])),y1=Math.max(...corners.map(p=>p[1]));
+ const availableW=Math.max(80,viewW-76),availableH=Math.max(80,viewH-78);
+ const scale=(currentMode==='3d'?Math.min(availableW/(x1-x0),availableH/(y1-y0)):Math.min(availableW/b.w,availableH/b.h))*camera.zoom;
+ const point=(x,y,z=0)=>{if(currentMode==='3d'){const p=raw(x,y,z);return[viewW/2+camera.panX+(p[0]-(x0+x1)/2)*scale,viewH/2+12+camera.panY+(p[1]-(y0+y1)/2)*scale];}return[viewW/2+camera.panX+(x-cx)*scale,viewH/2+12+camera.panY-(y-cy)*scale];};
+ return {b,scale,point,depth:(x,y)=>x*sin+y*cos};
+}
+function pathLine(c,points,color,width=1){if(points.length<2)return;c.beginPath();c.moveTo(...points[0]);for(let i=1;i<points.length;i++)c.lineTo(...points[i]);c.strokeStyle=color;c.lineWidth=width;c.stroke();}
+function polygon(c,points,color){if(points.length<3)return;c.beginPath();c.moveTo(...points[0]);for(let i=1;i<points.length;i++)c.lineTo(...points[i]);c.closePath();c.fillStyle=color;c.fill();}
+function drawGround(c,p){
+ const b=p.b,P=p.point;
+ polygon(c,[P(b.x,b.y),P(b.x+b.w,b.y),P(b.x+b.w,b.y+b.h),P(b.x,b.y+b.h)],'#15222d');
+ if(layers.grid){let step=Math.max(1,Math.pow(10,Math.floor(Math.log10(Math.max(b.w,b.h)/20))));for(let x=Math.ceil(b.x/step)*step;x<=b.x+b.w;x+=step)pathLine(c,[P(x,b.y),P(x,b.y+b.h)],'#263642');for(let y=Math.ceil(b.y/step)*step;y<=b.y+b.h;y+=step)pathLine(c,[P(b.x,y),P(b.x+b.w,y)],'#263642');}
+ pathLine(c,[P(b.x,b.y),P(b.x+b.w,b.y),P(b.x+b.w,b.y+b.h),P(b.x,b.y+b.h),P(b.x,b.y)],'#41515f');
+}
+function drawMapCache(p){
+ const c=mapCtx,P=p.point;c.setTransform(dpr,0,0,dpr,0,0);c.fillStyle='#111923';c.fillRect(0,0,viewW,viewH);drawGround(c,p);
+ if(!state){cacheDirty=false;return;}
+ const size=state.map_res*state.map_sample_step,ox=state.map_origin_x,oy=state.map_origin_y;
+ const cell=(pt,z=0)=>{const x=ox+pt[0]*state.map_res,y=oy+pt[1]*state.map_res;return [P(x,y,z),P(x+size,y,z),P(x+size,y+size,z),P(x,y+size,z)];};
+ if(layers.free){if(currentMode==='slam'){c.fillStyle='#254446';for(const pt of state.map_frees){const a=P(ox+pt[0]*state.map_res,oy+pt[1]*state.map_res+size);c.fillRect(a[0],a[1],size*p.scale+.4,size*p.scale+.4);}}else{for(const pt of state.map_frees)polygon(c,cell(pt),'#254446');}}
+ if(layers.obstacles){
+  if(currentMode==='slam'){c.fillStyle='#7be1ce';for(const pt of state.map_obstacles){const a=P(ox+pt[0]*state.map_res,oy+pt[1]*state.map_res+size);c.fillRect(a[0],a[1],Math.max(1.5,size*p.scale),Math.max(1.5,size*p.scale));}}
+  else{const cells=state.map_obstacles.slice().sort((a,b)=>p.depth(a[0],a[1])-p.depth(b[0],b[1]));for(const pt of cells){const base=cell(pt),top=cell(pt,wallHeight);const edges=[0,1,2,3].sort((a,b)=>((base[a][1]+base[(a+1)%4][1])-(base[b][1]+base[(b+1)%4][1])));for(const i of edges){const j=(i+1)%4;polygon(c,[base[i],base[j],top[j],top[i]],i%2?'#367d76':'#46988b');}polygon(c,top,'#8cddc6');}}
+ }
+ cacheDirty=false;
+}
+function scanPoints(){if(!state)return[];const inc=number(state.angle_increment,Math.PI*2/(state.ranges.length||360)),start=number(state.angle_min);return state.ranges.map((r,i)=>{const angle=start+i*inc;return r>0?{r,angle,x:state.robot_x+r*Math.cos(state.robot_yaw+angle),y:state.robot_y+r*Math.sin(state.robot_yaw+angle)}:null;}).filter(Boolean);}
+function drawDynamic(p){
+ if(!state)return;const P=p.point;
+ if(layers.path&&state.trajectory.length>1){const path=state.trajectory.map(pt=>P(pt[0],pt[1],.035));pathLine(ctx,path,'#1b241de6',4);pathLine(ctx,path,'#f6c879',1.65);}
+ const robot=P(state.robot_x,state.robot_y,.07),scan=scanPoints();
+ if(layers.beam){ctx.beginPath();for(let i=0;i<scan.length;i+=6){const pt=P(scan[i].x,scan[i].y,.045);ctx.moveTo(...robot);ctx.lineTo(...pt);}ctx.strokeStyle='#79e0d326';ctx.lineWidth=.8;ctx.stroke();}
+ if(layers.scan){ctx.fillStyle='#ccfff4';ctx.beginPath();for(const hit of scan){const pt=P(hit.x,hit.y,.055);ctx.rect(pt[0]-1,pt[1]-1,2,2);}ctx.fill();}
+ const heading=P(state.robot_x+Math.cos(state.robot_yaw)*.45,state.robot_y+Math.sin(state.robot_yaw)*.45,.07),angle=Math.atan2(heading[1]-robot[1],heading[0]-robot[0]);
+ ctx.save();ctx.translate(...robot);ctx.rotate(angle);ctx.beginPath();ctx.arc(0,0,11,0,Math.PI*2);ctx.fillStyle='#142f2cee';ctx.fill();ctx.strokeStyle='#83e6ce';ctx.lineWidth=1.5;ctx.stroke();polygon(ctx,[[16,0],[-5,-6],[-2,0],[-5,6]],'#e1fff6');ctx.restore();
+}
+function drawAxes(p){const P=p.point,origin=P(p.b.x,p.b.y),x=P(p.b.x+.6,p.b.y),y=P(p.b.x,p.b.y+.6),z=P(p.b.x,p.b.y,.6);pathLine(ctx,[origin,x],'#eeac97',1.5);pathLine(ctx,[origin,y],'#8cd8ba',1.5);ctx.font='10px Consolas, monospace';ctx.fillStyle='#eeac97';ctx.fillText('X',x[0]+5,x[1]+3);ctx.fillStyle='#8cd8ba';ctx.fillText('Y',y[0]-9,y[1]+1);if(currentMode==='3d'){pathLine(ctx,[origin,z],'#9ec8f7',1.5);ctx.fillStyle='#9ec8f7';ctx.fillText('Z',z[0]-4,z[1]-6);}}
+function drawPolar(){
+ ctx.fillStyle='#111923';ctx.fillRect(0,0,viewW,viewH);
+ const cx=viewW/2,cy=viewH/2+12,radius=Math.max(35,Math.min(viewW-88,viewH-150)/2),maxRange=8/camera.zoom;
+ if(layers.grid){ctx.font='10px Consolas, monospace';for(let i=1;i<=4;i++){const r=radius*i/4;ctx.beginPath();ctx.arc(cx,cy,r,0,Math.PI*2);ctx.strokeStyle=i===4?'#506574':'#30414e';ctx.lineWidth=1;ctx.stroke();ctx.fillStyle='#a2b6c5';ctx.fillText((maxRange*i/4).toFixed(1)+' m',cx+5,cy-r+12);}pathLine(ctx,[[cx-radius,cy],[cx+radius,cy]],'#334653');pathLine(ctx,[[cx,cy-radius],[cx,cy+radius]],'#334653');}
+ ctx.font='10px sans-serif';ctx.textAlign='center';ctx.fillStyle='#c2cdd9';ctx.fillText('前 0°',cx,cy-radius-12);ctx.fillText('后 180°',cx,cy+radius+20);ctx.fillText('左',cx-radius-18,cy+3);ctx.fillText('右',cx+radius+18,cy+3);ctx.textAlign='left';
+ const hits=scanPoints();
+ if(layers.beam){ctx.beginPath();for(let i=0;i<hits.length;i+=6){const hit=hits[i];if(hit.r>maxRange)continue;ctx.moveTo(cx,cy);ctx.lineTo(cx-Math.sin(hit.angle)*hit.r/maxRange*radius,cy-Math.cos(hit.angle)*hit.r/maxRange*radius);}ctx.strokeStyle='#69dec429';ctx.lineWidth=1;ctx.stroke();}
+ if(layers.scan)for(const hit of hits){if(hit.r>maxRange)continue;const x=cx-Math.sin(hit.angle)*hit.r/maxRange*radius,y=cy-Math.cos(hit.angle)*hit.r/maxRange*radius;ctx.fillStyle=hit.r<.6?'#ff8c91':hit.r<1.2?'#f6c879':'#a2eee0';ctx.fillRect(x-1.3,y-1.3,2.6,2.6);}
+ polygon(ctx,[[cx,cy-10],[cx-5,cy+6],[cx,cy+3],[cx+5,cy+6]],'#d4fff2');
+ $('scaleLine').style.width='48px';$('scaleLabel').textContent=`量程 ${maxRange.toFixed(1)} m`;
+}
+function renderFrame(now){
+ requestAnimationFrame(renderFrame);
+ if(document.hidden||!dirty||now-lastRender<1000/30)return;lastRender=now;
+ ctx.setTransform(dpr,0,0,dpr,0,0);
+ if(currentMode==='polar')drawPolar();else{const p=projection();if(cacheDirty)drawMapCache(p);ctx.drawImage(mapCache,0,0,canvas.width,canvas.height,0,0,viewW,viewH);drawDynamic(p);if(layers.grid)drawAxes(p);const a=p.point(p.b.x,p.b.y),b=p.point(p.b.x+1,p.b.y);const unit=Math.hypot(b[0]-a[0],b[1]-a[1]);const meters=unit>100?.5:unit<25?2:1;$('scaleLine').style.width=`${Math.max(4,unit*meters)}px`;$('scaleLabel').textContent=`${meters} m${currentMode==='3d'?' · 地面 X 方向':''}`;}
+ dirty=false;frameCount++;
+ if(now-frameAt>=1000){$('frameVal').textContent=`${Math.round(frameCount*1000/(now-frameAt))} FPS`;frameCount=0;frameAt=now;}
+}
+function mapExport(){if(!state)return null;return{format:'rk3588-sparse-map/v1',captured_at:new Date(Date.now()-(performance.now()-lastDisplayed)).toISOString(),source:'/api/stream',display_paused:paused,coordinate_frame:'map',map:{width:state.map_width,height:state.map_height,resolution:state.map_res,origin:[state.map_origin_x,state.map_origin_y],sample_step:state.map_sample_step,obstacles:state.map_obstacles,free:state.map_frees},robot:{x:state.robot_x,y:state.robot_y,yaw:state.robot_yaw},scan:{ranges:state.ranges,angle_min:number(state.angle_min),angle_increment:number(state.angle_increment,Math.PI*2/(state.ranges.length||360))},trajectory:state.trajectory,display:{mode:currentMode,extrusion_height:wallHeight,extrusion_is_measured:false}};}
+function downloadBlob(blob,name){const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=name;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);}
+function exportMap(){const data=mapExport();if(!data)return;downloadBlob(new Blob([JSON.stringify(data,null,2)],{type:'application/json'}),`rk3588-map-${Date.now()}.json`);notify('已生成当前显示帧的 JSON 下载');}
+function saveSnapshot(){if(!state)return;canvas.toBlob(blob=>{if(blob){downloadBlob(blob,`rk3588-${currentMode}-${Date.now()}.png`);notify('已生成当前视图的 PNG 下载');}else notify('视图导出失败，请重试');},'image/png');}
+
+document.querySelectorAll('[data-mode]').forEach(button=>button.addEventListener('click',()=>setMode(button.dataset.mode)));
+$('pauseBtn').addEventListener('click',togglePause);$('exportBtn').addEventListener('click',exportMap);$('snapshotBtn').addEventListener('click',saveSnapshot);
+$('zoomInBtn').addEventListener('click',()=>zoomBy(1.2));$('zoomOutBtn').addEventListener('click',()=>zoomBy(1/1.2));$('fitBtn').addEventListener('click',()=>resetView());
+$('focusBtn').addEventListener('click',()=>{const focus=$('workspace').classList.toggle('focus');$('focusBtn').setAttribute('aria-pressed',String(focus));resizeCanvas();});
+$('fullscreenBtn').addEventListener('click',async()=>{try{if(document.fullscreenElement)await document.exitFullscreen();else await $('viewer').requestFullscreen();}catch(error){notify('全屏请求未完成，可使用专注视图');}});
+document.addEventListener('fullscreenchange',resizeCanvas);
+for(const [id,key]of Object.entries({layerObstacles:'obstacles',layerFree:'free',layerPath:'path',layerScan:'scan',layerBeam:'beam',layerGrid:'grid'}))$(id).addEventListener('change',e=>{layers[key]=e.target.checked;invalidate();});
+$('wallHeight').addEventListener('input',e=>{wallHeight=clamp(Number(e.target.value),.2,2);$('heightVal').textContent=wallHeight.toFixed(1)+' m';invalidate();});
+canvas.addEventListener('wheel',e=>{e.preventDefault();zoomBy(Math.exp(-e.deltaY*.001));},{passive:false});
+canvas.addEventListener('pointerdown',e=>{if(e.button!==0||currentMode==='polar')return;drag={id:e.pointerId,x:e.clientX,y:e.clientY};canvas.setPointerCapture(e.pointerId);});
+canvas.addEventListener('pointermove',e=>{if(!drag||drag.id!==e.pointerId)return;const dx=e.clientX-drag.x,dy=e.clientY-drag.y;if(currentMode==='3d'&&!e.shiftKey){camera.yaw+=dx*.008;camera.pitch=clamp(camera.pitch+dy*.006,.25,1.3);}else{camera.panX+=dx;camera.panY+=dy;}drag.x=e.clientX;drag.y=e.clientY;invalidate();});
+function endDrag(e){if(drag&&drag.id===e.pointerId){if(canvas.hasPointerCapture(e.pointerId))canvas.releasePointerCapture(e.pointerId);drag=null;}}
+canvas.addEventListener('pointerup',endDrag);canvas.addEventListener('pointercancel',endDrag);canvas.addEventListener('lostpointercapture',()=>{drag=null;});
+canvas.addEventListener('keydown',e=>{if(['+','=','-','0','ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key)){e.preventDefault();if(e.key==='+'||e.key==='=')zoomBy(1.2);else if(e.key==='-')zoomBy(1/1.2);else if(e.key==='0')resetView();else if(currentMode!=='polar'){const dx=e.key==='ArrowLeft'?-1:e.key==='ArrowRight'?1:0,dy=e.key==='ArrowUp'?-1:e.key==='ArrowDown'?1:0;if(currentMode==='3d'&&!e.shiftKey){camera.yaw+=dx*.12;camera.pitch=clamp(camera.pitch+dy*.08,.25,1.3);}else{camera.panX+=dx*20;camera.panY+=dy*20;}invalidate();}}});
+document.addEventListener('visibilitychange',()=>{if(!document.hidden){dirty=true;frameAt=performance.now();frameCount=0;}});
+window.addEventListener('beforeunload',()=>{if(stream)stream.close();});
+new ResizeObserver(resizeCanvas).observe($('canvasStage'));
+setInterval(()=>{updateConnection();if(paused||performance.now()-lastReceived>3000)$('frameVal').textContent='IDLE';},500);
+resizeCanvas();setMode('3d');connectStream();requestAnimationFrame(renderFrame);
+</script>
+</body>
+</html>

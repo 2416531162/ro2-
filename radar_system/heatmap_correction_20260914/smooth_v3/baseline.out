@@ -1,0 +1,10 @@
+FAIL display_copy_unchanged_source
+FAIL reduced_plane_noise
+FAIL small_hole_explicit_mask
+FAIL large_hole_stays_missing
+FAIL discontinuity_preserved
+FAIL estimate_hatch_visible
+FAIL raw_mode_exact
+FAIL measurement_invariant
+checks=8 passed=0 failed=8
+REPLAY median_ms=24.2 estimated_pixels=0 source_sha256=cf6e4b14b6fa7be35b68e2a48196a7fa4d2864a777b7acffd75d759346a0d182

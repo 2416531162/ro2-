@@ -1,0 +1,11 @@
+--- a/reverse_bench.py
++++ b/reverse_bench.py
+@@ -9,7 +9,7 @@
+ 
+ from driver_reference import FrameParser, build_frame, STOP_FRAME, DEFAULT_PORT
+ 
+-PULSE_SPEED = 0.0
++PULSE_SPEED = -0.05
+ PULSE_SECONDS = 1.0
+ STARTUP_STOP_SECONDS = 3.0
+ FINAL_STOP_SECONDS = 10.0

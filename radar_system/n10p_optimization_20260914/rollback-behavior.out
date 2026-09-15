@@ -1,0 +1,10 @@
+FAIL byte_resync: valid frame after dropped byte lost
+FAIL reject_bad_angles: invalid span was replaced by invented 15 degrees
+FAIL second_echo: second echo ignored
+FAIL no_stale_republish: old scan republished with fresh timestamp
+FAIL empty_sweep: empty sweep suppressed
+FAIL revolution_time: scan_time is elapsed since reset, not revolution duration
+FAIL gap_reset: stale sweep survives stream gap
+FAIL sector_and_projection: direction mirrored; sectors skip half-degree bins
+REPLAY bytes=107713 scans=30 valid_min=91 valid_max=424
+checks=10 passed=2 failed=8

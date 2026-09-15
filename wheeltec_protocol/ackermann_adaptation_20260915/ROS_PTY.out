@@ -1,0 +1,2 @@
+ROS_PTY {"deadman_persistent_stop": "PASS", "shutdown_persistent_stop": "PASS", "stale_timestamp_rejected": "PASS", "stationary_steering_no_drive": "PASS", "telemetry_loss_stops_with_live_commands": "PASS"}
+ROS_PTY_RESULT=PASS physical_device_access=0

@@ -1,0 +1,10 @@
+FAIL no_rgb_mix: RGB content changes depth colors
+FAIL no_hole_fill: invalid pixels painted as returns
+FAIL stable_metric_color: same depth changes color with scene histogram
+FAIL fixed_range: default scale is not fixed 0.2–2m
+FAIL validity_endpoints: invalid pixel received a depth color
+FAIL red_near_blue_far: near red/far blue reversed
+FAIL depth_encoding: module 'heat_target' has no attribute 'decode_depth_mm'
+FAIL robust_center: module 'heat_target' has no attribute 'depth_center_mm'
+REPLAY shape=(516, 640, 3) near=389.0 far=2612.0 source_sha256=6a93a690aca66f5c6e6d9640289bac676f791dc1ae7a356ebbb45e0029a4584c
+checks=9 passed=1 failed=8

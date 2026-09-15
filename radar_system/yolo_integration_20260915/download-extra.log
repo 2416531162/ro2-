@@ -1,0 +1,26 @@
+Collecting scipy==1.13.1
+  Using cached scipy-1.13.1-cp312-cp312-manylinux_2_17_aarch64.manylinux2014_aarch64.whl.metadata (113 kB)
+Collecting opencv-python-headless==4.10.0.84
+  Using cached opencv_python_headless-4.10.0.84-cp37-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl.metadata (20 kB)
+Collecting numpy==1.26.4
+  File was already downloaded /Users/Admin1/Desktop/正点原子rk3588/radar_system/yolo_integration_20260915/converter_wheels/numpy-1.26.4-cp312-cp312-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
+Collecting psutil==6.1.1
+  Downloading psutil-6.1.1-cp36-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl.metadata (22 kB)
+Collecting ruamel.yaml==0.18.6
+  Downloading ruamel.yaml-0.18.6-py3-none-any.whl.metadata (23 kB)
+Collecting Pillow==10.4.0
+  Downloading pillow-10.4.0-cp312-cp312-manylinux_2_17_aarch64.manylinux2014_aarch64.whl.metadata (9.2 kB)
+Downloading scipy-1.13.1-cp312-cp312-manylinux_2_17_aarch64.manylinux2014_aarch64.whl (33.4 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 33.4/33.4 MB 3.3 MB/s  0:00:10
+Downloading opencv_python_headless-4.10.0.84-cp37-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl (29.3 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 29.3/29.3 MB 7.2 MB/s  0:00:04
+Downloading psutil-6.1.1-cp36-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl (289 kB)
+Downloading ruamel.yaml-0.18.6-py3-none-any.whl (117 kB)
+Downloading pillow-10.4.0-cp312-cp312-manylinux_2_17_aarch64.manylinux2014_aarch64.whl (4.3 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 4.3/4.3 MB 7.2 MB/s  0:00:00
+Saved ./radar_system/yolo_integration_20260915/converter_wheels/scipy-1.13.1-cp312-cp312-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
+Saved ./radar_system/yolo_integration_20260915/converter_wheels/opencv_python_headless-4.10.0.84-cp37-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
+Saved ./radar_system/yolo_integration_20260915/converter_wheels/psutil-6.1.1-cp36-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
+Saved ./radar_system/yolo_integration_20260915/converter_wheels/ruamel.yaml-0.18.6-py3-none-any.whl
+Saved ./radar_system/yolo_integration_20260915/converter_wheels/pillow-10.4.0-cp312-cp312-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
+Successfully downloaded scipy numpy opencv-python-headless psutil ruamel.yaml Pillow

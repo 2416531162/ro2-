@@ -1,0 +1,96 @@
+{
+  "result": "PASS",
+  "model": "YOLOv8n",
+  "backend": "RKNN NPU",
+  "classes": 80,
+  "observed_hz": {
+    "ai": 8.6,
+    "rgb": 22.6,
+    "lidar": 10.0,
+    "status": 11.0,
+    "targets": 11.7
+  },
+  "npu_inference_median_ms": 51.3,
+  "labels": [
+    "Suitcase",
+    "Tv"
+  ],
+  "latest_targets": [
+    {
+      "label": "Suitcase",
+      "conf": 0.41,
+      "distance": 0.38,
+      "x": -0.06,
+      "y": 0.09,
+      "z": 0.36,
+      "x1": 4,
+      "y1": 283,
+      "x2": 458,
+      "y2": 476
+    },
+    {
+      "label": "Suitcase",
+      "conf": 0.79,
+      "distance": 0.38,
+      "x": -0.06,
+      "y": 0.09,
+      "z": 0.36,
+      "x1": 13,
+      "y1": 287,
+      "x2": 454,
+      "y2": 476
+    },
+    {
+      "label": "Suitcase",
+      "conf": 0.62,
+      "distance": 0.38,
+      "x": -0.06,
+      "y": 0.09,
+      "z": 0.36,
+      "x1": 12,
+      "y1": 287,
+      "x2": 454,
+      "y2": 475
+    },
+    {
+      "label": "Suitcase",
+      "conf": 0.58,
+      "distance": 0.38,
+      "x": -0.06,
+      "y": 0.09,
+      "z": 0.36,
+      "x1": 12,
+      "y1": 288,
+      "x2": 453,
+      "y2": 475
+    },
+    {
+      "label": "Suitcase",
+      "conf": 0.54,
+      "distance": 0.38,
+      "x": -0.06,
+      "y": 0.09,
+      "z": 0.36,
+      "x1": 13,
+      "y1": 287,
+      "x2": 454,
+      "y2": 476
+    },
+    {
+      "label": "Suitcase",
+      "conf": 0.52,
+      "distance": 0.38,
+      "x": -0.06,
+      "y": 0.09,
+      "z": 0.36,
+      "x1": 12,
+      "y1": 288,
+      "x2": 453,
+      "y2": 476
+    }
+  ],
+  "frame_size": [
+    640,
+    480
+  ]
+}

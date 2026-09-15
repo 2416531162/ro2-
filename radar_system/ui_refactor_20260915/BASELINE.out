@@ -1,0 +1,3 @@
+FAIL appearance: light_background=false rtk_details_collapsed=false
+QStandardPaths: XDG_RUNTIME_DIR not set, defaulting to '/tmp/runtime-root'
+This plugin does not support propagateSizeHints()
