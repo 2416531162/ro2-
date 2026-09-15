@@ -1,6 +1,0 @@
-[Unit]
-Description=RK3588 homepage, camera, lidar and mapping
-Wants=rk3588-perception@camera.service rk3588-perception@rtk.service rk3588-perception@lidar.service rk3588-perception@ai.service rk3588-perception@mapping.service rk3588-perception@web.service rk3588-perception@gui.service
-
-[Install]
-WantedBy=multi-user.target

@@ -1,2 +1,0 @@
-JSON_DOWNLOAD: valid sparse map; paused robot x=0.703; ranges=360
-PNG_DOWNLOAD: valid PNG 1868x684; bytes=60616

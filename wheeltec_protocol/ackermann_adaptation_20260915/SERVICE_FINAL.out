@@ -1,6 +1,0 @@
-active
-enabled
-MainPID=9049
-ActiveState=active
-SubState=running
-6f0c59f8b7cfda2719f6f3e76abd3fdad163f65c28bee52ca8adc1237524d572  /root/wheeltec/wheeltec_driver.py

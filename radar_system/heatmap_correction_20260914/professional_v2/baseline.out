@@ -1,4 +1,0 @@
-FAIL professional_name
-FAIL quality_partition
-FAIL invalid_legend
-checks=4 passed=1 failed=3

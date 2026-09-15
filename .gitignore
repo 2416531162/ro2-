@@ -11,3 +11,10 @@ __pycache__/
 *.run
 *.caffemodel
 radar_system/n10p_optimization_20260914/vendor-reference/
+
+# Generated dependency/bootstrap trees
+radar_system/yolo_integration_20260915/pip-bootstrap/
+
+# Dated experiment snapshots are preserved on archive/experiments-20260915
+**/*_[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]/
+.git-maintenance/

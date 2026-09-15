@@ -1,1 +1,0 @@
-{"messages": 40, "hz": 10.01, "scan_time_median": 0.1, "age_median_ms": 101.7, "valid_min": 400, "valid_max": 422, "status": {"model": "N10P", "connected": true, "stale": false, "age_ms": 76, "hz": 9.99, "valid": 413, "bins": 720, "bytes": 783908, "frames": 7255, "crc_errors": 3, "angle_errors": 0, "discarded_bytes": 368, "echo_fallbacks": 575, "overruns": 0}}

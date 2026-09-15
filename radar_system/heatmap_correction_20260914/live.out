@@ -1,8 +1,0 @@
-rgb_info {"w": 640, "h": 480, "frame_id": "camera_rgb_optical_frame", "k": [570.3422241210938, 0.0, 319.5, 0.0, 570.3422241210938, 239.5, 0.0, 0.0, 1.0], "p": [570.3422241210938, 0.0, 319.5, 0.0, 0.0, 570.3422241210938, 239.5, 0.0, 0.0, 0.0, 1.0, 0.0], "d": [0.0, 0.0, 0.0, 0.0, 0.0], "model": "plumb_bob"}
-depth {"w": 640, "h": 480, "encoding": "16UC1", "step": 1280, "bigendian": 0, "frame_id": "camera_rgb_optical_frame", "stamp": 1789369948.3407056}
-depth_info {"w": 640, "h": 480, "frame_id": "camera_rgb_optical_frame", "k": [570.3422241210938, 0.0, 319.5, 0.0, 570.3422241210938, 239.5, 0.0, 0.0, 1.0], "p": [570.3422241210938, 0.0, 319.5, 0.0, 0.0, 570.3422241210938, 239.5, 0.0, 0.0, 0.0, 1.0, 0.0], "d": [0.0, 0.0, 0.0, 0.0, 0.0], "model": "plumb_bob"}
-rgb {"w": 640, "h": 480, "encoding": "rgb8", "step": 1920, "bigendian": 0, "frame_id": "camera_rgb_optical_frame", "stamp": 1789369948.3552308}
-rate depth 23.96 frames 214
-rate rgb 22.97 frames 205
-nearest_sync_ms_median_max 9.560108184814453 61.03920936584473
-ai_rate 9.41 last_targets [{"label": "Chair", "conf": 0.71, "distance": 1.06, "x": -0.3, "y": 0.25, "z": 0.98, "x1": 79, "y1": 341, "x2": 209, "y2": 430}]
