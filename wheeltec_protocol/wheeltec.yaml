@@ -17,4 +17,8 @@ wheeltec_driver:
     feedback_timeout_s: 0.30
     startup_stop_s: 3.0
     tx_hz: 50.0
-    publish_tf: false
+    # 唯一的 odom -> base_link 动态 TF 发布者；重启驱动生效。
+    # base_link 与测量几何统一为后轴中心。不要再给它静态 map 父坐标。
+    frame_id: odom
+    base_frame_id: base_link
+    publish_tf: true
