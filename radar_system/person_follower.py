@@ -66,6 +66,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from motion_safety import (  # noqa: E402
     ChassisGeometry, BrakeProfile, brake_envelope, stopping_distance,
     yaw_from_steer, AlphaBetaTracker, SlewLimiter, BreakawayKick, clamp,
+    TargetLock, ScanSectors, reconcile_range,
 )
 
 
@@ -112,10 +113,18 @@ class FollowerConfig:
     control_latency_s: float = 0.35     # ★ 感知到轮子响应的总死时间
 
     # ---- 目标管理 ----
-    min_confidence: float = 0.55
-    confirm_frames: int = 2             # 连续 N 帧才起步
+    min_confidence: float = 0.35
+    confirm_frames: int = 3             # 连续 N 帧位置一致才锁定目标
     target_timeout_s: float = 0.30      # 超过这么久没有新观测即视为丢失
     lost_grace_s: float = 0.40          # 短暂遮挡的宽限期,期间减速而非急停
+    lock_radius_m: float = 0.55         # 帧间关联半径,超出即认为不是同一个人
+    lock_timeout_s: float = 1.50        # 关联不上多久后解锁、允许重选目标
+    min_depth_ratio: float = 0.30       # 深度有效像素占比门限,低于此判无效
+
+    # ---- 传感器交叉校验 ----
+    cross_check_cone_deg: float = 10.0  # 在目标方位 ±N° 内查雷达做证伪
+    range_conflict_m: float = 1.00      # 相机比雷达远这么多即判为冲突
+    coasting_speed_cap: float = 0.15    # 滤波器靠外推滑行时的速度上限
 
     # ---- 其他 ----
     battery_min_v: float = 21.0
@@ -156,14 +165,24 @@ class PersonFollowerNode(Node):
         self.target_class = target_class.lower()
 
         # ---- 感知状态 ----
-        self.tracker_z = AlphaBetaTracker(alpha=0.45, beta=0.10)
-        self.tracker_x = AlphaBetaTracker(alpha=0.50, beta=0.08)
+        self.tracker_z = AlphaBetaTracker(alpha=0.45, beta=0.10,
+                                          gate_base_m=0.35, gate_rate_mps=2.5)
+        self.tracker_x = AlphaBetaTracker(alpha=0.50, beta=0.08,
+                                          gate_base_m=0.30, gate_rate_mps=2.0)
+        self.lock = TargetLock(assoc_radius_m=config.lock_radius_m,
+                               lost_timeout_s=config.lock_timeout_s,
+                               confirm_frames=config.confirm_frames)
+        self.sectors = ScanSectors(half_fov_deg=60.0, bin_deg=5.0)
         self.latest_raw = None
         self.last_target_seen = 0.0
-        self.consecutive_seen = 0
         self.min_front_scan = 99.0
         self.scan_stamp = 0.0
         self.voltage = 24.0
+        self.range_conflicts = 0
+        self.last_conflict = False
+        self.target_messages = 0
+        self.visual_matches = 0
+        self.lidar_fallback_matches = 0
 
         # ---- 执行状态 ----
         self.state = "STANDBY"
@@ -251,6 +270,7 @@ class PersonFollowerNode(Node):
         return lbl == self.target_class
 
     def on_targets(self, msg):
+        self.target_messages += 1
         try:
             items = json.loads(msg.data)
         except Exception:
@@ -259,41 +279,94 @@ class PersonFollowerNode(Node):
             return
 
         now = time.monotonic()
-        best, best_score = None, float('inf')
+        candidates = []
         for item in items:
             if not self._matches(item.get('label')):
                 continue
+            self.visual_matches += 1
             conf = float(item.get('conf', 0.0) or 0.0)
             if conf < self.cfg.min_confidence:
                 continue
-            z = float(item.get('z', 0.0) or 0.0)
-            x = float(item.get('x', 0.0) or 0.0)
-            if not (self.cfg.min_target_depth_m <= z <= self.cfg.max_follow_distance_m):
-                continue
-            # 优先选正前方、且距离最接近期望值的目标
-            score = abs(x) * 1.5 + abs(z - self.cfg.follow_distance_m)
-            if score < best_score:
-                best_score, best = score, (x, z, conf, item.get('label'))
+            # 相机能识别人但深度图有空洞时，不能把“人”这个检测也一起
+            # 丢掉。优先使用可信的相机深度；深度无效或像素比例不足时，
+            # 只在激光扫描新鲜且同方位确有回波时，使用雷达距离兜底。
+            raw_z = item.get('z')
+            raw_x = item.get('x')
+            z = float(raw_z or 0.0)
+            x = float(raw_x or 0.0)
+            ratio = item.get('depth_ratio')
+            range_valid = bool(item.get('range_valid', raw_z is not None))
+            camera_ok = (range_valid
+                         and self.cfg.min_target_depth_m <= z <= self.cfg.max_follow_distance_m
+                         and (ratio is None or float(ratio) >= self.cfg.min_depth_ratio))
 
-        if best is None:
-            self.consecutive_seen = 0
+            bearing_value = item.get('bearing_rad')
+            if bearing_value is not None:
+                bearing = float(bearing_value)
+            elif z > 0.0:
+                bearing = math.atan2(-x, max(z, 0.05))
+            else:
+                continue
+
+            lidar_near = None
+            source = 'camera_depth'
+            if not camera_ok:
+                scan_fresh = self.scan_stamp and now - self.scan_stamp < 0.5
+                if scan_fresh:
+                    lidar_near = self.sectors.min_near(
+                        bearing, math.radians(self.cfg.cross_check_cone_deg))
+                if (lidar_near is None
+                        or not self.cfg.min_target_depth_m <= lidar_near <= self.cfg.max_follow_distance_m):
+                    continue
+                z = float(lidar_near)
+                x = -math.tan(bearing) * z
+                source = 'lidar_fallback'
+                self.lidar_fallback_matches += 1
+
+            candidates.append({'x': x, 'z': z, 'conf': conf,
+                               'label': item.get('label'), 'source': source,
+                               'bearing': bearing, 'lidar_near': lidar_near,
+                               'depth_ratio': ratio})
+
+        # 目标锁定:按运动一致性关联,避免房间里走过第二个人就跟错
+        chosen = self.lock.update(candidates, now, self.cfg.follow_distance_m)
+        if chosen is None:
             return
 
-        x, z, conf, label = best
+        # ---- 相机 / 雷达交叉证伪 ----
+        # 结构光读错时几乎总是读得更远。用目标方位附近的雷达读数校验:
+        # 雷达更近就采信雷达;差得离谱则整帧作废并记冲突。
+        bearing = chosen.get('bearing', math.atan2(-chosen['x'], max(chosen['z'], 0.05)))
+        lidar_near = chosen.get('lidar_near')
+        if lidar_near is None:
+            lidar_near = self.sectors.min_near(
+                bearing, math.radians(self.cfg.cross_check_cone_deg))
+        if chosen.get('source') == 'lidar_fallback':
+            z_eff, conflict = chosen['z'], False
+        else:
+            z_eff, conflict = reconcile_range(chosen['z'], lidar_near,
+                                              self.cfg.range_conflict_m)
+        self.last_conflict = conflict
+        if conflict:
+            self.range_conflicts += 1
+            return      # 两个传感器讲的不是同一件事,这一帧不采信
+
         # 目标中断过久,滤波器里的速度估计已失效,重新起算
         if now - self.last_target_seen > self.cfg.lost_grace_s:
             self.tracker_z.reset()
             self.tracker_x.reset()
 
-        self.consecutive_seen += 1
-        if self.consecutive_seen < self.cfg.confirm_frames:
-            return
-
-        self.tracker_z.update(z, now)
-        self.tracker_x.update(x, now)
+        self.tracker_z.update(z_eff, now)
+        self.tracker_x.update(chosen['x'], now)
         self.last_target_seen = now
-        self.latest_raw = {'label': label, 'conf': round(conf, 3),
-                           'x': round(x, 3), 'z': round(z, 3)}
+        self.latest_raw = {'label': chosen['label'],
+                           'conf': round(chosen['conf'], 3),
+                           'x': round(chosen['x'], 3),
+                           'z': round(chosen['z'], 3),
+                           'z_used': round(z_eff, 3),
+                           'range_source': chosen.get('source', 'camera_depth'),
+                           'depth_ratio': chosen.get('depth_ratio'),
+                           'lidar_near': round(lidar_near, 3) if lidar_near else None}
 
     def on_scan(self, msg):
         n = len(msg.ranges)
@@ -307,6 +380,10 @@ class PersonFollowerNode(Node):
             angle_min = -math.pi
         cone = math.radians(self.cfg.scan_cone_deg)
 
+        # 按方位分桶存最近距离。只用全向最小值有两个问题:
+        # 走廊两侧的墙会把它拉低导致莫名限速;而做相机证伪时需要的是
+        # **目标所在方位附近**的距离,不是整个前向扇区的最小值。
+        self.sectors.clear()
         nearest = 99.0
         for i, r in enumerate(msg.ranges):
             if not math.isfinite(r) or not (msg.range_min <= r <= msg.range_max):
@@ -315,6 +392,7 @@ class PersonFollowerNode(Node):
                 continue
             ang = angle_min + i * angle_inc
             ang = math.atan2(math.sin(ang), math.cos(ang))
+            self.sectors.add(ang, r)
             if abs(ang) <= cone and r < nearest:
                 nearest = r
 
@@ -364,6 +442,9 @@ class PersonFollowerNode(Node):
                 self.speed_slew.reset(0.0)
                 self.tracker_z.reset()
                 self.tracker_x.reset()
+                # TargetLock 自己按 lock_timeout_s 管理超时。这里原先每个
+                # 20 Hz 控制周期都 reset，导致它永远攒不到 3 帧确认——
+                # AI 即使持续识别人也会一直显示“搜索目标”。
                 self.latest_raw = None
 
         # ---- 优先级 4: 正常跟随 ----
@@ -408,8 +489,19 @@ class PersonFollowerNode(Node):
         elif self.scan_stamp:
             cap, self.limit_reason = min(cap, 0.15), "scan_stale"
 
+        # 滤波器正靠预测外推滑行 (观测被野值门控拒绝),位置不是实测值,
+        # 这种时候不该按它全速前进 —— 顶多爬行,等下一帧真观测回来。
+        if have_target and self.tracker_z.coasting:
+            if self.cfg.coasting_speed_cap < cap:
+                cap, self.limit_reason = self.cfg.coasting_speed_cap, "coasting"
+
+        # 相机与雷达对同一方位给出矛盾读数,谁也不可信,停车
+        if self.last_conflict:
+            cap, self.limit_reason = 0.0, "range_conflict"
+            self.state = "SENSOR_CONFLICT"
+
         if self.state in ("LOW_BATTERY", "AEB_EMERGENCY", "SEARCHING_LOST",
-                          "TARGET_BLINK"):
+                          "TARGET_BLINK", "SENSOR_CONFLICT"):
             cap = 0.0
 
         self.speed_cap = cap
@@ -458,6 +550,7 @@ class PersonFollowerNode(Node):
             target['smooth_x'] = round(self.tracker_x.position, 3)
             target['closing_rate'] = round(self.tracker_z.velocity, 3)
             target['distance'] = target['smooth_z']
+            target['coasting'] = self.tracker_z.coasting
 
         payload = {
             "state": self.state,
@@ -468,6 +561,12 @@ class PersonFollowerNode(Node):
             "aeb_active": self.aeb_latched,
             "speed_cap_mps": round(self.speed_cap, 3),
             "limit_reason": self.limit_reason,
+            "target_locked": self.lock.locked,
+            "outliers_rejected": self.tracker_z.rejected_total,
+            "range_conflicts": self.range_conflicts,
+            "target_messages": self.target_messages,
+            "visual_matches": self.visual_matches,
+            "lidar_fallback_matches": self.lidar_fallback_matches,
             "voltage_v": round(self.voltage, 2),
             "cmd_vx": round(self.cmd_vx, 3),
             "cmd_wz": round(self.cmd_wz, 3),
@@ -488,6 +587,7 @@ class PersonFollowerNode(Node):
             "TARGET_BLINK":   "\033[1;33m[ 目标闪断 ]\033[0m",
             "SEARCHING_LOST": "\033[1;35m[ 搜索目标 ]\033[0m",
             "AEB_EMERGENCY":  "\033[1;41;37m[ 硬急停 ]\033[0m",
+            "SENSOR_CONFLICT": "\033[1;41;37m[ 传感器冲突 ]\033[0m",
             "LOW_BATTERY":    "\033[1;31m[ 低电量 ]\033[0m",
             "STANDBY":        "\033[1;30m[ 待命 ]\033[0m",
         }
@@ -496,10 +596,12 @@ class PersonFollowerNode(Node):
         info = (f"{t['label']} X:{t['smooth_x']:+.2f} Z:{t['smooth_z']:.2f}m "
                 f"v:{t['closing_rate']:+.2f}m/s" if t else "未发现目标")
         cap_col = "\033[1;31m" if s['speed_cap_mps'] < 0.2 else "\033[1;32m"
-        line = (f"\r{'[DRY]' if s['dry_run'] else '[RUN]'} {tag} "
+        lock_tag = "\033[1;32m锁定\033[0m" if s['target_locked'] else "\033[1;33m未锁\033[0m"
+        line = (f"\r{'[DRY]' if s['dry_run'] else '[RUN]'} {tag} {lock_tag} "
                 f"{info:<44} | 雷达 {s['aeb_min_scan_m']:5.2f}m "
                 f"| {cap_col}上限 {s['speed_cap_mps']:.2f}\033[0m ({s['limit_reason']:<17}) "
                 f"| vx={s['cmd_vx']:+.2f} 舵={s['cmd_steer_deg']:+5.1f}° "
+                f"| 野值{s['outliers_rejected']:>3d} 冲突{s['range_conflicts']:>3d} "
                 f"| {s['voltage_v']:.1f}V   ")
         sys.stdout.write(line)
         sys.stdout.flush()

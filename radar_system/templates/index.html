@@ -127,9 +127,9 @@
     </div>
     <div class="dpad-container">
      <div class="dpad-speed-bar">
-      <button class="speed-btn" data-speed="low">慢速 0.30m/s</button>
-      <button class="speed-btn active" data-speed="med">常速 0.55m/s</button>
-      <button class="speed-btn" data-speed="high">快速 0.85m/s</button>
+      <button class="speed-btn" data-speed="low">标准 0.50m/s</button>
+      <button class="speed-btn active" data-speed="med">疾速 0.85m/s</button>
+      <button class="speed-btn" data-speed="high">狂暴 1.20m/s</button>
      </div>
      <div class="dpad-speed-bar">
       <button class="steer-btn" data-steer="gentle">缓转 8&deg;</button>
@@ -744,18 +744,29 @@ let isPressing = false;
 let pressStartTime = 0;
 let heartbeatTimer = null;
 let pulseStopTimer = null;
+let pulseActive = false;
 let lastTouchTime = 0;
 
-function sendManualDrive(action) {
-  return fetch('/api/manual_drive', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      direction: action,
-      speed_tier: currentSpeedTier,
-      steer_tier: currentSteerTier
-    })
-  }).catch(() => {});
+async function sendManualDrive(action) {
+  try {
+    const response = await fetch('/api/manual_drive', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        direction: action,
+        speed_tier: currentSpeedTier,
+        steer_tier: currentSteerTier
+      })
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const result = await response.json();
+    if (!result.ok) throw new Error(result.error || '底盘拒绝指令');
+    return true;
+  } catch (error) {
+    console.error('手动底盘指令失败:', error);
+    updateBadgeStatus(`控制链路异常: ${error.message}`, '#ff8c91');
+    return false;
+  }
 }
 
 function updateBadgeStatus(text, color) {
@@ -775,6 +786,7 @@ function executeStop() {
     clearInterval(heartbeatTimer);
     heartbeatTimer = null;
   }
+  pulseActive = false;
   isPressing = false;
   currentAction = null;
   if (currentBtn) {
@@ -804,6 +816,7 @@ function handlePressStart(action, btnEl) {
     clearInterval(heartbeatTimer);
     heartbeatTimer = null;
   }
+  pulseActive = false;
   if (currentBtn && currentBtn !== btnEl) {
     currentBtn.classList.remove('pressed');
   }
@@ -822,13 +835,15 @@ function handlePressStart(action, btnEl) {
   // 1. 立即下发初始推力
   sendManualDrive(action);
 
-  // 2. 开启 120ms 心跳（配合后端 20Hz 自动维持平滑推力，网络不丢包）
+  // 2. 开启 100ms 网络心跳（后端再以 50Hz 稳定维持平滑推力）
   heartbeatTimer = setInterval(() => {
-    if (isPressing && currentAction === action) {
+    if ((isPressing || pulseActive) && currentAction === action) {
       sendManualDrive(action);
-      updateBadgeStatus(`已接管: ${actionText} (持续推进中)`, '#ff8c91');
+      if (isPressing) {
+        updateBadgeStatus(`已接管: ${actionText} (持续推进中)`, '#ff8c91');
+      }
     }
-  }, 120);
+  }, 100);
 }
 
 function handlePressEnd(action, btnEl) {
@@ -837,17 +852,14 @@ function handlePressEnd(action, btnEl) {
   const pressDuration = performance.now() - pressStartTime;
   isPressing = false;
 
-  // 立即停止长按心跳
-  if (heartbeatTimer) {
-    clearInterval(heartbeatTimer);
-    heartbeatTimer = null;
-  }
-
   // 核心双模判定：
   // 1. 如果按下时间 < 280ms：判定为【点击一下/点动微调】！
   //    为了克服静摩擦力并让小车动力充沛移动一段（约20-30cm），保证至少运行 600ms 动力脉冲！
   const MIN_PULSE_MS = 600;
   if (pressDuration < 280) {
+    // 点动期间继续发心跳。旧版在松指时立即断掉心跳，只靠一帧
+    // Twist 和后端 0.6s 看门狗，刚好卡在底盘 0.5s 超时边界，所以会顿挫。
+    pulseActive = true;
     const remainPulseMs = Math.max(100, MIN_PULSE_MS - pressDuration);
     const actionText = ACTION_NAMES[action] || action;
     updateBadgeStatus(`微调点动: ${actionText} (${remainPulseMs}ms)`, '#7bf3d9');
@@ -859,6 +871,7 @@ function handlePressEnd(action, btnEl) {
   } else {
     // 2. 如果按下时间 >= 280ms：判定为【长按不放】！
     //    松手即停！0 延迟立即刹车！
+    pulseActive = false;
     executeStop();
   }
 }

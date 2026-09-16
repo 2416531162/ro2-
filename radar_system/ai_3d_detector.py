@@ -94,7 +94,7 @@ def yolo_class_nms(boxes, scores, classes, threshold=0.45, limit=100):
     return sorted(kept, key=lambda i: (-float(scores[i]), i))[:limit]
 
 
-def yolo_postprocess(outputs, transform, confidence=0.40, iou=0.45, size=640):
+def yolo_postprocess(outputs, transform, confidence=0.30, iou=0.45, size=640):
     """Decode six raw YOLOv8 heads: box DFL logits / class logits per scale."""
     if outputs is None or len(outputs) != 6:
         raise ValueError('YOLO model must expose six raw detection heads')
@@ -189,6 +189,7 @@ class AI3DDetectorNode(Node):
 
         self.latest_rgb = None
         self.latest_depth = None
+        self.latest_depth_stamp = None
         self.latest_header = None
         self.frame_seq = 0
         self.lock = threading.Lock()
@@ -220,11 +221,65 @@ class AI3DDetectorNode(Node):
             self.cx = msg.k[2]
             self.cy = msg.k[5]
 
+    # ======================================================================
+    # 稳健深度提取
+    # ======================================================================
+    # 改造前的写法:
+    #     roi = depth[yc-8:yc+8, xc-8:xc+8]     # bbox 中心 16x16
+    #     valid = roi[roi > 150]                 # 只排下界
+    #     if len(valid) > 4: Z = median(valid)/1000
+    #
+    # 三个会导致车全速撞上去的缺陷:
+    #   1. 只有下界没有上界。Astra S 结构光超过约 6m 返回的是垃圾值,一律放行。
+    #   2. 256 个像素里只要有 5 个有效就下结论。人侧身、抬手、两腿之间有缝时,
+    #      中心那一小块很可能穿过去打在背景墙上 —— 于是"人在 4m 外",一脚油门。
+    #   3. 取中位数。黑衣服/逆光下有效像素零散分布在前景与背景之间,
+    #      中位数会被拉向远处。
+    #
+    # 现在:内缩 bbox 取大得多的 ROI,要求有效像素占比达标,并取**低百分位**
+    # (偏向更近的读数)。宁可把人判得比实际近,也不能判得比实际远。
+    DEPTH_MIN_MM = 150.0
+    DEPTH_MAX_MM = 6000.0
+    DEPTH_INSET = 0.20          # bbox 四边各内缩 20%,避开边缘穿透到背景
+    DEPTH_PERCENTILE = 20.0     # 取第 20 百分位而非中位数,保守偏近
+    DEPTH_MIN_VALID_RATIO = 0.30
+    DEPTH_MIN_PIXELS = 60
+    DEPTH_MAX_PAIR_AGE_S = 0.15  # RGB 与深度帧的最大允许时间差
+
+    @classmethod
+    def robust_depth(cls, depth, x1, y1, x2, y2):
+        """返回 (Z_米, 有效像素占比);数据不足以下结论时返回 (None, ratio)。"""
+        h, w = depth.shape[:2]
+        bw, bh = x2 - x1, y2 - y1
+        if bw <= 0 or bh <= 0:
+            return None, 0.0
+        ix1 = max(0, int(x1 + bw * cls.DEPTH_INSET))
+        ix2 = min(w, int(x2 - bw * cls.DEPTH_INSET))
+        iy1 = max(0, int(y1 + bh * cls.DEPTH_INSET))
+        iy2 = min(h, int(y2 - bh * cls.DEPTH_INSET))
+        if ix2 - ix1 < 2 or iy2 - iy1 < 2:
+            return None, 0.0
+
+        roi = depth[iy1:iy2, ix1:ix2]
+        if roi.size < cls.DEPTH_MIN_PIXELS:
+            return None, 0.0
+
+        mask = (roi > cls.DEPTH_MIN_MM) & (roi < cls.DEPTH_MAX_MM)
+        valid = roi[mask]
+        ratio = float(len(valid)) / float(roi.size)
+        # 有效像素太稀疏说明这一块深度图本身就不可信 (逆光/黑衣/玻璃),
+        # 此时任何统计量都是噪声,直接判为无效观测。
+        if ratio < cls.DEPTH_MIN_VALID_RATIO or len(valid) < cls.DEPTH_MIN_PIXELS:
+            return None, ratio
+        return float(np.percentile(valid, cls.DEPTH_PERCENTILE)) / 1000.0, ratio
+
     def depth_cb(self, msg):
         try:
             depth_arr = np.frombuffer(msg.data, dtype=np.uint16).reshape((msg.height, msg.width))
+            stamp = msg.header.stamp.sec + msg.header.stamp.nanosec / 1e9
             with self.lock:
                 self.latest_depth = depth_arr
+                self.latest_depth_stamp = stamp
         except Exception:
             pass
 
@@ -245,6 +300,7 @@ class AI3DDetectorNode(Node):
                 seq = self.frame_seq
                 rgb = None if self.latest_rgb is None else self.latest_rgb
                 depth = self.latest_depth
+                depth_stamp = self.latest_depth_stamp
                 header = self.latest_header
 
             if rgb is None or seq == last_seq:
@@ -256,6 +312,17 @@ class AI3DDetectorNode(Node):
             try:
                 bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
                 h, w = bgr.shape[:2]
+
+                # RGB 与深度来自两个独立回调,没有硬件同步。相差太多时
+                # 像素位置对不上,bbox 会框到错误的深度区域 —— 宁可不给距离。
+                rgb_stamp = None
+                if header is not None:
+                    rgb_stamp = header.stamp.sec + header.stamp.nanosec / 1e9
+                depth_ok = True
+                pair_skew = None
+                if rgb_stamp and depth_stamp:
+                    pair_skew = abs(rgb_stamp - depth_stamp)
+                    depth_ok = pair_skew <= self.DEPTH_MAX_PAIR_AGE_S
 
                 detections = []
                 self.tick += 1
@@ -275,6 +342,8 @@ class AI3DDetectorNode(Node):
                 detections.extend(self.yolo.infer_boxes(bgr))
 
                 target_list = []
+                ranged_count = 0
+                unranged_people = 0
                 # 3. 3D 逆投影几何空间测距
                 for label, conf, x1, y1, x2, y2, color in detections:
                     if x2 <= x1 or y2 <= y1:
@@ -285,16 +354,12 @@ class AI3DDetectorNode(Node):
 
                     dist_m = None
                     X = Y = Z = 0.0
+                    depth_ratio = 0.0
 
-                    if depth is not None:
-                        half = 8
-                        ry1, ry2 = max(0, yc - half), min(h, yc + half)
-                        rx1, rx2 = max(0, xc - half), min(w, xc + half)
-                        roi = depth[ry1:ry2, rx1:rx2]
-                        valid = roi[roi > 150]
-                        if len(valid) > 4:
-                            med_mm = float(np.median(valid))
-                            Z = med_mm / 1000.0
+                    if depth is not None and depth_ok:
+                        Zq, depth_ratio = self.robust_depth(depth, x1, y1, x2, y2)
+                        if Zq is not None:
+                            Z = Zq
                             X = (xc - self.cx) * Z / self.fx
                             Y = (yc - self.cy) * Z / self.fy
                             dist_m = math.sqrt(X*X + Y*Y + Z*Z)
@@ -303,24 +368,42 @@ class AI3DDetectorNode(Node):
                     cv2.rectangle(bgr, (x1, y1), (x2, y2), color, 2)
                     cv2.drawMarker(bgr, (xc, yc), color, cv2.MARKER_CROSS, 12, 2)
 
+                    # 2D 人体检测与 3D 深度是否有效是两件事。旧逻辑在深度图
+                    # 有空洞时把已经识别到的人整个丢掉，跟随器因此长期显示
+                    # “无人”。现在始终发布人体/人脸的 2D 方位；若 Astra 深度
+                    # 无效，跟随器可用同方位激光雷达距离完成安全兜底。
+                    bearing_rad = math.atan2(-(xc - self.cx), max(self.fx, 1.0))
+                    item = {
+                        "label": label,
+                        "conf": round(conf, 2),
+                        "x1": int(x1),
+                        "y1": int(y1),
+                        "x2": int(x2),
+                        "y2": int(y2),
+                        "bearing_rad": round(bearing_rad, 5),
+                        "stamp": round(rgb_stamp, 4) if rgb_stamp else None,
+                        "depth_ratio": round(depth_ratio, 3),
+                        "range_valid": False,
+                    }
+
                     if dist_m is not None and 0.2 < dist_m < 12.0:
                         dist_str = f"{dist_m:.2f}m"
                         coord_str = f"X:{X:+.2f} Y:{Y:+.2f} Z:{Z:.2f}m"
                         tag_text = f"[{label}] {dist_str} | {coord_str}"
-                        target_list.append({
-                            "label": label,
-                            "conf": round(conf, 2),
+                        item.update({
                             "distance": round(dist_m, 2),
                             "x": round(X, 2),
                             "y": round(Y, 2),
                             "z": round(Z, 2),
-                            "x1": int(x1),
-                            "y1": int(y1),
-                            "x2": int(x2),
-                            "y2": int(y2),
+                            "range_valid": True,
                         })
+                        target_list.append(item)
+                        ranged_count += 1
                     else:
                         tag_text = f"[{label}] (Out of Range)"
+                        if label.lower() in ("person", "face"):
+                            target_list.append(item)
+                            unranged_people += 1
 
                     (tw, th), _ = cv2.getTextSize(tag_text, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
                     cv2.rectangle(bgr, (x1, max(0, y1 - 22)), (x1 + tw + 8, y1), (15, 23, 42), -1)
@@ -359,7 +442,10 @@ class AI3DDetectorNode(Node):
                 status = String()
                 status.data = json.dumps(dict(model="YOLOv8n", backend="RKNN NPU", classes=80,
                                               fps=fps, inference_ms=round(self.yolo.last_inference_ms, 1),
-                                              detected=len(detections), ranged=len(target_list)))
+                                              detected=len(detections), ranged=ranged_count,
+                                              unranged_people=unranged_people,
+                                              depth_ok=depth_ok,
+                                              pair_skew_ms=round(pair_skew * 1000, 1) if pair_skew else None))
                 self.pub_status.publish(status)
 
             except Exception as e:
