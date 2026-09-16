@@ -1,0 +1,233 @@
+#!/usr/bin/env python3
+"""Read-only 3D observation bridge alongside the existing 2D navigation map.
+
+Default: Astra registered depth -> acquisition-time TF -> recent map-frame
+voxel samples. An existing registered PointCloud2 or OctoMap may be selected
+instead. Never mix sources or use N10P's one scanning plane as 3D geometry.
+"""
+import math
+import os
+import time
+import numpy as np
+from rclpy.time import Time
+from rclpy.qos import qos_profile_sensor_data
+from tf2_ros import TransformException
+from sensor_msgs.msg import Image,CameraInfo,PointCloud2
+from live_map_node import LiveMapNode,stamp_s
+from cloud_scene import VoxelHistory,ScenePackets,read_xyzi,depth_xyzi,apply_matrix,pose_jump
+
+
+class LiveCloudNode(LiveMapNode):
+    def __init__(self):
+        super().__init__()
+        defaults={
+            'cloud_source':os.environ.get('RO2_CLOUD_SOURCE','depth'),
+            'depth_topic':os.environ.get('DEPTH_TOPIC','/camera/depth_registered/image_raw'),
+            'depth_info_topic':os.environ.get('DEPTH_INFO_TOPIC','/camera/rgb/camera_info'),
+            'cloud_topic':os.environ.get('RO2_CLOUD_TOPIC','/mapping/depth_points'),
+            'sensor_tf_calibrated':os.environ.get('SENSOR_TF_CALIBRATED','0')=='1',
+            'display_voxel_m':.05,'display_point_limit':60000,'display_history_s':45.,
+        }
+        for k,v in defaults.items():
+            self.declare_parameter(k,v)
+        self.source=self.get_parameter('cloud_source').value
+        if self.source not in ('depth','pointcloud','octomap'):
+            raise ValueError('cloud_source must be depth, pointcloud or octomap')
+        self.history=VoxelHistory(self.get_parameter('display_voxel_m').value,
+                                  self.get_parameter('display_point_limit').value,
+                                  self.get_parameter('display_history_s').value)
+        self.packets=ScenePackets()
+        self.latest_depth=self.latest_info=self.latest_points=None
+        self.last_stamp=-1.
+        self.observed_at=None
+        self.cloud_error='等待三维数据'
+        self.reset_reason='启动新会话'
+        self.correction_anchor=None
+        self.clock_anchor=None
+        self.scene_dirty=False
+        self.create_subscription(Image,self.get_parameter('depth_topic').value,
+                                 self.depth_cb,qos_profile_sensor_data)
+        self.create_subscription(CameraInfo,self.get_parameter('depth_info_topic').value,
+                                 self.info_cb,qos_profile_sensor_data)
+        self.create_subscription(PointCloud2,self.get_parameter('cloud_topic').value,
+                                 self.points_cb,qos_profile_sensor_data)
+        self.create_timer(.5,self.publish_scene)
+
+    def depth_cb(self,msg):
+        if self.source=='depth':
+            self.latest_depth=msg
+
+    def info_cb(self,msg):
+        self.latest_info=msg
+
+    def points_cb(self,msg):
+        if self.source=='pointcloud':
+            self.latest_points=msg
+
+    def clear_scene(self,reason):
+        with self.lock:
+            self.history.clear()
+            self.packets.reset()
+            self.cloud=[]
+            self.cloud_revision+=1
+            self.observed_at=None
+            self.reset_reason=reason
+            self.scene_dirty=True
+
+    def reset_display(self):
+        super().reset_display()
+        self.clear_scene('地图会话切换，清除旧三维数据')
+        self.latest_depth=self.latest_points=self.pending_cloud=None
+        self.last_stamp=-1.
+        self.correction_anchor=None
+
+    def initial_pose(self,x,y,heading):
+        super().initial_pose(x,y,heading)
+        self.clear_scene('重新设置初始位置，等待新观测')
+        self.correction_anchor=None
+
+    def _transform(self,points,header):
+        tf=self.tf.lookup_transform('map',header.frame_id,Time.from_msg(header.stamp))
+        t,q=tf.transform.translation,tf.transform.rotation
+        return apply_matrix(points,(t.x,t.y,t.z),(q.x,q.y,q.z,q.w))
+
+    def tick(self):
+        super().tick()
+        now=time.monotonic()
+        ros_now=self.get_clock().now().nanoseconds*1e-9
+        if self.clock_anchor is not None and ros_now<self.clock_anchor-.1:
+            self.clear_scene('ROS 时间回退，清除历史观测')
+            self.last_stamp=-1.
+        self.clock_anchor=ros_now
+        with self.lock:
+            ready=self.map_info is not None and not self.map_fault and self.robot is not None and now-self.pose_at<1.
+        if not ready:
+            with self.lock:
+                self.robot=None
+            self.cloud_error='等待真实地图与新鲜定位 TF；历史点云不可用于控制'
+            return
+        try:
+            correction=self.tf.lookup_transform('map','odom',Time())
+            t,q=correction.transform.translation,correction.transform.rotation
+            pose=(t.x,t.y,math.atan2(2*(q.w*q.z+q.x*q.y),1-2*(q.y*q.y+q.z*q.z)))
+            if pose_jump(self.correction_anchor,pose):
+                self.clear_scene('定位/回环修正，重新累积三维观测，避免错位叠影')
+                self.correction_anchor=pose
+            if self.correction_anchor is None:
+                self.correction_anchor=pose
+        except TransformException as exc:
+            self.cloud_error='缺少 map→odom: '+str(exc)
+            return
+        if self.source=='octomap':
+            return  # marker callbacks are handled at 1Hz below
+        msg=self.latest_depth if self.source=='depth' else self.latest_points
+        if msg is None:
+            self.cloud_error='等待 '+self.get_parameter('depth_topic' if self.source=='depth' else 'cloud_topic').value
+            return
+        stamp=stamp_s(msg.header.stamp)
+        if not math.isfinite(stamp) or stamp<=0 or not -.1<=ros_now-stamp<=.8:
+            self.cloud_error='三维输入已过期；保留有限历史，不冒充实时'
+            return
+        if stamp<=self.last_stamp:
+            return
+        with self.lock:
+            input_epoch=self.packets.epoch
+        try:
+            if self.source=='depth':
+                if not self.get_parameter('sensor_tf_calibrated').value:
+                    raise ValueError('相机外参未确认：校准真实 TF 后设置 SENSOR_TF_CALIBRATED=1')
+                points=depth_xyzi(msg,self.latest_info)
+            else:
+                points=read_xyzi(msg)
+            if not msg.header.frame_id:
+                raise ValueError('missing source frame')
+            points=self._transform(points,msg.header)
+            # Do not keep arbitrary distant points in the 4GB display window.
+            with self.lock:
+                robot=self.robot
+            if robot:
+                mask=np.linalg.norm(points[:,:2]-np.array(robot[:2]),axis=1)<=20.
+                points=points[mask]
+            with self.lock:
+                if input_epoch!=self.packets.epoch or self.map_info is None or self.map_fault:
+                    return
+                self.history.add(points,now)
+                self.last_stamp=stamp
+                if len(points):
+                    self.observed_at=now-max(0.,ros_now-stamp)
+                self.scene_dirty=True
+                self.cloud_error='' if len(points) else '本帧没有有效三维深度点'
+        except (TransformException,ValueError,TypeError,OverflowError) as exc:
+            self.cloud_error=str(exc)
+
+    def encode_cloud(self):
+        # Base class already subscribes to OctoMap's transient-local MarkerArray.
+        # It is an alternative, complete snapshot, not a second source to blend.
+        with self.lock:
+            msg,self.pending_cloud=self.pending_cloud,None
+            ready=self.map_info is not None and self.robot is not None and not self.map_fault
+            input_epoch=self.packets.epoch
+        if self.source!='octomap' or msg is None or not ready:
+            return
+        points=[]; stamps=[]
+        # OctoMap publishes a complete set of resolution levels. Empty levels
+        # and DELETEALL must clear old points, never append a second map.
+        total=sum(len(m.points) for m in msg.markers if m.action==0)
+        step=max(1,math.ceil(total/self.history.limit))
+        for m in msg.markers:
+            if m.action!=0:
+                continue
+            if m.header.frame_id!='map':
+                self.cloud_error='OctoMap snapshot 必须在 map 坐标系'
+                return
+            if not m.points:
+                continue
+            a=np.array([[p.x,p.y,p.z,-1.] for p in m.points[::step]],np.float32)
+            t,q=m.pose.position,m.pose.orientation
+            try:
+                points.append(apply_matrix(a,(t.x,t.y,t.z),(q.x,q.y,q.z,q.w)))
+                stamps.append(stamp_s(m.header.stamp))
+            except ValueError as exc:
+                self.cloud_error=str(exc)
+                return
+        a=np.concatenate(points)[:self.history.limit] if points else np.empty((0,4),np.float32)
+        ros_now=self.get_clock().now().nanoseconds*1e-9
+        age=ros_now-max(stamps) if stamps else None
+        with self.lock:
+            if input_epoch!=self.packets.epoch:
+                return
+            self.packets.update(a)
+            self.observed_at=time.monotonic()-max(0.,age) if age is not None and age>=-.1 else None
+            self.cloud_error='' if len(a) else 'OctoMap 为空'
+
+    def publish_scene(self):
+        if self.source=='octomap':
+            return
+        with self.lock:
+            self.history.expire(time.monotonic())
+            if not (self.scene_dirty or self.history.dirty):
+                return
+            a=self.history.array()
+            self.packets.update(a)
+            self.history.dirty=self.scene_dirty=False
+
+    def snapshot(self):
+        data=super().snapshot()
+        now=time.monotonic()
+        with self.lock:
+            age=None if self.observed_at is None else max(0.,now-self.observed_at)
+            scene=dict(self.packets.meta)
+            scene.update(source=self.source,age_s=round(age,2) if age is not None else None,
+                         live=bool(age is not None and age<1.5 and data['localized'] and not self.cloud_error),
+                         error=self.cloud_error,reset_reason=self.reset_reason,
+                         voxel_m=self.history.voxel,limit=self.history.limit,history_s=self.history.ttl,
+                         kind='recent_observations' if self.source!='octomap' else 'octomap_snapshot',
+                         calibrated=bool(self.get_parameter('sensor_tf_calibrated').value),
+                         note='显示层，不是导航碰撞图；人体移动可能留下短时观测轨迹')
+            data['scene']=scene
+            data['epoch']=self.packets.epoch
+        return data
+
+    def scene_bytes(self,epoch,revision,compressed=False):
+        with self.lock:
+            return self.packets.get(epoch,revision,compressed)
