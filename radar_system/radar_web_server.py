@@ -137,6 +137,32 @@ follower_proc = None
 last_check_proc = 0.0
 cached_proc_running = False
 
+FOLLOWER_STALE_S = 1.5      # 跟随节点 20Hz 发状态,1.5 秒没消息即判为已停
+
+
+def mark_follower_staleness(payload):
+    """给跟随状态打上 stale 标记,陈旧时清掉会误导人的字段。
+
+    没有这道处理,节点挂掉后界面会一直显示它最后那一刻的 AEB 状态与测距,
+    看起来就像"雷达一直在报前方有障碍物",实际上节点早就不在了。
+    """
+    if not payload:
+        return payload
+    rx = payload.get('_rx_monotonic')
+    age = (time.monotonic() - rx) if rx else None
+    stale = (age is None) or (age > FOLLOWER_STALE_S)
+    payload['stale'] = stale
+    payload['age_s'] = round(age, 2) if age is not None else None
+    if stale:
+        # 这些值只在节点活着时才有意义,陈旧时必须清掉而不是接着显示
+        payload['aeb_active'] = False
+        payload['aeb_min_scan_m'] = None
+        payload['path_clearance_m'] = None
+        payload['target'] = None
+        payload['state'] = 'OFFLINE'
+    return payload
+
+
 def is_follower_running():
     global follower_proc
     if follower_proc is not None and follower_proc.poll() is None:
@@ -277,6 +303,10 @@ class SLAMBridgeNode(Node):
         global state
         try:
             d = json.loads(msg.data)
+            # 记录收到时刻。跟随节点被 Ctrl-C 或崩溃时不会发"我停了",
+            # 最后一条消息会永远冻在界面上 —— AEB 横幅一直亮、正前测距
+            # 一直显示那个旧值,哪怕雷达实时看到的是 2 米开外。
+            d['_rx_monotonic'] = time.monotonic()
             with data_lock:
                 state['follower'] = d
         except Exception:
@@ -338,10 +368,14 @@ class SLAMBridgeNode(Node):
             # 一次转换、一个掩码,四个方位与整体最小值都从同一份数组上取,
             # 避免原来每个方位各跑一遍 Python 循环、再多跑两遍全量遍历。
             clean, ok = clean_ranges(msg.ranges, msg.range_min, msg.range_max)
-            front_d = sector_min(clean, 345, 15)      # 跨 0 度,由 sector_min 处理
-            left_d = sector_min(clean, 75, 105)
-            back_d = sector_min(clean, 165, 195)
-            right_d = sector_min(clean, 255, 285)
+            # 必须把 angle_min 传进去。LaserScan 第 0 个光束指向 msg.angle_min
+            # 而不是 0°,N10P 发布 -π,不传的话「正前方测距」读的其实是车尾 ——
+            # 雷达扫到车自己的车身,会被当成正前方 0.17m 的障碍物。
+            amin_deg = math.degrees(msg.angle_min)
+            front_d = sector_min(clean, 345, 15, angle_min_deg=amin_deg)
+            left_d = sector_min(clean, 75, 105, angle_min_deg=amin_deg)
+            back_d = sector_min(clean, 165, 195, angle_min_deg=amin_deg)
+            right_d = sector_min(clean, 255, 285, angle_min_deg=amin_deg)
             overall_min = float(np.nanmin(clean)) if bool(np.any(ok)) else 99.0
             ranges_out = np.round(np.where(ok, clean, 0.0), 2).tolist()
         else:
@@ -491,6 +525,7 @@ class RadarHTTPHandler(http.server.BaseHTTPRequestHandler):
         elif self.path == '/api/follower/status':
             with data_lock:
                 f_data = dict(state.get('follower', {}))
+            f_data = mark_follower_staleness(f_data)
             f_data['running'] = check_follower_running_cached()
             self._send_json(f_data)
 
@@ -505,7 +540,10 @@ class RadarHTTPHandler(http.server.BaseHTTPRequestHandler):
                 while True:
                     with data_lock:
                         state['follower_running'] = check_follower_running_cached()
-                        payload = json.dumps(state)
+                        snapshot = dict(state)
+                        snapshot['follower'] = mark_follower_staleness(
+                            dict(snapshot.get('follower', {})))
+                        payload = json.dumps(snapshot)
                     self.wfile.write(f"data: {payload}\n\n".encode('utf-8'))
                     self.wfile.flush()
                     time.sleep(0.08) # ~12 FPS

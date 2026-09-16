@@ -80,12 +80,12 @@
      <span id="fStateBadge" class="f-badge f-badge-idle">未启动</span>
     </div>
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;font-size:11px;color:var(--muted);background:#111a23;padding:6px 9px;border-radius:6px;border:1px solid #283644;">
-     <span>保持间距: <strong style="color:var(--mint);">0.40 米</strong> (AEB防撞硬刹)</span>
+     <span>保持间距: <strong style="color:var(--mint);">1.00 米</strong> (车头到人)</span>
      <button id="fQuickToggleBtn" class="button" style="min-height:26px;padding:2px 8px;font-size:11px;background:#203b36;color:#69dec4;border-color:#3d6e64;">一键启动</button>
     </div>
     <div class="follower-card-grid">
      <div class="follower-stat-cell">
-      <span>人体纵距 Z (0.4m)</span>
+      <span>人体纵距 Z (1.0m)</span>
       <strong class="mono" id="fDistVal" style="color:#69dec4;">--</strong>
      </div>
      <div class="follower-stat-cell">
@@ -112,7 +112,7 @@
      </div>
     </div>
     <div id="fAebAlert" class="follower-alert danger" role="alert" style="display:none;">
-     🛑 <strong>雷达 AEB 防撞触发：</strong>前方障碍物 &lt; 0.40m，底盘紧急硬刹停！
+     🛑 <strong>雷达 AEB 防撞触发：</strong>车宽走廊净空受限，底盘紧急硬刹停！
     </div>
     <div id="fLostAlert" class="follower-alert warn" role="alert" style="display:none;">
      🔍 <strong>前方无人体目标：</strong>底盘原地静止等待中...
@@ -615,7 +615,7 @@ function updateFollowerUI(f, isRunning) {
       fBadge.textContent = '待命 / 未启动';
     } else if (rawState.includes('TRACKING')) {
       fBadge.classList.add('f-badge-tracking');
-      fBadge.textContent = '🎯 跟随中 (0.4m)';
+      fBadge.textContent = '🎯 跟随中 (1.0m)';
     } else if (rawState.includes('AEB')) {
       fBadge.classList.add('f-badge-aeb');
       fBadge.textContent = '🛑 AEB硬刹停';
@@ -624,7 +624,7 @@ function updateFollowerUI(f, isRunning) {
       fBadge.textContent = '🔍 搜寻目标';
     } else if (rawState.includes('WAITING')) {
       fBadge.classList.add('f-badge-running');
-      fBadge.textContent = '✅ 距离保持 (0.4m)';
+      fBadge.textContent = '✅ 距离保持 (1.0m)';
     } else {
       fBadge.classList.add('f-badge-running');
       fBadge.textContent = rawState;
@@ -635,7 +635,7 @@ function updateFollowerUI(f, isRunning) {
   if ($('fDistVal')) {
     if (target && Number.isFinite(target.z)) {
       $('fDistVal').textContent = `${target.z.toFixed(2)} m`;
-      $('fDistVal').style.color = Math.abs(target.z - 0.40) <= 0.08 ? '#69dec4' : '#f6c879';
+      $('fDistVal').style.color = Math.abs(target.z - 1.00) <= 0.15 ? '#69dec4' : '#f6c879';
     } else {
       $('fDistVal').textContent = '--';
       $('fDistVal').style.color = 'var(--muted)';
@@ -664,8 +664,15 @@ function updateFollowerUI(f, isRunning) {
     }
   }
 
+  // 跟随节点陈旧时(被 Ctrl-C 或崩溃),它最后那一刻的读数不能再显示 ——
+  // 否则界面会一直卡在"前方 0.55m、AEB 触发",而实时雷达其实看到 2 米开外,
+  // 节点也早就不在了。后端 1.5 秒收不到状态就打 stale 标记。
+  const fLive = (f && !f.stale) ? f : null;
+
   if ($('fFrontLidarVal')) {
-    const minFront = (f && Number.isFinite(f.aeb_min_scan_m)) ? f.aeb_min_scan_m : (state ? state.front_dist : null);
+    const minFront = (fLive && Number.isFinite(fLive.aeb_min_scan_m))
+      ? fLive.aeb_min_scan_m
+      : (state ? state.front_dist : null);
     if (Number.isFinite(minFront) && minFront > 0 && minFront < 50) {
       $('fFrontLidarVal').textContent = `${minFront.toFixed(2)} m`;
       $('fFrontLidarVal').style.color = minFront < 0.40 ? '#ff8c91' : minFront < 0.60 ? '#f6c879' : '#69dec4';
@@ -676,17 +683,17 @@ function updateFollowerUI(f, isRunning) {
   }
 
   if ($('fSpeedVal')) {
-    const vx = (f && Number.isFinite(f.cmd_vx)) ? f.cmd_vx : 0.0;
+    const vx = (fLive && Number.isFinite(fLive.cmd_vx)) ? fLive.cmd_vx : 0.0;
     $('fSpeedVal').textContent = `${vx.toFixed(2)} m/s`;
   }
   if ($('fSteerVal')) {
-    const wz = (f && Number.isFinite(f.cmd_wz)) ? f.cmd_wz : 0.0;
+    const wz = (fLive && Number.isFinite(fLive.cmd_wz)) ? fLive.cmd_wz : 0.0;
     $('fSteerVal').textContent = `${wz.toFixed(2)} rad/s`;
   }
 
   const aebAlert = $('fAebAlert');
   if (aebAlert) {
-    const aeb = Boolean(f && (f.aeb_active || rawState.includes('AEB')));
+    const aeb = Boolean(fLive && (fLive.aeb_active || rawState.includes('AEB')));
     aebAlert.style.display = aeb ? 'block' : 'none';
   }
 

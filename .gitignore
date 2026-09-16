@@ -18,3 +18,12 @@ radar_system/yolo_integration_20260915/pip-bootstrap/
 # Dated experiment snapshots are preserved on archive/experiments-20260915
 **/*_[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]/
 .git-maintenance/
+
+# Patch and audit artifacts
+*.patch
+artifacts/
+.inspect_upgrade_tool_v2.3_mac/
+rk3588_dashboard/
+0[0-9]、*/
+10、*/
+【*
