@@ -509,7 +509,7 @@ if ($('screenMirrorBtn')) {
 // 🦊 Foxglove 3D 现代机器人工作台快速通道
 const currentHost = window.location.hostname || '192.168.2.173';
 const foxgloveWsUrl = `ws://${currentHost}:8765`;
-const foxgloveAppUrl = `https://app.foxglove.dev~/view?ds=foxglove-websocket&ds.url=${encodeURIComponent(foxgloveWsUrl)}`;
+const foxgloveAppUrl = `https://app.foxglove.dev/~/view?ds=foxglove-websocket&ds.url=${encodeURIComponent(foxgloveWsUrl)}`;
 
 if ($('foxgloveBtn')) $('foxgloveBtn').href = foxgloveAppUrl;
 if ($('sideFoxgloveBtn')) $('sideFoxgloveBtn').href = foxgloveAppUrl;
