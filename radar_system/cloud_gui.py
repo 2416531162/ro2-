@@ -350,8 +350,25 @@ class CloudPanel(QWidget):
         self.closed=True;self.timer.stop();self.canvas.timer.stop();self.canvas.worker.stop()
 
 
+def _prewarm_ros():
+    try:
+        import rclpy
+        from rclpy.node import Node
+        import rcl_interfaces.msg
+        import sensor_msgs.msg
+        import std_msgs.msg
+        if not rclpy.ok():
+            rclpy.init()
+        _node = Node('_prewarm')
+        _node.destroy_node()
+    except Exception:
+        pass
+
+
 def main():
     # --map-only also supports headless/desktop testing without ROS or cameras.
+    if '--map-only' not in sys.argv:
+        _prewarm_ros()
     app=QApplication(sys.argv)
     win=QTabWidget();win.setWindowTitle('RK3588 · 三维点云地图')
     win.setStyleSheet('QWidget{background:#eef3f6;color:#284354;font-size:15px}QPushButton,QComboBox,QDoubleSpinBox{padding:9px;background:white;border:1px solid #c4d4df;border-radius:6px}QTabBar::tab{padding:14px 25px}QTabBar::tab:selected{background:white;color:#087f89}')

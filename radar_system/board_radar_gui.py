@@ -770,6 +770,13 @@ class BoardRadarMainWindow(QWidget):
         self.center_depth_mm = 0
         self.heat_near_mm = 0
         self.heat_far_mm = 0
+        try:
+            if not rclpy.ok():
+                rclpy.init()
+            _node = Node('_prewarm')
+            _node.destroy_node()
+        except Exception:
+            pass
         self.ros_thread = ROSThread()
         self.cors_dialog = CorsConfigDialog(self, self.ros_thread)
 
