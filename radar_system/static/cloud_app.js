@@ -23,7 +23,15 @@
     $('view-info').textContent=`${m.live?'实时':'历史 / 等待'} · ${m.count||0} 点 · map / m`;
     $('pose').textContent=s.robot?`车位 ${s.robot[0].toFixed(2)}, ${s.robot[1].toFixed(2)} m · ${(s.robot[2]*180/Math.PI).toFixed(0)}°`:'地图车位：未知';
     $('diagnostic').textContent=[s.error,m.error].filter(Boolean).join('\n');
-    $('history-note').textContent=m.kind==='recent_observations'?`最近 ${m.history_s} s 有限窗口 / 最多 ${m.limit} 点。移动物体可能留短时残影，不作为避障地图。`:'完整 OctoMap 快照的限量显示；二维导航层独立保留。';
+    $('history-note').textContent=m.kind!=='recent_observations'?'完整 OctoMap 快照的限量显示；二维导航层独立保留。'
+      :m.mode==='persistent'
+        ?`长期累积 / 最多 ${m.limit} 点，${m.radius_m} m 内入图。走过的区域不会过期；移动的人会留下残影，不作为避障地图。`
+        :`最近 ${m.history_s} s 有限窗口 / 最多 ${m.limit} 点。移动物体可能留短时残影，不作为避障地图。`;
+    // 相机外参没确认时深度根本不会入图。不明说的话,现场只会看到一张空地图。
+    $('calibration').textContent=m.extrinsics_pending
+      ?'等待相机外参标定：深度点不会入图。校准后用 SENSOR_TF_CALIBRATED=1 启动。'
+      :m.depth_offline&&m.source==='depth'?'深度相机无新数据（>1.5 s）。':'';
+    $('calibration').hidden=!$('calibration').textContent;
     $('fixture').textContent=s.test_fixture||'';
     $('empty').textContent=!(m.count>0)?`等待真实三维点云\n${m.error||'需要深度数据、匹配内参和采样时刻 TF。'}\nN10P 单平面扫描不等于三维建模。`:'';
     const intensity=$('color').options[2];intensity.disabled=!m.intensity_available;intensity.textContent=m.intensity_available?'反射强度（真实通道）':'反射强度（无真实通道）';

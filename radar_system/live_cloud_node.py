@@ -14,7 +14,8 @@ from rclpy.qos import qos_profile_sensor_data
 from tf2_ros import TransformException
 from sensor_msgs.msg import Image,CameraInfo,PointCloud2
 from live_map_node import LiveMapNode,stamp_s
-from cloud_scene import VoxelHistory,ScenePackets,read_xyzi,depth_xyzi,apply_matrix,pose_jump
+from cloud_scene import (VoxelHistory,ScenePackets,read_xyzi,depth_xyzi,apply_matrix,
+                         pose_jump,body_mask)
 
 
 class LiveCloudNode(LiveMapNode):
@@ -26,7 +27,17 @@ class LiveCloudNode(LiveMapNode):
             'depth_info_topic':os.environ.get('DEPTH_INFO_TOPIC','/camera/rgb/camera_info'),
             'cloud_topic':os.environ.get('RO2_CLOUD_TOPIC','/mapping/depth_points'),
             'sensor_tf_calibrated':os.environ.get('SENSOR_TF_CALIBRATED','0')=='1',
-            'display_voxel_m':.05,'display_point_limit':60000,'display_history_s':45.,
+            'display_voxel_m':float(os.environ.get('RO2_CLOUD_VOXEL_M','0.05')),
+            'display_point_limit':int(os.environ.get('RO2_CLOUD_POINTS','60000')),
+            # RO2_CLOUD_HISTORY_S=0 打开长期累积(走过的地方不再过期)
+            'display_history_s':float(os.environ.get('RO2_CLOUD_HISTORY_S','45')),
+            # 0 = 不过期,长期累积成一张三维地图。走过的房间不会消失,
+            # 代价是移动的人会留下短时拖影(见 scene.note)。
+            'display_radius_m':float(os.environ.get('RO2_CLOUD_RADIUS_M','20')),
+            # 车体实测尺寸,用于剔除自身反射。俯视的相机看得见自己的车头,
+            # 不剔掉的话车一走就在地图里拖出一条跟着车动的假墙。
+            'body_front_m':.67,'body_rear_m':.18,'body_half_width_m':.335,
+            'body_height_m':.45,'drop_self_hits':True,
         }
         for k,v in defaults.items():
             self.declare_parameter(k,v)
@@ -45,6 +56,8 @@ class LiveCloudNode(LiveMapNode):
         self.correction_anchor=None
         self.clock_anchor=None
         self.scene_dirty=False
+        self.self_hits=0
+        self.depth_at=self.points_at=0.
         self.create_subscription(Image,self.get_parameter('depth_topic').value,
                                  self.depth_cb,qos_profile_sensor_data)
         self.create_subscription(CameraInfo,self.get_parameter('depth_info_topic').value,
@@ -54,6 +67,7 @@ class LiveCloudNode(LiveMapNode):
         self.create_timer(.5,self.publish_scene)
 
     def depth_cb(self,msg):
+        self.depth_at=time.monotonic()
         if self.source=='depth':
             self.latest_depth=msg
 
@@ -61,6 +75,7 @@ class LiveCloudNode(LiveMapNode):
         self.latest_info=msg
 
     def points_cb(self,msg):
+        self.points_at=time.monotonic()
         if self.source=='pointcloud':
             self.latest_points=msg
 
@@ -146,8 +161,17 @@ class LiveCloudNode(LiveMapNode):
             with self.lock:
                 robot=self.robot
             if robot:
-                mask=np.linalg.norm(points[:,:2]-np.array(robot[:2]),axis=1)<=20.
+                radius=float(self.get_parameter('display_radius_m').value)
+                mask=np.linalg.norm(points[:,:2]-np.array(robot[:2]),axis=1)<=radius
                 points=points[mask]
+                if self.get_parameter('drop_self_hits').value:
+                    keep=~body_mask(points,robot,
+                                    self.get_parameter('body_front_m').value,
+                                    self.get_parameter('body_rear_m').value,
+                                    self.get_parameter('body_half_width_m').value,
+                                    self.get_parameter('body_height_m').value)
+                    self.self_hits+=int((~keep).sum())
+                    points=points[keep]
             with self.lock:
                 if input_epoch!=self.packets.epoch or self.map_info is None or self.map_fault:
                     return
@@ -223,7 +247,16 @@ class LiveCloudNode(LiveMapNode):
                          voxel_m=self.history.voxel,limit=self.history.limit,history_s=self.history.ttl,
                          kind='recent_observations' if self.source!='octomap' else 'octomap_snapshot',
                          calibrated=bool(self.get_parameter('sensor_tf_calibrated').value),
-                         note='显示层，不是导航碰撞图；人体移动可能留下短时观测轨迹')
+                         mode='persistent' if self.history.ttl<=0 else 'recent_window',
+                         self_hits=self.self_hits,radius_m=self.get_parameter('display_radius_m').value,
+                         depth_offline=now-self.depth_at>1.5,
+                         # 外参没确认时,深度源根本不会入图,前端必须明说,
+                         # 而不是让人对着一张空地图猜是不是相机坏了。
+                         extrinsics_pending=(self.source=='depth' and
+                             not self.get_parameter('sensor_tf_calibrated').value),
+                         note=('显示层，不是导航碰撞图；人体移动可能留下短时观测轨迹'
+                               +('；长期累积模式，走过的区域不会自动过期'
+                                 if self.history.ttl<=0 else '')))
             data['scene']=scene
             data['epoch']=self.packets.epoch
         return data

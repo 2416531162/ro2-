@@ -50,13 +50,26 @@ def load_fixture(page,control):
     page.set_content(html)
 
 
+def chromium_launch(playwright,**kwargs):
+    """启动 Chromium。
+
+    优先用系统里的 chromium/google-chrome;找不到就用 Playwright 自带的那份
+    (容器和 CI 里通常只有后者,它不在 PATH 上)。两个都没有才跳过。
+    """
+    executable=shutil.which('chromium') or shutil.which('google-chrome')
+    if executable:
+        return playwright.chromium.launch(executable_path=executable,**kwargs)
+    try:
+        return playwright.chromium.launch(**kwargs)
+    except Exception as exc:
+        pytest.skip('Chromium unavailable: %s'%exc)
+
+
 def test_browser_orbit_controls_epoch_disconnect(fixture_server):
     api=pytest.importorskip('playwright.sync_api')
-    executable=shutil.which('chromium') or shutil.which('google-chrome')
-    if not executable:pytest.skip('Chromium unavailable')
     control=fixture_server
     with api.sync_playwright() as p:
-        browser=p.chromium.launch(executable_path=executable,headless=True,
+        browser=chromium_launch(p,headless=True,
             args=['--no-sandbox','--enable-unsafe-swiftshader','--use-angle=swiftshader'])
         page=browser.new_page(viewport={'width':1520,'height':1040},device_scale_factor=1)
         errors=[];page.on('pageerror',lambda e:errors.append(str(e)))
@@ -109,11 +122,10 @@ def test_browser_orbit_controls_epoch_disconnect(fixture_server):
 
 
 def test_browser_missing_webgl_falls_back(fixture_server):
-    api=pytest.importorskip('playwright.sync_api');executable=shutil.which('chromium')
-    if not executable:pytest.skip('Chromium unavailable')
+    api=pytest.importorskip('playwright.sync_api')
     control=fixture_server
     with api.sync_playwright() as p:
-        browser=p.chromium.launch(executable_path=executable,headless=True,args=['--no-sandbox'])
+        browser=chromium_launch(p,headless=True,args=['--no-sandbox'])
         page=browser.new_page()
         page.evaluate("()=>{const old=HTMLCanvasElement.prototype.getContext;HTMLCanvasElement.prototype.getContext=function(t,...a){return t==='webgl'?null:old.call(this,t,...a);};}")
         load_fixture(page,control);page.wait_for_function('window.cloudView && cloudView.points.length>10000')
@@ -123,14 +135,16 @@ def test_browser_missing_webgl_falls_back(fixture_server):
 
 
 def test_webgl_driver_when_available(fixture_server):
-    api=pytest.importorskip('playwright.sync_api');executable=shutil.which('chromium')
-    if not executable:pytest.skip('Chromium unavailable')
+    api=pytest.importorskip('playwright.sync_api')
     with api.sync_playwright() as p:
-        browser=p.chromium.launch(executable_path=executable,headless=True,args=['--no-sandbox'])
+        browser=chromium_launch(p,headless=True,args=['--no-sandbox'])
         page=browser.new_page()
         if not page.evaluate("!!document.createElement('canvas').getContext('webgl')"):
             browser.close();pytest.skip('No working WebGL context on this test host; CPU UI test runs separately')
         load_fixture(page,fixture_server)
         page.wait_for_function('window.cloudView && cloudView.points.length>10000')
+        # 着色器链接失败不会报错,只会悄悄退到软件渲染。有 WebGL 的机器上
+        # 必须真的走 GL 路径,否则等于白装了显卡。
+        assert not page.evaluate('!!cloudView.cpu'),page.evaluate('cloudView.warning')
         assert page.evaluate('cloudView.gl.getError()')==0
         browser.close()

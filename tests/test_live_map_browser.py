@@ -16,11 +16,20 @@ sys.path.insert(0,str(ROOT/'radar_system'))
 from live_map_core import encode_grid
 
 
+def launch_chromium(playwright,**kwargs):
+    # 系统里没有 chromium 时用 Playwright 自带的那份(容器/CI 里通常只有它,
+    # 而且不在 PATH 上)。两个都没有才跳过。
+    executable=shutil.which('chromium') or shutil.which('google-chrome')
+    if executable:
+        return playwright.chromium.launch(executable_path=executable,**kwargs)
+    try:
+        return playwright.chromium.launch(**kwargs)
+    except Exception as exc:
+        pytest.skip('Chromium unavailable: %s'%exc)
+
+
 def test_map_browser_offline_fixture():
     playwright=pytest.importorskip('playwright.sync_api')
-    executable=shutil.which('chromium') or shutil.which('google-chrome')
-    if not executable:
-        pytest.skip('Chromium not installed')
     grid=np.full((180,240),-1,dtype=np.int8)
     grid[15:165,15:225]=0
     grid[15:18,15:225]=100
@@ -40,7 +49,7 @@ def test_map_browser_offline_fixture():
                error='界面自动化测试：合成数据，不代表实车建图结果')
     # In-memory fixture: no network, no ROS, no relaxed browser security policy.
     with playwright.sync_playwright() as p:
-        browser=p.chromium.launch(executable_path=executable,headless=True,args=['--no-sandbox'])
+        browser=launch_chromium(p,headless=True,args=['--no-sandbox'])
         page=browser.new_page(viewport=dict(width=1440,height=960),device_scale_factor=1)
         errors=[]
         page.on('pageerror',lambda error:errors.append(str(error)))

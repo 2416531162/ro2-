@@ -3,6 +3,10 @@
 (() => {
   const ramp = [[.64,.18,.85],[.14,.43,1],[.04,.82,.86],[.23,.86,.40],[1,.86,.20],[1,.31,.17]];
   const vertex = `
+    // GLSL ES 1.00 里顶点着色器的 int 默认是 highp,片元着色器默认是 mediump。
+    // 同名 uniform 两边精度不一致,严格的实现(Chromium 新版、ANGLE、Mali)
+    // 会直接链接失败,页面就悄悄退到软件渲染。这里显式统一成 mediump。
+    precision mediump int;
     attribute vec4 point;
     uniform vec3 eye, rightV, upV, forwardV, robot;
     uniform float aspect, pointSize, zLow, zHigh, intensityLow, intensityHigh;
