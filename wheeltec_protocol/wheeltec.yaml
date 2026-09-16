@@ -7,7 +7,7 @@ wheeltec_driver:
     protocol_confirmed: true
     mode_byte: 0
     steering_scale: 1.0
-    wheelbase_m: 0.25
+    wheelbase_m: 0.54          # 实测 2026-09-16 (原 0.25 是错的)
     max_speed_m_s: 1.30
     max_steering_rad: 0.35
     max_yaw_rate_rad_s: 1.00

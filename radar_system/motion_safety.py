@@ -58,9 +58,10 @@ class ChassisGeometry:
     注意它算的是**左前轮**转角,不是自行车模型的中心线转角。
     本模块严格复刻这个公式,这样上位机要求的转角和舵机实际转角才对得上。
     """
-    wheelbase_m: float = 0.25      # AxleSpacing 前后轴距
-    track_m: float = 0.17          # WheelSpacing 左右轮距
-    max_steer_rad: float = 0.35    # 舵机物理限位 ≈ 20°
+    # 以下为实测值 (2026-09-16),不是估算。改之前先量车。
+    wheelbase_m: float = 0.54      # AxleSpacing 前后轴距 (前轮轴心 -> 后轮轴心)
+    track_m: float = 0.59          # WheelSpacing 左右轮距 (轮中心距)
+    max_steer_rad: float = 0.35    # ★ 舵机物理限位,标称 20°,尚未实测确认
 
     def __post_init__(self):
         if self.wheelbase_m <= 0:
