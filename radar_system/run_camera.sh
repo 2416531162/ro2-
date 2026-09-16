@@ -34,7 +34,7 @@ sleep 3
 # 3. Launch depth_image_proc XYZRGB node with approximate time sync (exact_sync:=false)
 ros2 run depth_image_proc point_cloud_xyzrgb_node --ros-args \
   -p exact_sync:=false \
-  -p queue_size:=30 \
+  -p queue_size:=5 \
   -r rgb/camera_info:=/camera/rgb/camera_info \
   -r rgb/image_rect_color:=/camera/rgb/image_raw \
   -r depth_registered/image_rect:=/camera/depth_raw/image \

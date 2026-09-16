@@ -178,7 +178,7 @@ class LiveCloudNode(LiveMapNode):
             self.cloud_error='等待 '+self.get_parameter('depth_topic' if self.source=='depth' else 'cloud_topic').value
             return
         stamp=stamp_s(msg.header.stamp)
-        if not math.isfinite(stamp) or stamp<=0 or not -.1<=ros_now-stamp<=.8:
+        if not math.isfinite(stamp) or stamp<=0 or not -.5<=ros_now-stamp<=1.5:
             self.cloud_error='三维输入已过期；保留有限历史，不冒充实时'
             return
         if stamp<=self.last_stamp:
@@ -192,7 +192,7 @@ class LiveCloudNode(LiveMapNode):
                 info=self.camera_infos.get(msg.header.frame_id,self.latest_info)
                 points=depth_xyzi(msg,info)
             else:
-                points=read_xyzi(msg)
+                points=read_xyzi(msg,limit=int(self.get_parameter('display_point_limit').value))
             if not msg.header.frame_id:
                 raise ValueError('missing source frame')
             points=self._transform(points,msg.header)

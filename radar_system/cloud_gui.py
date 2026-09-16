@@ -57,7 +57,7 @@ class CloudCanvas(QWidget):
         self.setMinimumSize(320,280)
         self.points=np.empty((0,4),np.float32); self.meta={}; self.state={}
         self.target=[0.,0.,.5]; self.distance=14.; self.azimuth=-2.1; self.elevation=.9
-        self.color_mode='height'; self.z_low=-.2; self.z_high=3.; self.point_size=2
+        self.color_mode='rgb'; self.z_low=-.2; self.z_high=3.; self.point_size=2
         self.light=False; self.follow=True; self.rings=True; self.grid=True; self.view='orbit'
         self.online=False; self.drag=None
         self.worker=RasterWorker(); self.revision=0; self.generation=0; self.shown=-1; self.image=None
@@ -261,7 +261,7 @@ class CloudPanel(QWidget):
         self.follow.clicked.connect(self.set_follow);tools.addWidget(self.follow)
         self.theme=QPushButton('浅色模式');self.theme.clicked.connect(self.set_theme);tools.addWidget(self.theme)
         root.addLayout(tools);root.addWidget(self.canvas,1)
-        options=QHBoxLayout();self.color=QComboBox();self.color.addItems(['高度 Z','距机器人距离','真实强度'])
+        options=QHBoxLayout();self.color=QComboBox();self.color.addItems(['真实 RGB 彩色','高度 Z','距机器人距离','真实强度'])
         self.color.currentIndexChanged.connect(self.settings);options.addWidget(self.color)
         options.addWidget(QLabel('高度 / m'))
         self.low,self.high=QDoubleSpinBox(),QDoubleSpinBox()
@@ -286,7 +286,7 @@ class CloudPanel(QWidget):
     def settings(self,*args):
         if self.low.value()>=self.high.value():
             return
-        self.canvas.color_mode=['height','distance','intensity'][self.color.currentIndex()]
+        self.canvas.color_mode=['rgb','height','distance','intensity'][self.color.currentIndex()]
         self.canvas.z_low,self.canvas.z_high=self.low.value(),self.high.value()
         self.canvas.point_size=self.size.value();self.canvas.rings=self.rings.isChecked();self.canvas.invalidate()
 
@@ -325,9 +325,9 @@ class CloudPanel(QWidget):
             self.status.setText(f"三维点云 {meta['count']:,} 点 · {meta['source']} · "+
                                 ('实时' if meta.get('live') else '历史 / 等待')+'\n'+(meta.get('error') or state.get('error','')))
             available=meta.get('intensity_available',False)
-            self.color.model().item(2).setEnabled(available)
-            self.color.model().item(1).setEnabled(bool(state.get('localized')))
-            if (self.color.currentIndex()==2 and not available) or (self.color.currentIndex()==1 and not state.get('localized')):
+            self.color.model().item(3).setEnabled(available)
+            self.color.model().item(2).setEnabled(bool(state.get('localized')))
+            if (self.color.currentIndex()==3 and not available) or (self.color.currentIndex()==2 and not state.get('localized')):
                 self.color.setCurrentIndex(0)
             key=(meta['epoch'],meta['revision'])
             if self.loaded!=key and not self.binary_pending:

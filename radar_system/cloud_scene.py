@@ -14,7 +14,7 @@ DTYPES = {1: 'i1', 2: 'u1', 3: 'i2', 4: 'u2', 5: 'i4', 6: 'u4', 7: 'f4', 8: 'f8'
 RAMP = np.array([[.64,.18,.85],[.14,.43,1.],[.04,.82,.86],[.23,.86,.40],[1.,.86,.20],[1.,.31,.17]])
 
 
-def read_xyzi(msg, limit=8000):
+def read_xyzi(msg, limit=25000):
     """Read arbitrary PointCloud2 offsets, row padding, byte order and scalar types."""
     w,h,ps,rs = int(msg.width),int(msg.height),int(msg.point_step),int(msg.row_step)
     if w == 0 or h == 0:
@@ -29,11 +29,9 @@ def read_xyzi(msg, limit=8000):
     indices=np.arange(0,w*h,max(1,math.ceil(w*h/limit)))
     rows,cols=indices//w,indices%w
     out=np.full((len(indices),4),-1.,dtype=np.float32)
-    for j,name in enumerate(('x','y','z','intensity')):
+    for j,name in enumerate(('x','y','z')):
         if name not in fields:
-            if j<3:
-                raise ValueError('PointCloud2 missing '+name)
-            continue
+            raise ValueError('PointCloud2 missing '+name)
         f=fields[name]
         if f.datatype not in DTYPES or f.count != 1:
             raise ValueError('non-scalar/unsupported '+name)
@@ -42,8 +40,19 @@ def read_xyzi(msg, limit=8000):
             raise ValueError('point field outside point_step')
         values=np.ndarray((h,w),dtype=dtype,buffer=msg.data,offset=f.offset,strides=(rs,ps))
         out[:,j]=values[rows,cols]
+    color_field = 'intensity' if 'intensity' in fields else ('rgb' if 'rgb' in fields else None)
+    if color_field:
+        f=fields[color_field]
+        if f.datatype not in DTYPES or f.count != 1:
+            raise ValueError('non-scalar/unsupported '+color_field)
+        dtype=np.dtype(('>' if msg.is_bigendian else '<')+DTYPES[f.datatype])
+        if f.offset<0 or f.offset+dtype.itemsize>ps:
+            raise ValueError('point field outside point_step')
+        values=np.ndarray((h,w),dtype=dtype,buffer=msg.data,offset=f.offset,strides=(rs,ps))
+        out[:,3]=values[rows,cols].view(np.float32) if color_field=='rgb' else values[rows,cols]
     valid=np.isfinite(out[:,:3]).all(axis=1)&(np.abs(out[:,:3])<100000).all(axis=1)
-    out[~np.isfinite(out[:,3])|(out[:,3]<0),3]=-1
+    if color_field!='rgb':
+        out[~np.isfinite(out[:,3])|(out[:,3]<0),3]=-1
     return out[valid]
 
 
@@ -280,8 +289,10 @@ class ScenePackets:
         self.revision+=1
         self.cache.append((self.revision,raw,gzip.compress(raw,compresslevel=2,mtime=0)))
         valid=a[:,3][a[:,3]>=0]
+        has_rgb=bool(len(a) and (a[:,3]!=-1).any())
         self.meta=dict(epoch=self.epoch,revision=self.revision,count=len(a),frame='map',
                        stride=16,format='xyzi-f32le',intensity_available=bool(len(valid)),
+                       rgb_available=has_rgb,
                        intensity_range=[float(valid.min()),float(valid.max())] if len(valid) else None,
                        bounds=[a[:,:3].min(axis=0).tolist(),a[:,:3].max(axis=0).tolist()] if len(a) else None)
 
@@ -308,9 +319,24 @@ def project(points, target, distance, azimuth, elevation, width, height):
     return np.column_stack((width/2+(rel@r)*focal/safe,height/2-(rel@u)*focal/safe,depth))
 
 
-def colors(points, mode='height', low=-.2, high=3., robot=(0,0,0), intensity_range=None):
-    a=np.asarray(points).reshape(-1,4)
-    if mode=='intensity' and intensity_range:
+def colors(points, mode='rgb', low=-.2, high=3., robot=(0,0,0), intensity_range=None):
+    a=np.asarray(points,dtype=np.float32).reshape(-1,4)
+    if mode=='rgb':
+        u32=np.ascontiguousarray(a[:,3]).view(np.uint32)
+        r=((u32>>16)&0xFF).astype(np.uint8)
+        g=((u32>>8)&0xFF).astype(np.uint8)
+        b=(u32&0xFF).astype(np.uint8)
+        is_missing=np.isnan(a[:,3])|(u32==0)|(a[:,3]==-1.0)|(a[:,3]<0)
+        if is_missing.all():
+            v=a[:,2]
+            t=np.clip((v-low)/max(high-low,1e-6),0,1)*5
+            i=np.minimum(t.astype(int),4)
+            return ((RAMP[i]*(1-(t-i))[:,None]+RAMP[i+1]*(t-i)[:,None])*255).round().astype(np.uint8)
+        out=np.column_stack((r,g,b))
+        if np.any(is_missing):
+            out[is_missing]=[180,180,180]
+        return out
+    elif mode=='intensity' and intensity_range:
         v=a[:,3]; low,high=intensity_range
     elif mode=='distance':
         v=np.linalg.norm(a[:,:3]-np.asarray(robot),axis=1); low,high=0.,10.
@@ -325,7 +351,7 @@ def colors(points, mode='height', low=-.2, high=3., robot=(0,0,0), intensity_ran
 
 
 def raster(points, width=960, height=640, target=(0,0,0), distance=14., azimuth=-2.1,
-           elevation=.9, color_mode='height', z_low=-.2, z_high=3., point_size=2,
+           elevation=.9, color_mode='rgb', z_low=-.2, z_high=3., point_size=2,
            light=False, robot=(0,0,0), intensity_range=None):
     """Native Qt fallback: real perspective + nearest-depth pixels, vectorized NumPy.
 

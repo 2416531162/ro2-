@@ -184,3 +184,28 @@ def test_nearest_depth_wins_not_array_order():
 def test_raster_size_bound():
     im=raster([],width=4000,height=4000)
     assert im.shape==(1200,1600,4)
+
+
+def test_read_rgb_pointcloud():
+    # Pack RGB: R=255, G=128, B=64 -> 0x00FF8040
+    rgb_u32 = (255 << 16) | (128 << 8) | 64
+    rgb_f32 = np.array([rgb_u32], dtype=np.uint32).view(np.float32)[0]
+    data = np.array([[1.0, 2.0, 3.0, rgb_f32]], dtype='<f4').tobytes()
+    cloud = NS(width=1, height=1, point_step=16, row_step=16, data=data, is_bigendian=False,
+               fields=[NS(name='x', offset=0, datatype=7, count=1),
+                       NS(name='y', offset=4, datatype=7, count=1),
+                       NS(name='z', offset=8, datatype=7, count=1),
+                       NS(name='rgb', offset=12, datatype=7, count=1)])
+    pts = read_xyzi(cloud)
+    assert len(pts) == 1
+    assert pts[0, :3].tolist() == [1.0, 2.0, 3.0]
+    c = colors(pts, mode='rgb')
+    assert c.tolist() == [[255, 128, 64]]
+
+
+def test_colors_rgb_missing_fallback():
+    # If intensity is -1, fallback to height coloring
+    pts = np.array([[0, 0, -0.2, -1.0], [0, 0, 3.0, -1.0]], dtype=np.float32)
+    c = colors(pts, mode='rgb')
+    assert c.tolist() == [[163, 46, 217], [255, 79, 43]]
+

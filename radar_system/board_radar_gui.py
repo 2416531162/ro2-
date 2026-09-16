@@ -949,6 +949,11 @@ class BoardRadarMainWindow(QWidget):
             button.setMinimumHeight(44)
             button.clicked.connect(lambda _, m=mode: self.switch_cam_mode(m))
             modes.addWidget(button)
+        self.btn_rviz = QPushButton('🖥️ RViz2 原生三维')
+        self.btn_rviz.setMinimumHeight(44)
+        self.btn_rviz.setStyleSheet('QPushButton { background: #008080; color: white; font-weight: bold; border-radius: 6px; } QPushButton:hover { background: #006666; }')
+        self.btn_rviz.clicked.connect(self._toggle_rviz)
+        modes.addWidget(self.btn_rviz)
         cam.addLayout(modes)
 
         self.cam_display_stack = QStackedWidget()
@@ -1023,7 +1028,7 @@ class BoardRadarMainWindow(QWidget):
         c_opts = QHBoxLayout()
         c_opts.setSpacing(6)
         self.cloud_color = QComboBox()
-        self.cloud_color.addItems(['高度 Z', '距车距离', '反射强度'])
+        self.cloud_color.addItems(['真实 RGB 彩色', '高度 Z', '距车距离', '反射强度'])
         self.cloud_color.currentIndexChanged.connect(self._update_cloud_settings)
         c_opts.addWidget(self.cloud_color)
 
@@ -1316,11 +1321,11 @@ class BoardRadarMainWindow(QWidget):
             self.cam_fps_badge.setText(f"{self.cloud_canvas.render_ms:.0f} ms")
 
         avail_int = meta.get('intensity_available', False)
-        self.cloud_color.model().item(2).setEnabled(avail_int)
+        self.cloud_color.model().item(3).setEnabled(avail_int)
         dist_avail = bool(state.get('localized') or meta.get('frame') == 'base_link')
-        self.cloud_color.model().item(1).setEnabled(dist_avail)
-        if (self.cloud_color.currentIndex() == 2 and not avail_int) or \
-           (self.cloud_color.currentIndex() == 1 and not dist_avail):
+        self.cloud_color.model().item(2).setEnabled(dist_avail)
+        if (self.cloud_color.currentIndex() == 3 and not avail_int) or \
+           (self.cloud_color.currentIndex() == 2 and not dist_avail):
             self.cloud_color.setCurrentIndex(0)
 
     def _on_cloud_binary(self, body, meta):
@@ -1345,10 +1350,41 @@ class BoardRadarMainWindow(QWidget):
         self.cloud_theme.setText('深色' if self.cloud_canvas.light else '浅色')
         self.cloud_canvas.invalidate()
 
+    def _toggle_rviz(self):
+        try:
+            import subprocess
+            res = subprocess.run(['pgrep', '-f', 'rviz2'], stdout=subprocess.PIPE, text=True)
+            if res.returncode == 0 and res.stdout.strip():
+                subprocess.run(['pkill', '-9', '-f', 'rviz2'])
+                self.btn_rviz.setText('🖥️ RViz2 原生三维')
+                self.btn_rviz.setStyleSheet('QPushButton { background: #008080; color: white; font-weight: bold; border-radius: 6px; } QPushButton:hover { background: #006666; }')
+            else:
+                subprocess.Popen(['/root/radar_system/run_rviz.sh'])
+                self.btn_rviz.setText('❌ 关闭 RViz2')
+                self.btn_rviz.setStyleSheet('QPushButton { background: #C0392B; color: white; font-weight: bold; border-radius: 6px; } QPushButton:hover { background: #962D22; }')
+        except Exception as e:
+            print(f"Failed to toggle RViz2: {e}")
+
+    def _check_rviz_status(self):
+        try:
+            import subprocess
+            res = subprocess.run(['pgrep', '-f', 'rviz2'], stdout=subprocess.PIPE, text=True)
+            running = (res.returncode == 0 and bool(res.stdout.strip()))
+            if running:
+                if self.btn_rviz.text() != '❌ 关闭 RViz2':
+                    self.btn_rviz.setText('❌ 关闭 RViz2')
+                    self.btn_rviz.setStyleSheet('QPushButton { background: #C0392B; color: white; font-weight: bold; border-radius: 6px; } QPushButton:hover { background: #962D22; }')
+            else:
+                if self.btn_rviz.text() != '🖥️ RViz2 原生三维':
+                    self.btn_rviz.setText('🖥️ RViz2 原生三维')
+                    self.btn_rviz.setStyleSheet('QPushButton { background: #008080; color: white; font-weight: bold; border-radius: 6px; } QPushButton:hover { background: #006666; }')
+        except Exception:
+            pass
+
     def _update_cloud_settings(self, *args):
         if self.cloud_low.value() >= self.cloud_high.value():
             return
-        modes = ['height', 'distance', 'intensity']
+        modes = ['rgb', 'height', 'distance', 'intensity']
         idx = max(0, min(len(modes)-1, self.cloud_color.currentIndex()))
         self.cloud_canvas.color_mode = modes[idx]
         self.cloud_canvas.z_low = self.cloud_low.value()
@@ -1549,6 +1585,9 @@ class BoardRadarMainWindow(QWidget):
             self.cam_fps_badge.setText(f"{self.cloud_canvas.render_ms:.0f} ms")
         elif not live_cam:
             self.cam_fps_badge.setText('-- FPS')
+        if not hasattr(self, '_last_rviz_check') or now - self._last_rviz_check > 1.0:
+            self._last_rviz_check = now
+            self._check_rviz_status()
 
 def main():
     import signal
