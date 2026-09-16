@@ -501,6 +501,29 @@ class RadarHTTPHandler(http.server.BaseHTTPRequestHandler):
             with open(TEMPLATE_PATH, 'rb') as f:
                 self.wfile.write(f.read())
 
+        elif self.path.startswith('/static/'):
+            clean_rel = self.path.lstrip('/').split('?')[0]
+            static_file = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), clean_rel))
+            static_root = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static'))
+            if static_file.startswith(static_root) and os.path.isfile(static_file):
+                self.send_response(200)
+                if static_file.endswith('.json'):
+                    self.send_header('Content-type', 'application/json; charset=utf-8')
+                elif static_file.endswith('.js'):
+                    self.send_header('Content-type', 'application/javascript; charset=utf-8')
+                elif static_file.endswith('.css'):
+                    self.send_header('Content-type', 'text/css; charset=utf-8')
+                else:
+                    self.send_header('Content-type', 'application/octet-stream')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                with open(static_file, 'rb') as f:
+                    self.wfile.write(f.read())
+                return
+            else:
+                self.send_error(404)
+                return
+
         elif self.path == '/api/cors':
             self.send_response(200)
             self.send_header('Content-type', 'application/json; charset=utf-8')

@@ -1,10 +1,52 @@
 <!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>RK3588 · 实时三维点云地图</title><link rel="stylesheet" href="/static/cloud.css"></head><body>
-<header><div class="mark">3D</div><div><h1>实时三维点云地图</h1><small>RK3588 / Astra S + N10P · 屏幕与网页同源</small></div><span id="connection" class="badge">连接中</span><nav class="links"><a href="/map2d">二维导航地图</a><a href="/control">相机 / 遥控 →</a></nav></header>
+<header><div class="mark">3D</div><div><h1>实时三维点云地图</h1><small>RK3588 / Astra S + N10P · 屏幕与网页同源</small></div><span id="connection" class="badge">连接中</span><nav class="links"><a href="#" id="foxgloveBtn" target="_blank" style="background:#ff6b81;color:#1a0006;font-weight:700;padding:4px 10px;border-radius:6px;text-decoration:none;font-size:12px;box-shadow:0 2px 8px rgba(255,107,129,0.35);">🦊 3D 现代工作台 (RGB真彩点云)</a><a href="/map2d">二维导航地图</a><a href="/control">相机 / 遥控 →</a></nav></header>
 <main class="layout"><section class="viewer"><div class="toolbar"><button id="orbit" class="active">三维视角</button><button id="top">俯视</button><button id="front">低视角</button><button id="fit">全图</button><button id="follow">跟随车位</button><span class="spacer"></span><button id="theme">浅色模式</button><button id="zin" aria-label="放大">＋</button><button id="zout" aria-label="缩小">－</button></div>
 <div class="viewport"><canvas id="cloud" aria-label="可旋转的实测三维点云"></canvas><canvas id="overlay"></canvas><div class="view-tag"><strong id="source-label">3D OBSERVATIONS</strong><span id="view-info">等待真实三维数据</span></div><div id="fixture" class="watermark"></div><div id="empty" class="empty">等待真实三维数据
 点云来自深度相机或三维传感器，不由二维墙线拉高生成。</div><div class="color-legend"><span id="color-title">高度着色 · Z / m</span><div class="gradient"></div><div class="labels"><span id="low-label">−0.2 m</span><span id="high-label">3.0 m</span></div></div></div>
 <div class="footer"><span>点云＝实测空间位置　黄色＝车体轮廓　青色＝平面扫描投影/轨迹</span><span>显示层不参与底盘控制</span></div></section>
-<aside class="sidebar"><section class="card"><h2>数据与定位</h2><div class="stats"><div class="stat"><span>显示点数</span><strong id="count">0</strong></div><div class="stat"><span>三维数据年龄</span><strong id="age">—</strong></div><div class="stat"><span>体素选样间距</span><strong id="voxel">—</strong></div><div class="stat"><span>已知 2D 面积</span><strong id="area">—</strong></div></div><p id="pose">地图车位：未知</p><p id="diagnostic" class="error">等待服务 :8088</p><p id="calibration" class="error" hidden></p><p id="history-note">三维观测显示与二维导航地图分开，缺测区域不会自动补面。</p></section>
+<aside class="sidebar"><section class="card" style="border:1px solid #732a37;background:linear-gradient(180deg,#241217 0%,#141924 100%);">
+<h2 style="display:flex;align-items:center;justify-content:space-between;color:#ff98a0;">
+ <span>🦊 Foxglove 3D 现代工作台</span>
+ <span style="font-size:10px;background:#521c25;color:#ff98a0;padding:2px 6px;border-radius:4px;">RGB真彩色</span>
+</h2>
+<p style="font-size:11px;color:#a1afc0;line-height:1.4;margin:4px 0 10px;">
+ 专业机器人可视化平台，毫秒级呈现 30万点彩色 3D 点云、LiDAR 激光与视频流。
+</p>
+<div class="row">
+ <a href="#" id="sideFoxgloveBtn" target="_blank" style="flex:1;background:linear-gradient(90deg,#ff6b81,#ff8599);color:#1a0006;font-weight:bold;text-align:center;padding:8px;border-radius:6px;text-decoration:none;font-size:12px;box-shadow:0 2px 8px rgba(255,107,129,0.3);">一键进入 3D 现代工作台</a>
+</div>
+<div class="row" style="margin-top:6px;">
+ <a href="/static/foxglove_layout.json" download="rk3588_foxglove_layout.json" style="flex:1;font-size:11px;text-align:center;padding:5px;background:#1b2836;color:#69dec4;border:1px solid #364858;border-radius:4px;text-decoration:none;">📥 下载预设布局 JSON</a>
+ <button id="copyWsBtn" style="font-size:11px;padding:5px;background:#1b2836;color:#9ec8f7;border:1px solid #364858;border-radius:4px;">📋 复制 WS</button>
+</div>
+<div style="font-size:10px;color:#8899aa;margin-top:6px;display:flex;justify-content:space-between;">
+ <span>端口: 8765</span>
+ <span id="wsHostDisplay" style="font-family:monospace;color:#69dec4;">ws://...</span>
+</div>
+</section>
+<section class="card"><h2>数据与定位</h2><div class="stats"><div class="stat"><span>显示点数</span><strong id="count">0</strong></div><div class="stat"><span>三维数据年龄</span><strong id="age">—</strong></div><div class="stat"><span>体素选样间距</span><strong id="voxel">—</strong></div><div class="stat"><span>已知 2D 面积</span><strong id="area">—</strong></div></div><p id="pose">地图车位：未知</p><p id="diagnostic" class="error">等待服务 :8088</p><p id="calibration" class="error" hidden></p><p id="history-note">三维观测显示与二维导航地图分开，缺测区域不会自动补面。</p></section>
 <section class="card"><h2>显示设置</h2><label for="color">点云着色</label><select id="color" class="full"><option value="height">高度 Z</option><option value="distance">距机器人距离</option><option value="intensity" disabled>反射强度（无真实通道）</option></select><label>高度显示范围 / m</label><div class="row"><input id="zlow" type="number" value="-0.2" step="0.1" aria-label="最低高度"><input id="zhigh" type="number" value="3.0" step="0.1" aria-label="最高高度"></div><label for="size">点大小 <span id="size-label">2.5 px</span></label><input id="size" type="range" min="1" max="5" step="0.5" value="2.5"><div class="checks"><label><input id="rings" type="checkbox" checked>距离环</label><label><input id="grid" type="checkbox" checked>米制网格</label><label><input id="scan" type="checkbox" checked>实时扫描</label><label><input id="path" type="checkbox" checked>行驶轨迹</label></div></section>
 <section class="card"><h2>建图与保存</h2><div class="row"><button id="build" class="primary">开始建图</button><button id="stop">停止建图</button></div><div class="row"><input id="name" placeholder="office_01" maxlength="64" aria-label="地图名"><button id="save">保存 2D 图</button></div><select id="maps" class="full" aria-label="已保存地图"></select><div class="row"><button id="load">加载并定位</button></div><details><summary>设置 AMCL 初始位姿</summary><div class="row"><input id="px" type="number" value="0" step=".1" aria-label="X 米"><input id="py" type="number" value="0" step=".1" aria-label="Y 米"><input id="pa" type="number" value="0" step="5" aria-label="朝向度"></div><button id="initial">发送初始位置</button></details><p>切换前停止跟随并停稳车辆。这里的停止按钮不是底盘急停。</p><div id="message" role="status"></div></section></aside></main>
-<script src="/static/cloud_viewer.js"></script><script src="/static/cloud_app.js"></script></body></html>
+<script src="/static/cloud_viewer.js"></script><script src="/static/cloud_app.js"></script>
+<script>
+const currentHost = window.location.hostname || '192.168.2.173';
+const foxgloveWsUrl = `ws://${currentHost}:8765`;
+const foxgloveAppUrl = `https://app.foxglove.dev~/view?ds=foxglove-websocket&ds.url=${encodeURIComponent(foxgloveWsUrl)}`;
+const fgBtn = document.getElementById('foxgloveBtn');
+const sideFgBtn = document.getElementById('sideFoxgloveBtn');
+const wsDisp = document.getElementById('wsHostDisplay');
+const cpBtn = document.getElementById('copyWsBtn');
+if (fgBtn) fgBtn.href = foxgloveAppUrl;
+if (sideFgBtn) sideFgBtn.href = foxgloveAppUrl;
+if (wsDisp) wsDisp.textContent = foxgloveWsUrl;
+if (cpBtn) {
+  cpBtn.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(foxgloveWsUrl);
+      alert('已复制 Foxglove WebSocket 地址: ' + foxgloveWsUrl);
+    } catch(e) {
+      prompt('请复制 Foxglove WebSocket 地址:', foxgloveWsUrl);
+    }
+  });
+}
+</script></body></html>

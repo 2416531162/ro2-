@@ -12,7 +12,8 @@ from live_cloud_node import LiveCloudNode
 class CloudHandler(LiveMapHandler):
     ASSETS={'/static/cloud_viewer.js':('cloud_viewer.js','text/javascript; charset=utf-8'),
             '/static/cloud_app.js':('cloud_app.js','text/javascript; charset=utf-8'),
-            '/static/cloud.css':('cloud.css','text/css; charset=utf-8')}
+            '/static/cloud.css':('cloud.css','text/css; charset=utf-8'),
+            '/static/foxglove_layout.json':('foxglove_layout.json','application/json; charset=utf-8')}
 
     def do_GET(self):
         path=urlsplit(self.path).path

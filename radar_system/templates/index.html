@@ -52,7 +52,7 @@
  <div class="header-right"><div class="follower-badge" id="followerBadge" style="padding:4px 10px;border-radius:6px;background:#182531;border:1px solid #334658;font-size:11px;display:none;align-items:center;gap:6px;"><span style="color:#69dec4;">🐕 跟屁虫:</span><strong id="followerStateVal" style="color:#f6c879;">待命</strong></div><span class="device-tag">SPATIAL MAPPING CONSOLE</span><div class="connection" id="connection" data-status="waiting" role="status"><span class="status-dot"></span><span id="connectionText">正在连接</span></div></div>
 </header>
 <main class="workspace" id="workspace">
- <div class="workspace-heading"><div><p class="eyebrow">LIVE LIDAR</p><h2>真实雷达点云</h2></div><div class="heading-actions"><button class="button" id="followerToggleBtn" style="border-color:#356e63;background:#183630;color:#69dec4;font-weight:700;"><span id="followerToggleIcon">🐕</span><span id="followerToggleText">启动跟屁虫</span></button><a href="#" id="screenMirrorBtn" target="_blank" class="button" style="border-color:#486581;background:#1b2d3d;color:#9ec8f7;text-decoration:none;"><svg class="icon" aria-hidden="true"><use href="#i-expand"/></svg><span>🖥️ 小车屏幕画面</span></a><button class="button" id="corsBtn" style="border-color:#3b635e;background:#1c3534;color:#69dec4;"><svg class="icon" aria-hidden="true"><use href="#i-signal"/></svg><span>CORS 差分账号</span></button><button class="button" id="pauseBtn" aria-pressed="false"><svg class="icon" aria-hidden="true"><use href="#i-pause" id="pauseIcon"/></svg><span id="pauseText">暂停画面</span></button><button class="button primary" id="exportBtn" disabled><svg class="icon" aria-hidden="true"><use href="#i-download"/></svg>导出数据</button></div></div>
+  <div class="workspace-heading"><div><p class="eyebrow">LIVE LIDAR</p><h2>真实雷达点云</h2></div><div class="heading-actions"><a href="#" id="foxgloveBtn" target="_blank" class="button" style="border-color:#e05260;background:#2d171d;color:#ff8599;text-decoration:none;font-weight:700;"><span style="font-size:14px;">🦊</span><span>3D 现代工作台</span></a><button class="button" id="followerToggleBtn" style="border-color:#356e63;background:#183630;color:#69dec4;font-weight:700;"><span id="followerToggleIcon">🐕</span><span id="followerToggleText">启动跟屁虫</span></button><a href="#" id="screenMirrorBtn" target="_blank" class="button" style="border-color:#486581;background:#1b2d3d;color:#9ec8f7;text-decoration:none;"><svg class="icon" aria-hidden="true"><use href="#i-expand"/></svg><span>🖥️ 小车屏幕画面</span></a><button class="button" id="corsBtn" style="border-color:#3b635e;background:#1c3534;color:#69dec4;"><svg class="icon" aria-hidden="true"><use href="#i-signal"/></svg><span>CORS 差分账号</span></button><button class="button" id="pauseBtn" aria-pressed="false"><svg class="icon" aria-hidden="true"><use href="#i-pause" id="pauseIcon"/></svg><span id="pauseText">暂停画面</span></button><button class="button primary" id="exportBtn" disabled><svg class="icon" aria-hidden="true"><use href="#i-download"/></svg>导出数据</button></div></div>
  <section class="metrics" aria-label="实时建模指标">
   <div class="metric"><span class="metric-label"><svg class="icon" aria-hidden="true"><use href="#i-signal"/></svg>扫描频率</span><div class="value"><span id="hzBadge">--</span><span class="unit">Hz</span></div><span class="metric-symbol"><svg class="icon" aria-hidden="true"><use href="#i-signal"/></svg></span><span class="metric-note">激光扫描 · /scan</span></div>
   <div class="metric"><span class="metric-label"><svg class="icon" aria-hidden="true"><use href="#i-points"/></svg>有效扫描点</span><div class="value"><span id="pointsVal">--</span><span class="unit">pts</span></div><span class="metric-symbol"><svg class="icon" aria-hidden="true"><use href="#i-points"/></svg></span><span class="metric-note" id="pointsNote">等待扫描数据</span></div>
@@ -199,7 +199,34 @@
     <div class="distance-summary" style="margin-top:8px;"><span>经纬坐标</span><strong class="mono" id="rtkCoordsVal" style="font-size:11px;">--</strong></div>
     <div class="distance-summary" style="margin-top:4px;border-top:1px dashed #303c4b;padding-top:6px;"><span>CORS 差分流</span><strong class="mono" id="rtkCorsStatVal" style="color:#f6c879;cursor:pointer;" title="点击配置CORS账号">未启用 (点击配置)</strong></div>
    </section>
-   <section class="panel pose-panel" hidden><div class="panel-heading"><h3>机器人位姿</h3><span>已关闭演示轨迹</span></div><div class="pose-grid"><div class="pose-cell"><span>X / m</span><strong class="mono" id="robotXVal">--</strong></div><div class="pose-cell"><span>Y / m</span><strong class="mono" id="robotYVal">--</strong></div><div class="pose-cell"><span>Yaw / °</span><strong class="mono" id="robotYawVal">--</strong></div></div></section>
+   <!-- 🦊 Foxglove 3D 现代机器人工作台 -->
+   <section class="panel foxglove-panel" id="foxglovePanel" style="border: 1px solid #632a35; background: linear-gradient(180deg, #1f1217 0%, #151a24 100%);">
+    <div class="panel-heading" style="margin-bottom:8px;">
+     <h3 style="display:flex;align-items:center;gap:6px;"><span style="font-size:16px;">🦊</span> Foxglove 3D 现代工作台</h3>
+     <span style="background:#521c25;color:#ff98a0;font-size:10px;padding:2px 6px;border-radius:4px;font-weight:600;">RGB 彩色点云</span>
+    </div>
+    <p style="font-size:11px;color:var(--muted);margin:0 0 10px;line-height:1.4;">
+     基于专业机器人可视化平台，毫秒级呈现 Astra S 相机 30万点真彩色 3D 点云、LiDAR 激光、实况视频与底盘位姿。
+    </p>
+    <div style="display:flex;flex-direction:column;gap:8px;">
+     <a href="#" id="sideFoxgloveBtn" target="_blank" class="button" style="display:flex;justify-content:center;align-items:center;gap:6px;background:linear-gradient(90deg,#ff6b81,#ff8599);color:#1a0006;font-weight:700;border:none;border-radius:6px;padding:9px 12px;text-decoration:none;font-size:13px;box-shadow:0 3px 10px rgba(255,107,129,0.35);">
+      <span style="font-size:15px;">🦊</span><span>一键进入 3D 现代工作台</span>
+     </a>
+     <div style="display:flex;gap:6px;">
+      <a href="/static/foxglove_layout.json" download="rk3588_foxglove_layout.json" class="button" style="flex:1;font-size:11px;padding:5px 6px;text-align:center;text-decoration:none;border-color:#364858;color:var(--mint);background:#162430;" title="下载预设好的三维点云与视频布局文件">
+       📥 预设布局 JSON
+      </a>
+      <button class="button" id="copyWsBtn" style="font-size:11px;padding:5px 6px;border-color:#364858;color:#9ec8f7;background:#162430;" title="复制 WebSocket 地址">
+       📋 复制 WS 地址
+      </button>
+     </div>
+     <div style="font-size:10px;color:var(--muted);display:flex;justify-content:space-between;padding:0 2px;">
+      <span>桥接端口: <strong class="mono" style="color:#69dec4;">8765</strong></span>
+      <span id="wsHostDisplay" class="mono">ws://...</span>
+     </div>
+    </div>
+   </section>
+
    <section class="panel layers-panel"><div class="panel-heading"><h3>显示图层</h3><span>仅调整可视化</span></div><div class="layer-list">
     <label class="layer-row" hidden><span class="layer-label"><span class="swatch"></span>障碍物边界</span><input id="layerObstacles" type="checkbox" aria-label="障碍物边界"></label>
     <label class="layer-row" hidden><span class="layer-label"><span class="swatch free"></span>已知自由空间</span><input id="layerFree" type="checkbox" aria-label="已知自由空间"></label>
@@ -477,6 +504,25 @@ setInterval(()=>{updateConnection();if(paused||performance.now()-lastReceived>30
 resizeCanvas();setMode('polar');connectStream();requestAnimationFrame(renderFrame);
 if ($('screenMirrorBtn')) {
   $('screenMirrorBtn').href = `http://${window.location.hostname || '192.168.2.173'}:6080/vnc.html?autoconnect=true&resize=scale`;
+}
+
+// 🦊 Foxglove 3D 现代机器人工作台快速通道
+const currentHost = window.location.hostname || '192.168.2.173';
+const foxgloveWsUrl = `ws://${currentHost}:8765`;
+const foxgloveAppUrl = `https://app.foxglove.dev~/view?ds=foxglove-websocket&ds.url=${encodeURIComponent(foxgloveWsUrl)}`;
+
+if ($('foxgloveBtn')) $('foxgloveBtn').href = foxgloveAppUrl;
+if ($('sideFoxgloveBtn')) $('sideFoxgloveBtn').href = foxgloveAppUrl;
+if ($('wsHostDisplay')) $('wsHostDisplay').textContent = foxgloveWsUrl;
+if ($('copyWsBtn')) {
+  $('copyWsBtn').addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(foxgloveWsUrl);
+      notify('已复制 Foxglove WebSocket: ' + foxgloveWsUrl);
+    } catch(e) {
+      prompt('请复制 Foxglove WebSocket 地址:', foxgloveWsUrl);
+    }
+  });
 }
 
 // CORS NTRIP 设置与交互逻辑
