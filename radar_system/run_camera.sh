@@ -24,8 +24,21 @@ ros2 run tf2_ros static_transform_publisher \
   --frame-id base_link --child-frame-id camera_link &
 PIDS+=("$!")
 
-# Launch Astra S camera driver with depth-registered RGB point cloud pipeline
-ros2 launch openni2_camera camera_with_cloud.launch.py &
+# 1. Launch Astra S camera driver
+ros2 launch openni2_camera camera_only.launch.py &
+PIDS+=("$!")
+
+# 2. Wait for camera driver to initialize device
+sleep 3
+
+# 3. Launch depth_image_proc XYZRGB node with approximate time sync (exact_sync:=false)
+ros2 run depth_image_proc point_cloud_xyzrgb_node --ros-args \
+  -p exact_sync:=false \
+  -p queue_size:=30 \
+  -r rgb/camera_info:=/camera/rgb/camera_info \
+  -r rgb/image_rect_color:=/camera/rgb/image_raw \
+  -r depth_registered/image_rect:=/camera/depth_raw/image \
+  -r points:=/camera/depth_registered/points &
 PIDS+=("$!")
 
 wait -n "${PIDS[@]}"
