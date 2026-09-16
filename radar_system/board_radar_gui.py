@@ -18,9 +18,11 @@ import threading
 import atexit
 from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, 
                              QLabel, QPushButton, QFrame, QGridLayout, QSizePolicy,
-                             QDialog, QLineEdit, QComboBox)
-from PyQt5.QtCore import Qt, pyqtSignal, QThread, QPointF, QSize, QTimer, QRectF
-from PyQt5.QtGui import QPainter, QColor, QPen, QBrush, QFont, QImage, QPixmap, QFontMetrics
+                             QDialog, QLineEdit, QComboBox, QStackedWidget,
+                             QSlider, QCheckBox, QDoubleSpinBox)
+from PyQt5.QtCore import Qt, pyqtSignal, QThread, QPointF, QSize, QTimer, QRectF, QUrl
+from PyQt5.QtGui import QPainter, QColor, QPen, QBrush, QFont, QImage, QPixmap, QFontMetrics, QLinearGradient
+from PyQt5.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
 
 import json
 import rclpy
@@ -330,6 +332,52 @@ class ROSThread(QThread):
                     rclpy.shutdown()
             except Exception:
                 pass
+
+
+class CloudDataWorker(QThread):
+    state_signal = pyqtSignal(dict)
+    cloud_signal = pyqtSignal(bytes, dict)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.running = True
+        self.active = False
+        self.base = os.environ.get('RO2_MAP_URL', 'http://127.0.0.1:8088').rstrip('/')
+        self.last_key = None
+
+    def set_active(self, active):
+        self.active = active
+
+    def stop(self):
+        self.running = False
+        self.wait(1500)
+
+    def run(self):
+        import urllib.request
+        while self.running:
+            if not self.active:
+                time.sleep(0.3)
+                continue
+            try:
+                req = urllib.request.Request(f"{self.base}/api/live_map")
+                with urllib.request.urlopen(req, timeout=1.5) as resp:
+                    raw = resp.read()
+                state = json.loads(raw.decode('utf-8'))
+                self.state_signal.emit(state)
+
+                meta = state.get('scene')
+                if meta and meta.get('format') == 'xyzi-f32le':
+                    key = (meta.get('epoch', ''), meta.get('revision', 0))
+                    if key != self.last_key:
+                        bin_url = f"{self.base}/api/live_map/scene.bin?epoch={key[0]}&v={key[1]}"
+                        with urllib.request.urlopen(bin_url, timeout=2.5) as bin_resp:
+                            bin_data = bin_resp.read()
+                        self.last_key = key
+                        self.cloud_signal.emit(bin_data, meta)
+            except Exception:
+                pass
+            time.sleep(0.25)
+
 
 class RadarCanvas(QWidget):
     def __init__(self, parent=None):
@@ -801,13 +849,21 @@ class BoardRadarMainWindow(QWidget):
         self.ros_thread.start()
         self._fps_times = []
         self.last_targets = []
+        self._is_closed = False
+        self.cloud_epoch = ''
+        self.cloud_last_ok = 0.0
+        self.cloud_last_state = {}
+        self.cloud_worker = CloudDataWorker(self)
+        self.cloud_worker.state_signal.connect(self._on_cloud_state)
+        self.cloud_worker.cloud_signal.connect(self._on_cloud_binary)
+        self.cloud_worker.start()
 
         if '--open-cors' in sys.argv:
             QTimer.singleShot(800, self.open_cors_dialog)
         for arg in sys.argv:
             if arg.startswith('--cam-mode='):
                 mode = arg.split('=', 1)[1]
-                if mode in ('ai', 'rgb', 'depth'):
+                if mode in ('ai', 'rgb', 'depth', 'cloud'):
                     QTimer.singleShot(200, lambda m=mode: self.switch_cam_mode(m))
 
     def init_ui(self):
@@ -869,12 +925,12 @@ class BoardRadarMainWindow(QWidget):
         top = QHBoxLayout()
         caption = QVBoxLayout()
         caption.setSpacing(3)
-        title = QLabel('实时画面')
-        title.setStyleSheet('font-size:22px;font-weight:700;')
-        subtitle = QLabel('Astra S · 3D 深度相机')
-        subtitle.setStyleSheet('font-size:14px;color:#66788A;')
-        caption.addWidget(title)
-        caption.addWidget(subtitle)
+        self.cam_title = QLabel('实时画面')
+        self.cam_title.setStyleSheet('font-size:22px;font-weight:700;')
+        self.cam_subtitle = QLabel('Astra S · 3D 深度相机')
+        self.cam_subtitle.setStyleSheet('font-size:14px;color:#66788A;')
+        caption.addWidget(self.cam_title)
+        caption.addWidget(self.cam_subtitle)
         top.addLayout(caption)
         top.addStretch()
         self.cam_fps_badge = QLabel('-- FPS')
@@ -887,18 +943,28 @@ class BoardRadarMainWindow(QWidget):
         self.btn_ai = QPushButton('AI 目标测距')
         self.btn_rgb = QPushButton('彩色画面')
         self.btn_depth = QPushButton('深度距离图')
-        for mode, button in [('ai', self.btn_ai), ('rgb', self.btn_rgb), ('depth', self.btn_depth)]:
+        self.btn_cloud = QPushButton('3D 点云')
+        for mode, button in [('ai', self.btn_ai), ('rgb', self.btn_rgb), ('depth', self.btn_depth), ('cloud', self.btn_cloud)]:
             button.setCheckable(True)
             button.setMinimumHeight(44)
             button.clicked.connect(lambda _, m=mode: self.switch_cam_mode(m))
             modes.addWidget(button)
         cam.addLayout(modes)
+
+        self.cam_display_stack = QStackedWidget()
         self.video_box = QLabel('等待相机画面')
         self.video_box.setAlignment(Qt.AlignCenter)
         self.video_box.setMinimumSize(1, 280)
         self.video_box.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
         self.video_box.setStyleSheet('background:#C7D4DE;color:#677A8C;border:1px solid #B5C4D0;border-radius:10px;font-size:17px;')
-        cam.addWidget(self.video_box, 1)
+        self.cam_display_stack.addWidget(self.video_box)
+
+        from cloud_gui import CloudCanvas
+        self.cloud_canvas = CloudCanvas()
+        self.cloud_canvas.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
+        self.cam_display_stack.addWidget(self.cloud_canvas)
+        cam.addWidget(self.cam_display_stack, 1)
+
         self.cam_dist_badge = QLabel('等待目标信息')
         self.cam_dist_badge.setStyleSheet('color:#344E63;font-size:16px;padding:4px 0;')
         self.cam_dist_badge.setWordWrap(True)
@@ -925,6 +991,73 @@ class BoardRadarMainWindow(QWidget):
         self.depth_hint.setWordWrap(True)
         controls.addWidget(self.depth_hint)
         cam.addWidget(self.depth_controls)
+
+        self.cloud_controls = QWidget()
+        c_layout = QVBoxLayout(self.cloud_controls)
+        c_layout.setContentsMargins(0, 0, 0, 0)
+        c_layout.setSpacing(8)
+        c_tools = QHBoxLayout()
+        c_tools.setSpacing(6)
+        for label, cb in [
+            ('三维', lambda: self.cloud_canvas.set_view('orbit')),
+            ('俯视', lambda: self.cloud_canvas.set_view('top')),
+            ('低视角', lambda: self.cloud_canvas.set_view('front')),
+            ('全图', self.cloud_canvas.fit),
+        ]:
+            b = QPushButton(label)
+            b.setMinimumHeight(38)
+            b.clicked.connect(cb)
+            c_tools.addWidget(b)
+        self.cloud_follow = QPushButton('跟随车位')
+        self.cloud_follow.setCheckable(True)
+        self.cloud_follow.setChecked(True)
+        self.cloud_follow.setMinimumHeight(38)
+        self.cloud_follow.clicked.connect(self._set_cloud_follow)
+        c_tools.addWidget(self.cloud_follow)
+        self.cloud_theme = QPushButton('浅色')
+        self.cloud_theme.setMinimumHeight(38)
+        self.cloud_theme.clicked.connect(self._toggle_cloud_theme)
+        c_tools.addWidget(self.cloud_theme)
+        c_layout.addLayout(c_tools)
+
+        c_opts = QHBoxLayout()
+        c_opts.setSpacing(6)
+        self.cloud_color = QComboBox()
+        self.cloud_color.addItems(['高度 Z', '距车距离', '反射强度'])
+        self.cloud_color.currentIndexChanged.connect(self._update_cloud_settings)
+        c_opts.addWidget(self.cloud_color)
+
+        c_opts.addWidget(QLabel('Z/m'))
+        self.cloud_low = QDoubleSpinBox()
+        self.cloud_low.setRange(-100., 100.)
+        self.cloud_low.setSingleStep(0.2)
+        self.cloud_low.setValue(-0.2)
+        self.cloud_low.valueChanged.connect(self._update_cloud_settings)
+        c_opts.addWidget(self.cloud_low)
+
+        self.cloud_high = QDoubleSpinBox()
+        self.cloud_high.setRange(-100., 100.)
+        self.cloud_high.setSingleStep(0.5)
+        self.cloud_high.setValue(3.0)
+        self.cloud_high.valueChanged.connect(self._update_cloud_settings)
+        c_opts.addWidget(self.cloud_high)
+
+        c_opts.addWidget(QLabel('点径'))
+        self.cloud_size = QSlider(Qt.Horizontal)
+        self.cloud_size.setRange(1, 4)
+        self.cloud_size.setValue(2)
+        self.cloud_size.setMaximumWidth(80)
+        self.cloud_size.valueChanged.connect(self._update_cloud_settings)
+        c_opts.addWidget(self.cloud_size)
+
+        self.cloud_rings = QCheckBox('环')
+        self.cloud_rings.setChecked(True)
+        self.cloud_rings.toggled.connect(self._update_cloud_settings)
+        c_opts.addWidget(self.cloud_rings)
+        c_layout.addLayout(c_opts)
+
+        cam.addWidget(self.cloud_controls)
+        self.cloud_controls.hide()
         body.addWidget(camera, 60)
 
         radar = QFrame()
@@ -1105,6 +1238,8 @@ class BoardRadarMainWindow(QWidget):
             self.battery_badge.setStyleSheet(chip_style(style_type))
 
     def _note_fps(self):
+        if self.cam_mode == 'cloud':
+            return
         now = time.time()
         self._fps_times.append(now)
         self._fps_times = [t for t in self._fps_times if now - t < 1.0]
@@ -1113,33 +1248,111 @@ class BoardRadarMainWindow(QWidget):
 
     def switch_cam_mode(self, mode):
         self.cam_mode = mode
-        self.ros_thread.display_mode = mode
-        self.depth_range.setEnabled(mode=='depth')
-        self.depth_style.setEnabled(mode=='depth')
-        self._depth_shown=None
-        if mode=='depth':
-            self.latest_depth_pixmap=None
-            self.video_box.clear()
-            self.video_box.setText('等待新的深度帧…')
+        self.ros_thread.display_mode = mode if mode != 'cloud' else 'ai'
+        self.depth_range.setEnabled(mode == 'depth')
+        self.depth_style.setEnabled(mode == 'depth')
+        self._depth_shown = None
         self._fps_times = []
         self.update_mode_buttons()
-        if mode == 'ai':
-            if self.latest_ai_pixmap:
-                self.video_box.setPixmap(self.latest_ai_pixmap)
-            self.cam_dist_badge.setText(getattr(self, 'ai_badge_text', 'AI 空间目标检测就绪'))
-        elif mode == 'rgb':
-            if self.latest_rgb_pixmap:
-                self.video_box.setPixmap(self.latest_rgb_pixmap)
-            self.cam_dist_badge.setText("彩色实景 · 实时画面")
-        elif mode == 'depth':
-            if self.latest_depth_pixmap:
-                self.video_box.setPixmap(self.latest_depth_pixmap)
-            self._set_depth_badge(self.center_depth_mm, getattr(self, 'heat_near_mm', 0), getattr(self, 'heat_far_mm', 0))
+
+        if mode == 'cloud':
+            self.cam_title.setText('三维实测点云')
+            self.cam_subtitle.setText('Astra S + N10P · 空间重建与建图')
+            self.cam_display_stack.setCurrentWidget(self.cloud_canvas)
+            self.depth_controls.hide()
+            self.cloud_controls.show()
+            self.cam_fps_badge.setText(f"{self.cloud_canvas.render_ms:.0f} ms")
+            self.cloud_worker.set_active(True)
+        else:
+            self.cam_title.setText('实时画面')
+            self.cam_subtitle.setText('Astra S · 3D 深度相机')
+            self.cam_display_stack.setCurrentWidget(self.video_box)
+            self.cloud_controls.hide()
+            self.depth_controls.setVisible(mode == 'depth')
+            self.cloud_worker.set_active(False)
+            if mode == 'ai':
+                if self.latest_ai_pixmap:
+                    self.video_box.setPixmap(self.latest_ai_pixmap)
+                self.cam_dist_badge.setText(getattr(self, 'ai_badge_text', 'AI 空间目标检测就绪'))
+            elif mode == 'rgb':
+                if self.latest_rgb_pixmap:
+                    self.video_box.setPixmap(self.latest_rgb_pixmap)
+                self.cam_dist_badge.setText("彩色实景 · 实时画面")
+            elif mode == 'depth':
+                self.latest_depth_pixmap = None
+                self.video_box.clear()
+                self.video_box.setText('等待新的深度帧…')
+                if self.latest_depth_pixmap:
+                    self.video_box.setPixmap(self.latest_depth_pixmap)
+                self._set_depth_badge(self.center_depth_mm, getattr(self, 'heat_near_mm', 0), getattr(self, 'heat_far_mm', 0))
 
     def update_mode_buttons(self):
-        for mode, button in [('ai', self.btn_ai), ('rgb', self.btn_rgb), ('depth', self.btn_depth)]:
+        for mode, button in [('ai', self.btn_ai), ('rgb', self.btn_rgb), ('depth', self.btn_depth), ('cloud', self.btn_cloud)]:
             button.setChecked(self.cam_mode == mode)
         self.depth_controls.setVisible(self.cam_mode == 'depth')
+        self.cloud_controls.setVisible(self.cam_mode == 'cloud')
+
+    def _on_cloud_state(self, state):
+        meta = state.get('scene')
+        if not meta or meta.get('format') != 'xyzi-f32le':
+            return
+        self.cloud_last_ok = time.monotonic()
+        self.cloud_last_state = state
+        if self.cloud_epoch != meta.get('epoch'):
+            self.cloud_epoch = meta.get('epoch')
+            self.cloud_canvas.clear()
+        self.cloud_canvas.set_state(state, True)
+        if self.cam_mode == 'cloud':
+            count = meta.get('count', 0)
+            source = meta.get('source', '3D建图')
+            live = '实时' if meta.get('live') else '历史/等待'
+            err = meta.get('error') or state.get('error', '')
+            status_text = f"三维点云 {count:,} 点 · {source} · {live}"
+            if err:
+                status_text += f" ({err})"
+            self.cam_dist_badge.setText(status_text)
+            self.cam_fps_badge.setText(f"{self.cloud_canvas.render_ms:.0f} ms")
+
+        avail_int = meta.get('intensity_available', False)
+        self.cloud_color.model().item(2).setEnabled(avail_int)
+        self.cloud_color.model().item(1).setEnabled(bool(state.get('localized')))
+        if (self.cloud_color.currentIndex() == 2 and not avail_int) or \
+           (self.cloud_color.currentIndex() == 1 and not state.get('localized')):
+            self.cloud_color.setCurrentIndex(0)
+
+    def _on_cloud_binary(self, body, meta):
+        if not body or self.cloud_epoch != meta.get('epoch'):
+            return
+        try:
+            expected = meta['count'] * 16
+            if len(body) != expected:
+                return
+            arr = np.frombuffer(body, dtype='<f4').reshape(-1, 4)
+            self.cloud_canvas.set_cloud(arr, meta)
+            self.cloud_follow.setChecked(self.cloud_canvas.follow)
+        except Exception:
+            pass
+
+    def _set_cloud_follow(self, checked):
+        self.cloud_canvas.follow = checked
+        self.cloud_canvas.set_state(self.cloud_last_state, self.cloud_canvas.online)
+
+    def _toggle_cloud_theme(self):
+        self.cloud_canvas.light = not self.cloud_canvas.light
+        self.cloud_theme.setText('深色' if self.cloud_canvas.light else '浅色')
+        self.cloud_canvas.invalidate()
+
+    def _update_cloud_settings(self, *args):
+        if self.cloud_low.value() >= self.cloud_high.value():
+            return
+        modes = ['height', 'distance', 'intensity']
+        idx = max(0, min(len(modes)-1, self.cloud_color.currentIndex()))
+        self.cloud_canvas.color_mode = modes[idx]
+        self.cloud_canvas.z_low = self.cloud_low.value()
+        self.cloud_canvas.z_high = self.cloud_high.value()
+        self.cloud_canvas.point_size = self.cloud_size.value()
+        self.cloud_canvas.rings = self.cloud_rings.isChecked()
+        self.cloud_canvas.invalidate()
 
     def on_targets_data(self, json_str):
         try:
@@ -1167,6 +1380,12 @@ class BoardRadarMainWindow(QWidget):
         return pix.scaled(box, Qt.KeepAspectRatio, Qt.SmoothTransformation)
 
     def closeEvent(self,event):
+        self._is_closed = True
+        if hasattr(self, 'cloud_worker'):
+            self.cloud_worker.stop()
+        if hasattr(self, 'cloud_canvas'):
+            self.cloud_canvas.timer.stop()
+            self.cloud_canvas.worker.stop()
         self.depth_renderer.stop()
         super().closeEvent(event)
 
@@ -1316,19 +1535,53 @@ class BoardRadarMainWindow(QWidget):
         if self.cam_mode == 'depth':
             record = self.ros_thread.latest_depth
             live_cam = record is not None and now - record['received'] + record['age'] < 0.6
+        elif self.cam_mode == 'cloud':
+            live_cam = (now - self.cloud_last_ok < 2.0)
         else:
             live_cam = self._camera_received > 0 and now - self._camera_received < 1.0
-        self.camera_badge.setText('相机 · 在线' if live_cam else '相机 · 等待数据')
+        self.camera_badge.setText(('点云' if self.cam_mode == 'cloud' else '相机') + (' · 在线' if live_cam else ' · 等待数据'))
         self.camera_badge.setStyleSheet(chip_style('good' if live_cam else 'muted'))
         self.cam_fps_badge.setStyleSheet(chip_style('good' if live_cam else 'muted'))
-        if not live_cam:
+        if self.cam_mode == 'cloud':
+            self.cam_fps_badge.setText(f"{self.cloud_canvas.render_ms:.0f} ms")
+        elif not live_cam:
             self.cam_fps_badge.setText('-- FPS')
 
 def main():
+    import signal
+    try:
+        import rclpy
+        from rclpy.node import Node
+        import rcl_interfaces.msg
+        import sensor_msgs.msg
+        import std_msgs.msg
+        if not rclpy.ok():
+            rclpy.init()
+        _node = Node('_prewarm')
+        _node.destroy_node()
+    except Exception:
+        pass
+
     app = QApplication(sys.argv)
+    signal.signal(signal.SIGINT, lambda *_: app.quit())
+    signal.signal(signal.SIGTERM, lambda *_: app.quit())
+    sig_timer = QTimer()
+    sig_timer.start(500)
+    sig_timer.timeout.connect(lambda: None)
+
     win = BoardRadarMainWindow()
     win.showFullScreen()
-    sys.exit(app.exec_())
+    result = app.exec_()
+    try:
+        win.close()
+    except Exception:
+        pass
+    try:
+        if rclpy.ok():
+            rclpy.shutdown()
+    except Exception:
+        pass
+    return result
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())
