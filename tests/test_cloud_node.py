@@ -121,3 +121,14 @@ def test_clock_rollback_resets_epoch(node):
     node.params['sensor_tf_calibrated']=True;node.tick();epoch=node.packets.epoch
     node.ros_now=10;node.tick()
     assert node.packets.epoch!=epoch
+
+
+def test_base_link_fallback_when_no_map(node):
+    node.params['sensor_tf_calibrated']=True
+    node.map_info=None
+    node.tick();node.publish_scene()
+    snap=node.snapshot()
+    assert snap['scene']['count']==4
+    assert snap['scene']['frame']=='base_link'
+    assert snap['scene']['live']
+    assert ('base_link','camera_optical',99.9) in node.tf.calls

@@ -194,7 +194,9 @@ class CloudCanvas(QWidget):
                     if v[2]>.1:
                         p.drawPoint(QPointF(float(v[0]),float(v[1])))
         p.setPen(QColor('#405d73' if self.light else '#bdd2df'))
-        p.drawText(16,25,'3D 实测点云 · map / m · 原生 NumPy 深度缓冲')
+        frame_name=s.get('scene',{}).get('frame','map')
+        frame_desc='车体局部' if frame_name=='base_link' else '全局建图'
+        p.drawText(16,25,f'3D 实时点云 · {frame_name} ({frame_desc}) · 原生 NumPy 深度缓冲')
         p.drawText(16,self.height()-18,'左键旋转 / 右键或 Shift 平移 / 滚轮缩放 · 网格 1 m')
         p.drawText(16,self.height()-40,f'点数 {len(self.points):,} · 栅格化 {self.render_ms:.0f} ms · '+('实时' if self.online and s.get('scene',{}).get('live') else '历史 / 等待'))
         # Same metric palette as WebGL; intensity is only enabled when present.

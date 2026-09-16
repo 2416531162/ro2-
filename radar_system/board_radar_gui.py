@@ -1306,18 +1306,21 @@ class BoardRadarMainWindow(QWidget):
             count = meta.get('count', 0)
             source = meta.get('source', '3D建图')
             live = '实时' if meta.get('live') else '历史/等待'
+            frame = meta.get('frame', 'map')
+            frame_label = '局部' if frame == 'base_link' else '全局'
             err = meta.get('error') or state.get('error', '')
-            status_text = f"三维点云 {count:,} 点 · {source} · {live}"
-            if err:
+            status_text = f"三维点云 {count:,} 点 · {source} · {frame_label} · {live}"
+            if err and not meta.get('live'):
                 status_text += f" ({err})"
             self.cam_dist_badge.setText(status_text)
             self.cam_fps_badge.setText(f"{self.cloud_canvas.render_ms:.0f} ms")
 
         avail_int = meta.get('intensity_available', False)
         self.cloud_color.model().item(2).setEnabled(avail_int)
-        self.cloud_color.model().item(1).setEnabled(bool(state.get('localized')))
+        dist_avail = bool(state.get('localized') or meta.get('frame') == 'base_link')
+        self.cloud_color.model().item(1).setEnabled(dist_avail)
         if (self.cloud_color.currentIndex() == 2 and not avail_int) or \
-           (self.cloud_color.currentIndex() == 1 and not state.get('localized')):
+           (self.cloud_color.currentIndex() == 1 and not dist_avail):
             self.cloud_color.setCurrentIndex(0)
 
     def _on_cloud_binary(self, body, meta):
