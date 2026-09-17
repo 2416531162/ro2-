@@ -1,0 +1,4 @@
+{
+  "lidar_yaw_deg": 140.7,
+  "description": "N10P LiDAR physical mounting yaw offset (degrees, counter-clockwise is positive)"
+}

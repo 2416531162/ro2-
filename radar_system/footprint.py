@@ -216,8 +216,11 @@ def optical_to_vehicle(x_opt, y_opt, z_opt, mount, pitch_rad):
     x_v = z_opt * c - y_opt * s
     y_v = -x_opt
     z_v = -z_opt * s - y_opt * c
-    # 只做纵向/横向平移;相机高度不参与水平距离计算
-    return mount.x_m + x_v, mount.y_m + y_v, z_v
+    # 相机水平朝向(偏航)与车头不完全一致时按 yaw 旋转;
+    # 相机高度不参与水平距离计算
+    cy, sy = math.cos(mount.yaw_rad), math.sin(mount.yaw_rad)
+    return (mount.x_m + cy * x_v - sy * y_v,
+            mount.y_m + sy * x_v + cy * y_v, z_v)
 
 
 def corridor_clearance(points, footprint, max_range=8.0):

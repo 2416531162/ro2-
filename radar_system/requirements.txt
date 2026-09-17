@@ -1,0 +1,6 @@
+# ROS 2 rclpy/messages and PyQt5 are installed through the board's ROS/OS packages.
+numpy>=1.24,<2
+opencv-python>=4.8,<5
+pyserial>=3.5,<4
+# RK3588 Linux only; match the board's librknnrt / driver installation.
+rknn-toolkit-lite2==2.3.2; platform_machine == "aarch64" and sys_platform == "linux"

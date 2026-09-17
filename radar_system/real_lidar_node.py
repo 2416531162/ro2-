@@ -14,6 +14,24 @@ from n10p_pipeline import N10PDecoder, SweepAssembler, BINS, RANGE_MIN, RANGE_MA
 
 PORT = os.environ.get('N10P_PORT', '/dev/serial/by-id/usb-WCH.CN_USB_Single_Serial_0001-if00')
 BAUD = 460800
+CALIB_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config', 'lidar_calib.json')
+
+
+def load_calib_yaw_deg():
+    env_val = os.environ.get('LIDAR_YAW_DEG')
+    if env_val is not None:
+        try:
+            return float(env_val)
+        except ValueError:
+            pass
+    if os.path.isfile(CALIB_FILE):
+        try:
+            with open(CALIB_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                return float(data.get('lidar_yaw_deg', 0.0))
+        except Exception:
+            pass
+    return 0.0
 
 
 class RealLidarNode(Node):
@@ -22,6 +40,10 @@ class RealLidarNode(Node):
         self.pub = self.create_publisher(LaserScan, '/scan', QoSProfile(depth=1))
         self.status_pub = self.create_publisher(String, '/lidar/status', 1)
         self.decoder, self.assembler = N10PDecoder(), SweepAssembler()
+        self.yaw_deg = load_calib_yaw_deg()
+        self.yaw_bins = int(round(self.yaw_deg / 360.0 * BINS)) % BINS
+        if self.yaw_bins:
+            self.get_logger().info(f'N10P 零点偏航校准生效: {self.yaw_deg:+.1f}° ({self.yaw_bins} bins)')
         self.ser = None
         self.last_reconnect = -math.inf
         self.last_scan = None
@@ -92,11 +114,17 @@ class RealLidarNode(Node):
         # Bins are reversed/resampled into ROS angular order, not time order.
         msg.time_increment = 0.0
         msg.range_min, msg.range_max = RANGE_MIN, RANGE_MAX
-        msg.ranges, msg.intensities = scan['ranges'], scan['intensities']
+        if self.yaw_bins:
+            ranges = scan['ranges'][-self.yaw_bins:] + scan['ranges'][:-self.yaw_bins]
+            intensities = scan['intensities'][-self.yaw_bins:] + scan['intensities'][:-self.yaw_bins]
+        else:
+            ranges = scan['ranges']
+            intensities = scan['intensities']
+        msg.ranges, msg.intensities = ranges, intensities
         self.pub.publish(msg)
         self.last_scan = scan['received']
         self.scan_time = scan['scan_time']
-        self.valid = sum(math.isfinite(r) for r in scan['ranges'])
+        self.valid = sum(math.isfinite(r) for r in ranges)
 
     def publish_status(self):
         age = time.monotonic() - self.last_scan if self.last_scan is not None else None
@@ -105,6 +133,7 @@ class RealLidarNode(Node):
                       stale=age is None or age > 0.5, age_ms=round(age*1000) if age is not None else None,
                       hz=round(1/self.scan_time, 2) if self.scan_time and age is not None and age < 0.5 else 0,
                       valid=self.valid if age is not None and age < 0.5 else 0, bins=BINS,
+                      calib_yaw_deg=self.yaw_deg,
                       bytes=d.bytes_received, frames=d.frames, crc_errors=d.crc_errors,
                       angle_errors=d.angle_errors, discarded_bytes=d.discarded_bytes,
                       echo_fallbacks=d.echo_fallbacks, overruns=self.overruns)

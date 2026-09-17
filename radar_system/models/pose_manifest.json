@@ -1,0 +1,54 @@
+{
+  "model": "YOLOv8n-pose",
+  "source": "https://github.com/airockchip/rknn_model_zoo/tree/main/examples/yolov8_pose",
+  "download_url": "https://ftrg.zbox.filez.com/v2/delivery/data/95f00b0fc900458ba134f8b180b3f7a1/examples/yolov8_pose/yolov8n-pose.onnx",
+  "downloaded_on": "2026-09-17",
+  "onnx": {
+    "file": "yolov8n-pose.onnx",
+    "bytes": 13326816,
+    "sha256": "308495ebe4416b40adf376485252a7b8ba7933a169368b31e74e0f977ded8663",
+    "outputs": [
+      [
+        1,
+        65,
+        80,
+        80
+      ],
+      [
+        1,
+        65,
+        40,
+        40
+      ],
+      [
+        1,
+        65,
+        20,
+        20
+      ],
+      [
+        1,
+        17,
+        3,
+        8400
+      ]
+    ]
+  },
+  "validation": {
+    "onnx_checker": true,
+    "onnx_cpu_sample_people": 3,
+    "rk3588_device_tested": false,
+    "rknn_build": true,
+    "rknn_simulator": "Not completed: x86_64 simulator stalled at SessionPreparing under QEMU on Apple Silicon; container stopped"
+  },
+  "rknn": {
+    "file": "yolov8n_pose_rk3588_fp16.rknn",
+    "bytes": 8565315,
+    "sha256": "2011a85dcf5873f9ca0c2aeccceb9b17368a81742409e2a9b08a9ee38d2a8d01",
+    "target": "rk3588",
+    "precision": "fp16",
+    "toolkit2": "2.3.2",
+    "onnx": "1.16.1",
+    "quantized": false
+  }
+}

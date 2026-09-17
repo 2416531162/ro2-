@@ -12,6 +12,10 @@ import struct
 import threading
 import time
 from dataclasses import dataclass
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from scan_guard import GuardConfig, ScanGuard  # noqa: E402
 
 FRAME_HEADER, FRAME_TAIL = 0x7B, 0x7D
 BY_ID_HINT = "usb-WCH.CN_USB_Single_Serial_0002-if00"
@@ -144,6 +148,10 @@ class ControlPolicy:
         # Recoverable-fault bookkeeping: see Config.feedback_grace_s.
         self.hold_reason = None
         self.hold_since = None
+        # 独立防撞层(scan_guard.ScanGuard.limit 的包装):speed_filter(speed, turn, now)
+        # -> (限制后速度, 原因)。为 None 时行为与原来完全一致。
+        self.speed_filter = None
+        self.guard_reason = None
 
     def stop(self, reason):
         """Hard disarm. Recovery requires stationary telemetry, so reserve this
@@ -296,11 +304,17 @@ class ControlPolicy:
             return STOP_FRAME
         _, speed, turn = self.latest
         old_speed, old_turn = self.output
+        self.guard_reason = None
+        if self.speed_filter is not None:
+            speed, self.guard_reason = self.speed_filter(speed, turn, now)
         # Brake immediately on zero or reversal; never continue accelerating an old direction.
         if speed == 0 or old_speed * speed < 0:
             out_speed = 0.0
         else:
             out_speed = old_speed + max(-c.acceleration_m_s2 * dt, min(c.acceleration_m_s2 * dt, speed - old_speed))
+            if self.guard_reason is not None and abs(out_speed) > abs(speed):
+                # 防撞限速立即生效,不走减速斜坡
+                out_speed = speed
         out_turn = old_turn + max(-c.steering_rate_rad_s * dt, min(c.steering_rate_rad_s * dt, turn - old_turn))
         self.output = (out_speed, out_turn)
         wire_turn = out_turn * c.steering_scale if c.protocol == "steering_angle" else out_turn
@@ -317,7 +331,8 @@ try:
     from geometry_msgs.msg import Twist, TransformStamped
     from ackermann_msgs.msg import AckermannDriveStamped
     from nav_msgs.msg import Odometry
-    from sensor_msgs.msg import Imu
+    from sensor_msgs.msg import Imu, LaserScan
+    from rclpy.qos import ReliabilityPolicy
     from std_msgs.msg import Float32, String
     from std_srvs.srv import SetBool, Trigger
     from tf2_ros import TransformBroadcaster
@@ -346,9 +361,18 @@ class WheeltecDriver(Node):
         if gp("baud") != 115200:
             raise ValueError("verified Wheeltec baud is 115200")
         self.frame_id, self.base_frame_id = gp("frame_id"), gp("base_frame_id")
+        # 独立防撞层参数(guard_ 前缀,与 GuardConfig 字段一一对应)
+        guard_defaults = vars(GuardConfig())
+        for name, value in guard_defaults.items():
+            self.declare_parameter("guard_" + name, value, ParameterDescriptor(read_only=True))
+        self.guard = ScanGuard(GuardConfig(**{k: gp("guard_" + k) for k in guard_defaults}))
         self.publish_tf = gp("publish_tf")
         self.lock = threading.RLock()
         self.policy = ControlPolicy(self.config, time.monotonic())
+        if self.guard.cfg.enabled:
+            # 阿克曼协议里 turn 是角速度(twist)或转角;非零即视为转弯
+            self.policy.speed_filter = lambda speed, turn, now: self.guard.limit(
+                speed, abs(turn) > 0.05, now)
         self.parser = FrameParser()
         self.ser = None
         self.running = True
@@ -369,11 +393,19 @@ class WheeltecDriver(Node):
                          durability=DurabilityPolicy.VOLATILE, lifespan=Duration(seconds=self.config.cmd_timeout_s))
         self.create_subscription(Twist, "/cmd_vel", self.on_twist, qos)
         self.create_subscription(AckermannDriveStamped, "/ackermann_cmd", self.on_ackermann, qos)
+        self.create_subscription(LaserScan, "/scan", self.on_scan,
+                                 QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT))
         self.create_service(SetBool, "/wheeltec/arm", self.on_arm)
         self.create_service(Trigger, "/wheeltec/stop", self.on_stop)
         self.create_timer(0.2, self.publish_status)
         self.worker = threading.Thread(target=self.io_loop, daemon=True)
         self.worker.start()
+
+    def on_scan(self, msg):
+        points_ready = time.monotonic()
+        with self.lock:
+            self.guard.update_scan(msg.ranges, msg.angle_min, msg.angle_increment,
+                                   msg.range_min, msg.range_max, points_ready)
 
     def on_arm(self, request, response):
         with self.lock:
@@ -568,6 +600,11 @@ class WheeltecDriver(Node):
                     "telemetry": p.last_received, "output_speed_turn": p.output,
                     "tx_packets": self.tx_packets, "tx_bytes": self.tx_bytes, "last_tx_hex": self.last_tx_hex,
                     "io_errors": self.io_errors, "last_error": self.last_error,
+                    "guard": {"enabled": self.guard.cfg.enabled,
+                              "reason": p.guard_reason or self.guard.last_reason,
+                              "gap_m": (round(self.guard.last_gap, 3)
+                                        if self.guard.last_gap not in (None, float("inf")) else None),
+                              "interventions": self.guard.interventions},
                     "steering_feedback_available": False, "stop_confirmed": bool(age is not None and age < self.config.feedback_timeout_s and p.stationary_frames >= 5)}
         self.pub_status.publish(String(data=json.dumps(data, ensure_ascii=False)))
 

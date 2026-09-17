@@ -51,7 +51,7 @@ class TestWebControl(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         web.check_follower_running_cached = lambda: False
-        cls.bridge = web.SLAMBridgeNode()
+        cls.bridge = web.TrackingBridgeNode()
         web.bridge_node = cls.bridge
         cls.server = web.ThreadedHTTPServer(('127.0.0.1', 0), web.RadarHTTPHandler)
         cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
@@ -110,6 +110,19 @@ class TestWebControl(unittest.TestCase):
         vx, _wz, active, _zero = self.bridge.manual_drive.sample()
         self.assertFalse(active)
         self.assertEqual(vx, 0.0)
+
+    def test_tracking_bridge_has_no_retired_subscriptions(self):
+        topics = {topic for topic, _ in self.bridge.subscriptions_}
+        self.assertEqual(topics, {'/scan', '/camera/ai_detection/targets',
+                                 '/camera/ai_detection/status', '/voltage',
+                                 '/follower/status', '/wheeltec/status'})
+
+    def test_retired_map_and_rtk_routes_are_gone(self):
+        for path in ('/map', '/map2d', '/api/cors', '/api/live_map/state'):
+            self.conn.request('GET', path)
+            resp = self.conn.getresponse()
+            self.assertEqual(resp.status, 404, path)
+            resp.read()
 
     def test_index_page_has_length(self):
         self.conn.request('GET', '/')

@@ -58,7 +58,7 @@ python3 radar_system/person_follower.py --decel-mps2 0.63
 | 环节 | 典型值 |
 |---|---|
 | 相机曝光 + 传输 | 30~60 ms |
-| YOLO 推理 (RK3588 NPU) | 30~120 ms |
+| YOLOv8n-pose 推理 (RK3588 NPU) | 待设备实测 |
 | alpha-beta 滤波剩余滞后 | 20~50 ms |
 | 控制周期 (20 Hz) | 50 ms |
 | 串口 + 固件响应 | 20~40 ms |
@@ -179,7 +179,7 @@ python3 wheeltec_protocol/control.py drive --speed 0.005 --steering-deg 20 --sec
 
 控制层再稳,感知层给出错误距离时一样会撞。这一组参数决定「什么样的观测才配拿来开车」。
 
-### 深度可信度 — `radar_system/ai_3d_detector.py`
+### 深度可信度 — `radar_system/person_pose_node.py / depth_measurement.py`
 
 ```python
 DEPTH_MIN_MM = 150.0            # 下界
@@ -200,32 +200,35 @@ DEPTH_MAX_PAIR_AGE_S = 0.15     # RGB 与深度帧的最大允许时间差
 > `DEPTH_PERCENTILE` 不建议超过 50。取中位数在「一半前景一半背景」的
 > 分布上会被拉向远处,把人判得比实际远 —— 这正是要避免的方向。
 
-### 野值门控 — `motion_safety.AlphaBetaTracker`
+### 统一多人跟踪 — `radar_system/person_tracker.py`
+
+相机检测和雷达腿部点簇是同一个跟踪器的两路观测(参考 SPENCER / sobits_follower):
+
+- 每个人一条轨迹,匀速模型卡尔曼滤波,状态在里程计系(车动不影响人的速度估计)
+- 观测按**采集时刻**换算:相机用检测消息里的图像时间戳,雷达用扫描时间戳,
+  车身位姿取那一刻的,补偿推理延迟
+- 马氏距离门控(99%)+ 匈牙利算法全局关联
+- ByteTrack 两级关联:高分框可新建轨迹,低分框只延续已确认的轨迹
+- 雷达点簇只更新已确认的轨迹,不会凭空造出一个人
+- 跟随锁定的是**轨迹编号**,相机看不到时雷达照常更新同一条轨迹
 
 ```python
-gate_base_m  = 0.35    # 允许的新息幅度下限
-gate_rate_mps = 2.5    # 目标动得快时按 dt 放宽
-max_rejects  = 3       # 连续拒绝几帧后认定目标真的跳变并重置
+track_high_conf       = 0.45  # 高分框门限(可新建轨迹)
+track_low_conf        = 0.15  # 低分框门限(只延续);ai_3d_detector.PERSON_LOW_CONFIDENCE 同步
+confirm_frames        = 3     # 相机命中几次才确认为人
+target_timeout_s      = 0.30  # 目标多久没有任何观测算丢失
+max_camera_latency_s  = 0.60  # 相机时间戳比现在早这么多以上,按 0 延迟处理并计数
+camera_hfov_deg       = 58    # 反向证据用的相机视场
+PersonTracker(gate_max_m=1.2, accel_sigma=1.5, confirmed_timeout_s=1.5,
+              lidar_ambiguity_m=0.8, unseen_in_view_max_s=1.5)
 ```
 
-超出门限的观测会被丢弃,滤波器靠预测外推滑行,此时速度被
-`coasting_speed_cap`(默认 0.15 m/s)压住。终端会显示限制原因 `coasting`。
-
-- 正常快走被误拒(`野值` 计数随人走动增长)→ 调大 `gate_rate_mps`
-- 野值穿透(车偶尔无故加速)→ 调小 `gate_base_m`
-
-### 目标锁定 — `motion_safety.TargetLock`
-
-```python
-lock_radius_m  = 0.55   # 帧间关联半径,超出即认为不是同一个人
-lock_timeout_s = 1.50   # 关联不上多久后解锁、允许重选
-confirm_frames = 3      # 连续几帧位置一致才锁定
-```
-
-终端仪表盘会显示 `锁定` / `未锁`。
-
-- 人快速横向移动时频繁解锁 → 调大 `lock_radius_m`(但太大会容易被旁人抢走)
-- 想更快重新捕获 → 调小 `lock_timeout_s`
+- **反向证据**:轨迹明明在相机视野里(留 6° 余量、0.9~3.5m),却 1.5 秒没被相机看到
+  → 不是人(雷达把柱子当成人了),删除。面板「排除的非人轨迹」计数。
+- 旁边有人经过时目标编号不应变化;面板「目标编号」的切换次数持续增长说明关联门限太宽
+  → 调小 `gate_max_m`
+- 「相机时间戳异常」计数增长 → 相机节点和跟随节点的时钟不一致(检查 `use_sim_time`、NTP)
+- 人快走时频繁跟丢 → 调大 `accel_sigma`(允许更大的机动)
 
 ### 相机 / 雷达交叉校验
 
@@ -282,22 +285,84 @@ RecoveryConfig.trail_max_age_s  = 20.0  # 来路超过这么久就不再相信(�
 **根本解决办法是让雷达看得见车尾**:把雷达抬高到车上所有设备之上,
 或在车尾加一个测距传感器。
 
-### 雷达接力跟踪
+### 雷达接力(相机看不到时)
 
 ```python
-lidar_handoff          = True
-lidar_handoff_after_s  = 0.25  # 相机超过这么久没看到人,改由雷达接力
-lidar_handoff_max_s    = 8.0   # 超过这么久没被相机重新确认,放弃雷达轨迹
-lidar_track_speed_cap  = 0.35  # 接力期间限速
+lidar_handoff          = True  # False = 雷达不更新人的轨迹
+lidar_handoff_max_s    = 8.0   # 身份「不确定」状态最多维持多久
+lidar_track_speed_cap  = 0.35  # 只靠雷达时限速
 ```
 
-相机看到人时,把雷达上对应位置的腿部点簇「认领」下来;人走出相机视野
-(Astra S 水平约 60°)后继续按雷达轨迹跟随、转向。遥测 `lidar_handoff` 为
-true 时表示正在用雷达接力,`lidar_track.since_camera_s` 是距上次相机确认的秒数。
+人走出相机视野(Astra S 水平约 58°)后,同一条轨迹由雷达腿部点簇继续更新。
+雷达点簇周围 0.8m 内没有别的候选时,这次更新算「身份可信」,计时清零;
+旁边一直有椅子腿之类的干扰时,超过 `lidar_handoff_max_s` 就放弃。
 
-- 接力时跟到墙边/柱子上 → 调小 `lidar_handoff_max_s`
-- 人出画后车很快就停 → 看 `lidar_track` 是否为 null(雷达没认领到腿,
-  多半是 `scan_blind_sectors_deg` 或自反射过滤把人所在方向屏蔽了)
+- 接力时跟到墙边/柱子上 → 调小 `lidar_handoff_max_s`,或调大 `lidar_ambiguity_m`(更容易判为有干扰)
+- 人出画后车很快就停 → 看面板「雷达轨迹」:显示「未认领到腿」说明雷达没把腿关联到这个人,
+  多半是相机/雷达外参不准(用 `calib_check.py` 检查)或屏蔽扇区挡住了人所在方向
+
+### 沿人走过的路跟随(纯追踪)
+
+```python
+follow_breadcrumbs   = True
+pp_lookahead_min_m   = 1.20  # 预瞄距离(后轴起算)
+pp_lookahead_gain_s  = 0.60  # 每 1 m/s 车速增加
+pp_lookahead_max_m   = 1.80
+```
+
+目标轨迹每走 10cm 记一个路径点,车朝「路径上第一个超过预瞄距离的点」打舵
+(转角按固件公式 TurnR = L/tan(δ) + 轮距/2 反算),「还差多远」按沿路径剩下的长度算。
+人绕过门框、柜子拐弯时车不会斜着切过去。L 型路线仿真(满舵半径 1.77m):
+
+| 预瞄 | 拐角前内切 | 冲出拐角 |
+|---|---|---|
+| 0.6 m | 0.00 m | 1.01 m |
+| 1.2 m(默认) | 0.04 m | 0.40 m |
+| 1.5 m | 0.11 m | 0.11 m |
+
+- 过窄门时蹭内侧 → 调小 `pp_lookahead_min_m`
+- 拐弯冲得太出去 → 调大(外侧墙会被避障检查挡住)
+- 想恢复旧的「直接朝人打舵」→ `follow_breadcrumbs = False`
+
+### 底盘驱动内的独立防撞层 — `wheeltec_protocol/scan_guard.py`
+
+跟随程序、网页遥控、以后的导航都经过底盘驱动,驱动里按雷达实测再兜一层底
+(思路同 nav2_collision_monitor)。规则比跟随程序宽松,正常跟随不会触发;
+跟随程序崩溃/有 bug,或网页手动遥控时才起作用。
+
+- 只看行驶方向、车宽 +5cm(转弯再 +10cm)走廊内的点
+- 允许车速满足:0.2s 延迟距离 + 刹车距离(1.0 m/s²)+ 4cm 余量 ≤ 到障碍距离;
+  限速立即生效,不走加减速斜坡;不会解除底盘使能
+- 从没收到雷达 → 直通(雷达没开时仍可手动遥控);收到过但断流 → 限速 0.15 m/s
+- 车身自反射余量 2cm(比跟随程序小,否则车头 5cm 内的障碍会被忽略)
+
+驱动参数都以 `guard_` 开头,例如关掉:`ros2 run ... --ros-args -p guard_enabled:=false`。
+`/wheeltec/status` 里的 `guard` 字段、网页「运行详情 → 底盘防撞层」和手动遥控提示
+会显示「防撞减速 / 防撞停车」。
+
+### 录包与离线回放 — `record_follow_bag.sh` / `bag_replay.py`
+
+```bash
+bash radar_system/record_follow_bag.sh                     # 现场录制,Ctrl+C 结束
+python3 radar_system/bag_replay.py ~/bags/follow_XXXX      # 回放,打印状态占比与切换
+python3 radar_system/bag_replay.py BAG --set follow_breadcrumbs=False   # A/B 对比参数
+python3 radar_system/bag_replay.py BAG --out timeline.jsonl             # 逐周期状态
+```
+
+回放用包里的时间做时钟,相机/雷达时间戳与现场一致;节点以演练模式运行,不发指令。
+注意这是**开环**回放:底盘速度是现场录下的,改了参数后车的实际轨迹不会跟着变,
+适合查「为什么判丢、为什么判无路」,不适合评估路径。
+
+### 相机 / 雷达外参检查 — `calib_check.py`
+
+```bash
+python3 radar_system/calib_check.py --seconds 40
+```
+
+一个人依次站到车前 左/中/右 × 近/远,每处 3 秒。工具用二维刚体最小二乘对齐
+「相机算出的人」与「雷达上的腿」,给出 `camera_offset_x_m / camera_offset_y_m /
+camera_yaw_rad` 建议值。修正前误差 < 8cm 且角度 < 1° 时不需要改。
+雷达安装位置 `lidar_offset_x_m` 是基准,先用卷尺量准。
 
 ---
 
@@ -613,7 +678,7 @@ i = round((目标方位 - angle_min) / 角分辨率)
 已加固的位置:
 
 - `person_follower.on_scan` —— 用 `angle_min + i * angle_inc`
-- `grid_utils.sector_min` —— 新增 `angle_min_deg` 参数
+- `scan_utils.sector_min` —— 新增 `angle_min_deg` 参数
 - `radar_web_server.scan_cb` —— 传入 `degrees(msg.angle_min)`
 
 `scan_doctor` 会打印 `angle_min` 并在其非 0 时告警,差 180° 时点名

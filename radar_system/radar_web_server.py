@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-RK3588 激光雷达与 2D/3D 空间 SLAM 实时建模 Web 控制大屏
+RK3588 雷达与摄像头人体跟踪控制台
 - 运行端口: 8088
-- 汇聚: /scan (雷达点云) + /map (占据栅格地图) + /robot_pose (机器人位姿与轨迹)
+- 汇聚: /scan、人体姿态检测、跟随状态与底盘遥测
 """
 
 import http.server
@@ -21,25 +21,18 @@ from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 
-try:
-    import numpy as np
-except ImportError:
-    np = None
+import numpy as np
 from sensor_msgs.msg import LaserScan
-from nav_msgs.msg import OccupancyGrid
-from geometry_msgs.msg import PoseStamped, Twist
+from geometry_msgs.msg import Twist
 from std_msgs.msg import String, Float32
 from std_srvs.srv import SetBool, Trigger
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from motion_safety import ChassisGeometry, yaw_from_steer, steer_from_yaw, clamp
-from grid_utils import clean_ranges, sector_min, downsample_step, extract_grid_points
+from scan_utils import clean_ranges, sector_min
 from manual_drive import ManualDriveLatch
 
 PORT = 8088
-ENABLE_MAP = os.environ.get('ENABLE_MAP', '0').strip().lower() in ('1', 'true', 'yes', 'on')
-MAP_MIN_INTERVAL_S = 1.0
-MAP_MAX_POINTS = 12000
 MANUAL_PUBLISH_PERIOD_S = 0.02
 MANUAL_HEARTBEAT_TIMEOUT_S = 0.75
 
@@ -103,22 +96,8 @@ state = {
     'right_dist': 2.0,
     'min_dist': 1.8,
     'ranges': [],
-    'robot_x': 0.0,
-    'robot_y': 0.0,
-    'robot_yaw': 0.0,
-    'trajectory': [],
-    # AI 3D 目标检测
     'ai_targets': [],
-    # 联合 3D 体素建图状态
-    'mapping_status': {},
-    # 地图数据
-    'map_width': 0,
-    'map_height': 0,
-    'map_res': 0.05,
-    'map_origin_x': -4.0,
-    'map_origin_y': -3.5,
-    'map_data': [], # 稀疏压缩后的地图
-    'rtk': {},
+    'ai_status': {},
     # 动力电池状态
     'voltage': 0.0,
     'battery_pct': 0,
@@ -131,7 +110,6 @@ state = {
 frame_count = 0
 last_hz_calc = time.time()
 
-CORS_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'cors_config.json')
 bridge_node = None
 follower_proc = None
 last_check_proc = 0.0
@@ -222,24 +200,15 @@ def stop_follower():
     return True, "stopped"
 
 
-class SLAMBridgeNode(Node):
+class TrackingBridgeNode(Node):
     def __init__(self):
-        super().__init__('radar_slam_web_bridge')
+        super().__init__('radar_tracking_web_bridge')
         self.sub_scan = self.create_subscription(LaserScan, '/scan', self.scan_cb, 10)
-        self.sub_map = self.sub_proj_map = None
-        if ENABLE_MAP:
-            self.sub_map = self.create_subscription(OccupancyGrid, '/map', self.map_cb, 5)
-            self.sub_proj_map = self.create_subscription(
-                OccupancyGrid, '/projected_map', self.map_cb, 5)
-        self.last_map_time = 0.0
-        self.sub_pose = self.create_subscription(PoseStamped, '/robot_pose', self.pose_cb, 10)
         self.sub_ai = self.create_subscription(String, '/camera/ai_detection/targets', self.ai_cb, 10)
-        self.sub_stat = self.create_subscription(String, '/joint_mapping/status', self.stat_cb, 10)
-        self.sub_rtk = self.create_subscription(String, '/rtk/status', self.rtk_cb, 10)
+        self.sub_ai_status = self.create_subscription(String, '/camera/ai_detection/status', self.ai_status_cb, 1)
         self.sub_voltage = self.create_subscription(Float32, '/voltage', self.voltage_cb, 10)
         self.sub_follower = self.create_subscription(String, '/follower/status', self.follower_cb, 10)
         self.sub_wheeltec = self.create_subscription(String, '/wheeltec/status', self.wheeltec_cb, 10)
-        self.pub_cors_cmd = self.create_publisher(String, '/rtk/cors_cmd', 10)
 
         # 手动介入控制发布者与底盘解锁使能客户端
         self.pub_cmd_vel = self.create_publisher(Twist, '/cmd_vel', 10)
@@ -257,7 +226,7 @@ class SLAMBridgeNode(Node):
         self.manual_timer = self.create_timer(MANUAL_PUBLISH_PERIOD_S, self.manual_loop,
                                               callback_group=self.manual_group)
 
-        self.get_logger().info('>>> [SLAM Web Bridge] 已订阅 /scan, /voltage, /follower/status, /wheeltec/status, /map, /projected_map, /robot_pose, AI, 3D 建图与 RTK 话题 (含CORS与底盘手动控制)...')
+        self.get_logger().info('>>> 雷达、人体姿态、跟随与底盘遥测已连接')
 
     def wheeltec_cb(self, msg):
         global state
@@ -323,14 +292,6 @@ class SLAMBridgeNode(Node):
         except Exception:
             pass
 
-    def rtk_cb(self, msg):
-        global state
-        try:
-            r = json.loads(msg.data)
-            with data_lock:
-                state["rtk"] = r
-        except Exception:
-            pass
 
     def ai_cb(self, msg):
         global state
@@ -341,13 +302,12 @@ class SLAMBridgeNode(Node):
         except Exception:
             pass
 
-    def stat_cb(self, msg):
-        global state
+
+    def ai_status_cb(self, msg):
         try:
-            stat = json.loads(msg.data)
             with data_lock:
-                state['mapping_status'] = stat
-        except Exception:
+                state['ai_status'] = json.loads(msg.data)
+        except (TypeError, ValueError):
             pass
 
     def scan_cb(self, msg):
@@ -364,39 +324,19 @@ class SLAMBridgeNode(Node):
         n = len(msg.ranges)
         if n == 0: return
 
-        if np is not None:
-            # 一次转换、一个掩码,四个方位与整体最小值都从同一份数组上取,
-            # 避免原来每个方位各跑一遍 Python 循环、再多跑两遍全量遍历。
-            clean, ok = clean_ranges(msg.ranges, msg.range_min, msg.range_max)
-            # 必须把 angle_min 传进去。LaserScan 第 0 个光束指向 msg.angle_min
-            # 而不是 0°,N10P 发布 -π,不传的话「正前方测距」读的其实是车尾 ——
-            # 雷达扫到车自己的车身,会被当成正前方 0.17m 的障碍物。
-            amin_deg = math.degrees(msg.angle_min)
-            front_d = sector_min(clean, 345, 15, angle_min_deg=amin_deg)
-            left_d = sector_min(clean, 75, 105, angle_min_deg=amin_deg)
-            back_d = sector_min(clean, 165, 195, angle_min_deg=amin_deg)
-            right_d = sector_min(clean, 255, 285, angle_min_deg=amin_deg)
-            overall_min = float(np.nanmin(clean)) if bool(np.any(ok)) else 99.0
-            ranges_out = np.round(np.where(ok, clean, 0.0), 2).tolist()
-        else:
-            def get_min_range(start_deg, end_deg):
-                dists = []
-                for deg in range(start_deg, end_deg + 1):
-                    idx = int((deg % 360) / 360.0 * n)
-                    if 0 <= idx < n:
-                        r = msg.ranges[idx]
-                        if msg.range_min < r < msg.range_max:
-                            dists.append(r)
-                return min(dists) if dists else 99.0
-
-            front_d = min(get_min_range(345, 360), get_min_range(0, 15))
-            left_d = get_min_range(75, 105)
-            back_d = get_min_range(165, 195)
-            right_d = get_min_range(255, 285)
-            valid_ranges = [r for r in msg.ranges if msg.range_min < r < msg.range_max]
-            overall_min = min(valid_ranges) if valid_ranges else 99.0
-            ranges_out = [round(float(r), 2) if msg.range_min < r < msg.range_max else 0.0
-                          for r in msg.ranges]
+        # 一次转换、一个掩码,四个方位与整体最小值都从同一份数组上取,
+        # 避免原来每个方位各跑一遍 Python 循环、再多跑两遍全量遍历。
+        clean, ok = clean_ranges(msg.ranges, msg.range_min, msg.range_max)
+        # 必须把 angle_min 传进去。LaserScan 第 0 个光束指向 msg.angle_min
+        # 而不是 0°,N10P 发布 -π,不传的话「正前方测距」读的其实是车尾 ——
+        # 雷达扫到车自己的车身,会被当成正前方 0.17m 的障碍物。
+        amin_deg = math.degrees(msg.angle_min)
+        front_d = sector_min(clean, 345, 15, angle_min_deg=amin_deg)
+        left_d = sector_min(clean, 75, 105, angle_min_deg=amin_deg)
+        back_d = sector_min(clean, 165, 195, angle_min_deg=amin_deg)
+        right_d = sector_min(clean, 255, 285, angle_min_deg=amin_deg)
+        overall_min = float(np.nanmin(clean)) if bool(np.any(ok)) else 99.0
+        ranges_out = np.round(np.where(ok, clean, 0.0), 2).tolist()
 
         with data_lock:
             state['hz'] = hz
@@ -407,54 +347,10 @@ class SLAMBridgeNode(Node):
             state['right_dist'] = round(right_d, 2)
             state['min_dist'] = round(overall_min, 2)
             state['ranges'] = ranges_out
+            state['angle_min'] = msg.angle_min
+            state['angle_increment'] = msg.angle_increment
 
-    def pose_cb(self, msg):
-        global state
-        x = msg.pose.position.x
-        y = msg.pose.position.y
-        # 从四元数计算 yaw
-        qz = msg.pose.orientation.z
-        qw = msg.pose.orientation.w
-        yaw = 2.0 * math.atan2(qz, qw)
 
-        with data_lock:
-            state['robot_x'] = round(x, 3)
-            state['robot_y'] = round(y, 3)
-            state['robot_yaw'] = round(yaw, 3)
-            state['trajectory'].append([round(x, 2), round(y, 2)])
-            if len(state['trajectory']) > 200:
-                state['trajectory'].pop(0)
-
-    def map_cb(self, msg):
-        """限流 + 自适应抽样地提取地图点集。
-
-        旧版固定 step=2 且每帧都算,40m 地图会吐出 12.8 万个点、耗时 35ms,
-        60m 地图 28.8 万点、180ms —— 全程持有 GIL。
-        现在:每秒最多算一次,并按地图尺寸自动放大步长把点数钳在 MAP_MAX_POINTS 内。
-        实测 40m 地图 34.7ms -> 1.8ms (20x),60m 地图 179.9ms -> 2.6ms (70x)。
-        """
-        global state
-        now = time.monotonic()
-        if now - self.last_map_time < MAP_MIN_INTERVAL_S:
-            return
-        self.last_map_time = now
-
-        w, h = msg.info.width, msg.info.height
-        if w <= 0 or h <= 0:
-            return
-
-        step = downsample_step(w, h, MAP_MAX_POINTS)
-        obstacles, frees = extract_grid_points(msg.data, w, h, step)
-
-        with data_lock:
-            state['map_width'] = w
-            state['map_height'] = h
-            state['map_res'] = msg.info.resolution
-            state['map_origin_x'] = msg.info.origin.position.x
-            state['map_origin_y'] = msg.info.origin.position.y
-            state['map_obstacles'] = obstacles
-            state['map_frees'] = frees
-            state['map_step'] = step
 
 def ros_worker():
     global bridge_node
@@ -462,7 +358,7 @@ def ros_worker():
         rclpy.init()
     except Exception:
         pass
-    node = SLAMBridgeNode()
+    node = TrackingBridgeNode()
     bridge_node = node
     executor = MultiThreadedExecutor(num_threads=2)
     executor.add_node(node)
@@ -535,19 +431,6 @@ class RadarHTTPHandler(http.server.BaseHTTPRequestHandler):
                 self.send_error(404)
                 return
 
-        elif self.path == '/api/cors':
-            cfg = {}
-            if os.path.exists(CORS_CONFIG_PATH):
-                try:
-                    with open(CORS_CONFIG_PATH, 'r', encoding='utf-8') as f:
-                        cfg = json.load(f)
-                except Exception:
-                    pass
-            with data_lock:
-                rtk_status = state.get('rtk', {})
-                cors_stat = rtk_status.get('cors', {})
-            self._send_json({'config': cfg, 'status': cors_stat})
-
         elif self.path == '/api/follower/status':
             with data_lock:
                 f_data = dict(state.get('follower', {}))
@@ -595,45 +478,35 @@ class RadarHTTPHandler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         global bridge_node
-        if self.path == '/api/cors':
-            try:
-                new_cfg = json.loads(self._read_body().decode('utf-8'))
-                with open(CORS_CONFIG_PATH, 'w', encoding='utf-8') as f:
-                    json.dump(new_cfg, f, indent=2, ensure_ascii=False)
-
-                if bridge_node:
-                    msg = String()
-                    msg.data = "reload"
-                    bridge_node.pub_cors_cmd.publish(msg)
-
-                self._send_json({'ok': True, 'config': new_cfg})
-            except Exception as e:
-                self._send_json({'ok': False, 'error': str(e)}, status=500)
-
-        elif self.path == '/api/drive_profile':
+        if self.path == '/api/drive_profile':
             self._send_json({
                 'speed_tiers': SPEED_TIERS_MPS,
                 'steer_tiers': STEER_TIERS_DEG,
                 'reverse_scale': REVERSE_SCALE,
                 'min_turn_radius_m': round(CHASSIS.min_turn_radius_m, 3),
                 'max_steer_deg': round(math.degrees(CHASSIS.max_steer_rad), 1),
-                'map_enabled': ENABLE_MAP,
             })
 
         elif self.path == '/api/follower/start':
             ok, msg = start_follower()
-            self._send_json({'ok': ok, 'message': msg, 'running': is_follower_running()})
+            with data_lock:
+                f_data = mark_follower_staleness(dict(state.get('follower', {})))
+            self._send_json({'ok': ok, 'message': msg, 'running': is_follower_running(), 'follower': f_data})
 
         elif self.path == '/api/follower/stop':
             ok, msg = stop_follower()
-            self._send_json({'ok': ok, 'message': msg, 'running': is_follower_running()})
+            with data_lock:
+                f_data = mark_follower_staleness(dict(state.get('follower', {})))
+            self._send_json({'ok': ok, 'message': msg, 'running': is_follower_running(), 'follower': f_data})
 
         elif self.path == '/api/follower/toggle':
             if is_follower_running():
                 ok, msg = stop_follower()
             else:
                 ok, msg = start_follower()
-            self._send_json({'ok': ok, 'message': msg, 'running': is_follower_running()})
+            with data_lock:
+                f_data = mark_follower_staleness(dict(state.get('follower', {})))
+            self._send_json({'ok': ok, 'message': msg, 'running': is_follower_running(), 'follower': f_data})
 
         elif self.path == '/api/manual_drive':
             try:
@@ -700,11 +573,7 @@ def main():
     t = threading.Thread(target=ros_worker, daemon=True)
     t.start()
     server = ThreadedHTTPServer(('0.0.0.0', PORT), RadarHTTPHandler)
-    map_state = "开启" if ENABLE_MAP else "关闭 (仅雷达实时显示)"
-    print(f"🚀 SLAM Web 服务已就绪: http://192.168.0.170:{PORT}")
-    print(f"   建图订阅: {map_state}   numpy 加速: {'可用' if np is not None else '缺失,走慢路径'}")
-    if not ENABLE_MAP:
-        print("   需要建图时用: ENABLE_MAP=1 python3 radar_web_server.py")
+    print(f"雷达 / 摄像头跟踪服务: http://0.0.0.0:{PORT}")
     server.serve_forever()
 
 if __name__ == '__main__':

@@ -1,10 +1,11 @@
-"""Bounded Ackermann local recovery; pure Python, no actuator access.
+"""Bounded Ackermann local recovery; NumPy path checks, no actuator access.
 
 Unknown laser rays are NOT free. A blind reverse can only retrace a recent
-forward footprint, straight, once per recovery episode, for at most 15 cm.
+forward footprint, within the configured cumulative distance budget.
 This is a local manoeuvre controller, not a global navigation planner.
 """
 import math
+import numpy as np
 from dataclasses import dataclass
 
 from footprint import in_blind_sector, is_self_hit
@@ -104,6 +105,45 @@ class ScanEvidence:
         # scan so each free-space query is O(1) (clearance() issues ~10^5/cycle).
         self._lower = [self._nearest_valid(i, -1, self._reach, self._full) for i in range(n)]
         self._upper = [self._nearest_valid(i, +1, self._reach, self._full) for i in range(n)]
+
+        self._ranges_np = np.asarray(self.ranges, dtype=np.float64)
+        self._lower_np = np.array([-1 if i is None else i for i in self._lower])
+        self._upper_np = np.array([-1 if i is None else i for i in self._upper])
+        self.points_np = np.asarray(self.points, dtype=np.float64).reshape(-1, 2)
+
+    def query_many(self, x, y):
+        """Return (covered, free) arrays with the same strict ray rules as free()."""
+        x, y = np.broadcast_arrays(x, y)
+        if not self.usable:
+            empty = np.zeros(x.shape, dtype=bool)
+            return empty, empty.copy()
+        dx, dy = x-self.mount.x_m, y-self.mount.y_m
+        a = np.arctan2(dy, dx)-self.mount.yaw_rad
+        a += np.rint((self._mid-a)/(2*math.pi))*(2*math.pi)
+        index = (a-self.angle_min)/self.increment
+        finite = np.isfinite(index)
+        index = np.where(finite, index, 0.)
+        lo, hi = np.floor(index).astype(np.int64), np.ceil(index).astype(np.int64)
+        n = len(self.ranges)
+        valid = finite if self._full else finite & (lo >= 0) & (hi < n)
+        lower = self._lower_np[lo % n]
+        upper = self._upper_np[hi % n]
+        covered = valid & (lower >= 0) & (upper >= 0)
+        distance = np.hypot(dx, dy)
+        needed = distance + .015 + distance*abs(self.increment)/2
+        free = covered & (needed < self._ranges_np[lower]) & (needed < self._ranges_np[upper])
+        return covered, free
+
+    def masked_many(self, x, y):
+        a = np.arctan2(y-self.mount.y_m, x-self.mount.x_m)-self.mount.yaw_rad
+        edge = self.NEIGHBOR_WINDOW_RAD + abs(self.increment)
+        result = np.zeros(np.shape(a), dtype=bool)
+        for delta in (0., -edge, edge):
+            deg = (np.degrees(a+delta)+180.) % 360.-180.
+            for lo, hi in self.blind_sectors:
+                result |= ((deg >= lo) & (deg <= hi) if lo <= hi
+                           else (deg >= lo) | (deg <= hi))
+        return result
 
     # How far (radians) a query may look for a neighbouring real return.
     #
@@ -249,10 +289,7 @@ class LocalRecovery:
         self.still_since = None
         self.normal_distance = 0.0
         self.previous_speed = 0.0
-        self._edge = self._perimeter()
-        f = footprint
-        self._body_r2 = (math.hypot(max(f.front_m, f.rear_m) + f.margin_m,
-                                    f.effective_half_width) + 1e-6) ** 2
+        self._edge = np.asarray(self._perimeter(), dtype=np.float64)
         self.last_block = None
         self.exhausted_at = None
 
@@ -268,140 +305,104 @@ class LocalRecovery:
         return ([(lo+(hi-lo)*i/nx, y) for i in range(nx+1) for y in (-w, w)]
                 + [(x, -w+2*w*i/ny) for i in range(ny+1) for x in (lo, hi)])
 
-    def _inside(self, x, y, pad=0.0):
-        f = self.fp
-        return (-f.rear_m-f.margin_m-pad <= x <= f.front_m+f.margin_m+pad
-                and abs(y) <= f.effective_half_width+pad)
-
-    def _gap(self, x, y):
-        f = self.fp
-        return max(-f.rear_m-f.margin_m-x, x-f.front_m-f.margin_m,
-                   abs(y)-f.effective_half_width)
-
-    def _masked_body_shift(self, scan, bx, by, x, y, c, s):
-        """Forward gear only: tolerate a sliver the laser can NEVER observe.
-
-        Turning forward, the rear overhang swings out (~1.1 cm at full lock) and
-        the inner flank ahead of the rear axle cuts in (~1.7 cm). Where those
-        slivers fall inside a configured blind sector (car structure), no scan
-        can ever certify them, so the strict rule rejected EVERY turn from
-        standstill and the car could only drive dead straight.
-
-        Accepted only when the ray direction is structurally masked AND the
-        PHYSICAL body point (margin removed) is still inside the padded
-        footprint already occupied, i.e. the sweep stays within margin_m.
-        Unmasked unknown rays (dropouts, too-close returns ahead) stay blocking,
-        and reverse gear keeps the strict rule.
-        """
-        f = self.fp
-        px = min(max(bx, -f.rear_m), f.front_m)
-        py = min(max(by, -f.half_width_m), f.half_width_m)
-        if not self._inside(x+px*c-py*s, y+px*s+py*c, pad=1e-8):
-            return False
-        return scan.masked(x+bx*c-by*s, y+bx*s+by*c)
-
-    def _history_free(self, x, y):
-        px, py, yaw = self.pose
-        wx = px + x*math.cos(yaw) - y*math.sin(yaw)
-        wy = py + x*math.sin(yaw) + y*math.cos(yaw)
-        r2 = self._body_r2
-        for _, hx, hy, ha, _s in self.history:
-            dx, dy = wx-hx, wy-hy
-            if dx*dx + dy*dy > r2:
-                continue        # cannot lie inside that footprint
-            if self._inside(dx*math.cos(ha)+dy*math.sin(ha),
-                            -dx*math.sin(ha)+dy*math.cos(ha), pad=1e-8):
-                return True
-        return False
-
-    def _observed_before(self, x, y):
-        """Recent actual ray evidence, transformed with measured odometry.
-
-        Needed for rear-quarter swing: an area seen beside the front axle can
-        enter the body shadow as the car advances. Do not erase that evidence.
-        """
+    def _memory_many(self, x, y, allow_memory, allow_history):
+        """Transform query batches; newest covering scan wins even if occupied."""
         px, py, yaw = self.pose
         wx = px+x*math.cos(yaw)-y*math.sin(yaw)
         wy = py+x*math.sin(yaw)+y*math.cos(yaw)
-        for _, hx, hy, ha, scan in reversed(self.scan_history):
-            dx, dy = wx-hx, wy-hy
-            qx, qy = dx*math.cos(ha)+dy*math.sin(ha), -dx*math.sin(ha)+dy*math.cos(ha)
-            if scan.covered(qx, qy):
-                # The newest covering observation wins, including an obstacle.
-                return scan.free(qx, qy)
-        return False
+        known = np.zeros(x.shape, dtype=bool)
+        pending = np.ones(x.shape, dtype=bool)
+        if allow_memory:
+            for _, hx, hy, ha, scan in reversed(self.scan_history):
+                ids = np.flatnonzero(pending)
+                if not ids.size:
+                    break
+                dx, dy = wx[ids]-hx, wy[ids]-hy
+                covered, free = scan.query_many(dx*math.cos(ha)+dy*math.sin(ha),
+                                               -dx*math.sin(ha)+dy*math.cos(ha))
+                known[ids] = free
+                pending[ids[covered]] = False
+        if allow_history:
+            for _, hx, hy, ha, _ in self.history:
+                ids = np.flatnonzero(~known)
+                if not ids.size:
+                    break
+                dx, dy = wx[ids]-hx, wy[ids]-hy
+                known[ids] = self._inside_many(dx*math.cos(ha)+dy*math.sin(ha),
+                                              -dx*math.sin(ha)+dy*math.cos(ha))
+        return known
+
+    def _inside_many(self, x, y):
+        f = self.fp
+        return ((x >= -f.rear_m-f.margin_m-1e-8)
+                & (x <= f.front_m+f.margin_m+1e-8)
+                & (np.abs(y) <= f.effective_half_width+1e-8))
 
     def clearance(self, scan, steer, direction=1, current_steer=0.0,
                   allow_history=False, horizon=0.85, allow_memory=True):
-        """Sample the FULL rectangular body, including rear swing, both gears.
+        """Batch all sampled poses × obstacles/perimeter points in NumPy.
 
-        Steering is interpolated through its transition; sample spacing is
-        covered by a collision pad. Unknown newly swept space stops the path.
+        Retains the 2 cm samples, transition steering, collision pad, strict
+        unknown-space rules and first-block ordering of the scalar algorithm.
         """
         self.last_block = None
         if scan is None or not scan.usable:
             self.last_block = ("no_scan", 0.0, 0.0, 0.0)
             return 0.0
-        x = y = yaw = 0.0
-        step = 0.02
-        count = math.ceil(horizon/step)
-        # Sampling padding must not create a permanent virtual collision when
-        # a visible wall is already near the safety margin. Such a point may
-        # stay equally far away or recede, but must never get closer.
-        # Only returns the body can reach within the horizon matter. A point
-        # farther than (body circumradius + pad) from the current rear-axle
-        # origin cannot touch the body at this sample, so skip the exact test.
-        # Same result, far fewer _gap() calls (this runs up to ~7x per cycle).
+        step = .02
+        distances = np.arange(math.ceil(horizon/step)+1)*step
+        angles = current_steer+(steer-current_steer)*np.minimum(1., (distances+step)/.10)
+        dyaw = np.array([yaw_from_steer(float(direction), float(a), self.geo)*step
+                        for a in angles])
+        yaw = np.r_[0., np.cumsum(dyaw[:-1])]
+        x = np.r_[0., np.cumsum(direction*step*np.cos(yaw[:-1]+dyaw[:-1]/2))]
+        y = np.r_[0., np.cumsum(direction*step*np.sin(yaw[:-1]+dyaw[:-1]/2))]
+        c, s = np.cos(yaw)[:, None], np.sin(yaw)[:, None]
         f = self.fp
-        body_r = math.hypot(max(f.front_m, f.rear_m) + f.margin_m,
-                            f.effective_half_width) + .016
-        reach2 = (horizon + step + body_r) ** 2
-        # A return already inside the safety margin (negative gap) is allowed
-        # to stay equally far or recede, never to get closer; clamping its
-        # floor at 0 made it block even straight motion away from it.
-        obstacles = [(ox, oy, min(.015, self._gap(ox, oy)))
-                     for ox, oy in scan.points if ox*ox + oy*oy <= reach2]
-        body_r2 = body_r * body_r
-        g_rear, g_front = -f.rear_m-f.margin_m, f.front_m+f.margin_m
-        g_half = f.effective_half_width
-        for i in range(count+1):
-            distance = i * step
-            c, s = math.cos(yaw), math.sin(yaw)
-            for ox, oy, clearance_floor in obstacles:
-                dx, dy = ox-x, oy-y
-                if dx*dx + dy*dy > body_r2:
-                    continue
-                lx, ly = dx*c+dy*s, -dx*s+dy*c
-                # inline self._gap(lx, ly)
-                gap = g_rear-lx
-                if lx-g_front > gap:
-                    gap = lx-g_front
-                if abs(ly)-g_half > gap:
-                    gap = abs(ly)-g_half
-                if gap < clearance_floor-1e-9:
-                    self.last_block = ("obstacle", ox, oy, distance)
-                    return max(0.0, distance-step)
-            for bx, by in self._edge:
-                qx, qy = x+bx*c-by*s, y+bx*s+by*c
-                # inline self._inside(qx, qy, pad=1e-8)
-                if g_rear-1e-8 <= qx <= g_front+1e-8 and abs(qy) <= g_half+1e-8:
-                    continue   # already occupied body, not a free-space claim
-                if direction > 0 and self._masked_body_shift(scan, bx, by, x, y, c, s):
-                    continue
-                known = scan.free(qx, qy)
-                if not known and not scan.covered(qx, qy):
-                    known = ((allow_memory and self._observed_before(qx, qy))
-                             or (allow_history and self._history_free(qx, qy)))
-                if not known:
-                    self.last_block = ("unknown", qx, qy, distance)
-                    return max(0.0, distance-step)
-            # Worst-case steering transition over the first 10 cm.
-            fraction = min(1.0, (distance+step)/0.10)
-            angle = current_steer + (steer-current_steer)*fraction
-            dyaw = yaw_from_steer(float(direction), angle, self.geo)*step
-            x += direction*step*math.cos(yaw+dyaw/2)
-            y += direction*step*math.sin(yaw+dyaw/2)
-            yaw += dyaw
+        rear, front, half = -f.rear_m-f.margin_m, f.front_m+f.margin_m, f.effective_half_width
+        body_r = math.hypot(max(f.front_m, f.rear_m)+f.margin_m, half)+.016
+        pts = scan.points_np
+        pts = pts[np.sum(pts*pts, axis=1) <= (horizon+step+body_r)**2]
+        collision_step = len(distances)
+        collision_point = None
+        if len(pts):
+            ox, oy = pts.T
+            floor = np.minimum(.015, np.maximum.reduce((rear-ox, ox-front, np.abs(oy)-half)))
+            dx, dy = ox[None, :]-x[:, None], oy[None, :]-y[:, None]
+            lx, ly = dx*c+dy*s, -dx*s+dy*c
+            gap = np.maximum.reduce((rear-lx, lx-front, np.abs(ly)-half))
+            hits = ((dx*dx+dy*dy <= body_r*body_r) & (gap < floor[None, :]-1e-9))
+            indices = np.argwhere(hits)
+            if len(indices):
+                collision_step, j = map(int, indices[0])
+                collision_point = pts[j]
+        # No unknown-space check is needed after the first collision.
+        end = min(len(distances), collision_step+1)
+        c, s = c[:end], s[:end]
+        bx, by = self._edge.T
+        qx = x[:end, None]+bx*c-by*s
+        qy = y[:end, None]+bx*s+by*c
+        known = self._inside_many(qx, qy)
+        if direction > 0 and scan.blind_sectors:
+            px = np.clip(bx, -f.rear_m, f.front_m)
+            py = np.clip(by, -f.half_width_m, f.half_width_m)
+            known |= (self._inside_many(x[:end, None]+px*c-py*s,
+                                        y[:end, None]+px*s+py*c)
+                      & scan.masked_many(qx, qy))
+        covered, free = scan.query_many(qx, qy)
+        known |= free
+        missing = ~known & ~covered
+        if np.any(missing) and (allow_memory or allow_history):
+            known[missing] = self._memory_many(qx[missing], qy[missing], allow_memory, allow_history)
+        unknown = np.argwhere(~known)
+        # Obstacles were checked before the perimeter at each sample.
+        if len(unknown) and int(unknown[0, 0]) < collision_step:
+            i, j = map(int, unknown[0])
+            self.last_block = ("unknown", float(qx[i, j]), float(qy[i, j]), float(distances[i]))
+            return max(0., float(distances[i])-step)
+        if collision_point is not None:
+            self.last_block = ("obstacle", *map(float, collision_point), float(distances[collision_step]))
+            return max(0., float(distances[collision_step])-step)
         return horizon
 
     def _observe(self, now, speed, yaw_rate, healthy, odom_ok=None):
@@ -531,7 +532,9 @@ class LocalRecovery:
             elif self.phase == "SCAN":
                 resume = True          # still standing, only observing
             elif self.phase == "BRAKE" and self.direction > 0:
-                resume = abs(speed) < .02 and self.previous_speed >= 0
+                resume = (abs(speed) < .02 and self.previous_speed >= 0
+                          and self.still_since is not None
+                          and now-self.still_since >= self.cfg.settle_s)
             if resume:
                 self.active = False
                 self.phase = "IDLE"
@@ -565,10 +568,14 @@ class LocalRecovery:
             else:
                 if normal:
                     out = normal
-                elif target and requested_speed > 0:
-                    # Person visible but no steer has a certified path. Say so,
-                    # whatever the recovery budget: that is the actionable fact.
+                elif target and requested_speed >= .08 and follow_cap >= .08:
+                    # Person visible, the car wants to move, but no steer has a
+                    # certified path. Say so, whatever the recovery budget.
                     out = Command(state="PATH_BLOCKED", reason="no_observed_path")
+                elif target and requested_speed > 0:
+                    # Too slow to be worth moving (almost at follow distance).
+                    out = Command(state="HOLDING",
+                                  reason="follow_envelope" if follow_cap < .08 else "hold")
                 elif target:
                     out = Command(state="HOLDING", reason="hold")
                 elif self.exhausted:

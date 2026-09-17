@@ -17,6 +17,7 @@ import os
 import sys
 import types
 import unittest
+from unittest.mock import patch
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "tests"))
@@ -107,10 +108,10 @@ class FollowerHarness:
         self.node = pf.PersonFollowerNode(cfg, dry_run=True)
         self.node.print_dashboard = lambda s: None
 
-    def driver_ok(self, speed=0.0):
+    def driver_ok(self, speed=0.0, yaw_rate=0.0):
         self.node.on_driver_status(String(data=json.dumps({
             'armed': True, 'ready': 'ready', 'connected': True, 'holding': False,
-            'age_ms': 5, 'telemetry': {'velocity': [speed, 0.0, 0.0]}})))
+            'age_ms': 5, 'telemetry': {'velocity': [speed, 0.0, yaw_rate]}})))
 
     def tick(self, scan, targets=None):
         self.driver_ok(self.node.cmd_vx)        # 模拟底盘跟上指令,否则会被判为堵转
@@ -227,7 +228,7 @@ class TestFollowerStartup(unittest.TestCase):
         for _ in range(30):
             h.tick(n10p_scan(extra=legs), person)
         self.assertGreater(h.node.lidar_fallback_matches, 0)
-        self.assertLess(h.node.tracker_x.position, 0.0, "横向偏移右为正,人在左应为负")
+        self.assertLess(h.status()["target"]["x"], 0.0, "横向偏移右为正,人在左应为负")
         self.assertGreater(h.node.cmd_steer, 0.0, h.status())
 
 
@@ -270,15 +271,17 @@ class TestCrossCheckAndHandoff(unittest.TestCase):
         self.assertLessEqual(s['cmd_vx'], 0.05, s)
 
     def test_person_walks_out_of_camera_view_to_the_left(self):
-        """相机锁定后人向左走出画面,雷达接力:车继续跟并往左打舵。"""
-        h = FollowerHarness()
+        """相机锁定后人向左走出画面,雷达接力:车继续跟并往左打舵(直接瞄准模式)。"""
+        h = FollowerHarness(follow_breadcrumbs=False)
         x, y = 2.6, 0.0
-        for _ in range(25):
-            h.tick(n10p_scan(extra=person_legs(x, y), half_size=5.0), camera_person(x, y))
+        for i in range(25):
+            with patch('time.monotonic', return_value=1000.+i*.05):
+                h.tick(n10p_scan(extra=person_legs(x, y), half_size=5.0), camera_person(x, y))
         self.assertTrue(h.status()['lidar_track'], h.status())
-        for _ in range(40):
+        for i in range(40):
             y += 0.03                                  # 每帧左移 3cm
-            h.tick(n10p_scan(extra=person_legs(x, y), half_size=5.0), [])   # 相机已看不到
+            with patch('time.monotonic', return_value=1001.25+i*.05):
+                h.tick(n10p_scan(extra=person_legs(x, y), half_size=5.0), [])
         s = h.status()
         self.assertTrue(s['lidar_handoff'], s)
         self.assertEqual(s['target']['range_source'], 'lidar_track')
@@ -287,18 +290,56 @@ class TestCrossCheckAndHandoff(unittest.TestCase):
         self.assertGreater(s['cmd_vx'], 0.0, s)
         self.assertLessEqual(s['speed_cap_mps'], 0.35 + 1e-9, s)
 
-    def test_handoff_expires_without_camera_confirmation(self):
-        h = FollowerHarness(lidar_handoff_max_s=0.3)
-        for _ in range(25):
-            h.tick(n10p_scan(extra=person_legs(2.6, 0.0), half_size=5.0), camera_person(2.6, 0.0))
-        import time
-        time.sleep(0.4)
-        for _ in range(15):
-            h.tick(n10p_scan(extra=person_legs(2.6, 0.0), half_size=5.0), [])
-        s = h.status()
-        self.assertFalse(s['lidar_handoff'], s)
-        self.assertIsNone(s['target'], s)
-        self.assertEqual(s['cmd_vx'], 0.0, s)
+    def test_in_view_but_never_seen_is_dropped(self):
+        """雷达还在跟一个点簇,但它就在相机视野正中、相机却一直看不到:不是人,丢弃。"""
+        sim = WorldSim()
+        try:
+            for _ in range(30):
+                sim.step((2.6, 0.0))
+            node = sim.h.node
+            self.assertIsNotNone(node.people.target_id)
+            for _ in range(40):                    # 2 秒:相机空帧,雷达照常看到腿
+                sim.clock.t += 0.05
+                px, py = sim.person_in_vehicle(2.6, 0.0)
+                sim.h.driver_ok(node.cmd_vx, node.cmd_wz)
+                node.on_scan(n10p_scan(extra=person_legs(px, py), half_size=8.0))
+                node.on_targets(String(data=json.dumps([])))
+                node.last_control_time = None
+                node.control_loop()
+            s = sim.h.status()
+            self.assertIsNone(s['target'], s)
+            self.assertEqual(s['cmd_vx'], 0.0)
+            self.assertGreaterEqual(s['dropped_not_person'], 1)
+        finally:
+            sim.close()
+
+    def test_ambiguous_lidar_track_expires(self):
+        """出了相机视野,且腿旁边总有别的点簇(椅子腿):雷达单独维持有时间上限。"""
+        sim = WorldSim(lidar_handoff_max_s=1.0)
+        try:
+            for _ in range(30):
+                sim.step((2.6, 0.0))
+            node = sim.h.node
+            y = 0.0
+            gone = False
+            for k in range(120):
+                y = min(y + 0.05, 2.5)            # 人走到左侧视野外,停在一把椅子旁
+                sim.clock.t += 0.05
+                px, py = sim.person_in_vehicle(2.6, y)
+                cx, cy = sim.person_in_vehicle(2.6, y + 0.7)
+                sim.h.driver_ok(node.cmd_vx, node.cmd_wz)
+                world = combine(person_legs(px, py), disc(cx, cy, 0.05))
+                node.on_scan(n10p_scan(extra=world, half_size=8.0))
+                vis = abs(math.atan2(py, px - 0.54)) < math.radians(29)
+                node.on_targets(String(data=json.dumps(camera_person(px, py) if vis else [])))
+                node.last_control_time = None
+                node.control_loop()
+                if sim.h.status()['target'] is None:
+                    gone = True
+                    break
+            self.assertTrue(gone, sim.h.status())
+        finally:
+            sim.close()
 
     def test_wall_is_not_adopted_as_person(self):
         """相机报的人位置附近只有墙:雷达不认领,也就不会接力跟墙。"""
@@ -502,6 +543,195 @@ class TestStuckAgainstLowObstacle(unittest.TestCase):
         rec.active = True
         rec.cancel()
         self.assertEqual(rec.trail_length, before)
+
+
+class FakeClock:
+    def __init__(self):
+        self.t = 1000.0
+
+    def monotonic(self):
+        return self.t
+
+    def sleep(self, dt):
+        self.t += dt
+
+
+class WorldSim:
+    """世界坐标仿真:人按给定路径走,车按下发的速度/舵角运动,虚拟时钟。"""
+
+    def __init__(self, **overrides):
+        self.clock = FakeClock()
+        self._real_time = pf.time
+        pf.time = self.clock
+        self.h = FollowerHarness(**overrides)
+        self.car = [0.0, 0.0, 0.0]      # 世界系后轴位姿
+        self.trace = []
+
+    def close(self):
+        pf.time = self._real_time
+
+    def person_in_vehicle(self, wx, wy):
+        x, y, th = self.car
+        c, s = math.cos(th), math.sin(th)
+        dx, dy = wx - x, wy - y
+        return c * dx + s * dy, -s * dx + c * dy
+
+    def step(self, person_world, dt=0.05, camera_fov_deg=58.0):
+        node = self.h.node
+        self.clock.t += dt
+        v = node.cmd_vx
+        wz = node.cmd_wz
+        x, y, th = self.car
+        self.car = [x + v * dt * math.cos(th + wz * dt / 2),
+                    y + v * dt * math.sin(th + wz * dt / 2), th + wz * dt]
+        self.trace.append(tuple(self.car))
+        px, py = self.person_in_vehicle(*person_world)
+        visible = abs(math.atan2(py, px - 0.54)) < math.radians(camera_fov_deg / 2)
+        self.h.driver_ok(v, wz)
+        node.on_scan(n10p_scan(extra=person_legs(px, py), half_size=8.0))
+        node.on_targets(String(data=json.dumps(camera_person(px, py) if visible and px > 0.8 else [])))
+        node.last_control_time = None
+        node.control_loop()
+
+
+def l_shaped_walk(sim, speed=0.8, straight=4.0, turn_len=3.0, steps=420):
+    """人从车前 2.6m 出发,直走 straight 米后左转 90° 再走 turn_len 米。"""
+    s = 0.0
+    for _ in range(steps):
+        s = min(s + speed * 0.05, straight + turn_len)
+        if s <= straight:
+            p = (2.6 + s, 0.0)
+        else:
+            p = (2.6 + straight, s - straight)
+        sim.step(p)
+    return sim
+
+
+class TestBreadcrumbFollowing(unittest.TestCase):
+    """沿人走过的路走:人在拐角处转弯,车不应提前斜着切过去。"""
+
+    def cut(self, breadcrumbs):
+        sim = WorldSim(follow_breadcrumbs=breadcrumbs)
+        try:
+            for _ in range(30):                       # 先锁定
+                sim.step((2.6, 0.0))
+            l_shaped_walk(sim)
+            corner_x = 2.6 + 4.0
+            # 车后轴到达拐角前 1.5m 时的横向偏离:越大说明切角越早
+            before = [abs(y) for x, y, _ in sim.trace if x < corner_x - 1.5]
+            status = sim.h.status()
+            return max(before) if before else 0.0, sim.car, status
+        finally:
+            sim.close()
+
+    def test_follows_path_instead_of_cutting_corner(self):
+        cut_direct, car_d, _ = self.cut(False)
+        cut_crumbs, car_c, status = self.cut(True)
+        self.assertLess(cut_crumbs, cut_direct, (cut_crumbs, cut_direct))
+        self.assertLess(cut_crumbs, 0.15)
+        # 两种方式最终都要跟着人转过去
+        self.assertGreater(car_c[1], 0.5, car_c)
+        self.assertIsNotNone(status['target'], status)
+
+    def test_pursuit_steer_sign_and_limit(self):
+        node = FollowerHarness().node
+        self.assertGreater(node._pursuit_steer(1.0, 0.3), 0.0)
+        self.assertLess(node._pursuit_steer(1.0, -0.3), 0.0)
+        self.assertAlmostEqual(node._pursuit_steer(0.2, 1.0), node.cfg.max_steer_rad)
+        self.assertEqual(node._pursuit_steer(2.0, 0.0), 0.0)
+
+
+class TestUnifiedTracking(unittest.TestCase):
+
+    def test_second_person_crossing_does_not_steal_target(self):
+        """目标在正前方 2.5m,另一个人从 1.2m 处横穿:目标编号不变。"""
+        sim = WorldSim()
+        try:
+            for _ in range(30):
+                sim.step((2.6 + 0.0, 0.0))
+            node = sim.h.node
+            tid = node.people.target_id
+            self.assertIsNotNone(tid)
+            other_y = 1.5
+            for _ in range(60):
+                other_y -= 0.05
+                px, py = sim.person_in_vehicle(2.6 + 1.0 * 0, 0.0)
+                ox, oy = sim.person_in_vehicle(sim.car[0] + 1.8, other_y)
+                sim.clock.t += 0.05
+                sim.h.driver_ok(node.cmd_vx, node.cmd_wz)
+                world = combine(person_legs(px, py), person_legs(ox, oy))
+                node.on_scan(n10p_scan(extra=world, half_size=8.0))
+                dets = camera_person(px, py) + camera_person(ox, oy)
+                node.on_targets(String(data=json.dumps(dets)))
+                node.last_control_time = None
+                node.control_loop()
+                self.assertEqual(node.people.target_id, tid)
+        finally:
+            sim.close()
+
+    def test_low_confidence_boxes_keep_target(self):
+        """人被部分遮挡,检测置信度掉到 0.2:目标不丢(ByteTrack 第二级关联)。"""
+        sim = WorldSim()
+        try:
+            for _ in range(30):
+                sim.step((2.6, 0.0))
+            node = sim.h.node
+            for _ in range(40):
+                sim.clock.t += 0.05
+                px, py = sim.person_in_vehicle(2.6, 0.0)
+                sim.h.driver_ok(node.cmd_vx, node.cmd_wz)
+                node.on_scan(n10p_scan(half_size=8.0))           # 雷达也看不到腿
+                det = camera_person(px, py, conf=0.2)
+                node.on_targets(String(data=json.dumps(det)))
+                node.last_control_time = None
+                node.control_loop()
+            s = sim.h.status()
+            self.assertIsNotNone(s['target'], s)
+            self.assertEqual(s['target']['range_source'], 'camera_depth')
+        finally:
+            sim.close()
+
+    def test_low_confidence_alone_never_creates_target(self):
+        sim = WorldSim()
+        try:
+            for _ in range(30):
+                sim.clock.t += 0.05
+                node = sim.h.node
+                sim.h.driver_ok(0.0, 0.0)
+                node.on_scan(n10p_scan(half_size=8.0))
+                node.on_targets(String(data=json.dumps(camera_person(2.6, 0.0, conf=0.25))))
+                node.last_control_time = None
+                node.control_loop()
+            self.assertIsNone(sim.h.status()['target'])
+            self.assertEqual(sim.h.node.people.tracks, [])
+        finally:
+            sim.close()
+
+    def test_camera_latency_is_compensated(self):
+        """检测结果晚到 150ms 且车在转弯:按采集时刻换算后位置不应偏。"""
+        from person_tracker import PersonTracker
+        tr = PersonTracker()
+        t = 0.0
+        # 车以 0.5 m/s、0.5 rad/s 转弯;人在世界系 (3, 0) 静止
+        car = [0.0, 0.0, 0.0]
+        history = {}
+        for k in range(60):
+            t = k * 0.05
+            tr.step_odom(t, 0.5, 0.5)
+            car = list(tr.odom.current())
+            history[round(t, 2)] = tuple(car)
+            if k >= 3:
+                t_meas = round(t - 0.15, 2)
+                cx, cy, cth = history[t_meas]
+                c, s = math.cos(cth), math.sin(cth)
+                dx, dy = 3.0 - cx, 0.0 - cy
+                det = {'x': c * dx + s * dy, 'y': -s * dx + c * dy, 'conf': 0.9}
+                tr.add_camera([det], t_meas, t)
+        v = tr.target_view(t)
+        wx = car[0] + math.cos(car[2]) * v['x'] - math.sin(car[2]) * v['y']
+        wy = car[1] + math.sin(car[2]) * v['x'] + math.cos(car[2]) * v['y']
+        self.assertAlmostEqual(wx, 3.0, delta=0.05)
+        self.assertAlmostEqual(wy, 0.0, delta=0.05)
 
 
 if __name__ == '__main__':
