@@ -43,6 +43,9 @@
 
 转向也一并改了:阿克曼车的前轮转角由固件按 R = Vx/Vz 解算,所以角速度指令
 的含义随车速漂移。现在改为先定前轮转角,再按车速反算角速度,转弯半径与车速解耦。
+
+局部自主脱困默认开启:双向选路、停稳换向、限量后退、丢人先观察再弧线搜索。
+盲区不是空地;盲区倒车只能沿最近前进路径短退,所有动作受次数/里程/时间上限约束。
 """
 
 import sys
@@ -68,6 +71,7 @@ from motion_safety import (  # noqa: E402
     yaw_from_steer, AlphaBetaTracker, SlewLimiter, BreakawayKick, clamp,
     TargetLock, ScanSectors, reconcile_range,
 )
+from follower_recovery import LocalRecovery, RecoveryConfig, ScanEvidence  # noqa: E402
 from footprint import (  # noqa: E402
     VehicleFootprint, SensorMount, scan_to_vehicle_frame, swept_path_clearance,
     limit_steer_for_clearance, optical_to_vehicle, drop_self_hits,
@@ -104,7 +108,7 @@ class FollowerConfig:
     #   2. 明确知道哪些方位有车体结构时,用角度屏蔽更精准
     # 用 radar_system/scan_doctor.py 在空旷处实测,它会直接给出这两个值。
     self_hit_skin_m: float = 0.05       # 车体轮廓外扩多少算自反射 (5cm, 实车自反射点集中在 x<=0.39m, 0.05m 过滤完全且不吃门框)
-    scan_blind_sectors_deg: tuple = ()  # 例: ((-35, -20), (150, 180))
+    scan_blind_sectors_deg: tuple = ((155.0, -130.0),)  # 例: ((-35, -20), (150, 180))
 
     # ---- 速度 ----
     max_speed_mps: float = 0.55         # ★ 保守起步值,实车验证后再往上加
@@ -164,6 +168,7 @@ class FollowerConfig:
     enable_pre_steer: bool = False      # 静止预打舵 (见 PROTOCOL.md 8.3),需实车验证
     pre_steer_creep_mps: float = 0.005
 
+    recovery: RecoveryConfig = field(default_factory=RecoveryConfig)
     geometry: ChassisGeometry = field(default_factory=ChassisGeometry)
 
     @property
@@ -245,6 +250,14 @@ class PersonFollowerNode(Node):
         self.lidar_mount = config.lidar_mount
         self.camera_mount = config.camera_mount
         self.scan_points = []          # 车体坐标系下的雷达点,供扫掠检查用
+        self.scan_evidence = None
+        self.recovery = LocalRecovery(self.footprint, config.geometry,
+                                      config.obstacle_profile, config.recovery)
+        self.feedback_stamp = 0.0
+        self.feedback_healthy = False
+        self.chassis_yaw_rate = 0.0
+        self.last_control_time = None
+        self.motion_direction = 1
         self.path_clearance = 99.0
         self.self_hits = 0
         self.steer_limited = False     # 本帧是否因净空不足而收了舵
@@ -316,14 +329,22 @@ class PersonFollowerNode(Node):
             self.driver_ready = (d.get('ready', '') == 'ready')
             telemetry = d.get('telemetry') or {}
             vel = telemetry.get('velocity')
-            if isinstance(vel, (list, tuple)) and vel:
-                self.chassis_speed = float(vel[0])
             now = time.monotonic()
+            self.feedback_healthy = False
+            age_ms = d.get('age_ms')
+            if (isinstance(vel, (list, tuple)) and len(vel) >= 3
+                    and isinstance(age_ms, (float, int)) and math.isfinite(age_ms)
+                    and 0 <= age_ms <= 300):
+                vx, wz = float(vel[0]), float(vel[2])
+                if math.isfinite(vx) and math.isfinite(wz):
+                    self.chassis_speed, self.chassis_yaw_rate = vx, wz
+                    self.feedback_stamp = now - age_ms / 1000.0
+                    self.feedback_healthy = bool(d.get('connected', False)) and not d.get('holding', False)
             if (not self.dry_run and not self.driver_armed and self.driver_ready
                     and now - self.last_arm_request > 1.5):
                 self.arm_chassis(True)
         except Exception:
-            pass
+            self.feedback_healthy = False
 
     def arm_chassis(self, enable=True):
         if self.dry_run or not self.cli_arm.service_is_ready():
@@ -462,15 +483,34 @@ class PersonFollowerNode(Node):
                            'lidar_gap': round(lidar_gap, 3) if lidar_gap else None}
 
     def on_scan(self, msg):
+        header = getattr(msg, 'header', None)
+        stamp = getattr(header, 'stamp', None)
+        if stamp is not None:
+            source_ns = stamp.sec * 1000000000 + stamp.nanosec
+            if source_ns > 0:
+                age_s = (self.get_clock().now().nanoseconds-source_ns)/1e9
+                if not -0.1 <= age_s <= 0.5:
+                    self.scan_evidence = None
+                    self.scan_stamp = 0.0
+                    return
         n = len(msg.ranges)
         if n == 0:
+            self.scan_evidence = None
+            self.scan_stamp = 0.0
+            return
+        self.scan_evidence = ScanEvidence(
+            msg.ranges, msg.angle_min, msg.angle_increment,
+            max(msg.range_min, self.cfg.scan_min_valid_m), msg.range_max,
+            self.lidar_mount, self.footprint, self.cfg.scan_blind_sectors_deg)
+        if (not math.isfinite(msg.angle_min) or not math.isfinite(msg.angle_increment)
+                or msg.angle_increment == 0.0):
+            self.scan_stamp = 0.0
+            self.sectors.clear()
+            self.scan_points = []
             return
         # 用 LaserScan 自带的角度字段,不再假设一定是 360 等分
         angle_min = msg.angle_min
         angle_inc = msg.angle_increment
-        if angle_inc == 0.0:
-            angle_inc = 2.0 * math.pi / n
-            angle_min = -math.pi
         cone = math.radians(self.cfg.scan_cone_deg)
 
         # 按方位分桶存最近距离。只用全向最小值有两个问题:
@@ -523,146 +563,107 @@ class PersonFollowerNode(Node):
     def control_loop(self):
         now = time.monotonic()
         cfg = self.cfg
-        age = now - self.last_target_seen if self.last_target_seen else 1e9
+        elapsed = self.dt if self.last_control_time is None else now-self.last_control_time
+        self.last_control_time = now
+        dt = max(0.0, min(elapsed, 0.10))
+        age = now-self.last_target_seen if self.last_target_seen else 1e9
         have_target = self.tracker_z.initialized and age <= cfg.target_timeout_s
-
-        desired_vx = 0.0
-        desired_steer = 0.0
-        self.limit_reason = "-"
-
-        # 1. 目标跟踪与期望转角计算 (即使临时刹停也需持续更新舵向, 才能找到逃逸活路)
+        desired_vx = desired_steer = bearing = 0.0
+        gap = float('inf')
+        cap_follow = cfg.max_speed_mps
         if have_target:
-            z = self.tracker_z.predict(cfg.control_latency_s * 0.5) or self.tracker_z.position
-            x = self.tracker_x.position
-            z = max(z, 0.05)
-
-            # 目标对地速度 ≈ 本车速度 + 相对接近率
+            gap = self.tracker_z.position
+            z = max(self.tracker_z.predict(cfg.control_latency_s*0.5) or gap, .05)
+            bearing = math.atan2(-self.tracker_x.position, z)
             target_ground_speed = self.chassis_speed + self.tracker_z.velocity
-
-            error = z - cfg.follow_distance_m
-            if abs(error) <= cfg.deadband_m and abs(target_ground_speed) < 0.10:
-                desired_vx = 0.0
-                self.state = "HOLDING"
-            else:
-                # 前馈跟速 + 距离误差反馈
-                desired_vx = (cfg.kd_feedforward * max(0.0, target_ground_speed)
-                              + cfg.kp_distance * error)
-                desired_vx = max(0.0, desired_vx)   # 绝不倒车,身后是盲区
-                self.state = "TRACKING" if desired_vx > 0 else "HOLDING"
-
-            # 视线角 -> 前轮转角
-            bearing = math.atan2(-x, z)
+            error = z-cfg.follow_distance_m
+            if not (abs(error) <= cfg.deadband_m and abs(target_ground_speed) < .10):
+                desired_vx = max(0.0, cfg.kd_feedforward*max(0.0, target_ground_speed)
+                                 + cfg.kp_distance*error)
             if abs(bearing) > cfg.steer_deadband_rad:
-                desired_steer = clamp(cfg.kp_steer * bearing,
-                                      -cfg.max_steer_rad, cfg.max_steer_rad)
+                desired_steer = clamp(cfg.kp_steer*bearing, -cfg.max_steer_rad, cfg.max_steer_rad)
+            cap_follow = min(cfg.max_speed_mps, brake_envelope(gap, cfg.follow_profile))
+            if self.tracker_z.coasting:
+                cap_follow = min(cap_follow, cfg.coasting_speed_cap)
+            desired_vx = min(desired_vx, cap_follow)
 
-        scan_fresh = (now - self.scan_stamp) < 0.5 if self.scan_stamp else False
+        scan_fresh = bool(self.scan_stamp and 0 <= now-self.scan_stamp < .5
+                          and self.scan_evidence is not None and self.scan_evidence.usable)
+        feedback_fresh = bool(self.feedback_healthy and self.feedback_stamp
+                              and 0 <= now-self.feedback_stamp <= .30)
+        low_battery = not math.isfinite(self.voltage) or self.voltage < cfg.battery_min_v
+        healthy = (scan_fresh and feedback_fresh and (self.dry_run or self.driver_armed)
+                   and not low_battery and not self.last_conflict and elapsed <= .25)
+        result = self.recovery.update(
+            now=now, scan=self.scan_evidence, healthy=healthy,
+            speed=self.chassis_speed, yaw_rate=self.chassis_yaw_rate,
+            target=have_target, gap=gap, bearing=bearing,
+            requested_speed=desired_vx, requested_steer=desired_steer,
+            current_steer=self.cmd_steer, follow_cap=cap_follow, lost_age=age)
+        pre_steer = (cfg.enable_pre_steer and healthy and have_target
+                     and result.state == 'HOLDING' and cap_follow > 0
+                     and abs(desired_steer) > cfg.steer_deadband_rad)
+        if pre_steer:
+            result.speed = min(cfg.pre_steer_creep_mps, cap_follow)
+            result.steer = desired_steer
+        self.state, self.limit_reason = result.state, result.reason
+        if low_battery:
+            self.state, self.limit_reason = 'LOW_BATTERY', 'battery'
+        elif self.last_conflict:
+            self.state, self.limit_reason = 'SENSOR_CONFLICT', 'range_conflict'
+        elif not scan_fresh:
+            self.state, self.limit_reason = 'RECOVERY_WAIT', 'scan_unavailable'
+        elif not feedback_fresh or not (self.dry_run or self.driver_armed):
+            self.state, self.limit_reason = 'RECOVERY_WAIT', 'driver_unavailable'
 
-        # 2. 按净空收舵 & 扫掠路径评估
-        self.steer_limited = False
-        if scan_fresh:
-            if abs(desired_steer) > 1e-4:
-                safe_steer, safe_clear = limit_steer_for_clearance(
-                    self.scan_points, self.footprint, cfg.geometry,
-                    desired_steer, cfg.min_path_clearance_m)
-                if abs(safe_steer) < abs(desired_steer) - 1e-4:
-                    self.steer_limited = True
-                    self.limit_reason = "steer_limited"
-                desired_steer = safe_steer
-                self.path_clearance = safe_clear
-            else:
-                self.path_clearance = swept_path_clearance(
-                    self.scan_points, self.footprint, cfg.geometry, self.cmd_steer)
-
-            # 评估预期行进方向上的 AEB 净空 (若期望转角朝向开阔地, 应当允许释放 AEB)
-            eval_steer = desired_steer if (have_target and abs(desired_steer) > 1e-4) else self.cmd_steer
-            aeb_clear = swept_path_clearance(
-                self.scan_points, self.footprint_aeb, cfg.geometry, eval_steer)
-            if aeb_clear < cfg.aeb_clearance_m:
-                self.aeb_latched = True
-            elif aeb_clear >= cfg.aeb_release_clearance_m:
-                self.aeb_latched = False
-
-        # 3. 保护与状态判定
-        if 10.0 < self.voltage < cfg.battery_min_v:
-            self.state = "LOW_BATTERY"
-            self.limit_reason = "battery"
+        self.steer_limited = abs(result.steer-desired_steer) > 1e-4
+        max_dsteer = cfg.steer_rate_radps*dt
+        self.cmd_steer += clamp(result.steer-self.cmd_steer, -max_dsteer, max_dsteer)
+        desired_vx = result.speed if healthy else 0.0
+        direction = -1 if desired_vx < 0 else 1
+        # Gear changes require measured stop, not just a zero software command.
+        if desired_vx*self.chassis_speed < -0.002:
             desired_vx = 0.0
+            self.state, self.limit_reason = 'RECOVERY_BRAKE', 'wait_stationary'
+        self.path_clearance = self.recovery.clearance(
+            self.scan_evidence, self.cmd_steer, direction, self.cmd_steer,
+            allow_history=self.recovery.active and self.recovery.blind_leg) if healthy else 0.0
+        # Recheck the ACTUAL rate-limited steer, not only the selected future arc.
+        # Front AEB is not a rear veto; collision checks still include all corners.
+        hard = self.path_clearance < cfg.aeb_clearance_m
+        if self.motion_direction != direction:
+            self.aeb_latched = hard
+        elif hard:
+            self.aeb_latched = True
+        elif self.path_clearance >= cfg.aeb_release_clearance_m:
+            self.aeb_latched = False
+        self.motion_direction = direction
+        cap = abs(desired_vx)
+        profile = (BrakeProfile(cfg.decel_capability_mps2, cfg.control_latency_s, .035, .015)
+                   if self.recovery.active else cfg.obstacle_profile)
+        cap = min(cap, brake_envelope(self.path_clearance, profile))
+        if self.aeb_latched:
             cap = 0.0
-        elif self.aeb_latched:
-            self.state = "AEB_EMERGENCY"
-            self.limit_reason = "aeb_hard"
+            if healthy and abs(desired_vx) > 0:
+                self.state, self.limit_reason = 'AEB_EMERGENCY', 'aeb_hard'
+        if cap == 0:
             self.speed_slew.reset(0.0)
-            desired_vx = 0.0
-            cap = 0.0
-        elif not have_target:
-            if age <= cfg.lost_grace_s:
-                self.state = "TARGET_BLINK"      # 短暂遮挡,靠斜坡减速滑停
-                self.limit_reason = "blink"
-            else:
-                self.state = "SEARCHING_LOST"
-                self.limit_reason = "lost"
-                self.speed_slew.reset(0.0)
-                self.tracker_z.reset()
-                self.tracker_x.reset()
-                self.latest_raw = None
-            desired_vx = 0.0
-            cap = 0.0
-        else:
-            # 正常跟随: 速度上限取两条刹车包络的较小值
-            cap = cfg.max_speed_mps
-            cap_follow = brake_envelope(self.tracker_z.position, cfg.follow_profile)
-            if cap_follow < cap:
-                cap, self.limit_reason = cap_follow, "follow_envelope"
-
-            if scan_fresh:
-                cap_obstacle = brake_envelope(self.path_clearance, cfg.obstacle_profile)
-                if cap_obstacle < cap:
-                    cap, self.limit_reason = cap_obstacle, "swept_path"
-            elif self.scan_stamp:
-                cap, self.limit_reason = min(cap, 0.15), "scan_stale"
-
-            if self.tracker_z.coasting and cfg.coasting_speed_cap < cap:
-                cap, self.limit_reason = cfg.coasting_speed_cap, "coasting"
-
-            if self.last_conflict:
-                cap, self.limit_reason = 0.0, "range_conflict"
-                self.state = "SENSOR_CONFLICT"
-                cap = 0.0
-
-        self.speed_cap = cap
-        desired_vx = min(desired_vx, cap)
-
-        # 4. 静摩擦破除脉冲 (受包络约束,绝不越界)
-        moving = abs(self.chassis_speed) > 0.03 or self.speed_slew.value > 0.05
-        desired_vx = self.kick.apply(desired_vx, moving, cap, now)
-
-        # 5. 斜坡限幅
-        self.cmd_vx = self.speed_slew.step(desired_vx, self.dt)
-
-        # 6. 转角速率限制 + 角速度换算
-        max_dsteer = cfg.steer_rate_radps * self.dt
-        self.cmd_steer += clamp(desired_steer - self.cmd_steer, -max_dsteer, max_dsteer)
-
-        if self.cmd_vx > 1e-4:
-            self.cmd_wz = yaw_from_steer(self.cmd_vx, self.cmd_steer, cfg.geometry)
-        elif (cfg.enable_pre_steer and have_target
-              and abs(self.cmd_steer) > cfg.steer_deadband_rad
-              and self.state == "HOLDING"):
-            self.cmd_vx = cfg.pre_steer_creep_mps
-            self.cmd_wz = yaw_from_steer(self.cmd_vx, self.cmd_steer, cfg.geometry)
-        else:
+            self.kick.apply(0.0, False, 0.0, now)
             self.cmd_vx = 0.0
-            self.cmd_wz = 0.0
-            if self.state in ("LOW_BATTERY", "SEARCHING_LOST"):
-                self.cmd_steer *= 0.5
-
+        else:
+            # Recovery never uses the forward-only breakaway kick. Its speed and
+            # distance caps also apply to the final ramp output on every cycle.
+            wanted = direction*cap
+            if not self.recovery.active and direction > 0 and not pre_steer:
+                wanted = self.kick.apply(cap, abs(self.chassis_speed) > .03, cap, now)
+            self.cmd_vx = direction*min(cap, abs(self.speed_slew.step(wanted, dt)))
+            self.speed_slew.reset(self.cmd_vx)
+        self.speed_cap = cap
+        self.cmd_wz = yaw_from_steer(self.cmd_vx, self.cmd_steer, cfg.geometry)
         if not self.dry_run:
             cmd = Twist()
-            cmd.linear.x = float(self.cmd_vx)
-            cmd.angular.z = float(self.cmd_wz)
+            cmd.linear.x, cmd.angular.z = float(self.cmd_vx), float(self.cmd_wz)
             self.pub_cmd_vel.publish(cmd)
-
         self.publish_status(now, have_target, age)
 
     def publish_status(self, now, have_target, age):
@@ -677,6 +678,12 @@ class PersonFollowerNode(Node):
 
         payload = {
             "state": self.state,
+            "recovery_enabled": self.cfg.recovery.enabled,
+            "recovery_phase": self.recovery.phase,
+            "recovery_legs": self.recovery.legs,
+            "recovery_distance_m": round(self.recovery.total_distance, 3),
+            "blind_reverse_used": self.recovery.blind_used,
+            "recovery_exhausted": self.recovery.exhausted,
             "dry_run": self.dry_run,
             "target": target,
             "target_seen_age_ms": round(age * 1000, 1) if age < 1e8 else None,
@@ -710,6 +717,13 @@ class PersonFollowerNode(Node):
 
     def print_dashboard(self, s):
         colors = {
+            "ALIGNING":       "[ 调整过门姿态 ]",
+            "SEARCH_SCAN":    "[ 停车观察目标 ]",
+            "SEARCH_TURN":    "[ 转弯搜索 / 掉头 ]",
+            "RECOVERY_REVERSE": "[ 限量倒车脱困 ]",
+            "RECOVERY_BRAKE": "[ 停稳换向 ]",
+            "RECOVERY_WAIT":  "[ 等待可行路径 ]",
+            "RECOVERY_EXHAUSTED": "[ 脱困达到上限 ]",
             "TRACKING":       "\033[1;32m[ 跟踪追随 ]\033[0m",
             "HOLDING":        "\033[1;36m[ 距离锁定 ]\033[0m",
             "TARGET_BLINK":   "\033[1;33m[ 目标闪断 ]\033[0m",
@@ -761,6 +775,7 @@ def build_config(args):
         cfg.max_steer_rad = math.radians(args.max_steer_deg)
     if getattr(args, 'camera_pitch_deg', None) is not None:
         cfg.camera_pitch_rad = math.radians(args.camera_pitch_deg)
+    cfg.recovery.enabled = not bool(getattr(args, "no_recovery", False))
     cfg.enable_pre_steer = bool(getattr(args, 'pre_steer', False))
     if getattr(args, 'safe_mode', False):
         # 首次实车验证用:速度压到最低,停车距离放大,先确认逻辑正确再放开
@@ -775,6 +790,7 @@ def build_config(args):
 
 def main():
     p = argparse.ArgumentParser(description="RK3588 电子跟屁虫 - 人体跟随控制节点")
+    p.add_argument('--no-recovery', action='store_true', help='关闭自动倒车脱困和丢人搜索')
     p.add_argument('--dry-run', action='store_true',
                    help='仿真演练:照常计算与打印,但不向底盘发指令')
     p.add_argument('--safe-mode', action='store_true',

@@ -242,8 +242,8 @@ class AI3DDetectorNode(Node):
     DEPTH_MAX_MM = 6000.0
     DEPTH_INSET = 0.20          # bbox 四边各内缩 20%,避开边缘穿透到背景
     DEPTH_PERCENTILE = 20.0     # 取第 20 百分位而非中位数,保守偏近
-    DEPTH_MIN_VALID_RATIO = 0.30
-    DEPTH_MIN_PIXELS = 60
+    DEPTH_MIN_VALID_RATIO = 0.15
+    DEPTH_MIN_PIXELS = 30
     DEPTH_MAX_PAIR_AGE_S = 0.15  # RGB 与深度帧的最大允许时间差
 
     @classmethod
@@ -295,6 +295,8 @@ class AI3DDetectorNode(Node):
 
     def inference_loop(self):
         last_seq = -1
+        last_frame_time = time.monotonic()
+        has_received_first_frame = False
         while self.running:
             with self.lock:
                 seq = self.frame_seq
@@ -303,10 +305,17 @@ class AI3DDetectorNode(Node):
                 depth_stamp = self.latest_depth_stamp
                 header = self.latest_header
 
+            if rgb is not None:
+                has_received_first_frame = True
+
             if rgb is None or seq == last_seq:
+                if has_received_first_frame and (time.monotonic() - last_frame_time > 6.0):
+                    self.get_logger().warn("超过 6 秒未收到相机图像帧（可能相机服务已重启），退出以便 systemd 自动重连 DDS...")
+                    os._exit(1)
                 time.sleep(0.01)
                 continue
             last_seq = seq
+            last_frame_time = time.monotonic()
 
             t_start = time.time()
             try:
