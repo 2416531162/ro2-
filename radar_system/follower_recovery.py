@@ -46,6 +46,7 @@ class ScanEvidence:
         self.ranges = tuple(ranges)
         self.angle_min, self.increment = angle_min, increment
         self.mount = mount
+        self.blind_sectors = tuple(blind_sectors or ())
         self.valid = []
         self.points = []
         self.usable = (bool(ranges) and math.isfinite(angle_min)
@@ -64,26 +65,76 @@ class ScanEvidence:
                 ok = external and not in_blind_sector(a, blind_sectors)
             self.valid.append(ok)
         self.usable = self.usable and any(self.valid)
+        n = len(self.ranges)
+        self._full = bool(n) and abs(increment) * n >= 2 * math.pi - abs(increment) * 1.1
+        self._reach = (max(1, int(self.NEIGHBOR_WINDOW_RAD / abs(increment) + 1e-9))
+                       if self.usable else 1)
+        self._mid = angle_min + (n - 1) * increment / 2 if n else 0.0
+        # Nearest valid bin at/below and at/above every bin, precomputed once per
+        # scan so each free-space query is O(1) (clearance() issues ~10^5/cycle).
+        self._lower = [self._nearest_valid(i, -1, self._reach, self._full) for i in range(n)]
+        self._upper = [self._nearest_valid(i, +1, self._reach, self._full) for i in range(n)]
+
+    # How far (radians) a query may look for a neighbouring real return.
+    #
+    # The N10P node bins each sweep into 720 slots (0.5 deg), but the sensor
+    # only delivers ~450 samples per revolution at 10 Hz, so roughly a third of
+    # the slots are empty (inf) in EVERY sweep. Requiring the two slots right
+    # next to a query to both hold returns therefore failed on practically
+    # every sweep: clearance() returned 0 ("no_observed_path"), AEB latched at
+    # start-up and recovery burned all its legs without moving.
+    #
+    # A query now uses the nearest real return on each side within this
+    # window. 1 deg spans the N10P sample spacing (~0.8 deg) with margin; at
+    # 1 m that is ~3.5 cm of interpolated free space. Actual returns are still
+    # all collision obstacles, and a wider run of missing rays stays unknown.
+    NEIGHBOR_WINDOW_RAD = math.radians(1.0)
+
+    def _nearest_valid(self, start, step, reach, full):
+        n = len(self.ranges)
+        for k in range(reach + 1):
+            i = start + step * k
+            if full:
+                i %= n
+            if not 0 <= i < n:
+                return None
+            if self.valid[i]:
+                return i
+        return None
 
     def _indices(self, x, y):
         if not self.usable:
             return ()
         dx, dy = x - self.mount.x_m, y - self.mount.y_m
         a = math.atan2(dy, dx) - self.mount.yaw_rad
-        mid = self.angle_min + (len(self.ranges) - 1) * self.increment / 2
-        a += round((mid - a) / (2 * math.pi)) * 2 * math.pi
+        a += round((self._mid - a) / (2 * math.pi)) * 2 * math.pi
         index = (a - self.angle_min) / self.increment
         n = len(self.ranges)
-        full = abs(self.increment) * n >= 2 * math.pi - abs(self.increment) * 1.1
-        indices = (math.floor(index), math.ceil(index))
-        result = []
-        for i in indices:
-            if full:
-                i %= n
-            if not 0 <= i < n or not self.valid[i]:
-                return ()
-            result.append(i)
-        return result
+        lo, hi = math.floor(index), math.ceil(index)
+        if self._full:
+            lo %= n
+            hi %= n
+        elif not (0 <= lo < n and 0 <= hi < n):
+            return ()
+        lower = self._lower[lo]
+        if lower is None:
+            return ()
+        upper = self._upper[hi]
+        if upper is None:
+            return ()
+        return [lower, upper]
+
+    def masked(self, x, y):
+        """Direction lies in a configured blind sector (car structure)."""
+        if not self.blind_sectors:
+            return False
+        a = math.atan2(y - self.mount.y_m, x - self.mount.x_m) - self.mount.yaw_rad
+        # A direction whose neighbour lookup window reaches into the sector can
+        # never be certified either, so the sector edge counts as masked.
+        edge = self.NEIGHBOR_WINDOW_RAD + abs(self.increment)
+        return (in_blind_sector(a, self.blind_sectors)
+                or in_blind_sector(a - edge, self.blind_sectors)
+                or in_blind_sector(a + edge, self.blind_sectors))
 
     def covered(self, x, y):
         return bool(self._indices(x, y))
@@ -145,6 +196,28 @@ class LocalRecovery:
         return max(-f.rear_m-f.margin_m-x, x-f.front_m-f.margin_m,
                    abs(y)-f.effective_half_width)
 
+    def _masked_body_shift(self, scan, bx, by, x, y, c, s):
+        """Forward gear only: tolerate a sliver the laser can NEVER observe.
+
+        Turning forward, the rear overhang swings out (~1.1 cm at full lock) and
+        the inner flank ahead of the rear axle cuts in (~1.7 cm). Where those
+        slivers fall inside a configured blind sector (car structure), no scan
+        can ever certify them, so the strict rule rejected EVERY turn from
+        standstill and the car could only drive dead straight.
+
+        Accepted only when the ray direction is structurally masked AND the
+        PHYSICAL body point (margin removed) is still inside the padded
+        footprint already occupied, i.e. the sweep stays within margin_m.
+        Unmasked unknown rays (dropouts, too-close returns ahead) stay blocking,
+        and reverse gear keeps the strict rule.
+        """
+        f = self.fp
+        px = min(max(bx, -f.rear_m), f.front_m)
+        py = min(max(by, -f.half_width_m), f.half_width_m)
+        if not self._inside(x+px*c-py*s, y+px*s+py*c, pad=1e-8):
+            return False
+        return scan.masked(x+bx*c-by*s, y+bx*s+by*c)
+
     def _history_free(self, x, y):
         px, py, yaw = self.pose
         wx = px + x*math.cos(yaw) - y*math.sin(yaw)
@@ -188,19 +261,42 @@ class LocalRecovery:
         # Sampling padding must not create a permanent virtual collision when
         # a visible wall is already near the safety margin. Such a point may
         # stay equally far away or recede, but must never get closer.
+        # Only returns the body can reach within the horizon matter. A point
+        # farther than (body circumradius + pad) from the current rear-axle
+        # origin cannot touch the body at this sample, so skip the exact test.
+        # Same result, far fewer _gap() calls (this runs up to ~7x per cycle).
+        f = self.fp
+        body_r = math.hypot(max(f.front_m, f.rear_m) + f.margin_m,
+                            f.effective_half_width) + .016
+        reach2 = (horizon + step + body_r) ** 2
         obstacles = [(ox, oy, min(.015, max(0.0, self._gap(ox, oy))))
-                     for ox, oy in scan.points]
+                     for ox, oy in scan.points if ox*ox + oy*oy <= reach2]
+        body_r2 = body_r * body_r
+        g_rear, g_front = -f.rear_m-f.margin_m, f.front_m+f.margin_m
+        g_half = f.effective_half_width
         for i in range(count+1):
             distance = i * step
             c, s = math.cos(yaw), math.sin(yaw)
             for ox, oy, clearance_floor in obstacles:
                 dx, dy = ox-x, oy-y
-                if self._gap(dx*c+dy*s, -dx*s+dy*c) < clearance_floor-1e-9:
+                if dx*dx + dy*dy > body_r2:
+                    continue
+                lx, ly = dx*c+dy*s, -dx*s+dy*c
+                # inline self._gap(lx, ly)
+                gap = g_rear-lx
+                if lx-g_front > gap:
+                    gap = lx-g_front
+                if abs(ly)-g_half > gap:
+                    gap = abs(ly)-g_half
+                if gap < clearance_floor-1e-9:
                     return max(0.0, distance-step)
             for bx, by in self._edge:
                 qx, qy = x+bx*c-by*s, y+bx*s+by*c
-                if self._inside(qx, qy, pad=1e-8):
+                # inline self._inside(qx, qy, pad=1e-8)
+                if g_rear-1e-8 <= qx <= g_front+1e-8 and abs(qy) <= g_half+1e-8:
                     continue   # already occupied body, not a free-space claim
+                if direction > 0 and self._masked_body_shift(scan, bx, by, x, y, c, s):
+                    continue
                 known = scan.free(qx, qy)
                 if not known and not scan.covered(qx, qy):
                     known = ((allow_memory and self._observed_before(qx, qy))
@@ -282,7 +378,13 @@ class LocalRecovery:
             # Search BOTH steering directions, not just reduce the target steer.
             angles = [requested_steer, 0.0] + [self.geo.max_steer_rad*f for f in (-1, -.5, .5, 1)]
             choices = []
-            for steer in dict.fromkeys(angles):
+            best = -math.inf
+            # Cheapest-penalty first; an angle whose best possible score
+            # (.65 - penalty) is already below the best found cannot win, so
+            # its full sweep is skipped. The chosen command is unchanged.
+            for steer in sorted(dict.fromkeys(angles), key=lambda a: abs(a-requested_steer)):
+                if .65 - 0.45*abs(steer-requested_steer) < best:
+                    continue
                 clear = direct if steer == requested_steer else self.clearance(
                     scan, steer, current_steer=current_steer)
                 cap = min(requested_speed, follow_cap, brake_envelope(clear, self.brake))
@@ -290,6 +392,11 @@ class LocalRecovery:
                     # Prefer alignment with the person once there is adequate room.
                     score = min(clear, .65) - 0.45*abs(steer-requested_steer)
                     choices.append((score, cap, steer))
+                    best = max(best, score)
+                    if steer == requested_steer and score >= .65:
+                        # Maximum possible score; every other angle is penalised
+                        # for deviating, so it cannot win. Skip ~5 full sweeps.
+                        break
             if choices:
                 _, cap, steer = max(choices)
                 normal = Command(cap, steer, "TRACKING" if steer == requested_steer else "ALIGNING",
@@ -327,8 +434,16 @@ class LocalRecovery:
                 self.direction = 1 if lost else -1
                 self.still_since = None
             else:
-                out = normal or Command(state="RECOVERY_EXHAUSTED" if self.exhausted else
-                                        ("HOLDING" if target else "SEARCHING_LOST"))
+                if normal:
+                    out = normal
+                elif self.exhausted:
+                    out = Command(state="RECOVERY_EXHAUSTED", reason="recovery_budget_used")
+                elif target:
+                    out = Command(state="HOLDING",
+                                  reason="hold" if requested_speed <= 0 else "no_observed_path")
+                else:
+                    out = Command(state="SEARCHING_LOST",
+                                  reason="no_target" if not self.seen else "recovery_disabled")
                 self.previous_speed = out.speed
                 return out
 
