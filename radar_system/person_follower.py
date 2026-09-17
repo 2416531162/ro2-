@@ -565,7 +565,8 @@ class PersonFollowerNode(Node):
         self.scan_evidence = ScanEvidence(
             msg.ranges, msg.angle_min, msg.angle_increment,
             max(msg.range_min, self.cfg.scan_min_valid_m), msg.range_max,
-            self.lidar_mount, self.footprint, self.cfg.scan_blind_sectors_deg)
+            self.lidar_mount, self.footprint, self.cfg.scan_blind_sectors_deg,
+            self_hit_skin_m=self.cfg.self_hit_skin_m)
         if (not math.isfinite(msg.angle_min) or not math.isfinite(msg.angle_increment)
                 or msg.angle_increment == 0.0):
             self.scan_stamp = 0.0
@@ -748,6 +749,18 @@ class PersonFollowerNode(Node):
             self.pub_cmd_vel.publish(cmd)
         self.publish_status(now, have_target, age)
 
+    def _blocked_by(self):
+        """路径净空不足时,说明是被什么挡住的(车体系坐标 + 雷达方位)。"""
+        block = getattr(self.recovery, 'last_block', None)
+        if block is None or self.path_clearance >= 0.30:
+            return None
+        kind, x, y, at = block
+        lx, ly = x - self.lidar_mount.x_m, y - self.lidar_mount.y_m
+        return {"kind": kind, "x": round(x, 3), "y": round(y, 3),
+                "lidar_bearing_deg": round(math.degrees(math.atan2(ly, lx)), 1),
+                "lidar_range_m": round(math.hypot(lx, ly), 3),
+                "after_m": round(at, 2)}
+
     def publish_status(self, now, have_target, age):
         target = None
         if have_target and self.latest_raw:
@@ -784,6 +797,7 @@ class PersonFollowerNode(Node):
             "target_messages": self.target_messages,
             "visual_matches": self.visual_matches,
             "lidar_fallback_matches": self.lidar_fallback_matches,
+            "blocked_by": self._blocked_by(),
             "lidar_handoff": self.lidar_handoff_active,
             "lidar_handoff_frames": self.lidar_handoff_frames,
             "lidar_track": self.lidar_track.status(now),
@@ -809,6 +823,7 @@ class PersonFollowerNode(Node):
             "RECOVERY_BRAKE": "[ 停稳换向 ]",
             "RECOVERY_WAIT":  "[ 等待可行路径 ]",
             "RECOVERY_EXHAUSTED": "[ 脱困达到上限 ]",
+            "PATH_BLOCKED":   "\033[1;33m[ 前方无路 ]\033[0m",
             "TRACKING":       "\033[1;32m[ 跟踪追随 ]\033[0m",
             "HOLDING":        "\033[1;36m[ 距离锁定 ]\033[0m",
             "TARGET_BLINK":   "\033[1;33m[ 目标闪断 ]\033[0m",

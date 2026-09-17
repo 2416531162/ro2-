@@ -726,6 +726,11 @@ function updateFollowerUI(f, isRunning) {
     } else if (rawState.includes('AEB')) {
       fBadge.classList.add('f-badge-aeb');
       fBadge.textContent = '🛑 AEB硬刹停';
+    } else if (rawState === 'PATH_BLOCKED') {
+      fBadge.classList.add('f-badge-aeb');
+      const b = f && f.blocked_by;
+      const kind = b ? (b.kind === 'obstacle' ? '障碍物' : b.kind === 'unknown' ? '雷达看不到' : '无雷达') : '';
+      fBadge.textContent = '⛔ 前方无可行路径' + (b ? ` · ${kind} ${b.lidar_bearing_deg}° ${b.lidar_range_m}m` : '');
     } else if (rawState.includes('SEARCH') || rawState.includes('LOST')) {
       fBadge.classList.add('f-badge-lost');
       fBadge.textContent = '🔍 搜寻目标' + why;

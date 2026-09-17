@@ -312,5 +312,47 @@ class TestCrossCheckAndHandoff(unittest.TestCase):
         self.assertIsNone(h.status()['lidar_track'])
 
 
+class TestStuckWithPersonVisible(unittest.TestCase):
+    """现场:人在正前方 2.3m、置信度 91%,状态 RECOVERY_EXHAUSTED,车不动。"""
+
+    def test_self_reflection_just_outside_body_does_not_block(self):
+        """车侧外 1.5cm 的一个回波(轮子凸出/线缆):跟随节点当作自身,脱困模块也必须如此。"""
+        h = FollowerHarness()
+        world = combine(person_legs(3.0, 0.0), disc(0.45, 0.36, 0.005))
+        for _ in range(30):
+            h.tick(n10p_scan(extra=world, half_size=5.0), camera_person(3.0, 0.0))
+        s = h.status()
+        self.assertEqual(s['state'], 'TRACKING', s)
+        self.assertGreater(s['cmd_vx'], 0.2, s)
+
+    def test_brief_camera_dropout_does_not_exhaust_recovery(self):
+        h = FollowerHarness(lidar_handoff=False)
+        scan = n10p_scan(extra=person_legs(3.0, 0.0), half_size=5.0)
+        for _ in range(20):
+            h.tick(scan, camera_person(3.0, 0.0))
+        import time
+        t_end = time.monotonic() + 0.8           # 相机漏检 0.8s,触发丢失搜索
+        while time.monotonic() < t_end:
+            h.tick(scan, [])
+            time.sleep(0.03)
+        for _ in range(30):                      # 人重新出现
+            h.tick(scan, camera_person(3.0, 0.0))
+        s = h.status()
+        self.assertFalse(s['recovery_exhausted'], s)
+        self.assertEqual(s['state'], 'TRACKING', s)
+
+    def test_blocked_path_is_reported_with_its_cause(self):
+        """人可见但车头左前方紧贴一根柱子:明确报「前方无路」和挡路的位置。"""
+        h = FollowerHarness()
+        world = combine(person_legs(3.0, 0.0), disc(0.76, 0.32, 0.03))
+        for _ in range(30):
+            h.tick(n10p_scan(extra=world, half_size=5.0), camera_person(3.0, 0.0))
+        s = h.status()
+        self.assertEqual(s['cmd_vx'], 0.0, s)
+        self.assertEqual(s['state'], 'PATH_BLOCKED', s)
+        self.assertEqual(s['blocked_by']['kind'], 'obstacle', s)
+        self.assertGreater(s['blocked_by']['lidar_bearing_deg'], 0.0, s)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -25,6 +25,7 @@ class RecoveryConfig:
     history_s: float = 4.0
     timeout_s: float = 75.0
     max_legs: int = 12
+    exhausted_cooldown_s: float = 20.0
 
 
 @dataclass
@@ -42,7 +43,12 @@ class ScanEvidence:
     external finite hits (including masked angles) remain collision obstacles.
     """
     def __init__(self, ranges, angle_min, increment, range_min, range_max,
-                 mount, footprint, blind_sectors=()):
+                 mount, footprint, blind_sectors=(), self_hit_skin_m=0.0):
+        # self_hit_skin_m MUST match the follower's own self-hit filter. With
+        # 0 here but 0.05 in the follower, one return 1-5 cm outside the body
+        # (wheel bulge, cable, bracket) was "self" for the follower but an
+        # obstacle INSIDE the padded footprint here, so clearance() returned 0
+        # for every steer forever: person visible, car never moves.
         self.ranges = tuple(ranges)
         self.angle_min, self.increment = angle_min, increment
         self.mount = mount
@@ -59,7 +65,7 @@ class ScanEvidence:
             if ok:
                 x = mount.x_m + r * math.cos(a + mount.yaw_rad)
                 y = mount.y_m + r * math.sin(a + mount.yaw_rad)
-                external = not is_self_hit(x, y, footprint, skin_m=0.0)
+                external = not is_self_hit(x, y, footprint, skin_m=self_hit_skin_m)
                 if external:
                     self.points.append((x, y))
                 ok = external and not in_blind_sector(a, blind_sectors)
@@ -178,6 +184,8 @@ class LocalRecovery:
         self.normal_distance = 0.0
         self.previous_speed = 0.0
         self._edge = self._perimeter()
+        self.last_block = None
+        self.exhausted_at = None
 
     def _perimeter(self):
         f = self.fp
@@ -253,7 +261,9 @@ class LocalRecovery:
         Steering is interpolated through its transition; sample spacing is
         covered by a collision pad. Unknown newly swept space stops the path.
         """
+        self.last_block = None
         if scan is None or not scan.usable:
+            self.last_block = ("no_scan", 0.0, 0.0, 0.0)
             return 0.0
         x = y = yaw = 0.0
         step = 0.02
@@ -269,7 +279,10 @@ class LocalRecovery:
         body_r = math.hypot(max(f.front_m, f.rear_m) + f.margin_m,
                             f.effective_half_width) + .016
         reach2 = (horizon + step + body_r) ** 2
-        obstacles = [(ox, oy, min(.015, max(0.0, self._gap(ox, oy))))
+        # A return already inside the safety margin (negative gap) is allowed
+        # to stay equally far or recede, never to get closer; clamping its
+        # floor at 0 made it block even straight motion away from it.
+        obstacles = [(ox, oy, min(.015, self._gap(ox, oy)))
                      for ox, oy in scan.points if ox*ox + oy*oy <= reach2]
         body_r2 = body_r * body_r
         g_rear, g_front = -f.rear_m-f.margin_m, f.front_m+f.margin_m
@@ -289,6 +302,7 @@ class LocalRecovery:
                 if abs(ly)-g_half > gap:
                     gap = abs(ly)-g_half
                 if gap < clearance_floor-1e-9:
+                    self.last_block = ("obstacle", ox, oy, distance)
                     return max(0.0, distance-step)
             for bx, by in self._edge:
                 qx, qy = x+bx*c-by*s, y+bx*s+by*c
@@ -302,6 +316,7 @@ class LocalRecovery:
                     known = ((allow_memory and self._observed_before(qx, qy))
                              or (allow_history and self._history_free(qx, qy)))
                 if not known:
+                    self.last_block = ("unknown", qx, qy, distance)
                     return max(0.0, distance-step)
             # Worst-case steering transition over the first 10 cm.
             fraction = min(1.0, (distance+step)/0.10)
@@ -335,10 +350,12 @@ class LocalRecovery:
         return dt
 
     def cancel(self):
-        # Keep the exhausted latch and seen-target memory: faults must not give
-        # repeated fresh reverse budgets or start a new search without a target.
-        if self.active:
-            self.exhausted = True
+        # Keep seen-target memory and the blind-reverse flag: faults must not
+        # give repeated fresh BLIND reverse budgets (blind_used only resets
+        # after real forward travel). An interrupted episode is NOT exhausted:
+        # latching it here meant a 0.4 s camera dropout followed by the person
+        # reappearing (or one late control tick) left the car "exhausted"
+        # before it had moved at all, and it could never clear while blocked.
         self.active = False
         self.phase = "IDLE"
         self.blocked_since = None
@@ -367,6 +384,10 @@ class LocalRecovery:
         if self.normal_distance >= 0.30:
             self.exhausted = False
             self.blind_used = False
+        elif (self.exhausted and self.exhausted_at is not None
+              and now - self.exhausted_at >= self.cfg.exhausted_cooldown_s):
+            # Bounded retry: a fresh (non-blind) search budget after a pause.
+            self.exhausted = False
         # A close person always wins, including during a reverse manoeuvre.
         if target and (follow_cap < 0.04 or (self.active and requested_speed <= 0.001)):
             self.cancel()
@@ -402,9 +423,17 @@ class LocalRecovery:
                 normal = Command(cap, steer, "TRACKING" if steer == requested_steer else "ALIGNING",
                                  "follow" if steer == requested_steer else "local_path")
 
-        if self.active and target and normal and self.phase == "FORWARD" and direct > .45:
+        if self.active and target and normal and direct > .45:
+            # Person found again with a certified path: hand back to following.
             # Never switch reverse -> forward without a measured stationary dwell.
-            if speed >= -0.02 and self.previous_speed >= 0:
+            resume = False
+            if self.phase == "FORWARD":
+                resume = speed >= -0.02 and self.previous_speed >= 0
+            elif self.phase == "SCAN":
+                resume = True          # still standing, only observing
+            elif self.phase == "BRAKE" and self.direction > 0:
+                resume = abs(speed) < .02 and self.previous_speed >= 0
+            if resume:
                 self.active = False
                 self.phase = "IDLE"
                 self.blocked_since = None
@@ -436,11 +465,14 @@ class LocalRecovery:
             else:
                 if normal:
                     out = normal
+                elif target and requested_speed > 0:
+                    # Person visible but no steer has a certified path. Say so,
+                    # whatever the recovery budget: that is the actionable fact.
+                    out = Command(state="PATH_BLOCKED", reason="no_observed_path")
+                elif target:
+                    out = Command(state="HOLDING", reason="hold")
                 elif self.exhausted:
                     out = Command(state="RECOVERY_EXHAUSTED", reason="recovery_budget_used")
-                elif target:
-                    out = Command(state="HOLDING",
-                                  reason="hold" if requested_speed <= 0 else "no_observed_path")
                 else:
                     out = Command(state="SEARCHING_LOST",
                                   reason="no_target" if not self.seen else "recovery_disabled")
@@ -451,6 +483,7 @@ class LocalRecovery:
                 or self.total_distance >= 6.5 or self.total_yaw >= math.pi + .10):
             self.active = False
             self.exhausted = True
+            self.exhausted_at = now
             self.previous_speed = 0.0
             return Command(state="RECOVERY_EXHAUSTED", reason="bounded_search_complete")
 
