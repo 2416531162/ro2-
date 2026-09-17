@@ -74,7 +74,7 @@ from motion_safety import (  # noqa: E402
 from follower_recovery import LocalRecovery, RecoveryConfig, ScanEvidence  # noqa: E402
 from footprint import (  # noqa: E402
     VehicleFootprint, SensorMount, scan_to_vehicle_frame, swept_path_clearance,
-    limit_steer_for_clearance, optical_to_vehicle, drop_self_hits,
+    limit_steer_for_clearance, optical_to_vehicle, drop_self_hits, lidar_target_gap,
 )
 
 
@@ -426,10 +426,11 @@ class PersonFollowerNode(Node):
                         or not self.cfg.min_target_depth_m <= lidar_near <= self.cfg.max_follow_distance_m):
                     continue
                 # 雷达兜底:换算到车头,与相机路径同一个零点
-                gap = float(lidar_near) - self.cfg.lidar_to_bumper_m
+                # 按安装位置投影到车体系;横向偏移与相机路径同为「右为正」
+                gap, lateral = lidar_target_gap(bearing, float(lidar_near),
+                                                self.lidar_mount, self.cfg.footprint_front_m)
                 if gap <= 0.0:
                     continue
-                lateral = math.tan(bearing) * gap
                 source = 'lidar_fallback'
                 self.lidar_fallback_matches += 1
 
@@ -454,7 +455,9 @@ class PersonFollowerNode(Node):
                 bearing, math.radians(self.cfg.cross_check_cone_deg))
         # chosen['z'] 已是车头到人的水平间距,雷达这边也减掉自己的安装偏移,
         # 两者统一到车头再比对,否则比的是两把不同零点的尺。
-        lidar_gap = (lidar_near - self.cfg.lidar_to_bumper_m) if lidar_near else None
+        lidar_gap = (lidar_target_gap(bearing, lidar_near, self.lidar_mount,
+                                      self.cfg.footprint_front_m)[0]
+                     if lidar_near else None)
         if chosen.get('source') == 'lidar_fallback':
             z_eff, conflict = chosen['z'], False   # 距离本来就来自雷达,无从证伪
         else:
@@ -480,7 +483,7 @@ class PersonFollowerNode(Node):
                            'gap_used': round(z_eff, 3),
                            'range_source': chosen.get('source', 'camera_depth'),
                            'depth_ratio': chosen.get('depth_ratio'),
-                           'lidar_gap': round(lidar_gap, 3) if lidar_gap else None}
+                           'lidar_gap': round(lidar_gap, 3) if lidar_gap is not None else None}
 
     def on_scan(self, msg):
         header = getattr(msg, 'header', None)
@@ -750,6 +753,10 @@ class PersonFollowerNode(Node):
         sys.stdout.flush()
 
     def stop_robot(self):
+        # 信号处理与 finally 都会走到这里,只执行一次,且必须在 destroy_node 之前
+        if getattr(self, '_stopped', False):
+            return
+        self._stopped = True
         self.get_logger().info(">>> 安全刹停中...")
         if self.dry_run:
             return
@@ -788,6 +795,16 @@ def build_config(args):
     return cfg
 
 
+def strip_ros_args(argv):
+    """去掉 ros2 run 追加的 --ros-args 段,其余参数必须全部可识别。
+
+    旧版 parse_known_args 会静默吞掉写错的参数(如 --max-speed 0.3),
+    限速没生效却照常启动,比直接报错危险得多。
+    """
+    argv = list(argv)
+    return argv[:argv.index('--ros-args')] if '--ros-args' in argv else argv
+
+
 def main():
     p = argparse.ArgumentParser(description="RK3588 电子跟屁虫 - 人体跟随控制节点")
     p.add_argument('--no-recovery', action='store_true', help='关闭自动倒车脱困和丢人搜索')
@@ -818,27 +835,28 @@ def main():
                    help='相机俯角(度,向下为正),默认 15')
     p.add_argument('--pre-steer', action='store_true',
                    help='静止时用微速度触发预打舵 (PROTOCOL.md 8.3),需实车确认')
-    args, _ = p.parse_known_args()
+    args = p.parse_args(strip_ros_args(sys.argv[1:]))
 
     cfg = build_config(args)
-    rclpy.init()
+    try:
+        # 由本节点自己处理 SIGINT,保证刹停帧在 ROS 上下文关闭之前发出去
+        from rclpy.signals import SignalHandlerOptions
+        rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
+    except (ImportError, TypeError):
+        rclpy.init()
     node = PersonFollowerNode(cfg, dry_run=args.dry_run, target_class=args.target)
 
-    def shutdown(_sig=None, _frame=None):
-        print("\n\n>>> 捕获中断,安全刹停...")
-        node.stop_robot()
-        node.destroy_node()
-        if rclpy.ok():
-            rclpy.shutdown()
-        sys.exit(0)
+    def on_signal(_sig=None, _frame=None):
+        # 只打断 spin;刹停和销毁统一在 finally 里做一次
+        raise KeyboardInterrupt
 
-    signal.signal(signal.SIGINT, shutdown)
-    signal.signal(signal.SIGTERM, shutdown)
+    signal.signal(signal.SIGINT, on_signal)
+    signal.signal(signal.SIGTERM, on_signal)
 
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
-        pass
+        print("\n\n>>> 捕获中断,安全刹停...")
     finally:
         node.stop_robot()
         node.destroy_node()

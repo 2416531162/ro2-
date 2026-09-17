@@ -850,25 +850,53 @@ let pulseStopTimer = null;
 let pulseActive = false;
 let lastTouchTime = 0;
 
-async function sendManualDrive(action) {
+// 每个页面一个会话号 + 递增序号:后端据此丢弃迟到的旧「前进」,防止松手后车又动。
+const DRIVE_CLIENT_ID = (window.crypto && crypto.randomUUID)
+  ? crypto.randomUUID()
+  : `c${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`;
+const DRIVE_TIMEOUT_MS = 800;
+let driveSeq = 0;
+let driveInFlight = 0;
+
+// heartbeat=true 的心跳请求在上一条还没回来时直接跳过,绝不在浏览器里排队堆积;
+// 首次按下和刹车永远立即发送。
+async function sendManualDrive(action, { heartbeat = false } = {}) {
+  if (heartbeat && driveInFlight > 0) return false;
+  const seq = ++driveSeq;
+  const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), DRIVE_TIMEOUT_MS) : null;
+  driveInFlight += 1;
   try {
     const response = await fetch('/api/manual_drive', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      cache: 'no-store',
+      keepalive: action === 'stop',
+      signal: controller ? controller.signal : undefined,
       body: JSON.stringify({
         direction: action,
         speed_tier: currentSpeedTier,
-        steer_tier: currentSteerTier
+        steer_tier: currentSteerTier,
+        client_id: DRIVE_CLIENT_ID,
+        seq
       })
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const result = await response.json();
     if (!result.ok) throw new Error(result.error || '底盘拒绝指令');
+    const badge = $('manualActiveBadge');
+    if (badge && badge.textContent.startsWith('控制链路异常')) {
+      updateBadgeStatus(currentAction ? '控制链路已恢复' : '已刹停 (点击微调 / 长按持续开)', 'var(--muted)');
+    }
     return true;
   } catch (error) {
+    const msg = error && error.name === 'AbortError' ? `响应超时 (>${DRIVE_TIMEOUT_MS}ms)` : error.message;
     console.error('手动底盘指令失败:', error);
-    updateBadgeStatus(`控制链路异常: ${error.message}`, '#ff8c91');
+    updateBadgeStatus(`控制链路异常: ${msg}`, '#ff8c91');
     return false;
+  } finally {
+    if (timer) clearTimeout(timer);
+    driveInFlight = Math.max(0, driveInFlight - 1);
   }
 }
 
@@ -941,7 +969,7 @@ function handlePressStart(action, btnEl) {
   // 2. 开启 100ms 网络心跳（后端再以 50Hz 稳定维持平滑推力）
   heartbeatTimer = setInterval(() => {
     if ((isPressing || pulseActive) && currentAction === action) {
-      sendManualDrive(action);
+      sendManualDrive(action, { heartbeat: true });
       if (isPressing) {
         updateBadgeStatus(`已接管: ${actionText} (持续推进中)`, '#ff8c91');
       }

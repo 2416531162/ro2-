@@ -34,7 +34,8 @@ from dataclasses import dataclass
 __all__ = ["VehicleFootprint", "SensorMount", "scan_to_vehicle_frame",
            "optical_to_vehicle", "is_self_hit", "drop_self_hits", "in_blind_sector",
            "swept_path_clearance", "corridor_clearance", "arc_clearance",
-           "widest_passable_steer", "limit_steer_for_clearance"]
+           "widest_passable_steer", "limit_steer_for_clearance",
+           "lidar_target_gap"]
 
 EPS = 1e-9
 
@@ -138,6 +139,18 @@ def scan_to_vehicle_frame(bearings_ranges, mount, max_range=8.0,
         points.append((mount.x_m + sx * cos_y - sy * sin_y,
                        mount.y_m + sx * sin_y + sy * cos_y))
     return points
+
+
+def lidar_target_gap(bearing_rad, range_m, mount, front_m):
+    """雷达 (方位, 距离) -> (车头到目标的纵向间距, 横向偏移 **右为正**)。
+
+    雷达方位角是 ROS 约定(左为正),跟随节点里目标横向偏移沿用相机光学系(右为正)。
+    直接用 tan(bearing) * gap 会把符号弄反:人在左边,车往右打舵。
+    这里先按安装位置投影到车体系,再统一零点与符号。
+    """
+    px, py = scan_to_vehicle_frame([(bearing_rad, range_m)], mount,
+                                   max_range=float("inf"))[0]
+    return px - front_m, -py
 
 
 def is_self_hit(x, y, footprint, skin_m=0.05):

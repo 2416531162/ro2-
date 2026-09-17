@@ -483,54 +483,59 @@ def ros_worker():
             pass
 
 class RadarHTTPHandler(http.server.BaseHTTPRequestHandler):
+    # HTTP/1.1 长连接下,每个响应都必须带 Content-Length(或主动关连接),
+    # 否则浏览器不知道响应体在哪结束,fetch 会一直挂着占住连接。
+    # 手机浏览器对同一主机只有约 6 条连接,遥控心跳每 100ms 一条,几下就占满,
+    # 之后的指令(包括刹车)全部在浏览器里排队 —— 表现为"点了没反应,过一会车才动"。
     protocol_version = 'HTTP/1.1'
 
-    def do_OPTIONS(self):
-        self.send_response(200)
+    def _send_body(self, body, content_type, status=200, extra_headers=None):
+        self.send_response(status)
+        self.send_header('Content-Type', content_type)
+        self.send_header('Content-Length', str(len(body)))
         self.send_header('Access-Control-Allow-Origin', '*')
-        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
-        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+        for key, value in (extra_headers or {}).items():
+            self.send_header(key, value)
         self.end_headers()
+        if body:
+            self.wfile.write(body)
+
+    def do_OPTIONS(self):
+        self._send_body(b'', 'text/plain', status=204, extra_headers={
+            'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type',
+            'Access-Control-Max-Age': '600',
+        })
 
     def do_GET(self):
         if self.path == '/' or self.path.startswith('/index'):
-            self.send_response(200)
-            self.send_header('Content-type', 'text/html; charset=utf-8')
-            self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
-            self.send_header('Pragma', 'no-cache')
-            self.send_header('Expires', '0')
-            self.end_headers()
             with open(TEMPLATE_PATH, 'rb') as f:
-                self.wfile.write(f.read())
+                body = f.read()
+            self._send_body(body, 'text/html; charset=utf-8', extra_headers={
+                'Cache-Control': 'no-cache, no-store, must-revalidate',
+                'Pragma': 'no-cache', 'Expires': '0'})
 
         elif self.path.startswith('/static/'):
             clean_rel = self.path.lstrip('/').split('?')[0]
             static_file = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), clean_rel))
             static_root = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static'))
-            if static_file.startswith(static_root) and os.path.isfile(static_file):
-                self.send_response(200)
+            if static_file.startswith(static_root + os.sep) and os.path.isfile(static_file):
                 if static_file.endswith('.json'):
-                    self.send_header('Content-type', 'application/json; charset=utf-8')
+                    kind = 'application/json; charset=utf-8'
                 elif static_file.endswith('.js'):
-                    self.send_header('Content-type', 'application/javascript; charset=utf-8')
+                    kind = 'application/javascript; charset=utf-8'
                 elif static_file.endswith('.css'):
-                    self.send_header('Content-type', 'text/css; charset=utf-8')
+                    kind = 'text/css; charset=utf-8'
                 else:
-                    self.send_header('Content-type', 'application/octet-stream')
-                self.send_header('Access-Control-Allow-Origin', '*')
-                self.end_headers()
+                    kind = 'application/octet-stream'
                 with open(static_file, 'rb') as f:
-                    self.wfile.write(f.read())
+                    self._send_body(f.read(), kind)
                 return
             else:
                 self.send_error(404)
                 return
 
         elif self.path == '/api/cors':
-            self.send_response(200)
-            self.send_header('Content-type', 'application/json; charset=utf-8')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.end_headers()
             cfg = {}
             if os.path.exists(CORS_CONFIG_PATH):
                 try:
@@ -541,11 +546,7 @@ class RadarHTTPHandler(http.server.BaseHTTPRequestHandler):
             with data_lock:
                 rtk_status = state.get('rtk', {})
                 cors_stat = rtk_status.get('cors', {})
-            res = {
-                'config': cfg,
-                'status': cors_stat
-            }
-            self.wfile.write(json.dumps(res, ensure_ascii=False).encode('utf-8'))
+            self._send_json({'config': cfg, 'status': cors_stat})
 
         elif self.path == '/api/follower/status':
             with data_lock:
@@ -555,6 +556,8 @@ class RadarHTTPHandler(http.server.BaseHTTPRequestHandler):
             self._send_json(f_data)
 
         elif self.path == '/api/stream':
+            # 事件流没有长度,靠断开连接结束;明确声明,不让这条连接被当作可复用的长连接
+            self.close_connection = True
             self.send_response(200)
             self.send_header('Content-type', 'text/event-stream')
             self.send_header('Cache-Control', 'no-cache')
@@ -563,8 +566,10 @@ class RadarHTTPHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             try:
                 while True:
+                    # pgrep 是子进程调用,不能放在 data_lock 里,否则会卡住 ROS 回调和其他请求
+                    running = check_follower_running_cached()
                     with data_lock:
-                        state['follower_running'] = check_follower_running_cached()
+                        state['follower_running'] = running
                         snapshot = dict(state)
                         snapshot['follower'] = mark_follower_staleness(
                             dict(snapshot.get('follower', {})))
@@ -578,19 +583,21 @@ class RadarHTTPHandler(http.server.BaseHTTPRequestHandler):
             self.send_error(404)
 
     def _send_json(self, data, status=200):
-        self.send_response(status)
-        self.send_header('Content-type', 'application/json; charset=utf-8')
-        self.send_header('Access-Control-Allow-Origin', '*')
-        self.end_headers()
-        self.wfile.write(json.dumps(data, ensure_ascii=False).encode('utf-8'))
+        body = json.dumps(data, ensure_ascii=False).encode('utf-8')
+        self._send_body(body, 'application/json; charset=utf-8', status=status,
+                        extra_headers={'Cache-Control': 'no-store'})
+
+    def _read_body(self, limit=65536):
+        size = int(self.headers.get('Content-Length', 0) or 0)
+        if not 0 <= size <= limit:
+            raise ValueError('请求体过大')
+        return self.rfile.read(size) if size else b''
 
     def do_POST(self):
         global bridge_node
         if self.path == '/api/cors':
             try:
-                content_length = int(self.headers.get('Content-Length', 0))
-                body = self.rfile.read(content_length)
-                new_cfg = json.loads(body.decode('utf-8'))
+                new_cfg = json.loads(self._read_body().decode('utf-8'))
                 with open(CORS_CONFIG_PATH, 'w', encoding='utf-8') as f:
                     json.dump(new_cfg, f, indent=2, ensure_ascii=False)
 
@@ -629,10 +636,8 @@ class RadarHTTPHandler(http.server.BaseHTTPRequestHandler):
             self._send_json({'ok': ok, 'message': msg, 'running': is_follower_running()})
 
         elif self.path == '/api/manual_drive':
-            content_length = int(self.headers.get('Content-Length', 0))
-            body = self.rfile.read(content_length)
             try:
-                req = json.loads(body.decode('utf-8'))
+                req = json.loads(self._read_body(4096).decode('utf-8'))
                 action = req.get('action', 'custom')
                 steer_deg = 0.0
 
@@ -651,6 +656,15 @@ class RadarHTTPHandler(http.server.BaseHTTPRequestHandler):
                     steer_rad = steer_from_yaw(vx, wz, CHASSIS)
                     wz = yaw_from_steer(vx, steer_rad, CHASSIS)
                     steer_deg = round(math.degrees(steer_rad), 1)
+
+                # 按页面会话 + 序号丢弃迟到的旧指令:网络抖动时,先发的「前进」
+                # 可能晚于「刹车」到达,不能让它在松手后又把车开起来。
+                client_id = str(req.get('client_id', ''))[:64] or None
+                seq = req.get('seq')
+                seq = int(seq) if isinstance(seq, (int, float)) and math.isfinite(seq) else None
+                if bridge_node and not bridge_node.manual_drive.accept(client_id, seq, vx, wz):
+                    self._send_json({'ok': True, 'stale': True, 'action': action})
+                    return
 
                 # 强行介入：若自动跟随正在运行，强行介入必须先停掉自动跟随！
                 if check_follower_running_cached():

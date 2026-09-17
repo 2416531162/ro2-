@@ -21,12 +21,37 @@ from footprint import (  # noqa: E402
     corridor_clearance, arc_clearance, swept_path_clearance,
     widest_passable_steer, limit_steer_for_clearance, optical_to_vehicle,
     is_self_hit, drop_self_hits, in_blind_sector, _swept_radii,
+    lidar_target_gap,
 )
 from motion_safety import ChassisGeometry  # noqa: E402
 
 
 FP = VehicleFootprint(front_m=0.45, rear_m=0.25, half_width_m=0.30, margin_m=0.06)
 GEO = ChassisGeometry(wheelbase_m=0.25, track_m=0.17, max_steer_rad=0.35)
+
+
+class TestLidarTargetGap(unittest.TestCase):
+    """雷达兜底测距:横向偏移必须与相机路径同为「右为正」。"""
+
+    MOUNT = SensorMount(x_m=0.53, y_m=0.0, yaw_rad=0.0)
+
+    def test_person_on_left_gives_negative_lateral(self):
+        gap, lateral = lidar_target_gap(math.radians(20), 2.0, self.MOUNT, 0.67)
+        self.assertLess(lateral, 0.0, "人在左边,横向偏移应为负(右为正)")
+        self.assertAlmostEqual(lateral, -2.0 * math.sin(math.radians(20)), places=6)
+        self.assertAlmostEqual(gap, 0.53 + 2.0 * math.cos(math.radians(20)) - 0.67, places=6)
+
+    def test_control_bearing_points_back_to_the_person(self):
+        """跟随节点用 atan2(-x, z) 求视线角(左为正),必须还原成左侧。"""
+        gap, lateral = lidar_target_gap(math.radians(25), 1.5, self.MOUNT, 0.67)
+        self.assertGreater(math.atan2(-lateral, gap), 0.0)
+        gap, lateral = lidar_target_gap(math.radians(-25), 1.5, self.MOUNT, 0.67)
+        self.assertLess(math.atan2(-lateral, gap), 0.0)
+
+    def test_straight_ahead(self):
+        gap, lateral = lidar_target_gap(0.0, 1.0, self.MOUNT, 0.67)
+        self.assertAlmostEqual(gap, 0.86, places=6)
+        self.assertAlmostEqual(lateral, 0.0, places=9)
 
 
 class TestFootprintBasics(unittest.TestCase):
