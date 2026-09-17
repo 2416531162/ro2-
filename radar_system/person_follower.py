@@ -72,9 +72,10 @@ from motion_safety import (  # noqa: E402
     TargetLock, ScanSectors, reconcile_range,
 )
 from follower_recovery import LocalRecovery, RecoveryConfig, ScanEvidence  # noqa: E402
+from lidar_track import LidarPersonTrack, cluster_points, line_of_sight_gap  # noqa: E402
 from footprint import (  # noqa: E402
     VehicleFootprint, SensorMount, scan_to_vehicle_frame, swept_path_clearance,
-    limit_steer_for_clearance, optical_to_vehicle, drop_self_hits, lidar_target_gap,
+    limit_steer_for_clearance, optical_to_vehicle, drop_self_hits,
 )
 
 
@@ -158,9 +159,15 @@ class FollowerConfig:
     min_path_clearance_m: float = 0.15   # 低于此净空就收舵找更直的路,而不是硬停
 
     # ---- 传感器交叉校验 ----
-    cross_check_cone_deg: float = 10.0  # 在目标方位 ±N° 内查雷达做证伪
     range_conflict_m: float = 1.00      # 相机比雷达远这么多即判为冲突
     coasting_speed_cap: float = 0.15    # 滤波器靠外推滑行时的速度上限
+    los_half_width_m: float = 0.25      # 交叉校验只看「车->人」视线两侧这么宽的窄带
+
+    # ---- 雷达接力跟踪 (人走出相机视野后继续用雷达跟) ----
+    lidar_handoff: bool = True
+    lidar_handoff_after_s: float = 0.25  # 相机超过这么久没看到人,才改由雷达接力
+    lidar_handoff_max_s: float = 8.0     # 超过这么久未被相机重新确认,不再相信雷达轨迹
+    lidar_track_speed_cap: float = 0.35  # 接力期间身份可信度较低,额外限速
 
     # ---- 其他 ----
     battery_min_v: float = 21.0
@@ -271,6 +278,11 @@ class PersonFollowerNode(Node):
         self.target_messages = 0
         self.visual_matches = 0
         self.lidar_fallback_matches = 0
+        self.lidar_track = LidarPersonTrack(handoff_s=config.lidar_handoff_max_s)
+        self.last_camera_seen = 0.0
+        self.last_scan_time = None
+        self.lidar_handoff_active = False
+        self.lidar_handoff_frames = 0
 
         # ---- 执行状态 ----
         self.state = "STANDBY"
@@ -419,18 +431,14 @@ class PersonFollowerNode(Node):
                 lateral = -vy_
             else:
                 scan_fresh = self.scan_stamp and now - self.scan_stamp < 0.5
-                if scan_fresh:
-                    lidar_near = self.sectors.min_near(
-                        bearing, math.radians(self.cfg.cross_check_cone_deg))
-                if (lidar_near is None
-                        or not self.cfg.min_target_depth_m <= lidar_near <= self.cfg.max_follow_distance_m):
+                hit = self._line_of_sight(bearing=bearing) if scan_fresh else None
+                if hit is None:
                     continue
-                # 雷达兜底:换算到车头,与相机路径同一个零点
-                # 按安装位置投影到车体系;横向偏移与相机路径同为「右为正」
-                gap, lateral = lidar_target_gap(bearing, float(lidar_near),
-                                                self.lidar_mount, self.cfg.footprint_front_m)
-                if gap <= 0.0:
+                # 雷达兜底:取相机视线上最近的雷达点,已在车体系、横向右为正
+                gap, lateral = hit
+                if not (0.0 < gap <= self.cfg.max_follow_distance_m):
                     continue
+                lidar_near = gap
                 source = 'lidar_fallback'
                 self.lidar_fallback_matches += 1
 
@@ -445,28 +453,32 @@ class PersonFollowerNode(Node):
         if chosen is None:
             return
 
-        # ---- 相机 / 雷达交叉证伪 ----
-        # 结构光读错时几乎总是读得更远。用目标方位附近的雷达读数校验:
-        # 雷达更近就采信雷达;差得离谱则整帧作废并记冲突。
-        bearing = chosen.get('bearing', math.atan2(-chosen['x'], max(chosen['z'], 0.05)))
-        lidar_near = chosen.get('lidar_near')
-        if lidar_near is None:
-            lidar_near = self.sectors.min_near(
-                bearing, math.radians(self.cfg.cross_check_cone_deg))
-        # chosen['z'] 已是车头到人的水平间距,雷达这边也减掉自己的安装偏移,
-        # 两者统一到车头再比对,否则比的是两把不同零点的尺。
-        lidar_gap = (lidar_target_gap(bearing, lidar_near, self.lidar_mount,
-                                      self.cfg.footprint_front_m)[0]
-                     if lidar_near else None)
+        # ---- 相机 / 雷达交叉校验 ----
+        # 只看「车 -> 人」这条视线两侧 los_half_width_m 内的雷达点。
+        # 旧做法取目标方位 ±10° 扇形(分桶后可达 ±15°)里最近的任何东西,
+        # 2m 外扇形宽近 1m,旁边的椅子/门框被当成人:车以为人就在跟前而不走,
+        # 差超过 1m 还整帧丢弃,屏幕上有人、车却不动。
+        # 现在:视线上雷达更近 -> 采信雷达(保守,可能是人本身也可能是挡在中间的
+        # 东西,两种情况都不该往前冲);不再丢弃整帧,转向照常跟人。
+        lidar_gap = None
         if chosen.get('source') == 'lidar_fallback':
-            z_eff, conflict = chosen['z'], False   # 距离本来就来自雷达,无从证伪
+            z_eff = chosen['z']            # 距离本来就来自雷达
         else:
-            z_eff, conflict = reconcile_range(chosen['z'], lidar_gap,
+            if self.scan_stamp and now - self.scan_stamp < 0.5:
+                hit = self._line_of_sight(gap=chosen['z'], lateral=chosen['x'])
+                lidar_gap = hit[0] if hit else None
+            z_eff, occluded = reconcile_range(chosen['z'], lidar_gap,
                                               self.cfg.range_conflict_m)
-        self.last_conflict = conflict
-        if conflict:
-            self.range_conflicts += 1
-            return      # 两个传感器讲的不是同一件事,这一帧不采信
+            if occluded:
+                self.range_conflicts += 1   # 仅作遥测:视线上有明显更近的东西
+        self.last_conflict = False
+
+        self.last_camera_seen = now
+        self.lidar_handoff_active = False
+        if self.cfg.lidar_handoff:
+            # 让雷达认领这个人:用相机给出的位置(车体系 x 前 y 左)
+            self.lidar_track.seed(chosen['z'] + self.cfg.footprint_front_m,
+                                  -chosen['x'], now)
 
         # 目标中断过久,滤波器里的速度估计已失效,重新起算
         if now - self.last_target_seen > self.cfg.lost_grace_s:
@@ -484,6 +496,55 @@ class PersonFollowerNode(Node):
                            'range_source': chosen.get('source', 'camera_depth'),
                            'depth_ratio': chosen.get('depth_ratio'),
                            'lidar_gap': round(lidar_gap, 3) if lidar_gap is not None else None}
+
+    def _line_of_sight(self, gap=None, lateral=None, bearing=None):
+        """相机视线上最近的雷达点 -> (车头间距, 横向 右为正) 或 None。"""
+        origin = (self.camera_mount.x_m, self.camera_mount.y_m)
+        front = self.cfg.footprint_front_m
+        if gap is not None:
+            target = (gap + front, -lateral)
+            beyond = 0.40
+        else:
+            reach = self.cfg.max_follow_distance_m + front
+            target = (origin[0] + reach * math.cos(bearing),
+                      origin[1] + reach * math.sin(bearing))
+            beyond = 0.0
+        hit = line_of_sight_gap(self.scan_points, origin, target, front,
+                                self.cfg.los_half_width_m, beyond)
+        if hit is None or hit[0] < self.cfg.min_target_depth_m - front:
+            return None
+        return hit
+
+    def _lidar_handoff(self, now):
+        """相机看不到人时,用雷达轨迹继续喂跟踪滤波器。"""
+        cfg = self.cfg
+        if (not cfg.lidar_handoff or now - self.last_camera_seen < cfg.lidar_handoff_after_s
+                or not self.lidar_track.valid(now)):
+            self.lidar_handoff_active = False
+            return
+        gap = self.lidar_track.x - cfg.footprint_front_m
+        lateral = -self.lidar_track.y
+        if not (0.0 < gap <= cfg.max_follow_distance_m) or self.lidar_track.x <= 0.0:
+            self.lidar_handoff_active = False
+            return
+        if now - self.last_target_seen > cfg.lost_grace_s:
+            self.tracker_z.reset()
+            self.tracker_x.reset()
+        self.tracker_z.update(gap, now)
+        self.tracker_x.update(lateral, now)
+        self.last_target_seen = now
+        self.lidar_handoff_active = True
+        self.lidar_handoff_frames += 1
+        # 相机重新看到人时,锁定器要在人现在的位置附近找,而不是在出画前的位置
+        if self.lock.locked:
+            self.lock.anchor_xz = (lateral, gap)
+            self.lock.last_seen = now
+        raw = dict(self.latest_raw or {})
+        raw.update({'x': round(lateral, 3), 'z': round(gap, 3), 'gap_used': round(gap, 3),
+                    'range_source': 'lidar_track', 'lidar_gap': round(gap, 3)})
+        raw.setdefault('label', 'person')
+        raw.setdefault('conf', 0.0)
+        self.latest_raw = raw
 
     def on_scan(self, msg):
         header = getattr(msg, 'header', None)
@@ -547,6 +608,16 @@ class PersonFollowerNode(Node):
             raw_points, self.footprint, self.cfg.self_hit_skin_m)
         self.self_hits = dropped
         self.scan_stamp = time.monotonic()
+        if self.cfg.lidar_handoff:
+            now = self.scan_stamp
+            fresh = bool(self.feedback_healthy and self.feedback_stamp
+                         and 0 <= now - self.feedback_stamp <= .30)
+            clusters = cluster_points(self.scan_points,
+                                      origin=(self.lidar_mount.x_m, self.lidar_mount.y_m))
+            self.lidar_track.update(clusters, now,
+                                    self.chassis_speed if fresh else 0.0,
+                                    self.chassis_yaw_rate if fresh else 0.0)
+            self._lidar_handoff(now)
         # 硬急停按当前行进方向判定 (沿 cmd_steer 扫掠路径, 使用物理余量 footprint_aeb)
         active_steer = self.cmd_steer
         corridor_near = swept_path_clearance(
@@ -588,6 +659,8 @@ class PersonFollowerNode(Node):
             cap_follow = min(cfg.max_speed_mps, brake_envelope(gap, cfg.follow_profile))
             if self.tracker_z.coasting:
                 cap_follow = min(cap_follow, cfg.coasting_speed_cap)
+            if self.lidar_handoff_active:
+                cap_follow = min(cap_follow, cfg.lidar_track_speed_cap)
             desired_vx = min(desired_vx, cap_follow)
 
         scan_fresh = bool(self.scan_stamp and 0 <= now-self.scan_stamp < .5
@@ -711,6 +784,9 @@ class PersonFollowerNode(Node):
             "target_messages": self.target_messages,
             "visual_matches": self.visual_matches,
             "lidar_fallback_matches": self.lidar_fallback_matches,
+            "lidar_handoff": self.lidar_handoff_active,
+            "lidar_handoff_frames": self.lidar_handoff_frames,
+            "lidar_track": self.lidar_track.status(now),
             "voltage_v": round(self.voltage, 2),
             "cmd_vx": round(self.cmd_vx, 3),
             "cmd_wz": round(self.cmd_wz, 3),

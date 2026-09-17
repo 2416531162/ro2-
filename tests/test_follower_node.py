@@ -47,14 +47,14 @@ def room_range(angle, half_size=2.0):
     return min(half_size / c if c > 1e-6 else 1e9, half_size / s if s > 1e-6 else 1e9)
 
 
-def n10p_scan(samples_per_rev=450, phase_deg=0.13, extra=None):
+def n10p_scan(samples_per_rev=450, phase_deg=0.13, extra=None, half_size=2.0):
     """复现 real_lidar_node 的分桶方式:720 格,只有 samples_per_rev 个格子有回波。"""
     ranges = [math.inf] * BINS
     for k in range(samples_per_rev):
         ang = (phase_deg + k * 360.0 / samples_per_rev) % 360.0
         key = round(((360.0 - ang) % 360.0) * 2) % BINS
         a = key * 2 * math.pi / BINS
-        r = room_range(a)
+        r = room_range(a, half_size)
         if extra:
             r = min(r, extra(a))
         ranges[key] = r
@@ -63,9 +63,48 @@ def n10p_scan(samples_per_rev=450, phase_deg=0.13, extra=None):
         angle_increment=2 * math.pi / BINS, range_min=0.15, range_max=12.0)
 
 
+LIDAR_X = 0.53
+
+
+def disc(cx, cy, radius):
+    """车体系 (cx, cy) 处半径 radius 的圆柱(腿/椅子腿),返回 extra(angle) 函数。"""
+    def ray(a):
+        dx, dy = cx - LIDAR_X, cy
+        along = dx * math.cos(a) + dy * math.sin(a)
+        perp = abs(dx * math.sin(a) - dy * math.cos(a))
+        if along <= 0 or perp > radius:
+            return math.inf
+        return along - math.sqrt(radius * radius - perp * perp)
+    return ray
+
+
+def person_legs(x, y):
+    """人站在车体系 (x, y):两条腿,间距 0.2m。"""
+    left, right = disc(x, y + 0.1, 0.06), disc(x, y - 0.1, 0.06)
+    return lambda a: min(left(a), right(a))
+
+
+def combine(*fns):
+    return lambda a: min(f(a) for f in fns)
+
+
+def camera_person(x, y, conf=0.9):
+    """车体系 (x, y) 的人 -> 检测消息(相机俯角 15°,取躯干高度与光轴同高)。"""
+    cfg = pf.FollowerConfig()
+    horiz = x - cfg.camera_offset_x_m
+    # 与相机同高的点:光轴俯 θ,则 z = h·cosθ,y(向下为正) = -h·sinθ
+    z = horiz * math.cos(cfg.camera_pitch_rad)
+    y_opt = -horiz * math.sin(cfg.camera_pitch_rad)
+    return [{'label': 'person', 'conf': conf, 'x': -y, 'y': y_opt, 'z': z,
+             'depth_ratio': 0.9}]
+
+
 class FollowerHarness:
-    def __init__(self):
-        self.node = pf.PersonFollowerNode(pf.FollowerConfig(), dry_run=True)
+    def __init__(self, **overrides):
+        cfg = pf.FollowerConfig()
+        for k, v in overrides.items():
+            setattr(cfg, k, v)
+        self.node = pf.PersonFollowerNode(cfg, dry_run=True)
         self.node.print_dashboard = lambda s: None
 
     def driver_ok(self, speed=0.0):
@@ -190,6 +229,87 @@ class TestFollowerStartup(unittest.TestCase):
         self.assertGreater(h.node.lidar_fallback_matches, 0)
         self.assertLess(h.node.tracker_x.position, 0.0, "横向偏移右为正,人在左应为负")
         self.assertGreater(h.node.cmd_steer, 0.0, h.status())
+
+
+class TestCrossCheckAndHandoff(unittest.TestCase):
+
+    def test_camera_person_geometry_helper(self):
+        from footprint import optical_to_vehicle
+        cfg = pf.FollowerConfig()
+        det = camera_person(2.5, 0.3)[0]
+        vx, vy, _ = optical_to_vehicle(det['x'], det['y'], det['z'],
+                                       cfg.camera_mount, cfg.camera_pitch_rad)
+        self.assertAlmostEqual(vx, 2.5, places=6)
+        self.assertAlmostEqual(vy, 0.3, places=6)
+
+    def test_chair_beside_line_of_sight_is_not_the_person(self):
+        """人在正前方 2.9m(车头 2.2m),左前方约 12° 处 1.3m 有椅子腿。
+
+        旧版 ±10° 扇形(分桶后到 15°)会把椅子当成人:车以为人在 0.7m 处,不走。
+        椅子离视线 0.28m,在新的 ±0.25m 窄带之外。
+        """
+        h = FollowerHarness()
+        world = combine(person_legs(2.9, 0.0), disc(1.9, 0.33, 0.05))
+        for _ in range(30):
+            h.tick(n10p_scan(extra=world, half_size=5.0), camera_person(2.9, 0.0))
+        s = h.status()
+        self.assertEqual(s['state'], 'TRACKING', s)
+        self.assertAlmostEqual(s['target']['gap_used'], 2.23, delta=0.1)
+        self.assertGreater(s['cmd_vx'], 0.2, s)
+        self.assertEqual(s['range_conflicts'], 0)
+
+    def test_object_on_line_of_sight_is_respected(self):
+        """人和车之间正好有东西挡着:按更近的距离算,不往前冲,但不丢目标。"""
+        h = FollowerHarness()
+        world = combine(person_legs(3.2, 0.0), disc(1.60, 0.0, 0.05))
+        for _ in range(30):
+            h.tick(n10p_scan(extra=world, half_size=5.0), camera_person(3.2, 0.0))
+        s = h.status()
+        self.assertIsNotNone(s['target'], s)
+        self.assertLess(s['target']['gap_used'], 1.0, s)
+        self.assertLessEqual(s['cmd_vx'], 0.05, s)
+
+    def test_person_walks_out_of_camera_view_to_the_left(self):
+        """相机锁定后人向左走出画面,雷达接力:车继续跟并往左打舵。"""
+        h = FollowerHarness()
+        x, y = 2.6, 0.0
+        for _ in range(25):
+            h.tick(n10p_scan(extra=person_legs(x, y), half_size=5.0), camera_person(x, y))
+        self.assertTrue(h.status()['lidar_track'], h.status())
+        for _ in range(40):
+            y += 0.03                                  # 每帧左移 3cm
+            h.tick(n10p_scan(extra=person_legs(x, y), half_size=5.0), [])   # 相机已看不到
+        s = h.status()
+        self.assertTrue(s['lidar_handoff'], s)
+        self.assertEqual(s['target']['range_source'], 'lidar_track')
+        self.assertLess(s['target']['x'], -0.8, "人在左边,横向偏移为负")
+        self.assertGreater(s['cmd_steer_deg'], 5.0, s)
+        self.assertGreater(s['cmd_vx'], 0.0, s)
+        self.assertLessEqual(s['speed_cap_mps'], 0.35 + 1e-9, s)
+
+    def test_handoff_expires_without_camera_confirmation(self):
+        h = FollowerHarness(lidar_handoff_max_s=0.3)
+        for _ in range(25):
+            h.tick(n10p_scan(extra=person_legs(2.6, 0.0), half_size=5.0), camera_person(2.6, 0.0))
+        import time
+        time.sleep(0.4)
+        for _ in range(15):
+            h.tick(n10p_scan(extra=person_legs(2.6, 0.0), half_size=5.0), [])
+        s = h.status()
+        self.assertFalse(s['lidar_handoff'], s)
+        self.assertIsNone(s['target'], s)
+        self.assertEqual(s['cmd_vx'], 0.0, s)
+
+    def test_wall_is_not_adopted_as_person(self):
+        """相机报的人位置附近只有墙:雷达不认领,也就不会接力跟墙。"""
+        h = FollowerHarness()
+
+        def wall(a):
+            c = math.cos(a)
+            return (2.2 - LIDAR_X + 0.53) / c if c > 0.2 else math.inf
+        for _ in range(20):
+            h.tick(n10p_scan(extra=wall), camera_person(2.2, 0.0))
+        self.assertIsNone(h.status()['lidar_track'])
 
 
 if __name__ == '__main__':

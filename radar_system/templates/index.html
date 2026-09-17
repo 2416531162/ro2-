@@ -706,24 +706,35 @@ function updateFollowerUI(f, isRunning) {
 
   if (fBadge) {
     fBadge.className = 'f-badge';
+    // 雷达接力:人已出相机视野,正按雷达轨迹跟随
+    const relay = f && f.lidar_handoff ? ' · 雷达接力' : '';
+    // 车不动时把原因直接写出来,现场不用再去查 /follower/status
+    const REASONS = {
+      hold: '距离已到', person_close: '人太近', follow_envelope: '接近减速',
+      local_path: '绕行对准', no_observed_path: '前方无可行路径', no_target: '无目标',
+      scan_unavailable: '雷达数据中断', driver_unavailable: '底盘未就绪',
+      battery: '电量低', recovery_budget_used: '脱困次数已用完',
+      wait_stationary: '等待停稳', gear_change_dwell: '换向等待',
+    };
+    const why = f && f.limit_reason && REASONS[f.limit_reason] ? ` · ${REASONS[f.limit_reason]}` : '';
     if (!isFollowerRunning && (rawState === 'OFFLINE' || rawState === 'STANDBY')) {
       fBadge.classList.add('f-badge-idle');
       fBadge.textContent = '待命 / 未启动';
-    } else if (rawState.includes('TRACKING')) {
+    } else if (rawState.includes('TRACKING') || rawState === 'ALIGNING') {
       fBadge.classList.add('f-badge-tracking');
-      fBadge.textContent = '🎯 跟随中 (1.0m)';
+      fBadge.textContent = (rawState === 'ALIGNING' ? '🎯 绕行对准' : '🎯 跟随中') + relay;
     } else if (rawState.includes('AEB')) {
       fBadge.classList.add('f-badge-aeb');
       fBadge.textContent = '🛑 AEB硬刹停';
     } else if (rawState.includes('SEARCH') || rawState.includes('LOST')) {
       fBadge.classList.add('f-badge-lost');
-      fBadge.textContent = '🔍 搜寻目标';
-    } else if (rawState.includes('WAITING')) {
+      fBadge.textContent = '🔍 搜寻目标' + why;
+    } else if (rawState === 'HOLDING' || rawState.includes('WAITING')) {
       fBadge.classList.add('f-badge-running');
-      fBadge.textContent = '✅ 距离保持 (1.0m)';
+      fBadge.textContent = '✅ 停车保持' + relay + why;
     } else {
       fBadge.classList.add('f-badge-running');
-      fBadge.textContent = rawState;
+      fBadge.textContent = rawState + why;
     }
   }
 
