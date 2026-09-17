@@ -537,6 +537,7 @@ function updateFollowerUI(f, isRunning) {
       scan_unavailable: '雷达数据中断', driver_unavailable: '底盘未就绪',
       battery: '电量低', recovery_budget_used: '脱困次数已用完',
       wait_stationary: '等待停稳', gear_change_dwell: '换向等待',
+      face_rear_target: '回旋掉头', k_turn_forward: '前进揉库', k_turn_reverse: '反打倒车',
     };
     const why = f && f.limit_reason && REASONS[f.limit_reason] ? ` · ${REASONS[f.limit_reason]}` : '';
     if (!isFollowerRunning && (rawState === 'OFFLINE' || rawState === 'STANDBY')) {
@@ -685,7 +686,7 @@ function updateFollowerUI(f, isRunning) {
 
 // ==================== 跟随运行详情:在做什么、为什么、各环节是否正常 ====================
 const F_STATE_TEXT = {
-  TRACKING: '跟随中', ALIGNING: '绕行对准', REAR_ALIGNING: '倒车对准', TURNAROUND: '弧线掉头对准', HOLDING: '停车保持', PATH_BLOCKED: '前方无可行路径',
+  TRACKING: '跟随中', ALIGNING: '绕行对准', REAR_ALIGNING: '倒车对准', TURNAROUND: '揉库掉头对准', HOLDING: '停车保持', PATH_BLOCKED: '前方无可行路径',
   COLLISION_AEB: '防撞急停', AEB_EMERGENCY: 'AEB 硬急停', SEARCHING_LOST: '目标丢失', SEARCH_SCAN: '原地观察找人',
   SEARCH_TURN: '转弯搜索', RECOVERY_REVERSE: '沿来路倒车脱困', RECOVERY_BRAKE: '停稳换向',
   RECOVERY_WAIT: '等待条件满足', RECOVERY_EXHAUSTED: '脱困次数已用完', LOW_BATTERY: '电量低',
@@ -693,7 +694,9 @@ const F_STATE_TEXT = {
 };
 const F_REASON_TEXT = {
   follow: '按目标距离正常跟随', local_path: '正前方不通,选了一条可行的弯道', hold: '已到保持距离',
-  target_behind: '目标在车后', face_rear_target: '前方开阔,大舵角前向回旋掉头面朝人体', person_close: '人太近,停车', follow_envelope: '接近目标,提前减速', swept_path: '前方有障碍,减速',
+  target_behind: '目标在车后', face_rear_target: '前方开阔,大舵角前向回旋掉头面朝人体',
+  k_turn_forward: '掉头揉库中(前向大舵角回旋)', k_turn_reverse: '掉头揉库中(反打舵倒车调整)',
+  person_close: '人太近,停车', follow_envelope: '接近目标,提前减速', swept_path: '前方有障碍,减速',
   no_observed_path: '所有方向都没有确认可走的路', no_target: '没有识别到人', recovery_disabled: '脱困已关闭',
   recovery_budget_used: '自动脱困次数用完,20 秒后重试', scan_unavailable: '雷达数据中断',
   scan_stale: '雷达数据过期', driver_unavailable: '底盘未连接/未解锁/反馈中断',

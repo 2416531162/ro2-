@@ -312,6 +312,9 @@ class PersonFollowerNode(Node):
         # ---- 执行状态 ----
         self.state = "STANDBY"
         self.limit_reason = "-"
+        self.turnaround_phase = 'IDLE'     # 'IDLE', 'FORWARD', 'REVERSE'
+        self.turnaround_dir = 1            # +1 (左转 CCW), -1 (右转 CW)
+        self.turnaround_phase_start = 0.0
         self.aeb_latched = False
         self.speed_slew = SlewLimiter(config.accel_limit_mps2, config.decel_limit_mps2)
         self.kick = BreakawayKick(config.kick_mps, config.kick_duration_s,
@@ -682,42 +685,118 @@ class PersonFollowerNode(Node):
             target_ground_speed = view['v_fwd']
             person_error = z_person - cfg.follow_distance_m
 
-            # 目标位置分类：在车后（x < 0 或 |bearing| > 85°）还是车前/侧前
-            is_behind = view['x'] < 0.0 or abs(bearing) > math.radians(85.0)
+            turnaround_reason = 'face_rear_target'
+            # 掉头完成判定：如果已经在掉头过程中，检查是否已调转车头（目标位于前方且偏角进入车头前方视野 ±35°）
+            turnaround_complete = (
+                self.turnaround_phase != 'IDLE' and
+                view['x'] > 0.25 and
+                abs(bearing) <= math.radians(35.0)
+            )
+            if turnaround_complete:
+                self.turnaround_phase = 'IDLE'
+                self.turnaround_phase_start = 0.0
+
+            # 目标位置分类：在车后（x < 0 或 |bearing| > 80°）或仍处于掉头未完成过程中
+            is_behind = (self.turnaround_phase != 'IDLE') or (view['x'] < 0.0 or abs(bearing) > math.radians(80.0))
             if is_behind:
-                # 目标在车后：
-                # 优先策略：若开启掉头策略且前方回转净空充足，执行前向大舵角回旋掉头（Turnaround Arc），调转车头重新面朝人体！
-                fwd_turn_steer = cfg.max_steer_rad if bearing > 0 else -cfg.max_steer_rad
-                fwd_arc_clear = swept_path_clearance(self.scan_points, self.footprint, self.cfg.geometry, fwd_turn_steer)
+                if cfg.enable_rear_turnaround:
+                    # ---- 阿克曼狭窄空间揉库掉头 (K-turn) 状态机 ----
+                    # 刚进入掉头：锁定转向回旋方向(+1: 左转逆时针, -1: 右转顺时针)
+                    if self.turnaround_phase == 'IDLE':
+                        self.turnaround_dir = 1 if bearing >= 0 else -1
 
-                rear_clear = (self.recovery.clearance(self.scan_evidence, self.cmd_steer, -1,
-                                                      current_steer=self.cmd_steer,
-                                                      allow_history=True)
-                              if self.scan_evidence is not None else 0.0)
-                rear_dist = math.hypot(view['x'] + cfg.footprint_rear_m, view['y'])
-                rear_error = rear_dist - cfg.follow_distance_m
-                # 车尾朝向人体的偏角误差: 正值表示人在车尾偏左, 负值表示人在车尾偏右
-                rear_bearing_error = (math.pi - bearing) if bearing >= 0 else (-math.pi - bearing)
+                    fwd_turn_steer = self.turnaround_dir * cfg.max_steer_rad
+                    fwd_arc_clear = swept_path_clearance(self.scan_points, self.footprint, self.cfg.geometry, fwd_turn_steer)
+                    front_dist = self.min_front_scan
 
-                if cfg.enable_rear_turnaround and fwd_arc_clear >= 1.20 and self.min_front_scan >= 0.80:
-                    # 前方回转路径通畅且正前方净空充足：执行前向大舵角弧线掉头（Turnaround Arc）！
+                    # 阿克曼倒车揉库特性：前轮必须向反方向打舵(-turnaround_dir)，使车尾向相反方向摆动，车头保持同向旋转！
+                    rev_turn_steer = -self.turnaround_dir * cfg.max_steer_rad
+                    rev_clear = (self.recovery.clearance(self.scan_evidence, rev_turn_steer, -1,
+                                                          current_steer=rev_turn_steer,
+                                                          allow_history=True)
+                                  if self.scan_evidence is not None else 0.0)
+
+                    # 初始阶段决策：优先前向回旋，若前向受阻则倒车调整
+                    if self.turnaround_phase == 'IDLE':
+                        if fwd_arc_clear >= 0.70 and front_dist >= 0.55:
+                            self.turnaround_phase = 'FORWARD'
+                        elif rev_clear >= 0.45:
+                            self.turnaround_phase = 'REVERSE'
+                        elif fwd_arc_clear >= rev_clear and fwd_arc_clear > cfg.aeb_clearance_m:
+                            self.turnaround_phase = 'FORWARD'
+                        elif rev_clear > cfg.aeb_clearance_m:
+                            self.turnaround_phase = 'REVERSE'
+                        else:
+                            self.turnaround_phase = 'FORWARD'
+                        self.turnaround_phase_start = now
+
+                    phase_elapsed = now - self.turnaround_phase_start
+
+                    # 阶段换向与滞后防抖：
+                    # 单阶段至少保持 0.60 秒，冲程到位或逼近安全阈值再平滑换向，彻底杜绝原地抽搐
+                    if self.turnaround_phase == 'FORWARD':
+                        fwd_blocked = (fwd_arc_clear < 0.45 or front_dist < 0.45)
+                        fwd_urgent = (fwd_arc_clear < 0.32 or front_dist < 0.32)
+                        fwd_timeout = (phase_elapsed >= 2.5)
+                        rear_safe = (rev_clear >= 0.40)
+                        if ((phase_elapsed >= 0.60 and (fwd_blocked or fwd_timeout)) or fwd_urgent) and rear_safe:
+                            self.turnaround_phase = 'REVERSE'
+                            self.turnaround_phase_start = now
+                            phase_elapsed = 0.0
+
+                    elif self.turnaround_phase == 'REVERSE':
+                        rev_blocked = (rev_clear < 0.45)
+                        rev_urgent = (rev_clear < 0.32)
+                        rev_timeout = (phase_elapsed >= 2.0)
+                        fwd_safe = (fwd_arc_clear >= 0.55 and front_dist >= 0.50)
+                        if ((phase_elapsed >= 0.60 and (rev_blocked or rev_timeout)) or rev_urgent) and fwd_safe:
+                            self.turnaround_phase = 'FORWARD'
+                            self.turnaround_phase_start = now
+                            phase_elapsed = 0.0
+
                     is_turnaround = True
-                    desired_steer = fwd_turn_steer
-                    turn_speed = min(0.22, cfg.max_speed_mps)
-                    person_requested_vx = turn_speed
-                    desired_vx = turn_speed
-                elif rear_clear >= cfg.obstacle_standoff_m and rear_error > cfg.deadband_m:
-                    # 前方受阻但后方空旷且目标超出保持距离：按距离误差反向平滑倒车对准 (0.06 ~ 0.12 m/s)
-                    rev_steer = clamp(cfg.kp_steer * rear_bearing_error, -cfg.max_steer_rad, cfg.max_steer_rad)
-                    desired_steer = rev_steer
-                    rev_speed = clamp(cfg.kp_distance * rear_error, cfg.creep_floor_mps, min(0.12, cfg.recovery.blind_speed_mps))
-                    person_requested_vx = -rev_speed
-                    desired_vx = person_requested_vx
+                    if self.turnaround_phase == 'FORWARD':
+                        desired_steer = fwd_turn_steer
+                        turn_speed = min(0.20, cfg.max_speed_mps)
+                        if fwd_arc_clear > cfg.aeb_clearance_m and front_dist > cfg.aeb_clearance_m:
+                            desired_vx = turn_speed
+                        else:
+                            desired_vx = 0.0
+                        person_requested_vx = desired_vx
+                        turnaround_reason = 'k_turn_forward'
+                    elif self.turnaround_phase == 'REVERSE':
+                        desired_steer = rev_turn_steer
+                        rev_speed = min(0.12, cfg.recovery.blind_speed_mps)
+                        if rev_clear > cfg.aeb_clearance_m:
+                            desired_vx = -rev_speed
+                        else:
+                            desired_vx = 0.0
+                        person_requested_vx = desired_vx
+                        turnaround_reason = 'k_turn_reverse'
+                    else:
+                        desired_steer = fwd_turn_steer
+                        desired_vx = 0.0
+                        person_requested_vx = 0.0
                 else:
-                    # 前后均受限或距离合适：原地保持，前轮预打舵
-                    desired_steer = fwd_turn_steer if (cfg.enable_rear_turnaround and fwd_arc_clear > rear_clear) else clamp(cfg.kp_steer * rear_bearing_error, -cfg.max_steer_rad, cfg.max_steer_rad)
-                    person_requested_vx = 0.0
-                    desired_vx = 0.0
+                    # 纯倒车对准模式（兼容旧配置与基础单元测试）
+                    rear_clear = (self.recovery.clearance(self.scan_evidence, self.cmd_steer, -1,
+                                                          current_steer=self.cmd_steer,
+                                                          allow_history=True)
+                                  if self.scan_evidence is not None else 0.0)
+                    rear_dist = math.hypot(view['x'] + cfg.footprint_rear_m, view['y'])
+                    rear_error = rear_dist - cfg.follow_distance_m
+                    rear_bearing_error = (math.pi - bearing) if bearing >= 0 else (-math.pi - bearing)
+
+                    if rear_clear >= cfg.obstacle_standoff_m and rear_error > cfg.deadband_m:
+                        rev_steer = clamp(cfg.kp_steer * rear_bearing_error, -cfg.max_steer_rad, cfg.max_steer_rad)
+                        desired_steer = rev_steer
+                        rev_speed = clamp(cfg.kp_distance * rear_error, cfg.creep_floor_mps, min(0.12, cfg.recovery.blind_speed_mps))
+                        person_requested_vx = -rev_speed
+                        desired_vx = person_requested_vx
+                    else:
+                        desired_steer = clamp(cfg.kp_steer * rear_bearing_error, -cfg.max_steer_rad, cfg.max_steer_rad)
+                        person_requested_vx = 0.0
+                        desired_vx = 0.0
             else:
                 person_requested_vx = 0.0
                 if not (abs(person_error) <= cfg.deadband_m and abs(target_ground_speed) < .10):
@@ -761,6 +840,8 @@ class PersonFollowerNode(Node):
                 desired_vx = max(desired_vx, -cfg.recovery.speed_mps)
             self._remember_target(view, gap)
         else:
+            self.turnaround_phase = 'IDLE'
+            self.turnaround_phase_start = 0.0
             requested_vx = desired_vx
             person_follow_cap = cap_follow
             self.latest_raw = None
@@ -800,7 +881,7 @@ class PersonFollowerNode(Node):
         if is_behind:
             result.steer = desired_steer
             if is_turnaround:
-                result.state, result.reason = 'TURNAROUND', 'face_rear_target'
+                result.state, result.reason = 'TURNAROUND', turnaround_reason
                 result.speed = desired_vx
             elif person_requested_vx < 0:
                 result.state, result.reason = 'REAR_ALIGNING', 'target_behind'
@@ -824,7 +905,10 @@ class PersonFollowerNode(Node):
         if not self.recovery.active and healthy:
             if is_behind:
                 if is_turnaround:
-                    desired_vx = min(cap_follow, desired_vx)
+                    if desired_vx >= 0:
+                        desired_vx = min(0.20, cfg.max_speed_mps)
+                    else:
+                        desired_vx = max(-min(0.12, cfg.recovery.blind_speed_mps), desired_vx)
                 elif person_requested_vx < 0:
                     desired_vx = max(-min(0.12, cfg.recovery.blind_speed_mps), person_requested_vx)
                 else:
@@ -873,7 +957,7 @@ class PersonFollowerNode(Node):
             # Recovery never uses the forward-only breakaway kick. Its speed and
             # distance caps also apply to the final ramp output on every cycle.
             wanted = direction*cap
-            if not self.recovery.active and direction > 0 and not pre_steer:
+            if not self.recovery.active and direction > 0 and not pre_steer and not is_turnaround:
                 wanted = self.kick.apply(cap, abs(self.chassis_speed) > .03, cap, now)
             self.cmd_vx = direction*min(cap, abs(self.speed_slew.step(wanted, dt)))
             self.speed_slew.reset(self.cmd_vx)
@@ -1075,6 +1159,7 @@ class PersonFollowerNode(Node):
             "lidar_handoff_frames": self.lidar_handoff_frames,
             "lidar_track": self._lidar_track_status(now),
             "voltage_v": round(self.voltage, 2),
+            "turnaround_phase": self.turnaround_phase,
             "cmd_vx": round(self.cmd_vx, 3),
             "cmd_wz": round(self.cmd_wz, 3),
             "cmd_steer_deg": round(math.degrees(self.cmd_steer), 1),
@@ -1100,7 +1185,7 @@ class PersonFollowerNode(Node):
             "TRACKING":       "\033[1;32m[ 跟踪追随 ]\033[0m",
             "HOLDING":        "\033[1;36m[ 距离锁定 ]\033[0m",
             "REAR_ALIGNING":  "\033[1;36m[ 车后对准倒车 ]\033[0m",
-            "TURNAROUND":     "\033[1;36m[ 前向弧线掉头 ]\033[0m",
+            "TURNAROUND":     "\033[1;36m[ 揉库掉头对准 ]\033[0m",
             "TARGET_BLINK":   "\033[1;33m[ 目标闪断 ]\033[0m",
             "SEARCHING_LOST": "\033[1;35m[ 搜索目标 ]\033[0m",
             "COLLISION_AEB":  "\033[1;41;37m[ 防撞急停 ]\033[0m",

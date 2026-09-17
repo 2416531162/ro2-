@@ -811,14 +811,40 @@ class TestRearTargetFollowing(unittest.TestCase):
         self.assertEqual(h.node.state, 'TURNAROUND')
 
     def test_target_behind_turnaround_blocked_falls_back_to_reverse(self):
-        """当开启 enable_rear_turnaround 但前方受阻时，安全降级回倒车对准。"""
+        """当开启 enable_rear_turnaround 但前方受阻时，安全执行反打舵倒车揉库。"""
         h = FollowerHarness(enable_rear_turnaround=True, scan_blind_sectors_deg=())
         front_obstacle = disc(1.0, 0.0, 0.3)
         h.tick(n10p_scan(half_size=5.0, extra=front_obstacle))
         self._set_target_at(h, -2.0, 0.0)
         h.tick(n10p_scan(half_size=5.0, extra=front_obstacle))
         self.assertLess(h.node.cmd_vx, -0.01)
-        self.assertEqual(h.node.state, 'REAR_ALIGNING')
+        self.assertEqual(h.node.state, 'TURNAROUND')
+        self.assertEqual(h.node.limit_reason, 'k_turn_reverse')
+
+    def test_k_turn_inverted_steer_in_reverse(self):
+        """K-turn 揉库特性验证：左后方目标倒车时前轮必须向右打舵(反打舵)，保持车身逆时针旋转。"""
+        h = FollowerHarness(enable_rear_turnaround=True, scan_blind_sectors_deg=())
+        front_obstacle = disc(1.0, 0.0, 0.3)
+        h.tick(n10p_scan(half_size=5.0, extra=front_obstacle))
+        self._set_target_at(h, -2.0, 0.6)  # 左后方 (bearing > 0, turnaround_dir = +1)
+        h.tick(n10p_scan(half_size=5.0, extra=front_obstacle))
+        self.assertLess(h.node.cmd_vx, -0.01)
+        self.assertEqual(h.node.turnaround_phase, 'REVERSE')
+        # 倒车时打反舵 (turnaround_dir * -max_steer < 0)
+        self.assertLess(h.node.cmd_steer, -0.05, "左转掉头的倒车阶段必须反打舵(右打)使车身继续逆时针旋转")
+
+    def test_k_turn_completion_when_target_in_front_cone(self):
+        """K-turn 完成验证：当人体转入车头前方且角度在 ±35° 视野内时，退出掉头恢复正常跟随。"""
+        h = FollowerHarness(enable_rear_turnaround=True)
+        h.tick(n10p_scan(half_size=5.0))
+        self._set_target_at(h, -2.0, 0.5)
+        h.tick(n10p_scan(half_size=5.0))
+        self.assertEqual(h.node.state, 'TURNAROUND')
+        # 模拟车头已转过来，人体出现在前方 1.5m, 0.2m (bearing ~ 7.6° <= 35°)
+        self._set_target_at(h, 1.5, 0.2)
+        h.tick(n10p_scan(half_size=5.0))
+        self.assertEqual(h.node.turnaround_phase, 'IDLE', "目标进入车前 FOV 应当退出掉头状态机")
+        self.assertIn(h.node.state, ('TRACKING', 'HOLDING'))
 
     def test_lidar_handoff_timeout_relaxed(self):
         """雷达接力期间更新间隔在 0.5s (>0.30s) 时不应丢锁。"""
