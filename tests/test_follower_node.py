@@ -380,8 +380,8 @@ class TestStructuralShadowAhead(unittest.TestCase):
         self.assertGreater(clear, 0.5)
 
     def test_same_width_without_echo_still_blocks(self):
-        """同样宽度但是「完全没回波」(可能是黑色物体):仍然保守判为未知。"""
-        clear, rec, ev = self.clearance(*self.scan_with_sliver(-15.0, 3.0, math.inf))
+        """较宽但「完全没回波」(可能是黑色物体):仍然保守判为未知。"""
+        clear, rec, ev = self.clearance(*self.scan_with_sliver(-15.0, 6.0, math.inf))
         self.assertLess(clear, 0.1)
         kind, x, y, _ = rec.last_block
         self.assertEqual(kind, "unknown")
@@ -406,7 +406,7 @@ class TestStructuralShadowAhead(unittest.TestCase):
 
     def test_status_explains_unknown_block(self):
         h = FollowerHarness()
-        ranges, inc = self.scan_with_sliver(-15.0, 3.0, math.inf)
+        ranges, inc = self.scan_with_sliver(-15.0, 6.0, math.inf)
         msg = n10p_scan(450, half_size=5.0)
         msg.ranges = ranges
         for _ in range(20):

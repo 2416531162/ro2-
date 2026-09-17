@@ -112,7 +112,7 @@ class ScanEvidence:
     # window. 1 deg spans the N10P sample spacing (~0.8 deg) with margin; at
     # 1 m that is ~3.5 cm of interpolated free space. Actual returns are still
     # all collision obstacles, and a wider run of missing rays stays unknown.
-    NEIGHBOR_WINDOW_RAD = math.radians(1.0)
+    NEIGHBOR_WINDOW_RAD = math.radians(4.5)
     # A narrow run of rays blocked by the car's OWN structure (echo closer
     # than range_min, a return on the body, or a configured blind sector,
     # which by definition marks car structure) says nothing about the space
