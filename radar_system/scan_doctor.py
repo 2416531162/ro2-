@@ -46,6 +46,9 @@ class ScanDoctor(Node):
         self.bin_deg = bin_deg
         self.n_bins = int(round(360.0 / bin_deg))
         self.samples = defaultdict(list)     # bin -> [距离...]
+        # 原始光束分辨率上统计「没有有效回波」的帧数,用来找车头方向被车身
+        # 结构件永久挡住的窄缝(结构件近于量程下限时雷达报 -inf 或 +inf)
+        self.missing = defaultdict(int)       # 原始光束序号 -> 无效帧数
         self.frames = 0
         self.started = time.monotonic()
         self.meta = None
@@ -65,12 +68,48 @@ class ScanDoctor(Node):
         ainc = msg.angle_increment or (2 * math.pi / n)
         amin = msg.angle_min if msg.angle_increment else -math.pi
         for i, r in enumerate(msg.ranges):
+            if not math.isfinite(r) or r <= 0 or not (msg.range_min <= r <= msg.range_max):
+                self.missing[i] += 1
             if not math.isfinite(r) or r <= 0:
                 continue
             if not (msg.range_min <= r <= msg.range_max):
                 continue
             deg = math.degrees(amin + i * ainc) % 360.0
             self.samples[int(deg / self.bin_deg) % self.n_bins].append(r)
+
+    def report_front_shadows(self, half_fov_deg=90.0, min_ratio=0.9):
+        """车头 ±90° 内几乎每帧都没有有效回波的方向(空旷处只可能是车身遮挡)。"""
+        m = self.meta
+        n = m['n']
+        ainc = m['ainc'] or (2 * math.pi / n)
+        amin = m['amin'] if m['ainc'] else -math.pi
+        bad = []
+        for i in range(n):
+            deg = (math.degrees(amin + i * ainc) + 180.0) % 360.0 - 180.0
+            if abs(deg) <= half_fov_deg and self.missing[i] / self.frames >= min_ratio:
+                bad.append(deg)
+        # N10P 每圈约 450 点分进 720 格,孤立的空格是正常的;只报连续 >= 1.5° 的缝
+        bad.sort()
+        runs = []
+        for deg in bad:
+            if runs and deg - runs[-1][1] <= math.degrees(ainc) * 1.5:
+                runs[-1][1] = deg
+            else:
+                runs.append([deg, deg])
+        runs = [r for r in runs if r[1] - r[0] >= 1.5]
+        if not runs:
+            print("✅ 车头 ±90° 内没有持续无回波的方向。\n")
+            return
+        print("\033[1;33m车头 ±90° 内持续没有有效回波的方向(空旷处 = 被车身结构挡住):\033[0m")
+        for lo, hi in runs:
+            width = hi - lo
+            note = ("≤4°,填进屏蔽扇区后跟随会用两侧回波桥接" if width <= 4.0 else
+                    "\033[1;31m>4°,前方这片永远无法确认,跟随会一直判「前方无路」,"
+                    "需要挪开遮挡物或调整雷达高度\033[0m")
+            print(f"  {lo:+6.1f}° ~ {hi:+6.1f}°  宽 {width:.1f}°  {note}")
+        print("  确认是车身结构后,加进 FollowerConfig.scan_blind_sectors_deg,例如:")
+        print("    scan_blind_sectors_deg = ((155.0, -130.0), "
+              + ", ".join(f"({lo - 0.5:.1f}, {hi + 0.5:.1f})" for lo, hi in runs) + ")\n")
 
     def done(self):
         return time.monotonic() - self.started >= self.seconds
@@ -100,6 +139,8 @@ class ScanDoctor(Node):
                 print("  雷达装在车头时,它会把车尾扫到的自己当成正前方的障碍物,")
                 print("  AEB 于是一直硬刹停,而人眼看前方明明空无一物。")
             print(f"  正确写法: deg = degrees(msg.angle_min + i * msg.angle_increment)\n")
+
+        self.report_front_shadows()
 
         print("角度区间      最近    中位    出现率   判定")
         print("-" * 58)

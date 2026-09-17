@@ -54,6 +54,10 @@ class ScanEvidence:
         self.mount = mount
         self.blind_sectors = tuple(blind_sectors or ())
         self.valid = []
+        # Why each ray is (in)valid: ok / none (+inf, NaN: no echo) /
+        # near (-inf or < range_min: echo closer than the lidar can range,
+        # i.e. car structure) / self (return on the car body) / far / masked.
+        self.causes = []
         self.points = []
         self.usable = (bool(ranges) and math.isfinite(angle_min)
                        and math.isfinite(increment) and 0 < abs(increment) <= math.radians(2)
@@ -68,13 +72,27 @@ class ScanEvidence:
                 external = not is_self_hit(x, y, footprint, skin_m=self_hit_skin_m)
                 if external:
                     self.points.append((x, y))
-                ok = external and not in_blind_sector(a, blind_sectors)
+                masked = in_blind_sector(a, blind_sectors)
+                ok = external and not masked
+                cause = "ok" if ok else ("self" if not external else "masked")
+            elif in_blind_sector(a, blind_sectors):
+                cause = "masked"      # configured car structure, whatever the reading
+            elif r != r or r == math.inf:
+                cause = "none"
+            elif r == -math.inf or r < range_min:
+                cause = "near"
+            else:
+                cause = "far"
             self.valid.append(ok)
+            self.causes.append(cause)
         self.usable = self.usable and any(self.valid)
         n = len(self.ranges)
         self._full = bool(n) and abs(increment) * n >= 2 * math.pi - abs(increment) * 1.1
         self._reach = (max(1, int(self.NEIGHBOR_WINDOW_RAD / abs(increment) + 1e-9))
                        if self.usable else 1)
+        self._reach_struct = (max(self._reach,
+                                  int(self.STRUCTURE_WINDOW_RAD / abs(increment) + 1e-9))
+                              if self.usable else 1)
         self._mid = angle_min + (n - 1) * increment / 2 if n else 0.0
         # Nearest valid bin at/below and at/above every bin, precomputed once per
         # scan so each free-space query is O(1) (clearance() issues ~10^5/cycle).
@@ -95,10 +113,20 @@ class ScanEvidence:
     # 1 m that is ~3.5 cm of interpolated free space. Actual returns are still
     # all collision obstacles, and a wider run of missing rays stays unknown.
     NEIGHBOR_WINDOW_RAD = math.radians(1.0)
+    # A narrow run of rays blocked by the car's OWN structure (echo closer
+    # than range_min, a return on the body, or a configured blind sector,
+    # which by definition marks car structure) says nothing about the space
+    # beyond; such a permanent sliver ahead made every path "unknown" at
+    # start-up (field report: blocked at lidar bearing 16.7 deg, 0.20 m).
+    # Runs of structural rays up to this width are bridged by the real returns
+    # on both sides; no-echo (+inf) rays keep the strict 1 deg window, since a
+    # dark object also produces them. Wider structural shadows stay unknown.
+    STRUCTURE_WINDOW_RAD = math.radians(4.0)
 
     def _nearest_valid(self, start, step, reach, full):
         n = len(self.ranges)
-        for k in range(reach + 1):
+        loose = 0
+        for k in range((getattr(self, "_reach_struct", reach)) + 1):
             i = start + step * k
             if full:
                 i %= n
@@ -106,7 +134,34 @@ class ScanEvidence:
                 return None
             if self.valid[i]:
                 return i
+            if self.causes[i] not in ("near", "self", "masked"):
+                loose += 1
+                if loose > reach:
+                    return None
         return None
+
+    def explain(self, x, y, half_width_deg=3.0):
+        """Rays around the direction of (x, y): [(bearing_deg, range, cause)]."""
+        if not self.ranges:
+            return []
+        a = math.atan2(y - self.mount.y_m, x - self.mount.x_m) - self.mount.yaw_rad
+        a += round((self._mid - a) / (2 * math.pi)) * 2 * math.pi
+        centre = (a - self.angle_min) / self.increment
+        span = int(math.radians(half_width_deg) / abs(self.increment)) + 1
+        n = len(self.ranges)
+        out = []
+        for k in range(-span, span + 1):
+            i = int(round(centre)) + k
+            if self._full:
+                i %= n
+            if not 0 <= i < n:
+                continue
+            r = self.ranges[i]
+            deg = math.degrees(self.angle_min + i * self.increment + self.mount.yaw_rad)
+            deg = (deg + 180.0) % 360.0 - 180.0
+            out.append((round(deg, 1), round(r, 3) if math.isfinite(r) else str(r),
+                        self.causes[i]))
+        return out
 
     def _indices(self, x, y):
         if not self.usable:

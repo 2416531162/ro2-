@@ -62,9 +62,21 @@ class N10PDecoder:
                         distance, intensity = second, packet[off + 5]
                         self.echo_fallbacks += 1
                     else:
-                        distance, intensity = math.inf, 0
+                        # REP-117: -inf = 有回波但近于量程下限(几乎总是车身自己的
+                        # 结构件,雷达在这个方向上被挡住),+inf = 完全没有回波。
+                        # 两者合并成 +inf 时,下游无法区分「被车身挡住」和
+                        # 「前方可能有吸光物体」,只能都按未知处理。
+                        near = 0 < first < RANGE_MIN or 0 < second < RANGE_MIN
+                        distance, intensity = (-math.inf if near else math.inf), 0
                 points.append(((start + span * i / 15) % 360, distance, intensity))
             yield points
+
+
+def _rank(distance):
+    """同一格多个采样的取舍:真实回波(近者优先) > 太近(-inf) > 无回波(+inf)。"""
+    if math.isfinite(distance):
+        return (0, distance)
+    return (1, 0.0) if distance < 0 else (2, 0.0)
 
 
 class SweepAssembler:
@@ -97,7 +109,7 @@ class SweepAssembler:
             if self.started is not None:
                 key = round(((360 - angle) % 360) * 2) % BINS
                 old = self.bins.get(key)
-                if old is None or distance < old[0]:
+                if old is None or _rank(distance) < _rank(old[0]):
                     self.bins[key] = (distance, intensity)
         return scans
 

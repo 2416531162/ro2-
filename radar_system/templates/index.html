@@ -896,8 +896,11 @@ function describeFollower(f, live, rawState) {
   const src = t ? `(${F_SOURCE_TEXT[t.range_source] || t.range_source || '相机'})` : '';
   const st = live.state;
   const b = live.blocked_by;
+  const CAUSE_TEXT = { none: '无回波', near: '太近/车身遮挡', self: '打在车身上', masked: '屏蔽扇区', far: '超量程', ok: '正常' };
+  const causeText = b && b.ray_causes ? ' · 附近光束:' + Object.entries(b.ray_causes)
+    .map(([k, v]) => `${CAUSE_TEXT[k] || k}×${v}`).join('、') : '';
   const blockText = b ? `挡路:${b.kind === 'obstacle' ? '障碍物' : b.kind === 'unknown' ? '雷达看不到的区域' : '无雷达数据'},` +
-    `雷达方位 ${b.lidar_bearing_deg}°、距离 ${b.lidar_range_m}m` : '';
+    `雷达方位 ${b.lidar_bearing_deg}°、距离 ${b.lidar_range_m}m${causeText}` : '';
 
   if (vx > 0.005 && t) {
     return { tone: 'ok', text: `${F_STATE_TEXT[st] || st}:${who} → 前进 ${vx.toFixed(2)} m/s,${turn}`,

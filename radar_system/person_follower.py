@@ -775,10 +775,21 @@ class PersonFollowerNode(Node):
             return None
         kind, x, y, at = block
         lx, ly = x - self.lidar_mount.x_m, y - self.lidar_mount.y_m
-        return {"kind": kind, "x": round(x, 3), "y": round(y, 3),
-                "lidar_bearing_deg": round(math.degrees(math.atan2(ly, lx)), 1),
-                "lidar_range_m": round(math.hypot(lx, ly), 3),
-                "after_m": round(at, 2)}
+        out = {"kind": kind, "x": round(x, 3), "y": round(y, 3),
+               "lidar_bearing_deg": round(math.degrees(math.atan2(ly, lx)), 1),
+               "lidar_range_m": round(math.hypot(lx, ly), 3),
+               "after_m": round(at, 2)}
+        ev = self.scan_evidence
+        if kind == "unknown" and ev is not None:
+            # 这个方向上每条光束为什么不算数:none=没回波 near=太近(车身遮挡)
+            # self=打在车身上 masked=屏蔽扇区 far=超量程
+            rays = ev.explain(x, y)
+            counts = {}
+            for _deg, _r, cause in rays:
+                counts[cause] = counts.get(cause, 0) + 1
+            out["ray_causes"] = counts
+            out["rays"] = rays
+        return out
 
     def publish_status(self, now, have_target, age):
         target = None

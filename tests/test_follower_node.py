@@ -354,5 +354,96 @@ class TestStuckWithPersonVisible(unittest.TestCase):
         self.assertGreater(s['blocked_by']['lidar_bearing_deg'], 0.0, s)
 
 
+class TestStructuralShadowAhead(unittest.TestCase):
+    """现场:挡路 = 雷达看不到的区域,方位 16.7°、距离 0.20m(车上结构件遮挡)。"""
+
+    def scan_with_sliver(self, centre_deg, width_deg, value):
+        msg = n10p_scan(450, half_size=5.0)
+        ranges = list(msg.ranges)
+        for i in range(BINS):
+            deg = math.degrees(i * msg.angle_increment)
+            d = (deg - centre_deg + 180.0) % 360.0 - 180.0
+            if abs(d) <= width_deg / 2:
+                ranges[i] = value
+        return ranges, msg.angle_increment
+
+    def clearance(self, ranges, inc):
+        from follower_recovery import LocalRecovery
+        cfg = pf.FollowerConfig()
+        ev = ScanEvidence(ranges, 0.0, inc, 0.15, 12.0, cfg.lidar_mount, cfg.footprint,
+                          cfg.scan_blind_sectors_deg, self_hit_skin_m=cfg.self_hit_skin_m)
+        rec = LocalRecovery(cfg.footprint, cfg.geometry, cfg.obstacle_profile)
+        return rec.clearance(ev, 0.0), rec, ev
+
+    def test_narrow_car_structure_shadow_is_bridged(self):
+        clear, _, _ = self.clearance(*self.scan_with_sliver(16.7, 3.0, -math.inf))
+        self.assertGreater(clear, 0.5)
+
+    def test_same_width_without_echo_still_blocks(self):
+        """同样宽度但是「完全没回波」(可能是黑色物体):仍然保守判为未知。"""
+        clear, rec, ev = self.clearance(*self.scan_with_sliver(16.7, 3.0, math.inf))
+        self.assertLess(clear, 0.1)
+        kind, x, y, _ = rec.last_block
+        self.assertEqual(kind, "unknown")
+        causes = {c for _, _, c in ev.explain(x, y)}
+        self.assertIn("none", causes)
+
+    def test_wide_structure_shadow_still_blocks(self):
+        clear, _, _ = self.clearance(*self.scan_with_sliver(16.7, 8.0, -math.inf))
+        self.assertLess(clear, 0.1)
+
+    def test_configured_narrow_front_blind_sector_is_bridged(self):
+        """用户把车头的结构遮挡(测出来是 +inf)配进屏蔽扇区后,可以正常前进。"""
+        from follower_recovery import LocalRecovery
+        cfg = pf.FollowerConfig()
+        ranges, inc = self.scan_with_sliver(16.7, 3.0, math.inf)
+        blind = cfg.scan_blind_sectors_deg + ((15.0, 18.5),)
+        ev = ScanEvidence(ranges, 0.0, inc, 0.15, 12.0, cfg.lidar_mount, cfg.footprint,
+                          blind, self_hit_skin_m=cfg.self_hit_skin_m)
+        rec = LocalRecovery(cfg.footprint, cfg.geometry, cfg.obstacle_profile)
+        self.assertGreater(rec.clearance(ev, 0.0), 0.5)
+        self.assertLess(rec.clearance(ev, 0.0, -1), 0.05, "车尾宽屏蔽不受影响")
+
+    def test_status_explains_unknown_block(self):
+        h = FollowerHarness()
+        ranges, inc = self.scan_with_sliver(16.7, 3.0, math.inf)
+        msg = n10p_scan(450, half_size=5.0)
+        msg.ranges = ranges
+        for _ in range(20):
+            h.tick(msg, camera_person(2.5, 0.0))
+        b = h.status()['blocked_by']
+        self.assertIsNotNone(b, h.status())
+        self.assertEqual(b['kind'], 'unknown')
+        self.assertGreater(b['ray_causes'].get('none', 0), 0)
+        self.assertAlmostEqual(b['lidar_bearing_deg'], 16.7, delta=3.0)
+
+
+class TestN10PNearEcho(unittest.TestCase):
+    """驱动区分「太近」(-inf) 和「没回波」(+inf),且真实回波优先。"""
+
+    def test_rank_order(self):
+        from n10p_pipeline import _rank
+        vals = [math.inf, -math.inf, 2.0, 0.5]
+        self.assertEqual(sorted(vals, key=_rank)[:2], [0.5, 2.0])
+        self.assertEqual(sorted(vals, key=_rank)[2], -math.inf)
+
+    def test_decoder_marks_near_echo(self):
+        from n10p_pipeline import N10PDecoder, FRAME
+        pkt = bytearray(FRAME)
+        pkt[0:2] = b'\xa5\x5a'
+        pkt[2], pkt[3] = FRAME, 16
+        pkt[5:7] = (1000).to_bytes(2, 'big')        # 起始角 10.00°
+        pkt[105:107] = (2000).to_bytes(2, 'big')    # 结束角 20.00°
+        for i in range(16):
+            off = 7 + i * 6
+            first = 80 if i == 0 else (0 if i == 1 else 1500)   # 8cm / 无回波 / 1.5m
+            pkt[off:off + 2] = first.to_bytes(2, 'big')
+        pkt[-1] = sum(pkt[:-1]) & 255
+        points = [p for batch in N10PDecoder().feed(bytes(pkt)) for p in batch]
+        self.assertEqual(points[0][1], -math.inf)
+        self.assertEqual(points[1][1], math.inf)
+        self.assertAlmostEqual(points[2][1], 1.5)
+
+
 if __name__ == '__main__':
     unittest.main()
