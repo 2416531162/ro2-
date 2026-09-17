@@ -750,8 +750,10 @@ function updateFollowerUI(f, isRunning) {
   }
 
   if ($('fConfVal')) {
-    if (target && Number.isFinite(target.confidence)) {
-      const pct = Math.round(target.confidence * 100);
+    // 跟随节点发布的字段名是 conf,旧页面读 confidence,所以一直显示 --
+    const conf = target ? Number(target.confidence ?? target.conf) : NaN;
+    if (target && Number.isFinite(conf)) {
+      const pct = Math.round(conf * 100);
       $('fConfVal').textContent = `${pct}%`;
       $('fConfVal').style.color = pct >= 80 ? '#69dec4' : '#f6c879';
     } else {
@@ -789,7 +791,8 @@ function updateFollowerUI(f, isRunning) {
 
   const aebAlert = $('fAebAlert');
   if (aebAlert) {
-    const aeb = Boolean(fLive && (fLive.aeb_active || rawState.includes('AEB')));
+    // 只在急停真正拦住了运动时报警;静止保持距离时的锁存标志不代表正在硬刹
+    const aeb = Boolean(fLive && rawState.includes('AEB'));
     aebAlert.style.display = aeb ? 'block' : 'none';
   }
 

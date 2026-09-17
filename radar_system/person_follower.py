@@ -628,18 +628,24 @@ class PersonFollowerNode(Node):
         if desired_vx*self.chassis_speed < -0.002:
             desired_vx = 0.0
             self.state, self.limit_reason = 'RECOVERY_BRAKE', 'wait_stationary'
-        self.path_clearance = self.recovery.clearance(
-            self.scan_evidence, self.cmd_steer, direction, self.cmd_steer,
-            allow_history=self.recovery.active and self.recovery.blind_leg) if healthy else 0.0
-        # Recheck the ACTUAL rate-limited steer, not only the selected future arc.
-        # Front AEB is not a rear veto; collision checks still include all corners.
-        hard = self.path_clearance < cfg.aeb_clearance_m
-        if self.motion_direction != direction:
-            self.aeb_latched = hard
-        elif hard:
-            self.aeb_latched = True
-        elif self.path_clearance >= cfg.aeb_release_clearance_m:
-            self.aeb_latched = False
+        if healthy:
+            self.path_clearance = self.recovery.clearance(
+                self.scan_evidence, self.cmd_steer, direction, self.cmd_steer,
+                allow_history=self.recovery.active and self.recovery.blind_leg)
+            # Recheck the ACTUAL rate-limited steer, not only the selected future arc.
+            # Front AEB is not a rear veto; collision checks still include all corners.
+            hard = self.path_clearance < cfg.aeb_clearance_m
+            if self.motion_direction != direction:
+                self.aeb_latched = hard
+            elif hard:
+                self.aeb_latched = True
+            elif self.path_clearance >= cfg.aeb_release_clearance_m:
+                self.aeb_latched = False
+        else:
+            # 数据不可信(雷达/底盘断流、控制周期抖动 >250ms 等)时净空记 0,
+            # 由下面的 cap=0 保证不动;但不能据此锁存 AEB —— 旧版在这里把
+            # "数据不可信" 当成 "前方有障碍",页面在车静止时也一直报 AEB 硬急停。
+            self.path_clearance = 0.0
         self.motion_direction = direction
         cap = abs(desired_vx)
         profile = (BrakeProfile(cfg.decel_capability_mps2, cfg.control_latency_s, .035, .015)
