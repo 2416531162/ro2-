@@ -648,7 +648,7 @@ class LocalRecovery:
                     if all(abs(a-p[1]) > 1e-6 for p in paths):
                         paths.append((self.clearance(scan, a, 1, current_steer), a, False))
             clear, steer, blind = max(paths, key=score)
-            min_clear_req = .05 if blind else (.25 if self.direction > 0 else .15)
+            min_clear_req = .05 if blind else (.15 if self.direction > 0 else .10)
             if clear < min_clear_req:
                 self.legs += 1
                 self._brake(now, -self.direction)

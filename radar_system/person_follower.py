@@ -100,9 +100,9 @@ class FollowerConfig:
 
     # ---- 避障 ----
     # 以下均为车头到障碍物的**净空**
-    obstacle_standoff_m: float = 0.40   # 正常停车时车头前保留净空 (0.40m 提前平滑减速，留足安全停车距离)
-    aeb_clearance_m: float = 0.22       # 硬急停线:净空小于此值无条件发 0 (22cm 物理防撞硬急停)
-    aeb_release_clearance_m: float = 0.32   # 急停解除回差 (32cm 恢复)
+    obstacle_standoff_m: float = 0.15   # 正常停车时车头前保留净空 (0.15m 兼顾窄门通行与平滑减速)
+    aeb_clearance_m: float = 0.08       # 硬急停线:净空小于此值无条件发 0 (8cm 物理防撞硬急停)
+    aeb_release_clearance_m: float = 0.14   # 急停解除回差 (14cm 恢复)
     scan_cone_deg: float = 30.0         # 前向检测扇区半角
     scan_min_valid_m: float = 0.15      # 雷达本体盲区
     # 雷达装在车上,周围的相机支架、天线杆、传感器盒会被扫成距离恒定、
@@ -162,7 +162,7 @@ class FollowerConfig:
     footprint_front_m: float = 0.67      # 后轴中心 -> 车体最前端(含支架外伸)
     footprint_rear_m: float = 0.18       # 后轴中心 -> 车体最后端
     footprint_half_width_m: float = 0.335  # 中线 -> 轮胎外沿 (全宽 0.67 的一半)
-    footprint_margin_m: float = 0.035    # 侧向安全余量 (3.5cm, 全宽 0.67+0.07=0.74m 可顺畅穿过 80~85cm 窄门)
+    footprint_margin_m: float = 0.025    # 侧向安全余量 (2.5cm, 全宽 0.67+0.05=0.72m 可顺畅穿过 80~85cm 窄门)
     aeb_margin_m: float = 0.015          # AEB 专属物理急停余量 (1.5cm, 只要车体不发生物理碰撞就不锁死)
     lidar_offset_x_m: float = 0.53       # 后轴中心 -> 雷达,向前为正(基本在前轴线上)
     lidar_offset_y_m: float = 0.0        # 雷达在中线上
@@ -174,7 +174,7 @@ class FollowerConfig:
     camera_pitch_rad: float = 0.2618     # 相机俯角,实测 15°(向下为正)。
                                          #   深度 z 沿光轴,俯装时不等于水平距离,
                                          #   且误差随目标高度变化(上方 0.6m 处差 19cm)
-    min_path_clearance_m: float = 0.30   # 低于此净空就收舵找更直的路,而不是硬停
+    min_path_clearance_m: float = 0.15   # 低于此净空就收舵找更直的路,而不是硬停
 
     # ---- 传感器交叉校验 ----
     range_conflict_m: float = 1.00      # 相机比雷达远这么多即判为冲突
