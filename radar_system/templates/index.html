@@ -21,6 +21,25 @@
 }
 @media(max-width:1100px){.workspace{padding:18px 16px 12px}.main-grid{grid-template-columns:minmax(0,1fr) 264px;gap:12px}.panel{padding:13px}.viewer-toolbar{padding:9px}.mode-btn{padding:7px 9px}.mode-btn svg{display:none}.app-header{padding:0 18px}.metric{padding:13px}.metric-symbol{display:none}.metric .value{font-size:23px}.metric-note{font-size:9px}.view-badge{display:none}}
 .follower-card-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;margin-bottom:8px}.follower-stat-cell{background:#111a23;border:1px solid #2b3846;border-radius:6px;padding:8px 5px;text-align:center}.follower-stat-cell span{display:block;font-size:10px;color:var(--muted);margin-bottom:4px}.follower-stat-cell strong{font-size:12px;font-weight:600}.follower-alert{padding:8px 10px;border-radius:6px;font-size:11px;font-weight:500;margin-top:8px;line-height:1.4}.follower-alert.danger{background:#402630;border:1px solid #9f525a;color:#ff8c91;animation:pulse 1s infinite}.follower-alert.warn{background:#362e21;border:1px solid #7b6341;color:#f6c879}.f-badge{padding:3px 8px;border-radius:4px;font-size:10px;font-weight:600;letter-spacing:.3px}.f-badge-running{background:#193830;color:#69dec4;border:1px solid #336a5c}.f-badge-tracking{background:#133a2f;color:#7cf6da;border:1px solid #3ca88d}.f-badge-aeb{background:#40232a;color:#ff8c91;border:1px solid #8e3e48;animation:pulse 1s infinite}.f-badge-lost{background:#383120;color:#f6c879;border:1px solid #78623b}.f-badge-idle{background:#18222d;color:#8fa0b3;border:1px solid #2d3e50}@keyframes pulse{0%{opacity:1}50%{opacity:.6}100%{opacity:1}}
+.f-now{background:#0f1820;border:1px solid #2b3846;border-left:3px solid #4b5d70;border-radius:6px;padding:8px 10px;margin:2px 0 8px}
+.f-now[data-tone=ok]{border-left-color:#69dec4}.f-now[data-tone=warn]{border-left-color:#f6c879}.f-now[data-tone=bad]{border-left-color:#ff8c91}
+.f-now-label{font-size:9px;color:var(--muted);letter-spacing:.5px;margin-bottom:3px}
+.f-now-text{font-size:13px;font-weight:600;color:#e3ebf3;line-height:1.45}
+.f-now-sub{font-size:10px;color:#9fb0c2;line-height:1.5;margin-top:3px}
+.f-chips{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:8px}
+.f-chip{font-size:10px;padding:2px 7px;border-radius:10px;border:1px solid #2d3e50;background:#16202a;color:#8fa0b3;white-space:nowrap}
+.f-chip[data-tone=ok]{background:#133a2f;border-color:#3ca88d;color:#7cf6da}
+.f-chip[data-tone=warn]{background:#383120;border-color:#78623b;color:#f6c879}
+.f-chip[data-tone=bad]{background:#40232a;border-color:#8e3e48;color:#ff8c91}
+.f-more{border-top:1px solid #243140;padding-top:4px}
+.f-more summary{cursor:pointer;font-size:11px;color:#c0ccda;padding:6px 0;min-height:28px;list-style-position:inside}
+.f-kv{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px 10px;margin:2px 0 8px}
+.f-kv div{display:flex;justify-content:space-between;align-items:baseline;gap:6px;font-size:10px;border-bottom:1px dashed #223040;padding:3px 0;min-width:0}
+.f-kv span{color:var(--muted);white-space:nowrap}
+.f-kv b{font-weight:500;color:#dbe5ee;text-align:right;overflow-wrap:anywhere;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.f-kv b[data-tone=ok]{color:#7cf6da}.f-kv b[data-tone=warn]{color:#f6c879}.f-kv b[data-tone=bad]{color:#ff8c91}
+.f-kv .f-kv-head{grid-column:1/-1;border:0;color:#7f93a8;font-size:9px;letter-spacing:.5px;padding:6px 0 0}
+@media(max-width:380px){.f-kv{grid-template-columns:minmax(0,1fr)}}
 .dpad-container{display:flex;flex-direction:column;align-items:center;gap:9px;touch-action:none}.dpad-speed-bar{display:flex;gap:5px;width:100%;max-width:280px}.speed-btn,.steer-btn{flex:1;padding:5px 6px;font-size:11px;border-radius:6px;border:1px solid #303c4b;background:#18222d;color:var(--muted);touch-action:manipulation}.speed-btn.active,.steer-btn.active{background:#233d39;border-color:#69dec4;color:#69dec4;font-weight:600}.dpad-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;width:100%;max-width:280px;margin:0 auto;touch-action:none}.dpad-btn{min-height:50px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;padding:6px 2px;border-radius:8px;border:1px solid #364858;background:#1a2734;color:var(--text);font-size:12px;font-weight:600;touch-action:none!important;user-select:none!important;-webkit-user-select:none!important;-webkit-touch-callout:none!important;transition:transform .08s,background .1s,border-color .1s}.dpad-btn:active,.dpad-btn.pressed{transform:scale(.94);box-shadow:inset 0 2px 6px #0008}.dpad-btn.diagonal{background:#152731;border-color:#2a5057;color:#8be3d4}.dpad-btn.diagonal:active,.dpad-btn.diagonal.pressed{background:#1e464c;border-color:#69dec4;color:#fff}.dpad-btn.fwd{background:#193430;border-color:#2f685c;color:#7bf3d9}.dpad-btn.fwd:active,.dpad-btn.fwd.pressed{background:#255c51;border-color:#69dec4;color:#fff}.dpad-btn.stop{background:#421d23;border-color:#8a323f;color:#ff98a0}.dpad-btn.stop:active,.dpad-btn.stop.pressed{background:#672530;border-color:#ff8c91;color:#fff}.dpad-btn.rev{background:#262130;border-color:#4d3d5f;color:#cfb5ee}.dpad-btn.rev:active,.dpad-btn.rev.pressed{background:#3f3253;border-color:#b58bf8;color:#fff}.dpad-hint{font-size:10px;color:var(--muted);text-align:center;line-height:1.4;margin-top:2px}
 @media(max-width:820px){.app-header{height:68px}.device-tag{display:none}.workspace-heading h2{font-size:20px}.main-grid{grid-template-columns:minmax(0,1fr)}.canvas-stage{height:520px;min-height:420px}.sidebar{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));align-items:start;gap:12px}.follower-panel{grid-column:1/-1}.manual-panel{grid-column:1/-1}.layers-panel{grid-column:2;grid-row:auto}.pose-panel{grid-column:1}.metrics{gap:8px}.metric .value{font-size:21px}.metric-label{font-size:11px}.metric-label svg{display:none}.bottom-bar{flex-wrap:wrap}.brand h1{font-size:15px}.heading-actions{flex-wrap:wrap}.heading-actions .button{padding:8px 10px}.header-right{gap:10px}.render-info{gap:8px}}
 @media(max-width:520px){.workspace{padding:12px 10px 10px}.app-header{padding:0 12px;gap:8px}.brand{gap:8px}.brand-mark{width:32px;height:32px}.brand h1{font-size:13px}.brand p{font-size:9px;letter-spacing:0}.connection{font-size:10px;gap:6px}.workspace-heading{flex-direction:column;align-items:stretch;gap:10px;margin-bottom:12px}.eyebrow{font-size:9px}.workspace-heading h2{font-size:18px}.heading-actions{display:grid;grid-template-columns:repeat(2,1fr);gap:6px;width:100%}.heading-actions .button{padding:8px 4px;min-height:38px;font-size:11px;justify-content:center}.heading-actions .icon{display:none}#followerToggleBtn{grid-column:1/-1;font-size:13px;min-height:42px;font-weight:700}.metrics{grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin-bottom:12px}.metric{padding:10px;gap:5px}.metric-note{font-size:9px}.metric .value{font-size:21px}.viewer-toolbar{flex-wrap:wrap;gap:6px;padding:8px}.mode-selector{flex:1}.mode-btn{padding:7px 5px;flex:1;min-height:32px;font-size:11px}.viewer-tools{gap:4px}.viewer-tools .icon-button{width:32px;height:36px}.canvas-stage{height:420px;min-height:360px}.stage-meta{left:10px;top:12px}.stage-description{font-size:9px;max-width:180px}.stage-bottom{left:10px;bottom:14px}.viewer-footer{align-items:flex-start;flex-direction:column;gap:5px;font-size:9px;padding:8px 10px}.sidebar{grid-template-columns:minmax(0,1fr);gap:10px}.layers-panel,.pose-panel{grid-column:auto;grid-row:auto}.pose-grid{gap:6px}.pose-cell{padding:10px}.directional-grid{max-width:270px;margin:auto}.dir-badge{min-height:50px}.layer-row{min-height:38px}.panel{padding:13px}.bottom-bar{font-size:9px}.bottom-bar span:last-child{display:none}.zoom-tools .icon-button{width:32px;height:32px}.workspace.focus .canvas-stage{height:calc(100dvh - 270px)}.dpad-grid{max-width:100%;gap:8px}.dpad-btn{min-height:54px;font-size:13px}}
@@ -103,14 +122,25 @@
       <strong class="mono" id="fFrontLidarVal">--</strong>
      </div>
      <div class="follower-stat-cell">
-      <span>底盘车速 Vx</span>
+      <span>底盘实测车速</span>
       <strong class="mono" id="fSpeedVal">0.00 m/s</strong>
      </div>
      <div class="follower-stat-cell">
-      <span>转向角速 Wz</span>
-      <strong class="mono" id="fSteerVal">0.00 rad/s</strong>
+      <span>前轮转角</span>
+      <strong class="mono" id="fSteerVal">0.0°</strong>
      </div>
     </div>
+    <div class="f-now" id="fNow" data-tone="off" aria-live="polite">
+     <div class="f-now-label">正在执行</div>
+     <div class="f-now-text" id="fNowText">跟随程序未启动</div>
+     <div class="f-now-sub" id="fNowSub">点「一键启动」后这里会实时说明小车在做什么、为什么</div>
+    </div>
+    <div class="f-chips" id="fChips"></div>
+    <details class="f-more" id="fMore">
+     <summary>运行详情</summary>
+     <div class="f-kv" id="fKv"></div>
+     <button id="fCopyDiag" class="button" type="button" style="min-height:28px;padding:3px 10px;font-size:11px;width:100%;justify-content:center;">复制诊断信息（发给开发者排查）</button>
+    </details>
     <div id="fAebAlert" class="follower-alert danger" role="alert" style="display:none;">
      🛑 <strong>雷达 AEB 防撞触发：</strong>车宽走廊净空受限，底盘紧急硬刹停！
     </div>
@@ -728,9 +758,7 @@ function updateFollowerUI(f, isRunning) {
       fBadge.textContent = '🛑 AEB硬刹停';
     } else if (rawState === 'PATH_BLOCKED') {
       fBadge.classList.add('f-badge-aeb');
-      const b = f && f.blocked_by;
-      const kind = b ? (b.kind === 'obstacle' ? '障碍物' : b.kind === 'unknown' ? '雷达看不到' : '无雷达') : '';
-      fBadge.textContent = '⛔ 前方无可行路径' + (b ? ` · ${kind} ${b.lidar_bearing_deg}° ${b.lidar_range_m}m` : '');
+      fBadge.textContent = '⛔ 前方无路';   // 详细原因在「正在执行」里
     } else if (rawState.includes('SEARCH') || rawState.includes('LOST')) {
       fBadge.classList.add('f-badge-lost');
       fBadge.textContent = '🔍 搜寻目标' + why;
@@ -738,16 +766,19 @@ function updateFollowerUI(f, isRunning) {
       fBadge.classList.add('f-badge-running');
       fBadge.textContent = '✅ 停车保持' + relay + why;
     } else {
-      fBadge.classList.add('f-badge-running');
-      fBadge.textContent = rawState + why;
+      fBadge.classList.add(rawState.startsWith('RECOVERY') || rawState.includes('SENSOR') || rawState.includes('BATTERY')
+                           ? 'f-badge-lost' : 'f-badge-running');
+      fBadge.textContent = ((typeof F_STATE_TEXT !== 'undefined' && F_STATE_TEXT[rawState]) || rawState) + why;
     }
   }
 
   const target = f ? f.target : null;
   if ($('fDistVal')) {
-    if (target && Number.isFinite(target.z)) {
-      $('fDistVal').textContent = `${target.z.toFixed(2)} m`;
-      $('fDistVal').style.color = Math.abs(target.z - 1.00) <= 0.15 ? '#69dec4' : '#f6c879';
+    // 显示跟随实际采用的距离(已换算到车头并与雷达校验),不是相机原始读数
+    const dist = target ? Number(target.distance ?? target.z) : NaN;
+    if (target && Number.isFinite(dist)) {
+      $('fDistVal').textContent = `${dist.toFixed(2)} m`;
+      $('fDistVal').style.color = Math.abs(dist - 1.00) <= 0.15 ? '#69dec4' : '#f6c879';
     } else {
       $('fDistVal').textContent = '--';
       $('fDistVal').style.color = 'var(--muted)';
@@ -797,12 +828,12 @@ function updateFollowerUI(f, isRunning) {
   }
 
   if ($('fSpeedVal')) {
-    const vx = (fLive && Number.isFinite(fLive.cmd_vx)) ? fLive.cmd_vx : 0.0;
+    const vx = (fLive && Number.isFinite(fLive.chassis_speed)) ? fLive.chassis_speed : 0.0;
     $('fSpeedVal').textContent = `${vx.toFixed(2)} m/s`;
   }
   if ($('fSteerVal')) {
-    const wz = (fLive && Number.isFinite(fLive.cmd_wz)) ? fLive.cmd_wz : 0.0;
-    $('fSteerVal').textContent = `${wz.toFixed(2)} rad/s`;
+    const deg = (fLive && Number.isFinite(fLive.cmd_steer_deg)) ? fLive.cmd_steer_deg : 0.0;
+    $('fSteerVal').textContent = `${deg > 0 ? '+' : ''}${deg.toFixed(1)}°${deg > 0.5 ? ' 左' : deg < -0.5 ? ' 右' : ''}`;
   }
 
   const aebAlert = $('fAebAlert');
@@ -817,6 +848,176 @@ function updateFollowerUI(f, isRunning) {
     const lost = Boolean(isFollowerRunning && (rawState.includes('SEARCH') || rawState.includes('LOST')));
     lostAlert.style.display = lost ? 'block' : 'none';
   }
+  renderFollowerDetail(f, fLive, rawState);
+}
+
+// ==================== 跟随运行详情:在做什么、为什么、各环节是否正常 ====================
+const F_STATE_TEXT = {
+  TRACKING: '跟随中', ALIGNING: '绕行对准', HOLDING: '停车保持', PATH_BLOCKED: '前方无可行路径',
+  AEB_EMERGENCY: 'AEB 硬急停', SEARCHING_LOST: '目标丢失', SEARCH_SCAN: '原地观察找人',
+  SEARCH_TURN: '转弯搜索', RECOVERY_REVERSE: '倒车脱困', RECOVERY_BRAKE: '停稳换向',
+  RECOVERY_WAIT: '等待条件满足', RECOVERY_EXHAUSTED: '脱困次数已用完', LOW_BATTERY: '电量低',
+  SENSOR_CONFLICT: '传感器冲突', STARTING: '启动中', OFFLINE: '未运行', STANDBY: '待命',
+};
+const F_REASON_TEXT = {
+  follow: '按目标距离正常跟随', local_path: '正前方不通,选了一条可行的弯道', hold: '已到保持距离',
+  person_close: '人太近,停车', follow_envelope: '接近目标,提前减速', swept_path: '前方有障碍,减速',
+  no_observed_path: '所有方向都没有确认可走的路', no_target: '没有识别到人', recovery_disabled: '脱困已关闭',
+  recovery_budget_used: '自动脱困次数用完,20 秒后重试', scan_unavailable: '雷达数据中断',
+  scan_stale: '雷达数据过期', driver_unavailable: '底盘未连接/未解锁/反馈中断',
+  loop_late: '控制周期严重超时(板子太忙)', battery: '电池电压过低', aeb_hard: '车体即将碰撞,硬刹停',
+  range_conflict: '相机与雷达距离不一致', wait_stationary: '等车完全停稳', gear_change_dwell: '换挡前等待',
+  observe_before_turn: '人刚丢失,先停下观察', leg_complete_or_blocked: '本段机动完成或受阻',
+  observed_path: '沿已确认安全的路径搜索', recent_path_reverse: '沿刚走过的路短距离倒车',
+  bounded_search_complete: '搜索达到上限', sensor_or_driver_unavailable: '传感器或底盘异常',
+};
+const F_SOURCE_TEXT = { camera_depth: '相机深度', lidar_fallback: '雷达兜底测距', lidar_track: '雷达接力跟踪' };
+let lastFollowerPayload = null;
+
+function fmtNum(v, digits, unit) {
+  return Number.isFinite(v) ? `${v.toFixed(digits)}${unit || ''}` : '--';
+}
+
+function describeFollower(f, live, rawState) {
+  // 返回 {tone, text, sub}
+  if (!isFollowerRunning && (!f || rawState === 'OFFLINE' || rawState === 'STANDBY')) {
+    return { tone: 'off', text: '跟随程序未启动', sub: '点「一键启动」开始;手动遥控随时可用' };
+  }
+  if (!live) {
+    return { tone: 'bad', text: '收不到跟随程序的状态', sub: '程序可能正在启动,或已崩溃退出(超过 1.5 秒无消息)' };
+  }
+  const t = live.target;
+  const reason = F_REASON_TEXT[live.limit_reason] || live.limit_reason || '';
+  const vx = Number(live.cmd_vx) || 0;
+  const steer = Number(live.cmd_steer_deg) || 0;
+  const turn = Math.abs(steer) < 1 ? '直行' : (steer > 0 ? `左转 ${steer.toFixed(0)}°` : `右转 ${(-steer).toFixed(0)}°`);
+  const who = t ? `人在前方 ${fmtNum(t.distance, 2, 'm')}` +
+    (Math.abs(t.x) > 0.06 ? `、偏${t.x < 0 ? '左' : '右'} ${Math.abs(t.x).toFixed(2)}m` : '、正前方') : '';
+  const src = t ? `(${F_SOURCE_TEXT[t.range_source] || t.range_source || '相机'})` : '';
+  const st = live.state;
+  const b = live.blocked_by;
+  const blockText = b ? `挡路:${b.kind === 'obstacle' ? '障碍物' : b.kind === 'unknown' ? '雷达看不到的区域' : '无雷达数据'},` +
+    `雷达方位 ${b.lidar_bearing_deg}°、距离 ${b.lidar_range_m}m` : '';
+
+  if (vx > 0.005 && t) {
+    return { tone: 'ok', text: `${F_STATE_TEXT[st] || st}:${who} → 前进 ${vx.toFixed(2)} m/s,${turn}`,
+             sub: `${src} ${reason}${live.speed_cap_mps < 0.5 ? ` · 限速 ${live.speed_cap_mps.toFixed(2)} m/s` : ''}` };
+  }
+  if (vx > 0.005 || vx < -0.005) {
+    return { tone: 'warn', text: `${F_STATE_TEXT[st] || st}:${vx < 0 ? '倒车' : '前进'} ${Math.abs(vx).toFixed(2)} m/s,${turn}`,
+             sub: reason };
+  }
+  if (st === 'PATH_BLOCKED' || st.includes('AEB')) {
+    return { tone: 'bad', text: `停车:${F_STATE_TEXT[st]}${who ? `(${who})` : ''}`, sub: blockText || reason };
+  }
+  if (st === 'HOLDING') {
+    return { tone: 'ok', text: `停车保持:${who || '目标在保持距离内'}`, sub: `${src} ${reason}` };
+  }
+  if (st.startsWith('SEARCH') || st === 'SEARCHING_LOST') {
+    const age = Number.isFinite(live.target_seen_age_ms) ? `,已丢失 ${(live.target_seen_age_ms / 1000).toFixed(1)}s` : '';
+    return { tone: 'warn', text: `${F_STATE_TEXT[st] || st}${age}`, sub: reason };
+  }
+  return { tone: 'warn', text: `停车:${F_STATE_TEXT[st] || st}${who ? `(${who})` : ''}`, sub: [reason, blockText].filter(Boolean).join(' · ') };
+}
+
+function renderFollowerDetail(f, live, rawState) {
+  lastFollowerPayload = f || null;
+  const d = describeFollower(f, live, rawState);
+  const box = $('fNow');
+  if (box) {
+    box.dataset.tone = d.tone;
+    $('fNowText').textContent = d.text;
+    $('fNowSub').textContent = d.sub || '';
+  }
+
+  const running = isFollowerRunning && live && live.state !== 'OFFLINE';
+  const g = (live && live.diag) || {};
+  const chips = [];
+  const chip = (label, tone) => chips.push(`<span class="f-chip" data-tone="${tone}">${label}</span>`);
+  if (running) {
+    chip(g.scan_ok === false ? '雷达 ✕' : g.scan_ok ? '雷达 ✓' : '雷达 ?', g.scan_ok === false ? 'bad' : g.scan_ok ? 'ok' : 'off');
+    const chassisOk = g.feedback_ok && (g.driver_armed || live.dry_run);
+    chip(live.dry_run ? '底盘 演练模式' : chassisOk ? '底盘 ✓' : g.driver_ready === false ? '底盘 未就绪' : '底盘 ✕',
+         live.dry_run ? 'warn' : chassisOk ? 'ok' : 'bad');
+    const t = live.target;
+    chip(t ? `目标 ${F_SOURCE_TEXT[t.range_source] || '相机'}` : '目标 无', t ? (t.range_source === 'camera_depth' ? 'ok' : 'warn') : 'off');
+    chip(live.target_locked ? '已锁定' : '未锁定', live.target_locked ? 'ok' : 'off');
+    if (live.lidar_handoff) chip('雷达接力中', 'warn');
+    if (g.loop_late) chip('控制周期超时', 'bad');
+    if (live.voltage_v && live.voltage_v < 21.5) chip(`电量低 ${live.voltage_v.toFixed(1)}V`, 'bad');
+  }
+  if ($('fChips')) $('fChips').innerHTML = chips.join('');
+
+  const kv = $('fKv');
+  if (!kv) return;
+  if (!running) {
+    kv.innerHTML = `<div><span>状态</span><b>${isFollowerRunning ? '等待跟随程序状态' : '未运行'}</b></div>`;
+    return;
+  }
+  const rows = [];
+  const head = title => rows.push(`<div class="f-kv-head">${title}</div>`);
+  const row = (k, v, tone) => rows.push(`<div><span>${k}</span><b${tone ? ` data-tone="${tone}"` : ''}>${v}</b></div>`);
+  const t = live.target;
+  const lt = live.lidar_track;
+  head('决策');
+  row('状态', `${F_STATE_TEXT[live.state] || live.state}`);
+  row('原因', F_REASON_TEXT[live.limit_reason] || live.limit_reason || '--');
+  row('速度上限', fmtNum(live.speed_cap_mps, 2, ' m/s'));
+  row('指令速度', fmtNum(live.cmd_vx, 2, ' m/s'));
+  row('指令转角', fmtNum(live.cmd_steer_deg, 1, '°'));
+  row('收舵避让', live.steer_limited ? '是' : '否', live.steer_limited ? 'warn' : '');
+  head('目标');
+  row('距离(车头)', t ? fmtNum(t.distance, 2, ' m') : '--');
+  row('横向偏移', t ? `${fmtNum(t.x, 2, ' m')}${t.x < -0.06 ? ' 左' : t.x > 0.06 ? ' 右' : ''}` : '--');
+  row('测距来源', t ? (F_SOURCE_TEXT[t.range_source] || t.range_source) : '--', t && t.range_source !== 'camera_depth' ? 'warn' : '');
+  row('接近速度', t ? fmtNum(t.closing_rate, 2, ' m/s') : '--');
+  row('相机距离', t && Number.isFinite(t.z) ? fmtNum(t.z, 2, ' m') : '--');
+  row('视线上雷达', t && Number.isFinite(t.lidar_gap) ? fmtNum(t.lidar_gap, 2, ' m') : '--');
+  row('上次看到', Number.isFinite(live.target_seen_age_ms) ? `${(live.target_seen_age_ms / 1000).toFixed(1)} s 前` : '--');
+  row('雷达轨迹', lt ? `${lt.valid ? '有效' : '无效'} · 相机确认 ${fmtNum(lt.since_camera_s, 1, 's')} 前` : '无', lt && lt.valid ? 'ok' : '');
+  head('路径');
+  row('路径净空', fmtNum(live.path_clearance_m, 2, ' m'), live.path_clearance_m < 0.15 ? 'bad' : live.path_clearance_m < 0.4 ? 'warn' : 'ok');
+  row('正前方雷达', fmtNum(live.aeb_min_scan_m, 2, ' m'));
+  row('挡路', live.blocked_by ? `${live.blocked_by.kind === 'obstacle' ? '障碍物' : '看不到'} ${live.blocked_by.lidar_bearing_deg}° ${live.blocked_by.lidar_range_m}m` : '无', live.blocked_by ? 'bad' : '');
+  row('AEB 锁存', live.aeb_active ? '是' : '否', live.aeb_active ? 'warn' : '');
+  row('车身自反射点', `${live.self_hits ?? '--'}`);
+  row('通过最窄宽度', fmtNum(live.min_gap_needed_m, 2, ' m'));
+  head('自动脱困');
+  row('阶段', live.recovery_enabled === false ? '已关闭' : (live.recovery_phase || '--'));
+  row('已用次数', `${live.recovery_legs ?? '--'} / 12`, live.recovery_exhausted ? 'bad' : '');
+  row('本次行驶', fmtNum(live.recovery_distance_m, 2, ' m'));
+  row('盲区倒车', live.blind_reverse_used ? '已用' : '未用');
+  head('系统');
+  row('雷达数据延迟', Number.isFinite(g.scan_age_ms) ? `${g.scan_age_ms} ms` : '--', g.scan_ok === false ? 'bad' : '');
+  row('底盘反馈延迟', Number.isFinite(g.feedback_age_ms) ? `${g.feedback_age_ms} ms` : '--', g.feedback_ok === false ? 'bad' : '');
+  row('底盘解锁', g.driver_armed ? '是' : '否', g.driver_armed || live.dry_run ? '' : 'bad');
+  row('控制周期', Number.isFinite(g.loop_interval_ms) ? `${g.loop_interval_ms} ms` : '--', g.loop_late ? 'bad' : g.loop_interval_ms > 80 ? 'warn' : '');
+  row('计算耗时', Number.isFinite(g.loop_compute_ms) ? `${g.loop_compute_ms} ms` : '--', g.loop_compute_ms > 50 ? 'warn' : '');
+  row('电池', fmtNum(live.voltage_v, 2, ' V'), live.voltage_v < 21.5 ? 'bad' : '');
+  row('底盘实测', `${fmtNum(live.chassis_speed, 2, ' m/s')}`);
+  row('视觉帧/命中', `${live.target_messages ?? '--'} / ${live.visual_matches ?? '--'}`);
+  row('雷达接力帧', `${live.lidar_handoff_frames ?? 0}`);
+  row('视线遮挡计数', `${live.range_conflicts ?? 0}`);
+  kv.innerHTML = rows.join('');
+}
+
+if ($('fCopyDiag')) {
+  $('fCopyDiag').addEventListener('click', async () => {
+    const text = JSON.stringify(lastFollowerPayload || {}, null, 1);
+    try {
+      await navigator.clipboard.writeText(text);
+      notify('诊断信息已复制,可直接粘贴发送');
+    } catch (err) {
+      // 非 HTTPS 下部分手机浏览器禁用剪贴板:退回到可选中的文本框
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.cssText = 'position:fixed;left:8px;right:8px;bottom:8px;height:40vh;z-index:99999;font-size:11px';
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand('copy'); notify('诊断信息已复制'); } catch (e) { notify('请长按文本框手动复制'); }
+      ta.addEventListener('blur', () => ta.remove());
+    }
+  });
 }
 
 async function toggleFollower() {

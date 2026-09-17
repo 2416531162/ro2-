@@ -296,6 +296,8 @@ class PersonFollowerNode(Node):
         self.cmd_steer = 0.0
         self.chassis_speed = 0.0
         self.speed_cap = 0.0
+        self.last_loop_ms = None
+        self.diag = {}
 
         # ---- 底盘使能 ----
         self.driver_armed = False
@@ -671,6 +673,20 @@ class PersonFollowerNode(Node):
         low_battery = not math.isfinite(self.voltage) or self.voltage < cfg.battery_min_v
         healthy = (scan_fresh and feedback_fresh and (self.dry_run or self.driver_armed)
                    and not low_battery and not self.last_conflict and elapsed <= .25)
+        # 诊断:页面上逐项显示,现场不用再猜为什么不动
+        self.diag = {
+            "healthy": healthy,
+            "scan_ok": scan_fresh,
+            "scan_age_ms": round((now - self.scan_stamp) * 1000) if self.scan_stamp else None,
+            "feedback_ok": feedback_fresh,
+            "feedback_age_ms": (round((now - self.feedback_stamp) * 1000)
+                                if self.feedback_stamp else None),
+            "driver_armed": bool(self.driver_armed),
+            "driver_ready": bool(self.driver_ready),
+            "loop_interval_ms": round(elapsed * 1000),
+            "loop_late": elapsed > .25,
+            "loop_compute_ms": self.last_loop_ms,
+        }
         result = self.recovery.update(
             now=now, scan=self.scan_evidence, healthy=healthy,
             speed=self.chassis_speed, yaw_rate=self.chassis_yaw_rate,
@@ -692,6 +708,8 @@ class PersonFollowerNode(Node):
             self.state, self.limit_reason = 'RECOVERY_WAIT', 'scan_unavailable'
         elif not feedback_fresh or not (self.dry_run or self.driver_armed):
             self.state, self.limit_reason = 'RECOVERY_WAIT', 'driver_unavailable'
+        elif elapsed > .25:
+            self.state, self.limit_reason = 'RECOVERY_WAIT', 'loop_late'
 
         self.steer_limited = abs(result.steer-desired_steer) > 1e-4
         max_dsteer = cfg.steer_rate_radps*dt
@@ -747,6 +765,7 @@ class PersonFollowerNode(Node):
             cmd = Twist()
             cmd.linear.x, cmd.angular.z = float(self.cmd_vx), float(self.cmd_wz)
             self.pub_cmd_vel.publish(cmd)
+        self.last_loop_ms = round((time.monotonic() - now) * 1000, 1)
         self.publish_status(now, have_target, age)
 
     def _blocked_by(self):
@@ -798,6 +817,7 @@ class PersonFollowerNode(Node):
             "visual_matches": self.visual_matches,
             "lidar_fallback_matches": self.lidar_fallback_matches,
             "blocked_by": self._blocked_by(),
+            "diag": self.diag,
             "lidar_handoff": self.lidar_handoff_active,
             "lidar_handoff_frames": self.lidar_handoff_frames,
             "lidar_track": self.lidar_track.status(now),
