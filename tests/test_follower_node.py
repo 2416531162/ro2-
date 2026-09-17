@@ -734,5 +734,88 @@ class TestUnifiedTracking(unittest.TestCase):
         self.assertAlmostEqual(wy, 0.0, delta=0.05)
 
 
+class TestRearTargetFollowing(unittest.TestCase):
+    """目标在车后时的安全保持与倒车对准测试。"""
+
+    def _set_target_at(self, h, x, y):
+        import time
+        from person_tracker import Track
+        now = time.monotonic()
+        tr = Track(99, now, x, y, 0.01, 'camera')
+        tr.confirmed = True
+        h.node.people.tracks = [tr]
+        h.node.people.target_id = 99
+
+    def test_target_behind_never_drives_forward(self):
+        """人在车后，即使 enable_pre_steer=True，也绝不允许正向爬行或加速。"""
+        h = FollowerHarness(enable_pre_steer=True)
+        h.tick(n10p_scan(half_size=5.0))
+        self._set_target_at(h, -1.5, 0.0)
+        h.tick(n10p_scan(half_size=5.0))
+        self.assertLessEqual(h.node.cmd_vx, 0.0)
+
+    def test_target_behind_with_clearance_backs_up(self):
+        """人在车后且后方净空充足，目标超出保持距离时，平缓倒车对准。"""
+        h = FollowerHarness(scan_blind_sectors_deg=(), enable_pre_steer=True)
+        h.tick(n10p_scan(half_size=5.0))
+        self._set_target_at(h, -1.8, 0.0)
+        h.tick(n10p_scan(half_size=5.0))
+        self.assertLess(h.node.cmd_vx, -0.01)
+        self.assertEqual(h.node.state, 'REAR_ALIGNING')
+
+    def test_target_behind_close_holds_still(self):
+        """人在车后但距离合适（小于等于保持距离）时，安全静止保持。"""
+        h = FollowerHarness(scan_blind_sectors_deg=(), enable_pre_steer=True)
+        h.tick(n10p_scan(half_size=5.0))
+        self._set_target_at(h, -0.8, 0.0)
+        h.tick(n10p_scan(half_size=5.0))
+        self.assertEqual(h.node.cmd_vx, 0.0)
+        self.assertEqual(h.node.state, 'HOLDING')
+
+    def test_target_behind_with_rear_blocked_holds_still(self):
+        """人在车后但后方有障碍物时，严禁倒车，原地安全等待。"""
+        h = FollowerHarness(scan_blind_sectors_deg=(), enable_pre_steer=True)
+        h.tick(n10p_scan(half_size=5.0))
+        self._set_target_at(h, -2.0, 0.0)
+        obstacle = disc(-0.35, 0.0, 0.15)
+        h.tick(n10p_scan(half_size=5.0, extra=obstacle))
+        self.assertEqual(h.node.cmd_vx, 0.0)
+        self.assertEqual(h.node.state, 'HOLDING')
+
+    def test_target_behind_in_blind_sector_without_trail_holds(self):
+        """默认带车尾屏蔽扇区且无来路轨迹时，严禁盲倒，保持静止等待。"""
+        h = FollowerHarness(enable_pre_steer=True)
+        h.tick(n10p_scan(half_size=5.0))
+        self._set_target_at(h, -1.8, 0.0)
+        h.tick(n10p_scan(half_size=5.0))
+        self.assertEqual(h.node.cmd_vx, 0.0)
+        self.assertEqual(h.node.state, 'HOLDING')
+
+    def test_target_behind_left_steers_left_to_align(self):
+        """目标在左后方时，倒车前轮应向左打舵，带动车尾摆向人体对准。"""
+        h = FollowerHarness(scan_blind_sectors_deg=(), enable_pre_steer=True)
+        h.tick(n10p_scan(half_size=5.0))
+        self._set_target_at(h, -1.8, 0.6)
+        h.tick(n10p_scan(half_size=5.0))
+        self.assertLess(h.node.cmd_vx, -0.01)
+        self.assertGreater(h.node.cmd_steer, 0.05, "左后方目标倒车时前轮应左偏以带动车尾向左摆动")
+
+    def test_lidar_handoff_timeout_relaxed(self):
+        """雷达接力期间更新间隔在 0.5s (>0.30s) 时不应丢锁。"""
+        import time
+        h = FollowerHarness(enable_pre_steer=True)
+        h.tick(n10p_scan(half_size=5.0))
+        self._set_target_at(h, 1.5, 0.0)
+        # 将来源模拟为 lidar
+        tr = h.node.people.tracks[0]
+        now = time.monotonic()
+        tr.last_source = 'lidar'
+        tr.last_camera = now - 1.0
+        tr.last_update = now - 0.50
+        h.tick(n10p_scan(half_size=5.0))
+        self.assertIsNotNone(h.node.view, "雷达接力 0.5s 内目标应仍然有效，不应误判丢失")
+
+
 if __name__ == '__main__':
     unittest.main()
+

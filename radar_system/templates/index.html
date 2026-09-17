@@ -564,19 +564,20 @@ function updateFollowerUI(f, isRunning) {
 
 // ==================== 跟随运行详情:在做什么、为什么、各环节是否正常 ====================
 const F_STATE_TEXT = {
-  TRACKING: '跟随中', ALIGNING: '绕行对准', HOLDING: '停车保持', PATH_BLOCKED: '前方无可行路径',
-  AEB_EMERGENCY: 'AEB 硬急停', SEARCHING_LOST: '目标丢失', SEARCH_SCAN: '原地观察找人',
+  TRACKING: '跟随中', ALIGNING: '绕行对准', REAR_ALIGNING: '倒车对准', HOLDING: '停车保持', PATH_BLOCKED: '前方无可行路径',
+  COLLISION_AEB: '防撞急停', AEB_EMERGENCY: 'AEB 硬急停', SEARCHING_LOST: '目标丢失', SEARCH_SCAN: '原地观察找人',
   SEARCH_TURN: '转弯搜索', RECOVERY_REVERSE: '沿来路倒车脱困', RECOVERY_BRAKE: '停稳换向',
   RECOVERY_WAIT: '等待条件满足', RECOVERY_EXHAUSTED: '脱困次数已用完', LOW_BATTERY: '电量低',
   SENSOR_CONFLICT: '传感器冲突', STARTING: '启动中', OFFLINE: '未运行', STANDBY: '待命',
 };
 const F_REASON_TEXT = {
   follow: '按目标距离正常跟随', local_path: '正前方不通,选了一条可行的弯道', hold: '已到保持距离',
-  person_close: '人太近,停车', follow_envelope: '接近目标,提前减速', swept_path: '前方有障碍,减速',
+  target_behind: '目标在车后', person_close: '人太近,停车', follow_envelope: '接近目标,提前减速', swept_path: '前方有障碍,减速',
   no_observed_path: '所有方向都没有确认可走的路', no_target: '没有识别到人', recovery_disabled: '脱困已关闭',
   recovery_budget_used: '自动脱困次数用完,20 秒后重试', scan_unavailable: '雷达数据中断',
   scan_stale: '雷达数据过期', driver_unavailable: '底盘未连接/未解锁/反馈中断',
   loop_late: '控制周期严重超时(板子太忙)', battery: '电池电压过低', aeb_hard: '车体即将碰撞,硬刹停',
+  aeb_hard_stop: '接近障碍物急停',
   range_conflict: '相机与雷达距离不一致', wait_stationary: '等车完全停稳', gear_change_dwell: '换挡前等待',
   observe_before_turn: '人刚丢失,先停下观察', leg_complete_or_blocked: '本段机动完成或受阻',
   observed_path: '沿已确认安全的路径搜索', recent_path_reverse: '沿刚走过的路短距离倒车',

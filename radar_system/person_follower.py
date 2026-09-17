@@ -146,6 +146,7 @@ class FollowerConfig:
     min_depth_ratio: float = 0.30       # 深度有效像素占比门限,低于此判无效
     max_camera_latency_s: float = 0.60  # 相机时间戳比现在早这么多以上视为不可信,按 0 处理
     camera_hfov_deg: float = 58.0       # Astra S 水平视场,用于「在视野里却没看到」的反向证据
+    min_target_range_m: float = 0.30    # 目标距车体中心有效滤波下限(小于此距离视为自反射/底盘噪声)
 
     # ---- 沿人走过的路跟随 (纯追踪) ----
     follow_breadcrumbs: bool = True
@@ -603,9 +604,15 @@ class PersonFollowerNode(Node):
             raw_points, self.footprint, self.cfg.self_hit_skin_m)
         self.self_hits = dropped
         self.scan_stamp = time.monotonic()
-        # 雷达腿部点簇交给跟踪器,只更新已确认的人(不会凭空造出一个人)
-        clusters = cluster_points(self.scan_points,
-                                  origin=(self.lidar_mount.x_m, self.lidar_mount.y_m))
+        # 雷达腿部点簇交给跟踪器: 无论是否配置车尾盲区, 人体跟踪在车尾均不主动屏蔽,
+        # 只要在车身几何轮廓之外, 均送入聚类更新, 保证人绕到车尾时跟踪不中断
+        tracking_sectors = tuple(s for s in self.cfg.scan_blind_sectors_deg if not (s[0] > 90 and s[1] < -90))
+        if tracking_sectors != self.cfg.scan_blind_sectors_deg:
+            trk_raw = scan_to_vehicle_frame(bearings, self.lidar_mount, blind_sectors_deg=tracking_sectors)
+            trk_clean, _ = drop_self_hits(trk_raw, self.footprint, self.cfg.self_hit_skin_m)
+        else:
+            trk_clean = self.scan_points
+        clusters = cluster_points(trk_clean, origin=(self.lidar_mount.x_m, self.lidar_mount.y_m))
         self.people.add_lidar([(c.x, c.y) for c in clusters],
                               self.scan_stamp - scan_age, self.scan_stamp)
         # AEB 锁存只在 control_loop 里按实际舵角判定,避免两处同时改写
@@ -630,8 +637,11 @@ class PersonFollowerNode(Node):
                               self.chassis_yaw_rate if feedback_fresh else 0.0)
         self.people.prune_crumbs()
         view = self.people.target_view(now)
-        have_target = (view is not None and view['update_age'] <= cfg.target_timeout_s
-                       and view['x'] > cfg.footprint_front_m)
+        # 当目标由雷达接力跟踪或相机出现短暂丢帧时，允许更宽的超时门限 (0.80s)，防止离开相机画面瞬间掉锁
+        is_lidar_tracking = bool(view is not None and (view['source'] == 'lidar' or view.get('camera_age', 0.0) > 0.25))
+        timeout_limit = 0.80 if is_lidar_tracking else cfg.target_timeout_s
+        have_target = bool(view is not None and view['update_age'] <= timeout_limit
+                           and math.hypot(view['x'], view['y']) >= cfg.min_target_range_m)
         if have_target:
             self.last_target_seen = now - view['update_age']
         age = now-self.last_target_seen if self.last_target_seen else 1e9
@@ -641,6 +651,7 @@ class PersonFollowerNode(Node):
             self.lidar_handoff_frames += 1
         self.aim_point = None
         desired_vx = desired_steer = bearing = 0.0
+        is_behind = False
         gap = float('inf')
         cap_follow = cfg.max_speed_mps
         if have_target:
@@ -663,17 +674,23 @@ class PersonFollowerNode(Node):
             is_behind = view['x'] < 0.0 or abs(bearing) > math.radians(85.0)
             if is_behind:
                 # 目标在车后：严禁向前开！检查后方净空
-                rear_clear = (self.recovery.clearance(self.scan_evidence, 0.0, -1, current_steer=self.cmd_steer)
+                rear_clear = (self.recovery.clearance(self.scan_evidence, self.cmd_steer, -1,
+                                                      current_steer=self.cmd_steer,
+                                                      allow_history=True)
                               if self.scan_evidence is not None else 0.0)
                 rear_dist = math.hypot(view['x'] + cfg.footprint_rear_m, view['y'])
-                if rear_clear >= cfg.obstacle_standoff_m and rear_dist > cfg.follow_distance_m:
-                    # 后方空旷且目标超出保持距离：缓慢倒车对准
-                    person_requested_vx = -min(0.12, cfg.recovery.blind_speed_mps)
-                    desired_steer = -clamp(cfg.kp_steer * (math.pi - abs(bearing)), -cfg.max_steer_rad, cfg.max_steer_rad) * (1.0 if bearing >= 0 else -1.0)
+                rear_error = rear_dist - cfg.follow_distance_m
+                # 车尾朝向人体的偏角误差: 正值表示人在车尾偏左, 负值表示人在车尾偏右
+                rear_bearing_error = (math.pi - bearing) if bearing >= 0 else (-math.pi - bearing)
+                desired_steer = clamp(cfg.kp_steer * rear_bearing_error, -cfg.max_steer_rad, cfg.max_steer_rad)
+
+                if rear_clear >= cfg.obstacle_standoff_m and rear_error > cfg.deadband_m:
+                    # 后方空旷且目标超出保持距离：按距离误差反向平滑倒车对准 (0.06 ~ 0.12 m/s)
+                    rev_speed = clamp(cfg.kp_distance * rear_error, cfg.creep_floor_mps, min(0.12, cfg.recovery.blind_speed_mps))
+                    person_requested_vx = -rev_speed
                 else:
                     # 距离合适或后方受限：安全静止保持，不向任何方向乱动
                     person_requested_vx = 0.0
-                    desired_steer = 0.0
                 desired_vx = person_requested_vx
             else:
                 person_requested_vx = 0.0
@@ -748,12 +765,18 @@ class PersonFollowerNode(Node):
             requested_speed=requested_vx, requested_steer=desired_steer,
             current_steer=self.cmd_steer, follow_cap=person_follow_cap if have_target else cap_follow, lost_age=age,
             odom_ok=feedback_fresh)
-        pre_steer = (cfg.enable_pre_steer and healthy and have_target
-                     and result.state == 'HOLDING' and cap_follow > 0
+        pre_steer = (cfg.enable_pre_steer and healthy and have_target and not is_behind
+                     and result.state in ('HOLDING', 'ALIGNING') and cap_follow > 0
                      and abs(desired_steer) > cfg.steer_deadband_rad)
         if pre_steer:
             result.speed = min(cfg.pre_steer_creep_mps, cap_follow)
             result.steer = desired_steer
+        if is_behind:
+            result.steer = desired_steer
+            if person_requested_vx < 0:
+                result.state, result.reason = 'REAR_ALIGNING', 'target_behind'
+            else:
+                result.state, result.reason = 'HOLDING', 'target_behind'
         self.state, self.limit_reason = result.state, result.reason
         if low_battery:
             self.state, self.limit_reason = 'LOW_BATTERY', 'battery'
@@ -770,7 +793,13 @@ class PersonFollowerNode(Node):
         max_dsteer = cfg.steer_rate_radps*dt
         self.cmd_steer += clamp(result.steer-self.cmd_steer, -max_dsteer, max_dsteer)
         if not self.recovery.active and healthy:
-            desired_vx = max(0.0, min(desired_vx, result.speed, cap_follow))
+            if is_behind:
+                if person_requested_vx < 0:
+                    desired_vx = max(-min(0.12, cfg.recovery.blind_speed_mps), person_requested_vx)
+                else:
+                    desired_vx = 0.0
+            else:
+                desired_vx = max(0.0, min(desired_vx, result.speed, cap_follow))
         else:
             desired_vx = result.speed if healthy else 0.0
         direction = -1 if desired_vx < 0 else 1
@@ -781,7 +810,7 @@ class PersonFollowerNode(Node):
         if healthy:
             self.path_clearance = self.recovery.clearance(
                 self.scan_evidence, self.cmd_steer, direction, self.cmd_steer,
-                allow_history=self.recovery.active and self.recovery.blind_leg)
+                allow_history=(self.recovery.active and self.recovery.blind_leg) or (is_behind and direction < 0))
             # Recheck the ACTUAL rate-limited steer, not only the selected future arc.
             # Front AEB is not a rear veto; collision checks still include all corners.
             hard = self.path_clearance < cfg.aeb_clearance_m
@@ -997,8 +1026,10 @@ class PersonFollowerNode(Node):
             "PATH_BLOCKED":   "\033[1;33m[ 前方无路 ]\033[0m",
             "TRACKING":       "\033[1;32m[ 跟踪追随 ]\033[0m",
             "HOLDING":        "\033[1;36m[ 距离锁定 ]\033[0m",
+            "REAR_ALIGNING":  "\033[1;36m[ 车后对准倒车 ]\033[0m",
             "TARGET_BLINK":   "\033[1;33m[ 目标闪断 ]\033[0m",
             "SEARCHING_LOST": "\033[1;35m[ 搜索目标 ]\033[0m",
+            "COLLISION_AEB":  "\033[1;41;37m[ 防撞急停 ]\033[0m",
             "AEB_EMERGENCY":  "\033[1;41;37m[ 硬急停 ]\033[0m",
             "SENSOR_CONFLICT": "\033[1;41;37m[ 传感器冲突 ]\033[0m",
             "LOW_BATTERY":    "\033[1;31m[ 低电量 ]\033[0m",
@@ -1055,6 +1086,11 @@ def build_config(args):
         cfg.camera_pitch_rad = math.radians(args.camera_pitch_deg)
     cfg.recovery.enabled = not bool(getattr(args, "no_recovery", False))
     cfg.enable_pre_steer = bool(getattr(args, 'pre_steer', False))
+    if not getattr(args, 'rear_blind', False):
+        # 实车 N10P 雷达高位安装全向无遮挡, 默认移除车尾屏蔽盲区, 启用 360° 全向避障与倒车
+        cfg.scan_blind_sectors_deg = tuple(
+            s for s in cfg.scan_blind_sectors_deg if not (s[0] > 90 and s[1] < -90)
+        )
     if getattr(args, 'safe_mode', False):
         # 首次实车验证用:速度压到最低,停车距离放大,先确认逻辑正确再放开
         cfg.max_speed_mps = min(cfg.max_speed_mps, 0.30)
@@ -1079,6 +1115,8 @@ def strip_ros_args(argv):
 def main():
     p = argparse.ArgumentParser(description="RK3588 电子跟屁虫 - 人体跟随控制节点")
     p.add_argument('--no-recovery', action='store_true', help='关闭自动倒车脱困和丢人搜索')
+    p.add_argument('--rear-blind', action='store_true',
+                   help='车尾有结构遮挡时启用车尾屏蔽盲区 (默认关闭以启用 360° 全向雷达跟踪与倒车)')
     p.add_argument('--dry-run', action='store_true',
                    help='仿真演练:照常计算与打印,但不向底盘发指令')
     p.add_argument('--safe-mode', action='store_true',

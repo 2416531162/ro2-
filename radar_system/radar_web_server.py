@@ -238,7 +238,7 @@ class TrackingBridgeNode(Node):
             with data_lock:
                 state['wheeltec'] = d
             now = time.monotonic()
-            if not armed and ready and (now - self.last_arm_request > 1.5):
+            if not armed and ready and (now - self.last_arm_request > 0.50):
                 self.last_arm_request = now
                 self.arm_chassis(True)
         except Exception:
@@ -256,7 +256,7 @@ class TrackingBridgeNode(Node):
         vx, wz, active, publish_zero = self.manual_drive.sample(now)
 
         if active:
-            if not self.is_armed and now - self.last_arm_request > 0.25:
+            if not self.is_armed and now - self.last_arm_request > 0.10:
                 self.arm_chassis(True)
             cmd = Twist()
             cmd.linear.x = float(vx)
@@ -544,6 +544,8 @@ class RadarHTTPHandler(http.server.BaseHTTPRequestHandler):
                     stop_follower()
 
                 if bridge_node:
+                    if not bridge_node.is_armed and (abs(vx) > 1e-4 or abs(wz) > 1e-4):
+                        bridge_node.arm_chassis(True)
                     bridge_node.send_manual_twist(vx, wz)
 
                 with data_lock:
