@@ -25,6 +25,7 @@ from PyQt5.QtGui import QPainter, QColor, QPen, QBrush, QFont, QImage, QPixmap, 
 from PyQt5.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
 
 import json
+import urllib.request
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
@@ -250,45 +251,29 @@ class ROSThread(QThread):
             self.latest_scan = payload
 
         def rgb_callback(msg):
-            now = time.time()
-            try:
-                rgb_arr = np.frombuffer(msg.data, dtype=np.uint8).reshape((msg.height, msg.width, 3)).copy()
-                self.latest_rgb = rgb_arr
-            except Exception:
-                rgb_arr = None
             if self.display_mode not in ('rgb', 'ai'):
                 return
-            if now - self.last_rgb_time < 0.015:
-                return
-            self.last_rgb_time = now
-            if rgb_arr is None:
-                return
             try:
-                qimg = QImage(rgb_arr.data, msg.width, msg.height, msg.width * 3, QImage.Format_RGB888).copy()
-                self.rgb_signal.emit(qimg)
+                self.latest_rgb = (msg.width, msg.height, msg.step, bytes(msg.data), time.monotonic())
             except Exception:
                 pass
 
         def depth_callback(msg):
-            if self.display_mode != 'depth':return
+            if self.display_mode != 'depth':
+                return
             try:
-                depth=decode_depth_mm(msg)
-                stamp=msg.header.stamp.sec+msg.header.stamp.nanosec/1e9
-                age=node.get_clock().now().nanoseconds/1e9-stamp
-                self.latest_depth=dict(array=depth,received=time.monotonic(),age=max(0,age))
-            except (ValueError,TypeError) as exc:
-                node.get_logger().warn('depth: '+str(exc),throttle_duration_sec=5.0)
+                depth = decode_depth_mm(msg)
+                stamp = msg.header.stamp.sec + msg.header.stamp.nanosec / 1e9
+                age = node.get_clock().now().nanoseconds / 1e9 - stamp
+                self.latest_depth = dict(array=depth, received=time.monotonic(), age=max(0, age))
+            except (ValueError, TypeError) as exc:
+                node.get_logger().warn('depth: ' + str(exc), throttle_duration_sec=5.0)
 
         def ai_callback(msg):
             if self.display_mode != 'ai':
                 return
-            now = time.time()
-            if now - self.last_ai_time < 0.04:
-                return
-            self.last_ai_time = now
             try:
-                qimg = QImage(msg.data, msg.width, msg.height, msg.width * 3, QImage.Format_RGB888).copy()
-                self.ai_signal.emit(qimg)
+                self.latest_rgb = (msg.width, msg.height, msg.step, bytes(msg.data), time.monotonic())
             except Exception:
                 pass
 
@@ -313,9 +298,9 @@ class ROSThread(QThread):
         node.create_subscription(String, '/rtk/status', rtk_callback, 10)
         node.create_subscription(Float32, '/voltage', voltage_callback, 10)
         node.create_subscription(LaserScan, '/scan', scan_callback, QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT))
-        node.create_subscription(Image, '/camera/rgb/image_raw', rgb_callback, 10)
+        node.create_subscription(Image, '/camera/rgb/image_raw', rgb_callback, QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT))
         node.create_subscription(Image, '/camera/depth_raw/image', depth_callback, QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT))
-        node.create_subscription(Image, '/camera/ai_detection/image', ai_callback, 10)
+        node.create_subscription(Image, '/camera/ai_detection/image', ai_callback, QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT))
         node.create_subscription(String, '/camera/ai_detection/targets', targets_callback, 10)
 
         try:
@@ -353,7 +338,6 @@ class CloudDataWorker(QThread):
         self.wait(1500)
 
     def run(self):
-        import urllib.request
         while self.running:
             if not self.active:
                 time.sleep(0.3)
@@ -799,8 +783,8 @@ QToolTip { background:#20394B; color:white; border:none; padding:8px; }
 
 def chip_style(state):
     colors = {'good': ('#E6F4EC', '#247451'), 'warn': ('#FFF3DA', '#8B621A'),
-              'muted': ('#C3D1DC', '#5D7183')}
-    background, foreground = colors[state]
+              'danger': ('#FFE5E5', '#B91C1C'), 'muted': ('#C3D1DC', '#5D7183')}
+    background, foreground = colors.get(state, colors['muted'])
     return f'background:{background};color:{foreground};font-size:14px;border-radius:8px;padding:9px 12px;'
 
 class BoardRadarMainWindow(QWidget):
@@ -808,7 +792,7 @@ class BoardRadarMainWindow(QWidget):
         super().__init__()
         self.setWindowTitle("RK3588 激光雷达 + 3D 深度相机智能感知控制台")
         self.setStyleSheet("background-color: #0b0f19; color: #e2e8f0;")
-        self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)
+        self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self.setGeometry(0, 0, 1920, 1080)
         
         self.cam_mode = 'ai'  # 默认 'ai' 模式：实时显示 AI 3D 识别与测距
@@ -835,9 +819,14 @@ class BoardRadarMainWindow(QWidget):
         self._lidar_timer = QTimer(self)
         self._lidar_timer.timeout.connect(self.refresh_lidar)
         self._lidar_timer.start(50)
-        self.ros_thread.rgb_signal.connect(self.on_rgb_frame)
+
+        self._shown_rgb = None
+        self._rgb_timer = QTimer(self)
+        self._rgb_timer.timeout.connect(self.refresh_rgb)
+        self._rgb_timer.start(40)
+
         self._depth_shown = None
-        self.depth_renderer=DepthDisplayWorker()
+        self.depth_renderer = DepthDisplayWorker()
         self._depth_timer = QTimer(self)
         self._depth_timer.timeout.connect(self.refresh_depth)
         self._depth_timer.start(40)
@@ -1416,7 +1405,7 @@ class BoardRadarMainWindow(QWidget):
         box = self.video_box.size()
         if box.width() < 2 or box.height() < 2:
             return pix
-        return pix.scaled(box, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        return pix.scaled(box, Qt.KeepAspectRatio, Qt.FastTransformation)
 
     def closeEvent(self,event):
         self._is_closed = True
@@ -1469,8 +1458,20 @@ class BoardRadarMainWindow(QWidget):
         # AI 标注图仅作备份；实时画面走 RGB 叠加，避免被 3FPS 推理拖慢
         self.latest_ai_pixmap = self._scale_camera_pixmap(qimage)
 
-    def on_rgb_frame(self, qimage):
-        self._camera_received = time.monotonic()
+    def refresh_rgb(self):
+        if self.cam_mode not in ('rgb', 'ai'):
+            return
+        item = self.ros_thread.latest_rgb
+        if item is None or item is self._shown_rgb:
+            return
+        self._shown_rgb = item
+        w, h, step, data, stamp = item
+        now = time.monotonic()
+        if now - stamp > 0.8:
+            return
+        self._camera_received = stamp
+
+        qimage = QImage(data, w, h, step, QImage.Format_RGB888)
         if self.cam_mode == 'ai' and self.last_targets:
             img = qimage.copy()
             painter = QPainter(img)
@@ -1483,15 +1484,17 @@ class BoardRadarMainWindow(QWidget):
                 text = f"[{label}] {d:.2f}m" if d is not None else f"[{label}]"
                 painter.setPen(QPen(QColor(0, 242, 254), 2))
                 painter.drawRect(x1, y1, max(1, x2 - x1), max(1, y2 - y1))
-                painter.setFont(QFont("sans-serif", 11, QFont.Bold))
+                painter.setFont(QFont("sans-serif", 10, QFont.Bold))
                 painter.drawText(x1 + 4, max(16, y1 - 6), text)
             painter.end()
             qimage = img
         scaled_pix = self._scale_camera_pixmap(qimage)
         self.latest_rgb_pixmap = scaled_pix
-        if self.cam_mode in ('rgb', 'ai'):
-            self.video_box.setPixmap(scaled_pix)
-            self._note_fps()
+        self.video_box.setPixmap(scaled_pix)
+        self._note_fps()
+
+    def on_rgb_frame(self, qimage):
+        self.refresh_rgb()
 
     def on_depth_frame(self, qimage, center_val_mm, near_mm=0, far_mm=0):
         self.center_depth_mm = center_val_mm
@@ -1612,7 +1615,18 @@ def main():
     sig_timer.timeout.connect(lambda: None)
 
     win = BoardRadarMainWindow()
+    screens = app.screens()
+    target_screen = None
+    for s in screens:
+        if 'HDMI' in s.name().upper() or s.geometry().width() == 1920:
+            target_screen = s
+            break
+    if target_screen is None:
+        target_screen = app.primaryScreen()
+    win.setGeometry(target_screen.geometry())
     win.showFullScreen()
+    win.raise_()
+    win.activateWindow()
     result = app.exec_()
     try:
         win.close()
