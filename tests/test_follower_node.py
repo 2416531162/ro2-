@@ -376,12 +376,12 @@ class TestStructuralShadowAhead(unittest.TestCase):
         return rec.clearance(ev, 0.0), rec, ev
 
     def test_narrow_car_structure_shadow_is_bridged(self):
-        clear, _, _ = self.clearance(*self.scan_with_sliver(16.7, 3.0, -math.inf))
+        clear, _, _ = self.clearance(*self.scan_with_sliver(-15.0, 3.0, -math.inf))
         self.assertGreater(clear, 0.5)
 
     def test_same_width_without_echo_still_blocks(self):
         """同样宽度但是「完全没回波」(可能是黑色物体):仍然保守判为未知。"""
-        clear, rec, ev = self.clearance(*self.scan_with_sliver(16.7, 3.0, math.inf))
+        clear, rec, ev = self.clearance(*self.scan_with_sliver(-15.0, 3.0, math.inf))
         self.assertLess(clear, 0.1)
         kind, x, y, _ = rec.last_block
         self.assertEqual(kind, "unknown")
@@ -389,15 +389,15 @@ class TestStructuralShadowAhead(unittest.TestCase):
         self.assertIn("none", causes)
 
     def test_wide_structure_shadow_still_blocks(self):
-        clear, _, _ = self.clearance(*self.scan_with_sliver(16.7, 8.0, -math.inf))
+        clear, _, _ = self.clearance(*self.scan_with_sliver(-15.0, 10.0, -math.inf))
         self.assertLess(clear, 0.1)
 
     def test_configured_narrow_front_blind_sector_is_bridged(self):
         """用户把车头的结构遮挡(测出来是 +inf)配进屏蔽扇区后,可以正常前进。"""
         from follower_recovery import LocalRecovery
         cfg = pf.FollowerConfig()
-        ranges, inc = self.scan_with_sliver(16.7, 3.0, math.inf)
-        blind = cfg.scan_blind_sectors_deg + ((15.0, 18.5),)
+        ranges, inc = self.scan_with_sliver(-15.0, 3.0, math.inf)
+        blind = cfg.scan_blind_sectors_deg + ((-17.0, -13.0),)
         ev = ScanEvidence(ranges, 0.0, inc, 0.15, 12.0, cfg.lidar_mount, cfg.footprint,
                           blind, self_hit_skin_m=cfg.self_hit_skin_m)
         rec = LocalRecovery(cfg.footprint, cfg.geometry, cfg.obstacle_profile)
@@ -406,7 +406,7 @@ class TestStructuralShadowAhead(unittest.TestCase):
 
     def test_status_explains_unknown_block(self):
         h = FollowerHarness()
-        ranges, inc = self.scan_with_sliver(16.7, 3.0, math.inf)
+        ranges, inc = self.scan_with_sliver(-15.0, 3.0, math.inf)
         msg = n10p_scan(450, half_size=5.0)
         msg.ranges = ranges
         for _ in range(20):
@@ -415,7 +415,7 @@ class TestStructuralShadowAhead(unittest.TestCase):
         self.assertIsNotNone(b, h.status())
         self.assertEqual(b['kind'], 'unknown')
         self.assertGreater(b['ray_causes'].get('none', 0), 0)
-        self.assertAlmostEqual(b['lidar_bearing_deg'], 16.7, delta=3.0)
+        self.assertAlmostEqual(b['lidar_bearing_deg'], -15.0, delta=3.0)
 
 
 class TestN10PNearEcho(unittest.TestCase):

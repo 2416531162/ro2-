@@ -121,7 +121,7 @@ class ScanEvidence:
     # Runs of structural rays up to this width are bridged by the real returns
     # on both sides; no-echo (+inf) rays keep the strict 1 deg window, since a
     # dark object also produces them. Wider structural shadows stay unknown.
-    STRUCTURE_WINDOW_RAD = math.radians(4.0)
+    STRUCTURE_WINDOW_RAD = math.radians(9.0)
 
     def _nearest_valid(self, start, step, reach, full):
         n = len(self.ranges)

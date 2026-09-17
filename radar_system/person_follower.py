@@ -109,7 +109,11 @@ class FollowerConfig:
     #   2. 明确知道哪些方位有车体结构时,用角度屏蔽更精准
     # 用 radar_system/scan_doctor.py 在空旷处实测,它会直接给出这两个值。
     self_hit_skin_m: float = 0.05       # 车体轮廓外扩多少算自反射 (5cm, 实车自反射点集中在 x<=0.39m, 0.05m 过滤完全且不吃门框)
-    scan_blind_sectors_deg: tuple = ((155.0, -130.0),)  # 例: ((-35, -20), (150, 180))
+    scan_blind_sectors_deg: tuple = (
+        (155.0, -130.0),  # 车尾屏蔽扇区
+        (10.5, 17.5),     # 前向右侧相机支架/线束盲区 (scan_doctor 测得 11.5°~16.5°)
+        (30.0, 33.5),     # 前向右侧结构件盲区 (scan_doctor 测得 30.5°~33.0°)
+    )
 
     # ---- 速度 ----
     max_speed_mps: float = 0.55         # ★ 保守起步值,实车验证后再往上加
