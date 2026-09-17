@@ -445,5 +445,64 @@ class TestN10PNearEcho(unittest.TestCase):
         self.assertAlmostEqual(points[2][1], 1.5)
 
 
+class TestStuckAgainstLowObstacle(unittest.TestCase):
+    """现场照片:左前轮顶在推车上(底板低于雷达扫描面),识别到人也要会倒车。"""
+
+    def drive_then_stall(self, steer, drive_s=4.0, stall_s=8.0, odom_ok=True):
+        from follower_recovery import LocalRecovery
+        cfg = pf.FollowerConfig()
+        msg = n10p_scan(450, half_size=5.0)
+        ev = ScanEvidence(msg.ranges, 0.0, msg.angle_increment, 0.15, 12.0, cfg.lidar_mount,
+                          cfg.footprint, cfg.scan_blind_sectors_deg,
+                          self_hit_skin_m=cfg.self_hit_skin_m)
+        rec = LocalRecovery(cfg.footprint, cfg.geometry, cfg.obstacle_profile)
+        t, dt, speed = 0.0, 0.05, 0.0
+        reversed_m, log = 0.0, []
+        for k in range(int((drive_s + stall_s) / dt)):
+            t += dt
+            stalled = k * dt >= drive_s
+            wz = speed * math.tan(steer) / cfg.geometry.wheelbase_m
+            c = rec.update(now=t, scan=ev, healthy=True, odom_ok=odom_ok, speed=speed,
+                           yaw_rate=wz, target=True, gap=2.0, bearing=0.3,
+                           requested_speed=0.3, requested_steer=steer, current_steer=steer,
+                           follow_cap=0.55, lost_age=0.0)
+            speed = 0.0 if (stalled and c.speed > 0) else c.speed
+            if c.speed < 0:
+                reversed_m += -c.speed * dt
+            log.append((c.state, c.speed, c.steer))
+        return reversed_m, log, rec
+
+    def test_reverses_along_trail_while_steering(self):
+        reversed_m, log, rec = self.drive_then_stall(steer=0.2)
+        self.assertIn('RECOVERY_REVERSE', [s for s, _, _ in log])
+        self.assertGreater(reversed_m, 0.15)
+        self.assertLessEqual(reversed_m, rec.cfg.blind_reverse_m + 1e-6, "倒车不超过额度")
+
+    def test_no_trail_no_reverse(self):
+        """没有来路(刚启动就卡住):车尾看不见,绝不盲倒。"""
+        reversed_m, _, _ = self.drive_then_stall(steer=0.2, drive_s=0.0)
+        self.assertEqual(reversed_m, 0.0)
+
+    def test_broken_odometry_forgets_trail(self):
+        reversed_m, _, rec = self.drive_then_stall(steer=0.0, odom_ok=False)
+        self.assertEqual(reversed_m, 0.0)
+        self.assertEqual(rec.trail_length, 0.0)
+
+    def test_escape_leg_steers_away_from_stall_side(self):
+        _, log, rec = self.drive_then_stall(steer=0.25)
+        first_rev = next(i for i, (s, v, _) in enumerate(log) if v < 0)
+        after = [st for s, v, st in log[first_rev:] if v > 0 and s != 'TRACKING']
+        self.assertTrue(after, "倒车后应有一段脱困前进")
+        self.assertLess(after[0], 0.0, "卡住时左打舵,脱困前进应往右")
+
+    def test_trail_survives_cancel(self):
+        _, _, rec = self.drive_then_stall(steer=0.0, stall_s=0.1)
+        before = rec.trail_length
+        self.assertGreater(before, 0.5)
+        rec.active = True
+        rec.cancel()
+        self.assertEqual(rec.trail_length, before)
+
+
 if __name__ == '__main__':
     unittest.main()

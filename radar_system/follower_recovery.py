@@ -16,13 +16,19 @@ class RecoveryConfig:
     enabled: bool = True
     speed_mps: float = 0.12
     blind_speed_mps: float = 0.08
-    blind_reverse_m: float = 0.15
+    # Reverse into the unobservable rear is only allowed along the car's own
+    # recent trail: every swept body point must lie inside a footprint the
+    # car physically occupied (so it was free then). Budget per episode.
+    blind_reverse_m: float = 0.30
     reverse_m: float = 0.35
     forward_m: float = 0.70
     blocked_s: float = 1.0
     scan_s: float = 0.8
     settle_s: float = 0.30
-    history_s: float = 4.0
+    history_s: float = 4.0          # scan memory (observed-before) horizon
+    trail_m: float = 1.5            # how much of the recent forward path to keep
+    trail_max_age_s: float = 20.0   # older trail is too stale to reverse into
+    trail_step_m: float = 0.02
     timeout_s: float = 75.0
     max_legs: int = 12
     exhausted_cooldown_s: float = 20.0
@@ -230,8 +236,13 @@ class LocalRecovery:
         self.started = self.phase_time = 0.0
         self.leg_distance = self.total_distance = self.total_yaw = 0.0
         self.legs = 0
-        self.blind_used = False
         self.blind_leg = False
+        self.blind_distance = 0.0
+        self.leg_budget = None
+        self.trail_length = 0.0
+        # Steer at which the wheels physically stalled (something the lidar
+        # cannot see, e.g. a low cart deck). The escape must avoid it.
+        self.stall_steer = None
         self.direction = 1
         self.turn = 1
         self.steer = 0.0
@@ -239,8 +250,16 @@ class LocalRecovery:
         self.normal_distance = 0.0
         self.previous_speed = 0.0
         self._edge = self._perimeter()
+        f = footprint
+        self._body_r2 = (math.hypot(max(f.front_m, f.rear_m) + f.margin_m,
+                                    f.effective_half_width) + 1e-6) ** 2
         self.last_block = None
         self.exhausted_at = None
+
+    @property
+    def blind_used(self):
+        """Trail-reverse budget for this episode is spent."""
+        return self.blind_distance >= self.cfg.blind_reverse_m - 0.05
 
     def _perimeter(self):
         f = self.fp
@@ -285,8 +304,11 @@ class LocalRecovery:
         px, py, yaw = self.pose
         wx = px + x*math.cos(yaw) - y*math.sin(yaw)
         wy = py + x*math.sin(yaw) + y*math.cos(yaw)
-        for _, hx, hy, ha in self.history:
+        r2 = self._body_r2
+        for _, hx, hy, ha, _s in self.history:
             dx, dy = wx-hx, wy-hy
+            if dx*dx + dy*dy > r2:
+                continue        # cannot lie inside that footprint
             if self._inside(dx*math.cos(ha)+dy*math.sin(ha),
                             -dx*math.sin(ha)+dy*math.cos(ha), pad=1e-8):
                 return True
@@ -382,26 +404,44 @@ class LocalRecovery:
             yaw += dyaw
         return horizon
 
-    def _observe(self, now, speed, yaw_rate, healthy):
+    def _observe(self, now, speed, yaw_rate, healthy, odom_ok=None):
         dt = 0.0 if self.last_time is None else now-self.last_time
         self.last_time = now
-        if not healthy or not 0 <= dt <= 0.25:
+        odom_ok = healthy if odom_ok is None else odom_ok
+        if not odom_ok or not 0 <= dt <= 0.5:
+            # Dead-reckoning is broken: trail and scan memory can no longer be
+            # placed relative to the car. Anything else (a late control tick,
+            # a camera dropout) keeps them.
             self.history.clear()
             self.scan_history.clear()
+            self.trail_length = 0.0
             return 0.0
         x, y, a = self.pose
         self.pose = (x+speed*dt*math.cos(a+yaw_rate*dt/2),
                      y+speed*dt*math.sin(a+yaw_rate*dt/2), a+yaw_rate*dt)
-        self.history = [h for h in self.history if now-h[0] <= self.cfg.history_s]
         self.scan_history = [h for h in self.scan_history if now-h[0] <= self.cfg.history_s]
-        # Only remember forward travel under a validated normal-follow command.
+        # Trail of footprints the car physically occupied while driving forward
+        # (normal follow AND forward recovery legs), kept by distance and age.
+        if speed > 0.03:
+            last = self.history[-1] if self.history else None
+            moved = math.hypot(self.pose[0]-last[1], self.pose[1]-last[2]) if last else 1e9
+            if moved >= self.cfg.trail_step_m:
+                s_cum = (last[4] + moved) if last else 0.0
+                self.history.append((now, *self.pose, s_cum))
+        if self.history:
+            newest = self.history[-1][4]
+            self.history = [h for h in self.history
+                            if now-h[0] <= self.cfg.trail_max_age_s
+                            and newest-h[4] <= self.cfg.trail_m]
+        self.trail_length = (self.history[-1][4]-self.history[0][4]) if self.history else 0.0
         if not self.active and self.previous_speed > 0.03 and speed > 0.03:
-            self.history.append((now, *self.pose))
             self.normal_distance += speed*dt
         if self.active:
             self.leg_distance += abs(speed)*dt
             self.total_distance += abs(speed)*dt
             self.total_yaw += abs(yaw_rate)*dt
+            if self.blind_leg and speed < 0:
+                self.blind_distance += abs(speed)*dt
         return dt
 
     def cancel(self):
@@ -415,8 +455,8 @@ class LocalRecovery:
         self.phase = "IDLE"
         self.blocked_since = None
         self.previous_speed = 0.0
-        self.history.clear()
-        self.scan_history.clear()
+        # Trail and scan memory stay: the car's own recent path is exactly
+        # what a later reverse needs, and cancelling does not break odometry.
 
     def _brake(self, now, direction):
         self.phase = "BRAKE"
@@ -426,8 +466,8 @@ class LocalRecovery:
 
     def update(self, *, now, scan, healthy, speed, yaw_rate, target, gap,
                bearing, requested_speed, requested_steer, current_steer,
-               follow_cap, lost_age):
-        dt = self._observe(now, speed, yaw_rate, healthy)
+               follow_cap, lost_age, odom_ok=None):
+        dt = self._observe(now, speed, yaw_rate, healthy, odom_ok)
         if not healthy:
             self.cancel()
             return Command(state="RECOVERY_WAIT", reason="sensor_or_driver_unavailable")
@@ -438,7 +478,7 @@ class LocalRecovery:
             self.last_bearing = bearing
         if self.normal_distance >= 0.30:
             self.exhausted = False
-            self.blind_used = False
+            self.blind_distance = 0.0
         elif (self.exhausted and self.exhausted_at is not None
               and now - self.exhausted_at >= self.cfg.exhausted_cooldown_s):
             # Bounded retry: a fresh (non-blind) search budget after a pause.
@@ -481,8 +521,12 @@ class LocalRecovery:
         if self.active and target and normal and direct > .45:
             # Person found again with a certified path: hand back to following.
             # Never switch reverse -> forward without a measured stationary dwell.
+            # After a physical stall the lidar-certified path is not trusted:
+            # finish enough of the escape leg before handing back.
             resume = False
-            if self.phase == "FORWARD":
+            if self.stall_steer is not None:
+                resume = self.phase == "FORWARD" and self.leg_distance >= .30
+            elif self.phase == "FORWARD":
                 resume = speed >= -0.02 and self.previous_speed >= 0
             elif self.phase == "SCAN":
                 resume = True          # still standing, only observing
@@ -504,6 +548,7 @@ class LocalRecovery:
             lost = not target and self.seen and lost_age > .4
             trigger = lost or (self.blocked_since is not None and now-self.blocked_since >= self.cfg.blocked_s)
             if trigger and self.cfg.enabled and not self.exhausted:
+                self.stall_steer = requested_steer if (stalled and not lost) else None
                 self.active = True
                 self.normal_distance = 0.0
                 self.started = self.phase_time = now
@@ -531,6 +576,8 @@ class LocalRecovery:
                 else:
                     out = Command(state="SEARCHING_LOST",
                                   reason="no_target" if not self.seen else "recovery_disabled")
+                if normal and self.stall_steer is not None and not self.active:
+                    self.stall_steer = None
                 self.previous_speed = out.speed
                 return out
 
@@ -568,18 +615,38 @@ class LocalRecovery:
                 angles.append(0.0)
             paths = [(self.clearance(scan, a, self.direction, current_steer,
                                      allow_memory=self.direction > 0), a, False) for a in angles]
-            # Rear blind: only straight retrace, one tiny budget per episode.
-            if self.direction < 0 and not self.blind_used and abs(current_steer) < .03:
-                paths.append((min(self.cfg.blind_reverse_m,
-                                  self.clearance(scan, 0.0, -1, 0.0, allow_history=True)), 0.0, True))
-            clear, steer, blind = max(paths, key=lambda p: p[0] - (0.08 if self.direction > 0 and p[1] == 0 else 0))
-            if clear < .10:
+            # Rear blind: retrace the car's own recent trail, any steer whose
+            # whole swept body stays inside it, within the episode budget.
+            budget = self.cfg.blind_reverse_m - self.blind_distance
+            if self.direction < 0 and budget >= .05 and self.history:
+                m = self.geo.max_steer_rad
+                for a in dict.fromkeys([0.0, -self.turn*m, -self.turn*m*.5,
+                                        self.turn*m*.5, self.turn*m]):
+                    paths.append((min(budget, self.clearance(
+                        scan, a, -1, current_steer, allow_history=True,
+                        allow_memory=False, horizon=min(.85, budget + .10))), a, True))
+            def score(p):
+                bonus = -0.08 if self.direction > 0 and p[1] == 0 else 0.0
+                if self.direction > 0 and self.stall_steer is not None:
+                    # Do not drive back into what stopped the wheels.
+                    bonus -= 0.6 * max(0.0, 1.0 - abs(p[1]-self.stall_steer)/self.geo.max_steer_rad)
+                elif self.direction < 0 and self.stall_steer is not None:
+                    # Reversing with the same-side lock swings the nose away.
+                    bonus += 0.05 if p[1]*self.stall_steer > 0 else 0.0
+                return p[0] + bonus
+            if self.direction > 0 and self.stall_steer is not None:
+                m = self.geo.max_steer_rad
+                away = -math.copysign(1.0, self.stall_steer) if abs(self.stall_steer) > .02 else -self.turn
+                for a in (away*m, away*m*.5):
+                    if all(abs(a-p[1]) > 1e-6 for p in paths):
+                        paths.append((self.clearance(scan, a, 1, current_steer), a, False))
+            clear, steer, blind = max(paths, key=score)
+            if clear < (.05 if blind else .10):
                 self.legs += 1
                 self._brake(now, -self.direction)
                 return Command(state="RECOVERY_WAIT", reason="no_observed_path")
             self.steer, self.blind_leg = steer, blind
-            if blind:
-                self.blind_used = True
+            self.leg_budget = min(budget, clear) if blind else None
             self.phase = "REVERSE" if self.direction < 0 else "FORWARD"
             self.phase_time = now
             self.leg_distance = 0.0
@@ -590,12 +657,15 @@ class LocalRecovery:
             if self.clearance(scan, turn_steer, 1, current_steer) >= .30:
                 self.steer = turn_steer
 
-        distance_limit = (self.cfg.blind_reverse_m if self.blind_leg else
+        distance_limit = (self.leg_budget or self.cfg.blind_reverse_m
+                          if self.blind_leg else
                           self.cfg.reverse_m if self.direction < 0 else self.cfg.forward_m)
         remaining = distance_limit-self.leg_distance
         clear = self.clearance(scan, self.steer, self.direction, current_steer,
                                allow_history=self.blind_leg,
-                               allow_memory=self.direction > 0 or self.blind_leg)
+                               allow_memory=self.direction > 0 or self.blind_leg,
+                               horizon=(min(.85, max(remaining, 0.0) + .10)
+                                        if self.blind_leg else .85))
         profile = BrakeProfile(self.brake.decel_mps2, self.brake.latency_s, .035, .015)
         cap = min(self.cfg.blind_speed_mps if self.blind_leg else self.cfg.speed_mps,
                   brake_envelope(min(clear, remaining), profile))

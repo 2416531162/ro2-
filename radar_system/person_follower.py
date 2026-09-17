@@ -696,7 +696,8 @@ class PersonFollowerNode(Node):
             speed=self.chassis_speed, yaw_rate=self.chassis_yaw_rate,
             target=have_target, gap=gap, bearing=bearing,
             requested_speed=desired_vx, requested_steer=desired_steer,
-            current_steer=self.cmd_steer, follow_cap=cap_follow, lost_age=age)
+            current_steer=self.cmd_steer, follow_cap=cap_follow, lost_age=age,
+            odom_ok=feedback_fresh)
         pre_steer = (cfg.enable_pre_steer and healthy and have_target
                      and result.state == 'HOLDING' and cap_follow > 0
                      and abs(desired_steer) > cfg.steer_deadband_rad)
@@ -812,6 +813,11 @@ class PersonFollowerNode(Node):
             "recovery_legs": self.recovery.legs,
             "recovery_distance_m": round(self.recovery.total_distance, 3),
             "blind_reverse_used": self.recovery.blind_used,
+            "reverse_trail_m": round(self.recovery.trail_length, 2),
+            "stall_steer_deg": (round(math.degrees(self.recovery.stall_steer), 1)
+                                if self.recovery.stall_steer is not None else None),
+            "reverse_budget_m": round(max(0.0, self.recovery.cfg.blind_reverse_m
+                                          - self.recovery.blind_distance), 2),
             "recovery_exhausted": self.recovery.exhausted,
             "dry_run": self.dry_run,
             "target": target,

@@ -855,7 +855,7 @@ function updateFollowerUI(f, isRunning) {
 const F_STATE_TEXT = {
   TRACKING: '跟随中', ALIGNING: '绕行对准', HOLDING: '停车保持', PATH_BLOCKED: '前方无可行路径',
   AEB_EMERGENCY: 'AEB 硬急停', SEARCHING_LOST: '目标丢失', SEARCH_SCAN: '原地观察找人',
-  SEARCH_TURN: '转弯搜索', RECOVERY_REVERSE: '倒车脱困', RECOVERY_BRAKE: '停稳换向',
+  SEARCH_TURN: '转弯搜索', RECOVERY_REVERSE: '沿来路倒车脱困', RECOVERY_BRAKE: '停稳换向',
   RECOVERY_WAIT: '等待条件满足', RECOVERY_EXHAUSTED: '脱困次数已用完', LOW_BATTERY: '电量低',
   SENSOR_CONFLICT: '传感器冲突', STARTING: '启动中', OFFLINE: '未运行', STANDBY: '待命',
 };
@@ -946,6 +946,7 @@ function renderFollowerDetail(f, live, rawState) {
     chip(t ? `目标 ${F_SOURCE_TEXT[t.range_source] || '相机'}` : '目标 无', t ? (t.range_source === 'camera_depth' ? 'ok' : 'warn') : 'off');
     chip(live.target_locked ? '已锁定' : '未锁定', live.target_locked ? 'ok' : 'off');
     if (live.lidar_handoff) chip('雷达接力中', 'warn');
+    else if (t && t.range_source === 'camera_depth' && !live.lidar_track) chip('雷达未认领', 'warn');
     if (g.loop_late) chip('控制周期超时', 'bad');
     if (live.voltage_v && live.voltage_v < 21.5) chip(`电量低 ${live.voltage_v.toFixed(1)}V`, 'bad');
   }
@@ -977,7 +978,10 @@ function renderFollowerDetail(f, live, rawState) {
   row('相机距离', t && Number.isFinite(t.z) ? fmtNum(t.z, 2, ' m') : '--');
   row('视线上雷达', t && Number.isFinite(t.lidar_gap) ? fmtNum(t.lidar_gap, 2, ' m') : '--');
   row('上次看到', Number.isFinite(live.target_seen_age_ms) ? `${(live.target_seen_age_ms / 1000).toFixed(1)} s 前` : '--');
-  row('雷达轨迹', lt ? `${lt.valid ? '有效' : '无效'} · 相机确认 ${fmtNum(lt.since_camera_s, 1, 's')} 前` : '无', lt && lt.valid ? 'ok' : '');
+  // 相机看得到人、雷达却没认领到腿:人出画后无法接力,多半是相机/雷达外参没对上
+  const seedMissing = t && t.range_source === 'camera_depth' && !lt;
+  row('雷达轨迹', lt ? `${lt.valid ? '有效' : '无效'} · 相机确认 ${fmtNum(lt.since_camera_s, 1, 's')} 前`
+      : (seedMissing ? '未认领到腿(出画后无法接力)' : '无'), lt && lt.valid ? 'ok' : seedMissing ? 'warn' : '');
   head('路径');
   row('路径净空', fmtNum(live.path_clearance_m, 2, ' m'), live.path_clearance_m < 0.15 ? 'bad' : live.path_clearance_m < 0.4 ? 'warn' : 'ok');
   row('正前方雷达', fmtNum(live.aeb_min_scan_m, 2, ' m'));
@@ -989,7 +993,10 @@ function renderFollowerDetail(f, live, rawState) {
   row('阶段', live.recovery_enabled === false ? '已关闭' : (live.recovery_phase || '--'));
   row('已用次数', `${live.recovery_legs ?? '--'} / 12`, live.recovery_exhausted ? 'bad' : '');
   row('本次行驶', fmtNum(live.recovery_distance_m, 2, ' m'));
-  row('盲区倒车', live.blind_reverse_used ? '已用' : '未用');
+  row('沿来路可倒', Number.isFinite(live.reverse_trail_m)
+      ? `来路 ${live.reverse_trail_m.toFixed(2)} m · 剩余额度 ${fmtNum(live.reverse_budget_m, 2, ' m')}`
+      : (live.blind_reverse_used ? '已用' : '未用'), live.reverse_trail_m < 0.1 ? 'warn' : '');
+  row('卡住时舵角', Number.isFinite(live.stall_steer_deg) ? `${live.stall_steer_deg}°(脱困时避开)` : '无');
   head('系统');
   row('雷达数据延迟', Number.isFinite(g.scan_age_ms) ? `${g.scan_age_ms} ms` : '--', g.scan_ok === false ? 'bad' : '');
   row('底盘反馈延迟', Number.isFinite(g.feedback_age_ms) ? `${g.feedback_age_ms} ms` : '--', g.feedback_ok === false ? 'bad' : '');
