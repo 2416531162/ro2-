@@ -927,7 +927,10 @@ function handlePressStart(action, btnEl) {
   if (navigator.vibrate) navigator.vibrate(20);
 
   const actionText = ACTION_NAMES[action] || action;
-  updateBadgeStatus(`已接管: ${actionText} (按住开动)`, '#ff8c91');
+  const g0 = lastWheeltec && lastWheeltec.guard;
+  const guardInit = g0 && (g0.reason === 'guard_stop' || g0.reason === 'guard_slow')
+    ? ` · ${GUARD_TEXT[g0.reason]}` : '';
+  updateBadgeStatus(`已接管: ${actionText} (按住开动${guardInit})`, (g0 && g0.reason === 'guard_stop') ? '#ff4d4f' : '#ff8c91');
 
   // 1. 立即下发初始推力
   sendManualDrive(action);
@@ -1033,14 +1036,9 @@ document.querySelectorAll('.dpad-btn').forEach(btn => {
     }
   });
 
-  // 4. Fallback click 事件兜底
+  // 4. click 事件仅阻止默认行为, 避免与 touchend/mouseup 产生双发竞态
   btn.addEventListener('click', (e) => {
     e.preventDefault();
-    if (performance.now() - lastTouchTime < 500) return;
-    if (!isPressing && currentAction !== action) {
-      handlePressStart(action, btn);
-      setTimeout(() => handlePressEnd(action, btn), 50);
-    }
   });
 });
 

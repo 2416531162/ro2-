@@ -339,7 +339,7 @@ class LocalRecovery:
                 & (np.abs(y) <= f.effective_half_width+1e-8))
 
     def clearance(self, scan, steer, direction=1, current_steer=0.0,
-                  allow_history=False, horizon=0.85, allow_memory=True):
+                  allow_history=False, horizon=1.60, allow_memory=True):
         """Batch all sampled poses × obstacles/perimeter points in NumPy.
 
         Retains the 2 cm samples, transition steering, collision pad, strict
@@ -617,9 +617,9 @@ class LocalRecovery:
             if self.direction < 0:
                 angles.append(0.0)
             elif not target:
-                # Move into an observed front corridor to obtain a new view of
-                # the rear quarter; do not require an impossible blind pivot.
-                angles.append(0.0)
+                # 只有当正前方净空充足 (>= 0.80m) 时才允许尝试直行搜寻，严禁在正前方有障碍物时盲目向前冲
+                if self.clearance(scan, 0.0, 1, current_steer) >= 0.80:
+                    angles.append(0.0)
             paths = [(self.clearance(scan, a, self.direction, current_steer,
                                      allow_memory=self.direction > 0), a, False) for a in angles]
             # Rear blind: retrace the car's own recent trail, any steer whose
@@ -631,7 +631,7 @@ class LocalRecovery:
                                         self.turn*m*.5, self.turn*m]):
                     paths.append((min(budget, self.clearance(
                         scan, a, -1, current_steer, allow_history=True,
-                        allow_memory=False, horizon=min(.85, budget + .10))), a, True))
+                        allow_memory=False, horizon=min(1.60, budget + .10))), a, True))
             def score(p):
                 bonus = -0.08 if self.direction > 0 and p[1] == 0 else 0.0
                 if self.direction > 0 and self.stall_steer is not None:
@@ -648,7 +648,8 @@ class LocalRecovery:
                     if all(abs(a-p[1]) > 1e-6 for p in paths):
                         paths.append((self.clearance(scan, a, 1, current_steer), a, False))
             clear, steer, blind = max(paths, key=score)
-            if clear < (.05 if blind else .10):
+            min_clear_req = .05 if blind else (.25 if self.direction > 0 else .15)
+            if clear < min_clear_req:
                 self.legs += 1
                 self._brake(now, -self.direction)
                 return Command(state="RECOVERY_WAIT", reason="no_observed_path")

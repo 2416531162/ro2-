@@ -23,5 +23,6 @@ bash radar_system/run_follower.sh --dry-run
 - [架构、姿态权重与验证说明](docs/TRACKING.md)
 - [运动参数与标定](docs/TUNING.md)
 - [跟随脱困行为](docs/FOLLOWER_RECOVERY.md)
+- [架构评审：超声波跟随与 GNSS/RTK 导航演进](docs/ARCHITECTURE_ROADMAP.md)（设计建议，尚未实现）
 
 本地代码、模型转换及合成场景测试不等于已部署或通过实车验收。

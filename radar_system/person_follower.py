@@ -100,9 +100,9 @@ class FollowerConfig:
 
     # ---- 避障 ----
     # 以下均为车头到障碍物的**净空**
-    obstacle_standoff_m: float = 0.12   # 正常停车时车头前保留净空 (0.12m 兼顾室内门框防卡死与平滑减速)
-    aeb_clearance_m: float = 0.06       # 硬急停线:净空小于此值无条件发 0 (6cm 物理防撞刹停)
-    aeb_release_clearance_m: float = 0.10   # 急停解除回差 (10cm 恢复)
+    obstacle_standoff_m: float = 0.40   # 正常停车时车头前保留净空 (0.40m 提前平滑减速，留足安全停车距离)
+    aeb_clearance_m: float = 0.22       # 硬急停线:净空小于此值无条件发 0 (22cm 物理防撞硬急停)
+    aeb_release_clearance_m: float = 0.32   # 急停解除回差 (32cm 恢复)
     scan_cone_deg: float = 30.0         # 前向检测扇区半角
     scan_min_valid_m: float = 0.15      # 雷达本体盲区
     # 雷达装在车上,周围的相机支架、天线杆、传感器盒会被扫成距离恒定、
@@ -118,7 +118,7 @@ class FollowerConfig:
     )
 
     # ---- 速度 ----
-    max_speed_mps: float = 0.55         # ★ 保守起步值,实车验证后再往上加
+    max_speed_mps: float = 0.45         # ★ 安全巡航速度上限
     creep_floor_mps: float = 0.08       # 低于此速度直接停,避免电机嗡嗡不转
     kick_mps: float = 0.22              # 静摩擦破除脉冲幅值
     kick_duration_s: float = 0.25       # 脉冲时长
@@ -174,7 +174,7 @@ class FollowerConfig:
     camera_pitch_rad: float = 0.2618     # 相机俯角,实测 15°(向下为正)。
                                          #   深度 z 沿光轴,俯装时不等于水平距离,
                                          #   且误差随目标高度变化(上方 0.6m 处差 19cm)
-    min_path_clearance_m: float = 0.15   # 低于此净空就收舵找更直的路,而不是硬停
+    min_path_clearance_m: float = 0.30   # 低于此净空就收舵找更直的路,而不是硬停
 
     # ---- 传感器交叉校验 ----
     range_conflict_m: float = 1.00      # 相机比雷达远这么多即判为冲突
@@ -190,8 +190,8 @@ class FollowerConfig:
     # ---- 其他 ----
     battery_min_v: float = 21.0
     control_hz: float = 20.0
-    enable_pre_steer: bool = False      # 静止预打舵 (见 PROTOCOL.md 8.3),需实车验证
-    pre_steer_creep_mps: float = 0.005
+    enable_pre_steer: bool = True       # 开启静止微速打舵转向对准
+    pre_steer_creep_mps: float = 0.08   # 0.08 m/s 微动蠕行带动阿克曼转角对准人
 
     recovery: RecoveryConfig = field(default_factory=RecoveryConfig)
     geometry: ChassisGeometry = field(default_factory=ChassisGeometry)
@@ -480,7 +480,7 @@ class PersonFollowerNode(Node):
                 y = float(item.get('y', 0.0) or 0.0)
                 px, py, _pz = optical_to_vehicle(x, y, z, self.camera_mount,
                                                  self.cfg.camera_pitch_rad)
-                if px - front <= 0.0:
+                if math.hypot(px, py) < 0.30:
                     continue
                 source, depth_sigma = 'camera_depth', None
             else:
@@ -645,8 +645,10 @@ class PersonFollowerNode(Node):
         cap_follow = cfg.max_speed_mps
         if have_target:
             front = cfg.footprint_front_m
-            # 刹车包络用车头到人的直线距离;人拐到侧面时,纵向距离会严重偏小
-            person_gap = math.hypot(view['x'] - front, view['y'])
+            bearing = math.atan2(view['y'], view['x'])
+            person_gap = (math.hypot(max(0.0, view['x'] - front), view['y'])
+                          if view['x'] >= 0
+                          else math.hypot(view['x'] + cfg.footprint_rear_m, view['y']))
             gap = person_gap
             if (view['source'] == 'camera' and self.los_gap is not None
                     and now - self.los_time <= 0.3):
@@ -654,24 +656,51 @@ class PersonFollowerNode(Node):
             person_follow_gap = max(person_gap, self._path_remaining(view)) if cfg.follow_breadcrumbs else person_gap
             v_rel = view['v_fwd'] - self.chassis_speed
             z_person = max(person_follow_gap + v_rel * cfg.control_latency_s * 0.5, .05)
-            bearing = math.atan2(view['y'], view['x'])
             target_ground_speed = view['v_fwd']
             person_error = z_person - cfg.follow_distance_m
-            person_requested_vx = 0.0
-            if not (abs(person_error) <= cfg.deadband_m and abs(target_ground_speed) < .10):
-                person_requested_vx = max(0.0, cfg.kd_feedforward*max(0.0, target_ground_speed)
-                                          + cfg.kp_distance*person_error)
-            desired_vx = person_requested_vx
-            if gap < person_gap:
-                # 视线上有更近的东西:按它限速,不往前冲
-                z_obs = max(gap + v_rel * cfg.control_latency_s * 0.5, .05)
-                obs_error = z_obs - cfg.follow_distance_m
-                desired_vx = max(0.0, cfg.kp_distance * obs_error) if obs_error > cfg.deadband_m else 0.0
 
-            ax, ay = self._aim(view)
-            self.aim_point = (ax, ay)
-            if abs(math.atan2(ay, ax)) > cfg.steer_deadband_rad:
-                desired_steer = self._pursuit_steer(ax, ay)
+            # 目标位置分类：在车后（x < 0 或 |bearing| > 85°）还是车前/侧前
+            is_behind = view['x'] < 0.0 or abs(bearing) > math.radians(85.0)
+            if is_behind:
+                # 目标在车后：严禁向前开！检查后方净空
+                rear_clear = (self.recovery.clearance(self.scan_evidence, 0.0, -1, current_steer=self.cmd_steer)
+                              if self.scan_evidence is not None else 0.0)
+                rear_dist = math.hypot(view['x'] + cfg.footprint_rear_m, view['y'])
+                if rear_clear >= cfg.obstacle_standoff_m and rear_dist > cfg.follow_distance_m:
+                    # 后方空旷且目标超出保持距离：缓慢倒车对准
+                    person_requested_vx = -min(0.12, cfg.recovery.blind_speed_mps)
+                    desired_steer = -clamp(cfg.kp_steer * (math.pi - abs(bearing)), -cfg.max_steer_rad, cfg.max_steer_rad) * (1.0 if bearing >= 0 else -1.0)
+                else:
+                    # 距离合适或后方受限：安全静止保持，不向任何方向乱动
+                    person_requested_vx = 0.0
+                    desired_steer = 0.0
+                desired_vx = person_requested_vx
+            else:
+                person_requested_vx = 0.0
+                if not (abs(person_error) <= cfg.deadband_m and abs(target_ground_speed) < .10):
+                    person_requested_vx = max(0.0, cfg.kd_feedforward*max(0.0, target_ground_speed)
+                                              + cfg.kp_distance*person_error)
+                desired_vx = person_requested_vx
+
+                # 视线上有更近的障碍物：根据障碍物距离平滑减速，贴近 obstacle_standoff_m 时直接归零
+                if gap < person_gap:
+                    z_obs = max(gap + v_rel * cfg.control_latency_s * 0.5, .05)
+                    obs_error = z_obs - cfg.follow_distance_m
+                    if obs_error <= cfg.deadband_m or gap <= cfg.obstacle_standoff_m:
+                        desired_vx = 0.0
+                    else:
+                        desired_vx = min(desired_vx, cfg.kp_distance * obs_error)
+
+                ax, ay = self._aim(view)
+                self.aim_point = (ax, ay)
+                if abs(math.atan2(ay, ax)) > cfg.steer_deadband_rad:
+                    desired_steer = self._pursuit_steer(ax, ay)
+
+                # 侧向对准：若人在侧方（偏角 > 20°），以蠕行小速度带动阿克曼车头转正对准人
+                if (cfg.enable_pre_steer and abs(bearing) > math.radians(20.0)
+                        and desired_vx < cfg.pre_steer_creep_mps):
+                    desired_vx = cfg.pre_steer_creep_mps
+
             cap_follow = min(cfg.max_speed_mps, brake_envelope(gap, cfg.follow_profile))
             if view['update_age'] > 0.2:
                 cap_follow = min(cap_follow, cfg.coasting_speed_cap)
@@ -683,7 +712,10 @@ class PersonFollowerNode(Node):
             if self.lidar_handoff_active:
                 person_follow_cap = min(person_follow_cap, cfg.lidar_track_speed_cap)
             requested_vx = person_requested_vx
-            desired_vx = min(desired_vx, cap_follow)
+            if desired_vx >= 0:
+                desired_vx = min(desired_vx, cap_follow)
+            else:
+                desired_vx = max(desired_vx, -cfg.recovery.speed_mps)
             self._remember_target(view, gap)
         else:
             requested_vx = desired_vx

@@ -493,7 +493,7 @@ class WheeltecDriver(Node):
         while self.running:
             try:
                 if self.ser is None:
-                    self.ser = serial.Serial(self.port, 115200, timeout=0, write_timeout=0.02, exclusive=True)
+                    self.ser = serial.Serial(self.port, 115200, timeout=0, write_timeout=0.20, exclusive=True)
                     # Drop only data from a prior session. All serial access belongs to this worker.
                     self.ser.reset_input_buffer()
                     self.ser.reset_output_buffer()
