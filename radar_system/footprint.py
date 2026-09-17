@@ -148,8 +148,11 @@ def lidar_target_gap(bearing_rad, range_m, mount, front_m):
     直接用 tan(bearing) * gap 会把符号弄反:人在左边,车往右打舵。
     这里先按安装位置投影到车体系,再统一零点与符号。
     """
-    px, py = scan_to_vehicle_frame([(bearing_rad, range_m)], mount,
-                                   max_range=float("inf"))[0]
+    pts = scan_to_vehicle_frame([(bearing_rad, range_m)], mount,
+                                   max_range=float("inf"))
+    if not pts:
+        return float("inf"), 0.0
+    px, py = pts[0]
     return px - front_m, -py
 
 

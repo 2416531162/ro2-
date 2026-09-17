@@ -130,6 +130,16 @@
       <strong class="mono" id="fSteerVal">0.0°</strong>
      </div>
     </div>
+    <div class="f-target-direction" id="fTargetDirectionBox" style="background:#0e1721;border:1px solid #233748;border-radius:6px;padding:8px 10px;margin:2px 0 8px;display:flex;justify-content:space-between;align-items:center;">
+      <div style="display:flex;align-items:center;gap:8px;">
+        <span id="fTargetCompassIcon" style="font-size:18px;display:inline-block;transition:transform .2s;">🧭</span>
+        <div>
+          <div style="font-size:9px;color:var(--muted);letter-spacing:.5px;">人体相对车体方位</div>
+          <div id="fTargetDirectionText" style="font-size:13px;font-weight:700;color:#69dec4;">等待目标锁定</div>
+        </div>
+      </div>
+      <div id="fTargetSensorBadge" style="font-size:10px;padding:3px 7px;border-radius:4px;background:#182833;border:1px solid #2d4557;color:#9eb0c3;font-weight:600;">无目标</div>
+    </div>
     <div class="f-now" id="fNow" data-tone="off" aria-live="polite">
      <div class="f-now-label">正在执行</div>
      <div class="f-now-text" id="fNowText">跟随程序未启动</div>
@@ -347,6 +357,41 @@ function drawPolar(){
  if(layers.beam){ctx.beginPath();for(let i=0;i<hits.length;i+=6){const hit=hits[i];if(hit.r>maxRange)continue;ctx.moveTo(cx,cy);ctx.lineTo(cx-Math.sin(hit.angle)*hit.r/maxRange*radius,cy-Math.cos(hit.angle)*hit.r/maxRange*radius);}ctx.strokeStyle='#69dec429';ctx.lineWidth=1;ctx.stroke();}
  if(layers.scan)for(const hit of hits){if(hit.r>maxRange)continue;const x=cx-Math.sin(hit.angle)*hit.r/maxRange*radius,y=cy-Math.cos(hit.angle)*hit.r/maxRange*radius;ctx.fillStyle=hit.r<.6?'#ff8c91':hit.r<1.2?'#f6c879':'#a2eee0';ctx.fillRect(x-1.3,y-1.3,2.6,2.6);}
  polygon(ctx,[[cx,cy-10],[cx-5,cy+6],[cx,cy+3],[cx+5,cy+6]],'#d4fff2');
+
+ // 在 360° 极坐标雷达盘上实时绘制人体目标 (视觉与雷达全向接力)
+ const tgt = state && state.follower && state.follower.target;
+ if (tgt && Number.isFinite(tgt.x) && Number.isFinite(tgt.y)) {
+   const tx = cx - (tgt.y / maxRange) * radius;
+   const ty = cy - (tgt.x / maxRange) * radius;
+   const isCam = tgt.tracking_source === 'camera';
+   const col = isCam ? '#69dec4' : '#f6c879';
+
+   ctx.beginPath();
+   ctx.setLineDash([3, 3]);
+   ctx.moveTo(cx, cy);
+   ctx.lineTo(tx, ty);
+   ctx.strokeStyle = isCam ? '#69dec477' : '#f6c87977';
+   ctx.lineWidth = 1.5;
+   ctx.stroke();
+   ctx.setLineDash([]);
+
+   ctx.beginPath();
+   ctx.arc(tx, ty, 8, 0, Math.PI * 2);
+   ctx.strokeStyle = col;
+   ctx.lineWidth = 2;
+   ctx.stroke();
+   ctx.beginPath();
+   ctx.arc(tx, ty, 3.5, 0, Math.PI * 2);
+   ctx.fillStyle = col;
+   ctx.fill();
+
+   ctx.font = 'bold 11px sans-serif';
+   ctx.fillStyle = col;
+   const distText = Number.isFinite(tgt.distance) ? `${tgt.distance.toFixed(2)}m` : '';
+   const tagText = isCam ? `👤 人体 ${distText}` : `👤 雷达接力 ${distText}`;
+   ctx.fillText(tagText, tx + 10, ty + 4);
+ }
+
  $('scaleLine').style.width='48px';$('scaleLabel').textContent=`量程 ${maxRange.toFixed(1)} m`;
 }
 function renderFrame(now){
@@ -371,11 +416,20 @@ for(const [id,key]of Object.entries({layerScan:'scan',layerBeam:'beam',layerGrid
 canvas.addEventListener('wheel',e=>{e.preventDefault();zoomBy(Math.exp(-e.deltaY*.001));},{passive:false});
 canvas.addEventListener('keydown',e=>{if(['+','=','-','0'].includes(e.key)){e.preventDefault();if(e.key==='0')resetView();else zoomBy(e.key==='-'?1/1.2:1.2);}});
 document.addEventListener('visibilitychange',()=>{
- if(!document.hidden){
+ if(document.hidden){
+  if(typeof executeStop==='function'&&(isPressing||pulseActive||heartbeatTimer)){
+   executeStop();
+  }
+ }else{
   dirty=true;frameAt=performance.now();frameCount=0;
   if(!lastReceived||performance.now()-lastReceived>2500||!stream||stream.readyState!==EventSource.OPEN){
    connectStream(true);
   }
+ }
+});
+window.addEventListener('blur',()=>{
+ if(typeof executeStop==='function'&&(isPressing||pulseActive||heartbeatTimer)){
+  executeStop();
  }
 });
 window.addEventListener('beforeunload',()=>{if(stream)stream.close();});
@@ -520,10 +574,50 @@ function updateFollowerUI(f, isRunning) {
     }
   }
 
+  const targetDirBox = $('fTargetDirectionText');
+  const targetDirBadge = $('fTargetSensorBadge');
+  const targetCompassIcon = $('fTargetCompassIcon');
+  if (targetDirBox) {
+    if (target && target.direction_name) {
+      const bDeg = target.bearing_deg;
+      targetDirBox.textContent = `${target.direction_name} ${bDeg > 0 ? '+' : ''}${bDeg}° (${target.clock_name || ''})`;
+      if (target.tracking_source === 'camera') {
+        targetDirBox.style.color = '#69dec4';
+        if (targetDirBadge) {
+          targetDirBadge.textContent = '视觉+雷达';
+          targetDirBadge.style.color = '#7cf6da';
+          targetDirBadge.style.borderColor = '#3ca88d';
+          targetDirBadge.style.background = '#133a2f';
+        }
+      } else {
+        targetDirBox.style.color = '#f6c879';
+        if (targetDirBadge) {
+          targetDirBadge.textContent = '雷达全向接力';
+          targetDirBadge.style.color = '#f6c879';
+          targetDirBadge.style.borderColor = '#78623b';
+          targetDirBadge.style.background = '#383120';
+        }
+      }
+      if (targetCompassIcon && Number.isFinite(bDeg)) {
+        targetCompassIcon.style.transform = `rotate(${bDeg}deg)`;
+      }
+    } else {
+      targetDirBox.textContent = isFollowerRunning ? '搜寻目标中...' : '跟随未启动';
+      targetDirBox.style.color = 'var(--muted)';
+      if (targetDirBadge) {
+        targetDirBadge.textContent = '无目标';
+        targetDirBadge.style.color = 'var(--muted)';
+        targetDirBadge.style.borderColor = '#2d4557';
+        targetDirBadge.style.background = '#182833';
+      }
+      if (targetCompassIcon) targetCompassIcon.style.transform = 'none';
+    }
+  }
+
   // 跟随节点陈旧时(被 Ctrl-C 或崩溃),它最后那一刻的读数不能再显示 ——
   // 否则界面会一直卡在"前方 0.55m、AEB 触发",而实时雷达其实看到 2 米开外,
   // 节点也早就不在了。后端 1.5 秒收不到状态就打 stale 标记。
-  const fLive = (f && f.state && !f.stale) ? f : null;
+  const fLive = (f && f.state && !Boolean(f.stale)) ? f : null;
 
   if ($('fFrontLidarVal')) {
     const minFront = (fLive && Number.isFinite(fLive.aeb_min_scan_m))
@@ -564,7 +658,7 @@ function updateFollowerUI(f, isRunning) {
 
 // ==================== 跟随运行详情:在做什么、为什么、各环节是否正常 ====================
 const F_STATE_TEXT = {
-  TRACKING: '跟随中', ALIGNING: '绕行对准', REAR_ALIGNING: '倒车对准', HOLDING: '停车保持', PATH_BLOCKED: '前方无可行路径',
+  TRACKING: '跟随中', ALIGNING: '绕行对准', REAR_ALIGNING: '倒车对准', TURNAROUND: '弧线掉头对准', HOLDING: '停车保持', PATH_BLOCKED: '前方无可行路径',
   COLLISION_AEB: '防撞急停', AEB_EMERGENCY: 'AEB 硬急停', SEARCHING_LOST: '目标丢失', SEARCH_SCAN: '原地观察找人',
   SEARCH_TURN: '转弯搜索', RECOVERY_REVERSE: '沿来路倒车脱困', RECOVERY_BRAKE: '停稳换向',
   RECOVERY_WAIT: '等待条件满足', RECOVERY_EXHAUSTED: '脱困次数已用完', LOW_BATTERY: '电量低',
@@ -572,7 +666,7 @@ const F_STATE_TEXT = {
 };
 const F_REASON_TEXT = {
   follow: '按目标距离正常跟随', local_path: '正前方不通,选了一条可行的弯道', hold: '已到保持距离',
-  target_behind: '目标在车后', person_close: '人太近,停车', follow_envelope: '接近目标,提前减速', swept_path: '前方有障碍,减速',
+  target_behind: '目标在车后', face_rear_target: '前方开阔,大舵角前向回旋掉头面朝人体', person_close: '人太近,停车', follow_envelope: '接近目标,提前减速', swept_path: '前方有障碍,减速',
   no_observed_path: '所有方向都没有确认可走的路', no_target: '没有识别到人', recovery_disabled: '脱困已关闭',
   recovery_budget_used: '自动脱困次数用完,20 秒后重试', scan_unavailable: '雷达数据中断',
   scan_stale: '雷达数据过期', driver_unavailable: '底盘未连接/未解锁/反馈中断',
@@ -654,8 +748,9 @@ function renderFollowerDetail(f, live, rawState) {
 
   const running = isFollowerRunning && live && live.state !== 'OFFLINE';
   const g = (live && live.diag) || {};
+  const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   const chips = [];
-  const chip = (label, tone) => chips.push(`<span class="f-chip" data-tone="${tone}">${label}</span>`);
+  const chip = (label, tone) => chips.push(`<span class="f-chip" data-tone="${esc(tone)}">${esc(label)}</span>`);
   if (running) {
     chip(g.scan_ok === false ? '雷达 ✕' : g.scan_ok ? '雷达 ✓' : '雷达 ?', g.scan_ok === false ? 'bad' : g.scan_ok ? 'ok' : 'off');
     const chassisOk = g.feedback_ok && (g.driver_armed || live.dry_run);
@@ -680,8 +775,8 @@ function renderFollowerDetail(f, live, rawState) {
     return;
   }
   const rows = [];
-  const head = title => rows.push(`<div class="f-kv-head">${title}</div>`);
-  const row = (k, v, tone) => rows.push(`<div><span>${k}</span><b${tone ? ` data-tone="${tone}"` : ''}>${v}</b></div>`);
+  const head = title => rows.push(`<div class="f-kv-head">${esc(title)}</div>`);
+  const row = (k, v, tone) => rows.push(`<div><span>${esc(k)}</span><b${tone ? ` data-tone="${esc(tone)}"` : ''}>${esc(v)}</b></div>`);
   const t = live.target;
   const lt = live.lidar_track;
   head('决策');
@@ -771,6 +866,10 @@ async function toggleFollower() {
   try {
     const res = await fetch('/api/follower/toggle', { method: 'POST' });
     const data = await res.json();
+    if (typeof data.running !== 'boolean') {
+      notify('切换跟屁虫失败: 服务端响应异常');
+      return;
+    }
     if (data.running) {
       notify('🐕 跟屁虫已启动，正搜寻跟随人体...');
     } else {
@@ -824,11 +923,18 @@ const DRIVE_CLIENT_ID = (window.crypto && crypto.randomUUID)
 const DRIVE_TIMEOUT_MS = 800;
 let driveSeq = 0;
 let driveInFlight = 0;
+let lastCompletedDriveSeq = 0;
 
 // heartbeat=true 的心跳请求在上一条还没回来时直接跳过,绝不在浏览器里排队堆积;
 // 首次按下和刹车永远立即发送。
 async function sendManualDrive(action, { heartbeat = false } = {}) {
-  if (heartbeat && driveInFlight > 0) return false;
+  if (heartbeat) {
+    if (document.hidden || !document.hasFocus()) {
+      if (typeof executeStop === 'function') executeStop();
+      return false;
+    }
+    if (driveInFlight > 0) return false;
+  }
   const seq = ++driveSeq;
   const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
   const timer = controller ? setTimeout(() => controller.abort(), DRIVE_TIMEOUT_MS) : null;
@@ -851,12 +957,16 @@ async function sendManualDrive(action, { heartbeat = false } = {}) {
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const result = await response.json();
     if (!result.ok) throw new Error(result.error || '底盘拒绝指令');
+    if (seq < lastCompletedDriveSeq) return true;
+    lastCompletedDriveSeq = seq;
     const badge = $('manualActiveBadge');
     if (badge && badge.textContent.startsWith('控制链路异常')) {
       updateBadgeStatus(currentAction ? '控制链路已恢复' : '已刹停 (点击微调 / 长按持续开)', 'var(--muted)');
     }
     return true;
   } catch (error) {
+    if (seq < lastCompletedDriveSeq) return false;
+    lastCompletedDriveSeq = seq;
     const msg = error && error.name === 'AbortError' ? `响应超时 (>${DRIVE_TIMEOUT_MS}ms)` : error.message;
     console.error('手动底盘指令失败:', error);
     updateBadgeStatus(`控制链路异常: ${msg}`, '#ff8c91');

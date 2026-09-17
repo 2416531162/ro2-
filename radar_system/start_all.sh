@@ -6,7 +6,7 @@ set -e
 for component in mapping mapping3d rtk foxglove; do
   unit="rk3588-perception@${component}.service"
   if systemctl cat "$unit" >/dev/null 2>&1; then
-    systemctl disable --now "$unit"
+    systemctl disable --now "$unit" 2>/dev/null || true
   fi
 done
 systemctl start rk3588-perception.target

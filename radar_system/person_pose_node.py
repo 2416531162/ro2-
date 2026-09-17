@@ -211,7 +211,7 @@ class PersonPoseNode(Node, DepthMeasurement):
                         ranged_count += 1
                     else:
                         tag_text = f"[{label}] (Out of Range)"
-                        if label.lower() == "person":
+                        if label.lower() == "person" and conf >= 0.35:
                             target_list.append(item)
                             unranged_people += 1
 

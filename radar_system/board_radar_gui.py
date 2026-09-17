@@ -868,7 +868,7 @@ class BoardRadarMainWindow(QWidget):
         box = self.video_box.size()
         if box.width() < 2 or box.height() < 2:
             return pix
-        return pix.scaled(box, Qt.KeepAspectRatio, Qt.FastTransformation)
+        return pix.scaled(box, Qt.KeepAspectRatio, Qt.SmoothTransformation)
 
     def closeEvent(self,event):
         self._is_closed = True
@@ -959,7 +959,7 @@ class BoardRadarMainWindow(QWidget):
         self.heat_near_mm = near_mm
         self.heat_far_mm = far_mm
         available=QSize(max(1,self.video_box.width()-24),max(1,self.video_box.height()-24))
-        scaled_pix = QPixmap.fromImage(qimage).scaled(available, Qt.KeepAspectRatio, Qt.SmoothTransformation if self.depth_style.currentData()=='smooth' else Qt.FastTransformation)
+        scaled_pix = QPixmap.fromImage(qimage).scaled(available, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self.latest_depth_pixmap = scaled_pix
         if self.cam_mode == 'depth':
             self._set_depth_badge(center_val_mm, near_mm, far_mm)

@@ -368,6 +368,11 @@ class BreakawayKick:
         measured_moving 车目前是否真的在动 (来自底盘遥测,没有就传 False)
         speed_cap       刹车包络给出的速度上限,脉冲绝不允许突破它
         """
+        if desired_mps < 0:
+            self._kick_until = 0.0
+            self._was_moving = measured_moving
+            return max(desired_mps, -abs(speed_cap))
+
         if desired_mps <= self.creep_floor_mps:
             self._kick_until = 0.0
             self._was_moving = measured_moving

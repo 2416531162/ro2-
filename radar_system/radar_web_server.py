@@ -524,8 +524,8 @@ class RadarHTTPHandler(http.server.BaseHTTPRequestHandler):
                 else:
                     # 旧接口保留兼容,但要把物理上做不到的角速度掐掉:
                     # 超过满舵能达到的 wz 只会让固件把舵机打死,反而丢失档位区分度
-                    vx = float(req.get('vx', 0.0))
-                    wz = float(req.get('wz', 0.0))
+                    vx = max(-0.6, min(1.0, float(req.get('vx', 0.0))))
+                    wz = max(-1.5, min(1.5, float(req.get('wz', 0.0))))
                     steer_rad = steer_from_yaw(vx, wz, CHASSIS)
                     wz = yaw_from_steer(vx, steer_rad, CHASSIS)
                     steer_deg = round(math.degrees(steer_rad), 1)

@@ -193,6 +193,7 @@ class FollowerConfig:
     control_hz: float = 20.0
     enable_pre_steer: bool = True       # 开启静止微速打舵转向对准
     pre_steer_creep_mps: float = 0.08   # 0.08 m/s 微动蠕行带动阿克曼转角对准人
+    enable_rear_turnaround: bool = False  # 单元测试保持纯倒车模式兼容，实车启动时默认开启
 
     recovery: RecoveryConfig = field(default_factory=RecoveryConfig)
     geometry: ChassisGeometry = field(default_factory=ChassisGeometry)
@@ -306,6 +307,7 @@ class PersonFollowerNode(Node):
         self.lidar_fallback_matches = 0
         self.lidar_handoff_active = False
         self.lidar_handoff_frames = 0
+        self.latest_clusters = []
 
         # ---- 执行状态 ----
         self.state = "STANDBY"
@@ -493,6 +495,14 @@ class PersonFollowerNode(Node):
                 if not (0.0 < gap <= self.cfg.max_follow_distance_m):
                     continue
                 px, py = gap + front, -lateral
+                # 玻璃反光防误检：雷达视线兜底必须校验附近是否存在真实人体尺寸点簇！
+                # 平整玻璃窗或平整墙面会被 cluster_points 剔除；若无真实点簇匹配，拒绝当成人体！
+                cluster_matched = any(
+                    math.hypot(px - c.x, py - c.y) <= 0.40
+                    for c in getattr(self, 'latest_clusters', [])
+                )
+                if not cluster_matched:
+                    continue
                 source, depth_sigma = 'lidar_fallback', 0.10
                 self.lidar_fallback_matches += 1
             detections.append({'x': px, 'y': py, 'conf': conf,
@@ -613,6 +623,7 @@ class PersonFollowerNode(Node):
         else:
             trk_clean = self.scan_points
         clusters = cluster_points(trk_clean, origin=(self.lidar_mount.x_m, self.lidar_mount.y_m))
+        self.latest_clusters = clusters
         self.people.add_lidar([(c.x, c.y) for c in clusters],
                               self.scan_stamp - scan_age, self.scan_stamp)
         # AEB 锁存只在 control_loop 里按实际舵角判定,避免两处同时改写
@@ -652,6 +663,7 @@ class PersonFollowerNode(Node):
         self.aim_point = None
         desired_vx = desired_steer = bearing = 0.0
         is_behind = False
+        is_turnaround = False
         gap = float('inf')
         cap_follow = cfg.max_speed_mps
         if have_target:
@@ -673,7 +685,11 @@ class PersonFollowerNode(Node):
             # 目标位置分类：在车后（x < 0 或 |bearing| > 85°）还是车前/侧前
             is_behind = view['x'] < 0.0 or abs(bearing) > math.radians(85.0)
             if is_behind:
-                # 目标在车后：严禁向前开！检查后方净空
+                # 目标在车后：
+                # 优先策略：若开启掉头策略且前方回转净空充足，执行前向大舵角回旋掉头（Turnaround Arc），调转车头重新面朝人体！
+                fwd_turn_steer = cfg.max_steer_rad if bearing > 0 else -cfg.max_steer_rad
+                fwd_arc_clear = swept_path_clearance(self.scan_points, self.footprint, self.cfg.geometry, fwd_turn_steer)
+
                 rear_clear = (self.recovery.clearance(self.scan_evidence, self.cmd_steer, -1,
                                                       current_steer=self.cmd_steer,
                                                       allow_history=True)
@@ -682,16 +698,26 @@ class PersonFollowerNode(Node):
                 rear_error = rear_dist - cfg.follow_distance_m
                 # 车尾朝向人体的偏角误差: 正值表示人在车尾偏左, 负值表示人在车尾偏右
                 rear_bearing_error = (math.pi - bearing) if bearing >= 0 else (-math.pi - bearing)
-                desired_steer = clamp(cfg.kp_steer * rear_bearing_error, -cfg.max_steer_rad, cfg.max_steer_rad)
 
-                if rear_clear >= cfg.obstacle_standoff_m and rear_error > cfg.deadband_m:
-                    # 后方空旷且目标超出保持距离：按距离误差反向平滑倒车对准 (0.06 ~ 0.12 m/s)
+                if cfg.enable_rear_turnaround and fwd_arc_clear >= 1.20 and self.min_front_scan >= 0.80:
+                    # 前方回转路径通畅且正前方净空充足：执行前向大舵角弧线掉头（Turnaround Arc）！
+                    is_turnaround = True
+                    desired_steer = fwd_turn_steer
+                    turn_speed = min(0.22, cfg.max_speed_mps)
+                    person_requested_vx = turn_speed
+                    desired_vx = turn_speed
+                elif rear_clear >= cfg.obstacle_standoff_m and rear_error > cfg.deadband_m:
+                    # 前方受阻但后方空旷且目标超出保持距离：按距离误差反向平滑倒车对准 (0.06 ~ 0.12 m/s)
+                    rev_steer = clamp(cfg.kp_steer * rear_bearing_error, -cfg.max_steer_rad, cfg.max_steer_rad)
+                    desired_steer = rev_steer
                     rev_speed = clamp(cfg.kp_distance * rear_error, cfg.creep_floor_mps, min(0.12, cfg.recovery.blind_speed_mps))
                     person_requested_vx = -rev_speed
+                    desired_vx = person_requested_vx
                 else:
-                    # 距离合适或后方受限：安全静止保持，不向任何方向乱动
+                    # 前后均受限或距离合适：原地保持，前轮预打舵
+                    desired_steer = fwd_turn_steer if (cfg.enable_rear_turnaround and fwd_arc_clear > rear_clear) else clamp(cfg.kp_steer * rear_bearing_error, -cfg.max_steer_rad, cfg.max_steer_rad)
                     person_requested_vx = 0.0
-                desired_vx = person_requested_vx
+                    desired_vx = 0.0
             else:
                 person_requested_vx = 0.0
                 if not (abs(person_error) <= cfg.deadband_m and abs(target_ground_speed) < .10):
@@ -773,7 +799,10 @@ class PersonFollowerNode(Node):
             result.steer = desired_steer
         if is_behind:
             result.steer = desired_steer
-            if person_requested_vx < 0:
+            if is_turnaround:
+                result.state, result.reason = 'TURNAROUND', 'face_rear_target'
+                result.speed = desired_vx
+            elif person_requested_vx < 0:
                 result.state, result.reason = 'REAR_ALIGNING', 'target_behind'
             else:
                 result.state, result.reason = 'HOLDING', 'target_behind'
@@ -794,7 +823,9 @@ class PersonFollowerNode(Node):
         self.cmd_steer += clamp(result.steer-self.cmd_steer, -max_dsteer, max_dsteer)
         if not self.recovery.active and healthy:
             if is_behind:
-                if person_requested_vx < 0:
+                if is_turnaround:
+                    desired_vx = min(cap_follow, desired_vx)
+                elif person_requested_vx < 0:
                     desired_vx = max(-min(0.12, cfg.recovery.blind_speed_mps), person_requested_vx)
                 else:
                     desired_vx = 0.0
@@ -948,15 +979,57 @@ class PersonFollowerNode(Node):
     def publish_status(self, now, have_target, age):
         target = None
         view = self.view
-        if have_target and self.latest_raw and view is not None:
-            target = dict(self.latest_raw)
+        if have_target and view is not None:
+            if self.latest_raw:
+                target = dict(self.latest_raw)
+            else:
+                target = {'label': view.get('label') or 'person', 'conf': 0.85,
+                          'gap_used': round(math.hypot(view['x'], view['y']), 2)}
+            target['veh_x'] = round(view['x'], 3)
+            target['veh_y'] = round(view['y'], 3)
+            target['x'] = round(-view['y'], 3)
+            target['y'] = round(view['x'], 3)
             target['smooth_z'] = round(view['x'] - self.cfg.footprint_front_m, 3)
             target['smooth_x'] = round(-view['y'], 3)
             target['closing_rate'] = round(view['v_fwd'] - self.chassis_speed, 3)
             target['ground_speed'] = round(math.hypot(view['v_fwd'], view['v_lat']), 2)
-            target['distance'] = target['gap_used']
+            target['distance'] = target.get('gap_used') or round(math.hypot(view['x'], view['y']), 2)
             target['coasting'] = view['update_age'] > 0.2
             target['sigma_m'] = round(view['sigma'], 3)
+
+            # 计算人相对车头的精确方位角（车头正前方为 0°，左侧为正，右侧为负，车尾为 ±180°）
+            bearing_rad = math.atan2(view['y'], view['x'])
+            bearing_deg = round(math.degrees(bearing_rad), 1)
+            dist_val = round(math.hypot(view['x'], view['y']), 2)
+
+            abs_deg = abs(bearing_deg)
+            if abs_deg <= 20.0:
+                dir_name, clock_name = "正前方", "12点钟"
+            elif bearing_deg > 20.0 and bearing_deg <= 70.0:
+                dir_name, clock_name = "左前方", "10点钟"
+            elif bearing_deg > 70.0 and bearing_deg <= 110.0:
+                dir_name, clock_name = "正左方", "9点钟"
+            elif bearing_deg > 110.0 and bearing_deg <= 160.0:
+                dir_name, clock_name = "左后方", "8点钟"
+            elif abs_deg > 160.0:
+                dir_name, clock_name = "正后方", "6点钟"
+            elif bearing_deg < -20.0 and bearing_deg >= -70.0:
+                dir_name, clock_name = "右前方", "2点钟"
+            elif bearing_deg < -70.0 and bearing_deg >= -110.0:
+                dir_name, clock_name = "正右方", "3点钟"
+            else:
+                dir_name, clock_name = "右后方", "4点钟"
+
+            in_cam = bool(view.get('source') == 'camera' and view.get('camera_age', 0.0) < 0.35)
+            src_name = "视觉+雷达" if in_cam else "雷达接力"
+            summary_text = f"{dir_name} {bearing_deg:+.0f}° ({clock_name}) · {dist_val:.2f}m [{src_name}]"
+
+            target['bearing_deg'] = bearing_deg
+            target['direction_name'] = dir_name
+            target['clock_name'] = clock_name
+            target['in_camera_view'] = in_cam
+            target['tracking_source'] = 'camera' if in_cam else 'lidar'
+            target['direction_summary'] = summary_text
 
         payload = {
             "state": self.state,
@@ -1027,6 +1100,7 @@ class PersonFollowerNode(Node):
             "TRACKING":       "\033[1;32m[ 跟踪追随 ]\033[0m",
             "HOLDING":        "\033[1;36m[ 距离锁定 ]\033[0m",
             "REAR_ALIGNING":  "\033[1;36m[ 车后对准倒车 ]\033[0m",
+            "TURNAROUND":     "\033[1;36m[ 前向弧线掉头 ]\033[0m",
             "TARGET_BLINK":   "\033[1;33m[ 目标闪断 ]\033[0m",
             "SEARCHING_LOST": "\033[1;35m[ 搜索目标 ]\033[0m",
             "COLLISION_AEB":  "\033[1;41;37m[ 防撞急停 ]\033[0m",
@@ -1086,6 +1160,7 @@ def build_config(args):
         cfg.camera_pitch_rad = math.radians(args.camera_pitch_deg)
     cfg.recovery.enabled = not bool(getattr(args, "no_recovery", False))
     cfg.enable_pre_steer = bool(getattr(args, 'pre_steer', False))
+    cfg.enable_rear_turnaround = not bool(getattr(args, 'no_turnaround', False))
     if not getattr(args, 'rear_blind', False):
         # 实车 N10P 雷达高位安装全向无遮挡, 默认移除车尾屏蔽盲区, 启用 360° 全向避障与倒车
         cfg.scan_blind_sectors_deg = tuple(
@@ -1115,6 +1190,8 @@ def strip_ros_args(argv):
 def main():
     p = argparse.ArgumentParser(description="RK3588 电子跟屁虫 - 人体跟随控制节点")
     p.add_argument('--no-recovery', action='store_true', help='关闭自动倒车脱困和丢人搜索')
+    p.add_argument('--no-turnaround', action='store_true',
+                   help='禁用车后目标前向大舵角弧线掉头 (默认开启掉头调转车头面朝人体)')
     p.add_argument('--rear-blind', action='store_true',
                    help='车尾有结构遮挡时启用车尾屏蔽盲区 (默认关闭以启用 360° 全向雷达跟踪与倒车)')
     p.add_argument('--dry-run', action='store_true',

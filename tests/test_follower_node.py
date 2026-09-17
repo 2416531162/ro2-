@@ -800,6 +800,26 @@ class TestRearTargetFollowing(unittest.TestCase):
         self.assertLess(h.node.cmd_vx, -0.01)
         self.assertGreater(h.node.cmd_steer, 0.05, "左后方目标倒车时前轮应左偏以带动车尾向左摆动")
 
+    def test_target_behind_with_turnaround_enabled_arcs_forward(self):
+        """当开启 enable_rear_turnaround 且前方开阔时，执行前向大舵角掉头。"""
+        h = FollowerHarness(enable_rear_turnaround=True)
+        h.tick(n10p_scan(half_size=5.0))
+        self._set_target_at(h, -2.0, 0.5)
+        for _ in range(5):
+            h.tick(n10p_scan(half_size=5.0))
+        self.assertGreater(h.node.cmd_vx, 0.10)
+        self.assertEqual(h.node.state, 'TURNAROUND')
+
+    def test_target_behind_turnaround_blocked_falls_back_to_reverse(self):
+        """当开启 enable_rear_turnaround 但前方受阻时，安全降级回倒车对准。"""
+        h = FollowerHarness(enable_rear_turnaround=True, scan_blind_sectors_deg=())
+        front_obstacle = disc(1.0, 0.0, 0.3)
+        h.tick(n10p_scan(half_size=5.0, extra=front_obstacle))
+        self._set_target_at(h, -2.0, 0.0)
+        h.tick(n10p_scan(half_size=5.0, extra=front_obstacle))
+        self.assertLess(h.node.cmd_vx, -0.01)
+        self.assertEqual(h.node.state, 'REAR_ALIGNING')
+
     def test_lidar_handoff_timeout_relaxed(self):
         """雷达接力期间更新间隔在 0.5s (>0.30s) 时不应丢锁。"""
         import time
