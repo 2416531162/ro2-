@@ -14,12 +14,17 @@ class FollowerController:
         dt = max(0.0, min(elapsed, 0.10))
         feedback_fresh = bool(self.feedback_healthy and self.feedback_stamp
                               and 0 <= now-self.feedback_stamp <= PROFILE['driver']['feedback_timeout_s'])
+        scan_fresh = bool(self.scan_stamp is not None and 0 <= now-self.scan_stamp < PROFILE['safety']['scan_timeout_s']
+                          and self.scan_evidence is not None and self.scan_evidence.usable)
         # 里程计:底盘反馈断了按静止处理(此时 healthy=False,车本来就会停)
         if self.simulated_odometry:
             self.people.step_odom(now, self.chassis_speed if feedback_fresh else 0.0,
                                   self.chassis_yaw_rate if feedback_fresh else 0.0)
         local_pose = None if self.simulated_odometry else self.people.odom.pose_at(now)
         feedback_fresh = feedback_fresh and (self.simulated_odometry or local_pose is not None)
+        self.recovery.last_depth_used = False
+        self.recovery.depth_evidence = self.depth_path.view(
+            now, self.people.odom.current() if feedback_fresh else None)
         self.people.prune_crumbs()
         view = self.people.target_view(now, lidar_after_s=cfg.lidar_handoff_after_s)
         # 当目标由雷达接力跟踪或相机出现短暂丢帧时，允许更宽的超时门限 (0.80s)，防止离开相机画面瞬间掉锁
@@ -177,30 +182,26 @@ class FollowerController:
                         person_requested_vx = 0.0
                         desired_vx = 0.0
             else:
-                person_requested_vx = 0.0
-                if not (abs(person_error) <= cfg.deadband_m and abs(target_ground_speed) < .10):
-                    person_requested_vx = max(0.0, cfg.kd_feedforward*max(0.0, target_ground_speed)
-                                              + cfg.kp_distance*person_error)
-                desired_vx = person_requested_vx
+                if getattr(self, 'mppi', None) is not None and not getattr(self, 'mppi_fallback', False):
+                    desired_vx, desired_steer = self.solve_mppi(person_gap, scan_fresh)
+                    person_requested_vx = desired_vx
+                else:
+                    desired_vx, desired_steer = self.solve_pure_pursuit(person_gap, bearing)
+                    person_requested_vx = desired_vx
 
-                # 视线上有更近的障碍物：根据障碍物距离平滑减速，贴近 obstacle_standoff_m 时直接归零
-                if gap < person_gap:
-                    z_obs = max(gap + v_rel * cfg.control_latency_s * 0.5, .05)
-                    obs_error = z_obs - cfg.follow_distance_m
-                    if obs_error <= cfg.deadband_m or gap <= cfg.obstacle_standoff_m:
-                        desired_vx = 0.0
-                    else:
-                        desired_vx = min(desired_vx, cfg.kp_distance * obs_error)
+                    # 视线上有更近的障碍物：根据障碍物距离平滑减速，贴近 obstacle_standoff_m 时直接归零
+                    if gap < person_gap:
+                        z_obs = max(gap + v_rel * cfg.control_latency_s * 0.5, .05)
+                        obs_error = z_obs - cfg.follow_distance_m
+                        if obs_error <= cfg.deadband_m or gap <= cfg.obstacle_standoff_m:
+                            desired_vx = 0.0
+                        else:
+                            desired_vx = min(desired_vx, cfg.kp_distance * obs_error)
 
-                ax, ay = self._aim(view)
-                self.aim_point = (ax, ay)
-                if abs(math.atan2(ay, ax)) > cfg.steer_deadband_rad:
-                    desired_steer = self._pursuit_steer(ax, ay)
-
-                # 侧向对准：若人在侧方（偏角 > 20°），以蠕行小速度带动阿克曼车头转正对准人
-                if (cfg.enable_pre_steer and abs(bearing) > math.radians(20.0)
-                        and desired_vx < cfg.pre_steer_creep_mps):
-                    desired_vx = cfg.pre_steer_creep_mps
+                    # 侧向对准：若人在侧方（偏角 > 20°），以蠕行小速度带动阿克曼车头转正对准人
+                    if (cfg.enable_pre_steer and abs(bearing) > math.radians(20.0)
+                            and desired_vx < cfg.pre_steer_creep_mps):
+                        desired_vx = cfg.pre_steer_creep_mps
 
             cap_follow = min(cfg.max_speed_mps, brake_envelope(gap, cfg.follow_profile))
             if view['update_age'] > 0.2 and not self.lidar_handoff_active:
@@ -225,8 +226,6 @@ class FollowerController:
             person_follow_cap = cap_follow
             self.latest_raw = None
 
-        scan_fresh = bool(self.scan_stamp is not None and 0 <= now-self.scan_stamp < PROFILE['safety']['scan_timeout_s']
-                          and self.scan_evidence is not None and self.scan_evidence.usable)
         low_battery = not math.isfinite(self.voltage) or self.voltage < cfg.battery_min_v
         healthy = (scan_fresh and feedback_fresh and (self.dry_run or self.driver_armed)
                    and not low_battery and not self.last_conflict and elapsed <= .25)
@@ -331,13 +330,25 @@ class FollowerController:
             self.path_clearance = 0.0
         self.motion_direction = direction
         cap = abs(desired_vx)
+        if self.recovery.last_depth_used:
+            # Camera corroboration is initially limited to creeping speed.
+            cap = min(cap, .12)
         profile = (BrakeProfile(cfg.decel_capability_mps2, cfg.control_latency_s, .035, .015)
                    if self.recovery.active else cfg.obstacle_profile)
         cap = min(cap, brake_envelope(self.path_clearance, profile))
         if self.aeb_latched:
             cap = 0.0
             if healthy and abs(desired_vx) > 0:
-                self.state, self.limit_reason = 'AEB_EMERGENCY', 'aeb_hard'
+                block = self.recovery.last_block
+                if block is not None and block[0] in ('unknown', 'no_scan'):
+                    self.state, self.limit_reason = 'OBSERVATION_WAIT', 'insufficient_observation'
+                else:
+                    self.state, self.limit_reason = 'AEB_EMERGENCY', 'aeb_hard'
+        if self.recovery.last_depth_used:
+            ev = self.depth_path.evidence
+            if ev is None or not 0 <= self.now()-ev.stamp <= self.depth_path.MAX_AGE_S:
+                cap = 0.0
+                self.state, self.limit_reason = 'OBSERVATION_WAIT', 'depth_expired_during_control'
         if cap == 0:
             self.speed_slew.reset(0.0)
             self.kick.apply(0.0, False, 0.0, now)
@@ -401,3 +412,61 @@ class FollowerController:
         denom = radius - 0.5 * geo.track_m
         steer = geo.max_steer_rad if denom <= 1e-6 else math.atan(geo.wheelbase_m / denom)
         return math.copysign(min(steer, self.cfg.max_steer_rad), ay)
+
+
+    def solve_pure_pursuit(self, z, bearing):
+        """几何解 + 距离 P 律 + 目标速度前馈。确定性,无依赖,默认走这条。"""
+        cfg = self.cfg
+        vx = steer = 0.0
+        v = self.view
+        target_ground_speed = v['v_fwd'] if v else self.chassis_speed
+        error = z - cfg.follow_distance_m
+        if not (abs(error) <= cfg.deadband_m and abs(target_ground_speed) < .10):
+            vx = max(0.0, cfg.kd_feedforward * max(0.0, target_ground_speed)
+                     + cfg.kp_distance * error)
+        if abs(bearing) > cfg.steer_deadband_rad:
+            ax, ay = self._aim(v) if v else (z + cfg.footprint_front_m, 0.0)
+            self.aim_point = (ax, ay)
+            steer = self._pursuit_steer(ax, ay)
+        return vx, steer
+
+
+    def solve_mppi(self, z, scan_fresh):
+        """采样优化:跟随、避障、视野保持共用一个代价函数。
+
+        它只产出**参考量**。产出之后照样过刹车包络、扫掠净空、AEB 和脱困
+        状态机 —— MPPI 是软约束优化器,加权平均出来的控制可能落在没有任何
+        样本占据的区域,把硬安全交给它是拿碰撞保证换一个调参旋钮。
+
+        连续判不可行超过上限就整段回退到纯追踪:偶尔找不到解是正常的,
+        一直找不到说明它自己坏了,不该让车一直瘫着。
+        """
+        cfg = self.cfg
+        v = self.view
+        if v is not None:
+            person = (v['x'], v['y'])
+            velocity = (v['v_fwd'], v['v_lat'])
+        else:
+            person = (z + cfg.footprint_front_m, 0.0)
+            velocity = (0.0, 0.0)
+        bearing = math.atan2(person[1], max(0.05, person[0]))
+        try:
+            sol = self.mppi.solve(self.scan_points, person, velocity,
+                                  self.chassis_speed, self.cmd_steer,
+                                  usable=scan_fresh)
+        except Exception:
+            self.mppi_fallback = True
+            self.mppi_last = None
+            return self.solve_pure_pursuit(z, bearing)
+        self.mppi_last = sol
+        too_slow = sol.solve_ms > cfg.mppi_solve_budget_ms
+        if sol.feasible and not too_slow:
+            self.mppi_infeasible_streak = 0
+        else:
+            self.mppi_infeasible_streak += 1
+            if self.mppi_infeasible_streak >= cfg.mppi_fallback_after:
+                self.mppi_fallback = True
+                return self.solve_pure_pursuit(z, bearing)
+            if not sol.feasible:
+                self.limit_reason = sol.reason
+        return sol.speed, sol.steer

@@ -3,20 +3,23 @@
 import argparse
 import json
 import math
+import os
 import signal
 import sys
 import time
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
-from sensor_msgs.msg import LaserScan
+from sensor_msgs.msg import LaserScan, Image, CameraInfo
 from nav_msgs.msg import Odometry
 from std_msgs.msg import String, Float32
-from runtime_config import PROFILE
+from runtime_config import PROFILE, profile_hash
 from robot_core.contracts import ScanFrame, LocalPose
 from follower_config import FollowerConfig as FollowerConfig, build_config
 from follower_engine import FollowerEngine
 from motion_client import MotionClient
+from depth_measurement import decode_depth
+from depth_path import DepthIntrinsics
 
 __all__ = ['PersonFollowerNode', 'FollowerConfig', 'build_config']
 
@@ -30,6 +33,8 @@ class PersonFollowerNode(Node):
             ros_time=lambda: self.get_clock().now().nanoseconds / 1e9,
             emit_status=lambda data: self.pub_status.publish(String(data=json.dumps(data, ensure_ascii=False))),
             dry_run=dry_run, target_class=target_class, simulated_odometry=simulated_odometry)
+        self.engine.depth_path.load_calibration(
+            os.environ.get('RK3588_DEPTH_PATH_CONFIG', '/etc/rk3588/depth_path.json'), profile_hash(PROFILE))
         self.motion = MotionClient(self, 'follow')
         self._select_pending = not (dry_run or passive)
         self._motion_epoch = None
@@ -39,7 +44,15 @@ class PersonFollowerNode(Node):
         self.create_subscription(Float32, '/voltage', self.on_voltage, 1)
         self.create_subscription(String, '/wheeltec/status', self.on_driver_status, 1)
         self.create_subscription(Odometry, PROFILE['localization']['topic'], self.on_odom, sensor_qos)
+        self.create_subscription(CameraInfo, '/camera/depth_raw/camera_info', self.on_depth_info, sensor_qos)
+        self.create_subscription(Image, '/camera/depth_raw/image', self.on_depth_image, sensor_qos)
         self.timer = self.create_timer(self.engine.dt, self.control_loop)
+        if self.engine.mppi is not None:
+            self.get_logger().info(f">>> 参考量生成器: {self.engine.mppi.describe()}")
+            if 'cuda' not in self.engine.mppi.b.describe():
+                self.get_logger().warn(
+                    ">>> MPPI 没有跑在 CUDA 上。CPU 后端的求解耗时会把控制周期"
+                    "撑爆,而刹车包络是按周期算的 —— 实车上请确认 torch.cuda 可用")
         self.get_logger().info('Follower ready; local odometry: ' +
                                ('simulation only' if simulated_odometry else PROFILE['localization']['topic']))
 
@@ -77,6 +90,44 @@ class PersonFollowerNode(Node):
         seconds = stamp.sec + stamp.nanosec / 1e9 if stamp else 0.
         self.engine.observe_scan(ScanFrame(msg.ranges, msg.angle_min, msg.angle_increment,
                                           msg.range_min, msg.range_max, seconds))
+
+    def on_depth_info(self, msg):
+        sensor = self.engine.depth_path
+        try:
+            roi = msg.roi
+            info = DepthIntrinsics.from_info(width=msg.width, height=msg.height,
+                frame=msg.header.frame_id,
+                stamp=msg.header.stamp.sec+msg.header.stamp.nanosec/1e9,
+                k=msg.k, d=msg.d, r=msg.r, p=msg.p,
+                binning=(msg.binning_x, msg.binning_y),
+                roi=(roi.x_offset, roi.y_offset, roi.width, roi.height, roi.do_rectify))
+            previous = sensor.intrinsics
+            if previous is not None and (previous.width, previous.height, previous.frame,
+                    previous.fx, previous.fy, previous.cx, previous.cy) != (
+                    info.width, info.height, info.frame, info.fx, info.fy, info.cx, info.cy):
+                sensor.invalidate('intrinsics_changed')
+            sensor.intrinsics = info
+        except (AttributeError, ValueError, TypeError):
+            sensor.intrinsics = None
+            sensor.invalidate('intrinsics_invalid')
+
+    def on_depth_image(self, msg):
+        core, sensor = self.engine, self.engine.depth_path
+        now = core.now()
+        try:
+            stamp = msg.header.stamp.sec+msg.header.stamp.nanosec/1e9
+            lag = core.ros_time()-stamp
+            if not math.isfinite(lag) or not 0 <= lag <= sensor.MAX_AGE_S:
+                sensor.invalidate('depth_stale')
+                return
+            t_meas = now-lag
+            pose = core.people.odom.pose_at(t_meas)
+            # Decoding honors ROS encoding, stride and byte order. This image
+            # is independent of detection boxes and does not create people.
+            depth_m = decode_depth(msg)*.001 if sensor.calibration is not None else None
+            sensor.observe(depth_m, t_meas, pose, msg.header.frame_id, stamp, now)
+        except (AttributeError, ValueError, TypeError, OverflowError):
+            sensor.invalidate('invalid_depth')
 
     def on_voltage(self, msg):
         self.engine.observe_voltage(msg.data)
@@ -162,6 +213,14 @@ def main():
                    help='最小通行净空门限(米),默认0.15')
     p.add_argument('--camera-pitch-deg', type=float, default=None, dest='camera_pitch_deg',
                    help='相机俯角(度,向下为正),默认 15')
+    p.add_argument('--controller', choices=('pure-pursuit', 'mppi'),
+                   default=None,
+                   help='参考量生成器。默认 pure-pursuit;mppi 需要 Orin + Torch CUDA')
+    p.add_argument('--mppi-samples', type=int, default=None, dest='mppi_samples',
+                   help='MPPI 采样数 K,默认 1024。Orin CUDA 上 2048 也只是几毫秒')
+    p.add_argument('--mppi-device', type=str, default=None, dest='mppi_device',
+                   choices=('auto', 'cuda', 'cpu', 'numpy'),
+                   help='MPPI 后端。实车上应当是 cuda;auto 会在没有 CUDA 时悄悄降级')
     p.add_argument('--pre-steer', action='store_true',
                    help='静止时用微速度触发预打舵 (PROTOCOL.md 8.3),需实车确认')
     args = p.parse_args(strip_ros_args(sys.argv[1:]))

@@ -12,6 +12,7 @@ from runtime_config import PROFILE
 from follower_perception import FollowerPerception
 from follower_controller import FollowerController
 from follower_telemetry import FollowerTelemetry
+from depth_path import DepthPathSensor
 
 
 class FollowerEngine(FollowerPerception, FollowerController, FollowerTelemetry):
@@ -37,6 +38,23 @@ class FollowerEngine(FollowerPerception, FollowerController, FollowerTelemetry):
         from motion_safety import TargetLock
         self.lock = TargetLock(confirm_frames=config.confirm_frames,
                                lost_timeout_s=config.lost_timeout_s)
+        try:
+            from mppi_controller import MPPIController, MPPIConfig
+            mppi_err = None
+        except Exception as _exc:
+            MPPIController = MPPIConfig = None
+            mppi_err = _exc
+        self.mppi = None
+        self.mppi_infeasible_streak = 0
+        self.mppi_fallback = False
+        self.mppi_last = None
+        if config.controller == 'mppi':
+            if MPPIController is None:
+                raise RuntimeError(f"要求 MPPI 但模块导入失败: {mppi_err}")
+            mcfg = MPPIConfig.from_follower(config)
+            mcfg.samples = config.mppi_samples
+            mcfg.horizon = config.mppi_horizon
+            self.mppi = MPPIController(mcfg, prefer=config.mppi_device)
         self.view = None               # 本周期目标视图(车体系)
         self.los_gap = None            # 相机视线上雷达测得的车头间距
         self.los_time = 0.0
@@ -49,6 +67,7 @@ class FollowerEngine(FollowerPerception, FollowerController, FollowerTelemetry):
         self.camera_mount = config.camera_mount
         self.scan_points = []          # 车体坐标系下的雷达点,供扫掠检查用
         self.scan_evidence = None
+        self.depth_path = DepthPathSensor()
         self.recovery = LocalRecovery(self.footprint, config.geometry,
                                       config.obstacle_profile, config.recovery)
         self.feedback_stamp = 0.0
@@ -103,6 +122,8 @@ class FollowerEngine(FollowerPerception, FollowerController, FollowerTelemetry):
         self.last_print_time = 0.0
 
     def reset_tracking(self, keep_odom=True):
+        if not keep_odom:
+            self.depth_path.invalidate('pose_reset')
         self.people.reset(keep_odom=keep_odom)
         self.recovery = LocalRecovery(self.footprint, self.cfg.geometry,
                                       self.cfg.obstacle_profile, self.cfg.recovery)
@@ -126,6 +147,7 @@ class FollowerEngine(FollowerPerception, FollowerController, FollowerTelemetry):
         accepted = buf.add(self.now() - age, pose.x, pose.y, pose.yaw,
                            cfg['max_speed_m_s'], cfg['max_yaw_rate_rad_s'])
         if buf.revision != revision:
+            self.depth_path.invalidate('pose_reset')
             self.reset_tracking(keep_odom=True)
         return accepted
 

@@ -495,3 +495,32 @@ class TestDoorSimulation(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
+
+class TestMissingObservationWait(unittest.TestCase):
+    def test_persistent_front_gap_waits_without_spending_recovery_legs(self):
+        p = planner()
+        m = scan_message()
+        for i in range(360):
+            a = math.degrees(m.angle_min + i*m.angle_increment)
+            if -32 <= a <= -20:
+                m.ranges[i] = float('inf')
+        e = evidence(m)
+        for i in range(200):
+            command = update(p, 100. + .05*i, scan=e, requested_steer=0.)
+            self.assertEqual(command.speed, 0.)
+            self.assertEqual(command.state, 'OBSERVATION_WAIT')
+            self.assertEqual(command.reason, 'insufficient_observation')
+        self.assertEqual(p.legs, 0)
+        self.assertFalse(p.exhausted)
+        self.assertFalse(p.active)
+        # Fresh complete observations resume the existing normal path.
+        command = update(p, 110., scan=evidence(), requested_steer=0.)
+        self.assertGreater(command.speed, 0.)
+        self.assertEqual(command.state, 'TRACKING')
+
+    def test_observed_wall_is_not_reported_as_missing_observations(self):
+        p = planner(enabled=False)
+        command = update(p, 100., scan=evidence(scan_message(wall=.75)), requested_steer=0.)
+        self.assertEqual(command.speed, 0.)
+        self.assertEqual(command.state, 'PATH_BLOCKED')
+        self.assertEqual(command.reason, 'obstacle_path_blocked')

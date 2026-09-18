@@ -250,6 +250,7 @@ class PersonTracker:
         self.rejected = 0
         self.switches = 0
         self.reacquires = 0
+        self.lidar_ambiguous_frames = 0
         self.lidar_enabled = True
         self.camera_in_view = None
 
@@ -269,6 +270,7 @@ class PersonTracker:
         self.target_id = None
         self.target_lost_at = None
         self.last_target_pos = None
+        self.camera_in_view = None
 
     # ---------------------------------------------------------------- 观测噪声
     @staticmethod
@@ -397,60 +399,21 @@ class PersonTracker:
         pose = self.odom.pose_at(t_meas)
         if pose is None:
             return
+        # Expired tracks must be removed before a late return can refresh them.
+        self._housekeeping(t_now)
         self._predict_all(t_now)
         meas = []
         for cx, cy in clusters:
             ox, oy = OdomBuffer.vehicle_to_odom(pose, cx, cy)
             meas.append((ox, oy, self.LIDAR_R))
-        tracks = [tr for tr in self.tracks if tr.confirmed]
+        # Only the locked, visually confirmed person may use lidar continuity.
+        # Keeping every old camera track alive on arbitrary small returns creates
+        # persistent ghost people and steals measurements from the actual target.
+        target = self._get(self.target_id) if self.target_id is not None else None
+        tracks = [target] if target is not None and target.confirmed else []
         amb2 = self.lidar_ambiguity_m ** 2
         pairs = self._associate(tracks, meas, t_meas)
-        target = self._get(self.target_id) if self.target_id is not None else None
-
-        # A normal gate is deliberately tight so a chair leg cannot move a
-        # track by a metre in one frame.  A confirmed target crossing the rear
-        # of the car is the one exception: once the camera has gone quiet, a
-        # unique rear cluster inside the short handoff window is stronger
-        # evidence than a stale front association.  Work this out before
-        # applying the normal pairs so a front clutter hit cannot suppress it.
-        forced = None
-        target_pair = next(((tr, j) for tr, j in pairs if tr is target), None)
-        occupied_by_other = {j for tr, j in pairs if tr is not target}
-        if (target is not None and target.confirmed and target.last_camera is not None
-                and t_now - target.last_camera >= self.reacquire_after_s):
-            candidates = []
-            for j, (mx, my, R) in enumerate(meas):
-                sx, sy = self._shift(mx, my, t_meas, target)
-                d = math.hypot(sx - target.state[0], sy - target.state[1])
-                if d <= self.reacquire_radius_m and j not in occupied_by_other:
-                    candidates.append((d, j, sx, sy, R))
-
-            # If the old track is still in front, prefer a unique cluster that
-            # is already behind the axle.  This is the fast rear crossing case;
-            # front candidates are commonly the point which caused the miss.
-            pose_now = self.odom.current()
-            rear = []
-            for candidate in candidates:
-                bx, by = OdomBuffer.odom_to_vehicle(pose_now, candidate[2], candidate[3])
-                if bx < -0.05 or abs(math.atan2(by, bx)) > math.radians(110.0):
-                    rear.append(candidate)
-            old_x, _ = OdomBuffer.odom_to_vehicle(pose_now, *target.pos)
-            if old_x >= 0.0 and rear:
-                rear.sort(key=lambda c: c[0])
-                best = rear[0]
-                ambiguous = len(rear) > 1 and rear[1][0] - best[0] < self.lidar_ambiguity_m
-                if not ambiguous:
-                    forced = best
-            elif old_x >= 0.0 and target_pair is None and candidates:
-                candidates.sort(key=lambda c: c[0])
-                best = candidates[0]
-                ambiguous = len(candidates) > 1 and candidates[1][0] - best[0] < self.lidar_ambiguity_m
-                if not ambiguous:
-                    forced = best
-
         for tr, j in pairs:
-            if forced is not None and tr is target:
-                continue
             ox, oy, R = meas[j]
             ox, oy = self._shift(ox, oy, t_meas, tr)
             # Check alternatives against the SAME pre-update prediction and
@@ -468,44 +431,14 @@ class PersonTracker:
                         and math.hypot(mx - tr.pos[0], my - tr.pos[1]) <= self.gate_max_m):
                     ambiguous = True
                     break
+            if ambiguous:
+                # Do not update position/velocity with an arbitrary winner and
+                # then use that narrowed covariance to certify it next frame.
+                self.lidar_ambiguous_frames += 1
+                continue
             self._apply(tr, ox, oy, R, "lidar", t_now, None)
-            if not ambiguous:
-                tr.last_confident = t_now
-        if forced is not None:
-            _, j, ox, oy, R = forced
-            self._relocate(target, ox, oy, R, t_now)
+            tr.last_confident = t_now
         self._housekeeping(t_now)
-
-    def _relocate(self, tr, ox, oy, R, t_now):
-        """Snap a confirmed track to a unique rear radar return.
-
-        A Kalman update is intentionally gradual.  For a front-to-rear
-        crossing that would make the estimated person pass through the car
-        for several control cycles, exactly when the controller must turn.
-        The radar association has already been gated and ambiguity checked;
-        relocate the position immediately while bounding the derived velocity.
-        """
-        old_x, old_y = tr.pos
-        dt = max(t_now - tr.last_update, 0.05)
-        vx, vy = (ox - old_x) / dt, (oy - old_y) / dt
-        speed = math.hypot(vx, vy)
-        if speed > 2.5:
-            scale = 2.5 / speed
-            vx, vy = vx * scale, vy * scale
-        tr.state = [ox, oy, vx, vy]
-        tr.P[0][0] = max(R[0], 0.08 ** 2)
-        tr.P[1][1] = max(R[1], 0.08 ** 2)
-        tr.P[0][1] = tr.P[1][0] = 0.0
-        tr.P[0][2] = tr.P[0][3] = tr.P[1][2] = tr.P[1][3] = 0.0
-        tr.P[2][0] = tr.P[2][1] = tr.P[3][0] = tr.P[3][1] = 0.0
-        tr.t = tr.last_update = t_now
-        tr.last_source = "lidar"
-        tr.last_confident = t_now
-        tr.misses = 0
-        tr.lidar_hits += 1
-        self.reacquires += 1
-        if tr.id == self.target_id:
-            tr.add_crumb(self.crumb_spacing_m, self.crumb_max)
 
     def _apply(self, tr, ox, oy, R, source, t_now, det):
         tr.update(ox, oy, R)
@@ -564,24 +497,25 @@ class PersonTracker:
         if target is not None:
             self.last_target_pos = target.pos
             self.target_lost_at = None
-            cam_age = t_now - target.last_camera if target.last_camera is not None else 1e9
-            if cam_age <= self.reacquire_after_s:
-                return
-            # 目标只靠雷达维持时,若附近出现一条相机正看着的已确认轨迹,
-            # 说明雷达轨迹可能已经漂移/挂在别的东西上:换到相机那条(就近原则)
-            alt = self._best_near(t_now, target.pos, self.reacquire_radius_m, exclude=target.id)
-            if alt is not None:
-                self._switch(alt, target)
+            # A different visible person is not proof that the locked person
+            # moved there. Camera reacquisition goes through normal association.
             return
-        if self.target_id is not None and self.target_lost_at is None:
-            self.target_lost_at = t_now
-        # 没有目标:刚丢失时优先在丢失位置附近找;否则按「最正前方、最接近期望距离」挑
-        cand = None
-        if self.last_target_pos is not None and self.target_lost_at is not None \
-                and t_now - self.target_lost_at < 3.0:
-            cand = self._best_near(t_now, self.last_target_pos, self.reacquire_radius_m + 1.0)
-        if cand is None:
-            cand = self._best_front(t_now)
+        if self.target_id is not None:
+            if self.target_lost_at is None:
+                self.target_lost_at = t_now
+            # Brief local camera recovery only; never select an unrelated front
+            # person just because the original one went behind the car.
+            if (self.last_target_pos is not None
+                    and t_now - self.target_lost_at < 3.0):
+                near = [tr for tr in self.tracks if self._camera_fresh(tr, t_now)
+                        and math.hypot(tr.pos[0] - self.last_target_pos[0],
+                                       tr.pos[1] - self.last_target_pos[1])
+                        <= min(self.reacquire_radius_m, 0.6)]
+                if len(near) == 1:
+                    self._switch(near[0], None)
+                    self.reacquires += 1
+            return
+        cand = self._best_front(t_now)
         if cand is not None:
             self._switch(cand, None)
 
@@ -613,8 +547,9 @@ class PersonTracker:
         return best
 
     def _switch(self, new, old):
-        if old is not None:
+        if self.target_id is not None and self.target_id != new.id:
             self.switches += 1
+        if old is not None:
             # 继承路径点:人没变,只是轨迹编号换了
             new.crumbs = deque(old.crumbs)
         self.target_id = new.id

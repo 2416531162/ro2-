@@ -10,7 +10,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import String
-from n10p_pipeline import N10PDecoder, SweepAssembler, BINS, RANGE_MIN, RANGE_MAX
+from n10p_pipeline import N10PDecoder, SweepAssembler, BINS, RANGE_MIN, RANGE_MAX, scan_coverage
 
 PORT = os.environ.get('N10P_PORT', '/dev/serial/by-id/usb-WCH.CN_USB_Single_Serial_0001-if00')
 BAUD = 460800
@@ -39,6 +39,7 @@ class RealLidarNode(Node):
         self.last_scan = None
         self.scan_time = 0.0
         self.valid = 0
+        self.coverage = None
         self.overruns = 0
         self.open_serial()
         self.timer = self.create_timer(0.01, self.spin_serial)
@@ -110,6 +111,10 @@ class RealLidarNode(Node):
         else:
             ranges = scan['ranges']
             intensities = scan['intensities']
+        sampled = scan['sampled']
+        if self.yaw_bins:
+            sampled = sampled[-self.yaw_bins:] + sampled[:-self.yaw_bins]
+        self.coverage = scan_coverage(ranges, sampled)
         msg.ranges, msg.intensities = ranges, intensities
         self.pub.publish(msg)
         self.last_scan = scan['received']
@@ -127,7 +132,8 @@ class RealLidarNode(Node):
                       calib_yaw_deg=self.yaw_deg,
                       bytes=d.bytes_received, frames=d.frames, crc_errors=d.crc_errors,
                       angle_errors=d.angle_errors, discarded_bytes=d.discarded_bytes,
-                      echo_fallbacks=d.echo_fallbacks, overruns=self.overruns)
+                      echo_fallbacks=d.echo_fallbacks, overruns=self.overruns,
+                      coverage=self.coverage if age is not None and age < 0.5 else None)
         msg = String()
         msg.data = json.dumps(status)
         self.status_pub.publish(msg)

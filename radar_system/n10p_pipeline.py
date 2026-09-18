@@ -106,10 +106,13 @@ class SweepAssembler:
                     duration = now - self.started
                     if 0.03 <= duration <= 0.3:
                         ranges, intensities = [math.inf] * BINS, [0.0] * BINS
+                        sampled = [False] * BINS
                         for key, (r, quality) in self.bins.items():
                             ranges[key], intensities[key] = r, float(quality)
+                            sampled[key] = True
                         self.sweeps += 1
                         scans.append({'ranges': ranges, 'intensities': intensities,
+                                      'sampled': sampled,
                                       'scan_time': duration, 'received': now})
                 self.bins = {}
                 self.started = now
@@ -144,3 +147,49 @@ def scan_payload(ranges, range_min, range_max, angle_min=0.0,
 def project_point(angle, distance, cx, cy, scale):
     # ROS +Y is left: 90 degrees must agree with the left distance card.
     return cx - math.sin(angle) * distance * scale, cy - math.cos(angle) * distance * scale
+
+
+def scan_coverage(ranges, sampled, bin_deg=0.5, min_gap_deg=3.0):
+    """Preserve acquisition provenance without changing LaserScan ranges.
+
+    Summarize contiguous invalid sectors in published angular coordinates.
+    Empty bins are not the same as samples received with no usable echo.
+    """
+    if len(ranges) != len(sampled):
+        raise ValueError("ranges and sampled must have equal lengths")
+    n = len(ranges)
+    def kind(i):
+        if not sampled[i]:
+            return 'unsampled'
+        r = ranges[i]
+        if math.isfinite(r) and RANGE_MIN <= r <= RANGE_MAX:
+            return 'valid'
+        return 'too_near' if r == -math.inf else 'no_valid_echo'
+    kinds = [kind(i) for i in range(n)]
+    counts = {name: kinds.count(name) for name in
+              ('valid', 'unsampled', 'too_near', 'no_valid_echo')}
+    if not n:
+        return dict(counts=counts, gaps=[])
+    # Start immediately after a good return so a gap crossing zero stays whole.
+    start = next((i + 1 for i in range(n) if kinds[i] == 'valid'), 0) % n
+    groups, group = [], []
+    for offset in range(n):
+        i = (start + offset) % n
+        if kinds[i] != 'valid':
+            group.append(i)
+        elif group:
+            groups.append(group)
+            group = []
+    if group:
+        groups.append(group)
+    gaps = []
+    for group in groups:
+        if len(group) * bin_deg < min_gap_deg:
+            continue
+        gaps.append(dict(start_deg=round((group[0]*bin_deg + 180) % 360 - 180, 2),
+                         end_deg=round((group[-1]*bin_deg + 180) % 360 - 180, 2),
+                         width_deg=round(len(group)*bin_deg, 2),
+                         unsampled=sum(kinds[i] == 'unsampled' for i in group),
+                         too_near=sum(kinds[i] == 'too_near' for i in group),
+                         no_valid_echo=sum(kinds[i] == 'no_valid_echo' for i in group)))
+    return dict(counts=counts, gaps=gaps)

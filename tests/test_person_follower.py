@@ -97,7 +97,9 @@ class FollowerHarness:
                 return cb
         raise KeyError(topic)
 
-    def feed(self, people=(), scan=None, speed=0.0, yaw=0.0, voltage=25.0):
+    def feed(self, people=(), scan=None, speed=None, yaw=0.0, voltage=25.0):
+        if speed is None:
+            speed = getattr(self.node, 'cmd_vx', 0.0)
         s = scan or FakeScan()
         s.header.stamp.sec = 1000 + int(self.t)
         s.header.stamp.nanosec = int((self.t % 1) * 1e9)
@@ -326,6 +328,115 @@ class TestIdentity(FollowerTestCase):
         self.assertTrue(s['target_locked'])
         self.assertFalse(s['signature_ready'])
 
+
+
+# =============================================================================
+# MPPI 接入 —— 重点不是它算得好不好,而是它**没有**绕过安全层
+# =============================================================================
+
+class TestMPPIIntegration(FollowerTestCase):
+    """MPPI 只产出参考量。刹车包络、扫掠净空、AEB、脱困状态机全部照旧。
+
+    这组测试存在的理由:MPPI 是软约束优化器,加权平均出来的控制可能落在没有
+    任何样本占据的区域。如果哪天有人为了"让它更跟手"把下游某一层摘掉,
+    这里必须立刻红。
+    """
+
+    def mppi(self, **kw):
+        kw.setdefault('controller', 'mppi')
+        kw.setdefault('mppi_device', 'numpy')
+        kw.setdefault('mppi_samples', 64)
+        kw.setdefault('mppi_horizon', 12)
+        return self.make(**kw)
+
+    def test_node_starts_with_mppi(self):
+        h = self.mppi()
+        s = h.settle(8, people=[person(2.5)])
+        self.assertEqual(s['controller'], 'mppi')
+        self.assertIsNotNone(s['mppi'])
+        self.assertGreater(s['mppi']['solve_ms'], 0.0)
+
+    def test_mppi_drives_toward_the_person(self):
+        h = self.mppi()
+        s = h.settle(16, people=[person(3.0)])
+        self.assertGreater(s['cmd_vx'], 0.0)
+
+    def test_mppi_output_never_goes_backwards(self):
+        h = self.mppi()
+        for _ in range(20):
+            s = h.tick(people=[person(1.1)])
+            self.assertGreaterEqual(s['cmd_vx'], -1e-9)
+
+    def test_brake_envelope_still_caps_mppi(self):
+        """跟随刹车包络在 MPPI 之后仍然生效 —— 靠得越近上限越低。"""
+        h = self.mppi()
+        far = h.settle(10, people=[person(3.2)])['speed_cap_mps']
+        near = h.settle(10, people=[person(1.6)])['speed_cap_mps']
+        self.assertLess(near, far)
+
+    def test_aeb_still_overrides_mppi(self):
+        """硬急停不归 MPPI 管,也不该归它管。"""
+        h = self.mppi()
+        h.settle(8, people=[person(3.0)])
+        blocked = FakeScan()
+        for d in range(-40, 41):
+            blocked.put(d, 0.22)          # 贴着车头 (0.53 + 0.22 = 0.75m, 车头 0.67m 外 8cm 处硬急停)
+        s = h.settle(8, people=[person(3.0)], scan=blocked)
+        self.assertEqual(s['cmd_vx'], 0.0)
+        self.assertTrue(s['aeb_active'])
+
+    def test_low_battery_still_wins(self):
+        h = self.mppi()
+        s = h.settle(8, people=[person(2.5)], voltage=18.0)
+        self.assertEqual(s['state'], 'LOW_BATTERY')
+        self.assertEqual(s['cmd_vx'], 0.0)
+
+    def test_stale_scan_still_stops_the_robot(self):
+        h = self.mppi()
+        h.settle(8, people=[person(2.5)])
+        for _ in range(12):
+            h.t += 0.05
+            h.node.control_loop()
+        self.assertEqual(h.status()['cmd_vx'], 0.0)
+
+    def test_falls_back_to_pure_pursuit_when_solving_is_too_slow(self):
+        """求解耗时越过控制周期是实车上真正会发生的失效:torch 没跑在 CUDA 上、
+        Orin 降频、K 调太大。刹车包络按周期算,这时车会以为自己刹得住。"""
+        h = self.mppi(mppi_fallback_after=3, mppi_solve_budget_ms=0.0)
+        for _ in range(20):
+            s = h.tick(people=[person(2.5)])
+        self.assertEqual(s['controller'], 'pure-pursuit')
+        self.assertTrue(s['mppi']['fell_back'])
+        self.assertTrue(s['mppi']['over_budget'])
+
+    def test_a_healthy_solve_does_not_count_as_failure(self):
+        h = self.mppi(mppi_solve_budget_ms=10000.0)
+        for _ in range(20):
+            s = h.tick(people=[person(2.5)])
+        self.assertEqual(s['controller'], 'mppi')
+        self.assertEqual(s['mppi']['failure_streak'], 0)
+
+    def test_fallback_keeps_the_robot_following(self):
+        """回退不是停车。切回纯追踪之后车必须照常跟人。"""
+        h = self.mppi(mppi_fallback_after=3, mppi_solve_budget_ms=0.0)
+        for _ in range(24):
+            s = h.tick(people=[person(3.0)])
+        self.assertEqual(s['controller'], 'pure-pursuit')
+        self.assertGreater(s['cmd_vx'], 0.0)
+
+    def test_default_controller_is_still_pure_pursuit(self):
+        """实车验证通过之前,默认值不能是 MPPI。"""
+        h = self.make()
+        self.assertIsNone(h.node.mppi)
+        self.assertEqual(h.settle(4, people=[person(2.5)])['controller'],
+                         'pure-pursuit')
+
+    def test_steering_stays_within_the_servo_limit(self):
+        h = self.mppi()
+        limit = math.degrees(h.cfg.max_steer_rad) + 1e-6
+        for x in (-1.2, 0.0, 1.2):
+            s = h.settle(8, people=[person(2.5, x=x)])
+            self.assertLessEqual(abs(s['cmd_steer_deg']), limit)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

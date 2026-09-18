@@ -291,6 +291,8 @@ class LocalRecovery:
         self.previous_speed = 0.0
         self._edge = np.asarray(self._perimeter(), dtype=np.float64)
         self.last_block = None
+        self.depth_evidence = None
+        self.last_depth_used = False
         self.exhausted_at = None
 
     @property
@@ -346,6 +348,7 @@ class LocalRecovery:
         unknown-space rules and first-block ordering of the scalar algorithm.
         """
         self.last_block = None
+        self.last_depth_used = False
         if scan is None or not scan.usable:
             self.last_block = ("no_scan", 0.0, 0.0, 0.0)
             return 0.0
@@ -362,6 +365,8 @@ class LocalRecovery:
         rear, front, half = -f.rear_m-f.margin_m, f.front_m+f.margin_m, f.effective_half_width
         body_r = math.hypot(max(f.front_m, f.rear_m)+f.margin_m, half)+.016
         pts = scan.points_np
+        if self.depth_evidence is not None:
+            pts = np.concatenate((pts, self.depth_evidence.points_np), axis=0)
         pts = pts[np.sum(pts*pts, axis=1) <= (horizon+step+body_r)**2]
         collision_step = len(distances)
         collision_point = None
@@ -392,13 +397,26 @@ class LocalRecovery:
         covered, free = scan.query_many(qx, qy)
         known |= free
         missing = ~known & ~covered
+        depth_blocked = np.zeros(qx.shape, dtype=bool)
+        if self.depth_evidence is not None:
+            depth_free, depth_blocked = self.depth_evidence.query_many(qx, qy)
+            # Reverse retains its original lidar/history policy. Camera free
+            # evidence fills only unknown cells, never observed lidar obstacles.
+            if direction > 0:
+                corroborated = missing & depth_free
+                self.last_depth_used = bool(np.any(corroborated))
+                known |= corroborated
+            missing = ~known & ~covered & ~depth_blocked
         if np.any(missing) and (allow_memory or allow_history):
             known[missing] = self._memory_many(qx[missing], qy[missing], allow_memory, allow_history)
+        # A current depth obstacle also overrides remembered free space.
+        known &= ~depth_blocked
         unknown = np.argwhere(~known)
         # Obstacles were checked before the perimeter at each sample.
         if len(unknown) and int(unknown[0, 0]) < collision_step:
             i, j = map(int, unknown[0])
-            self.last_block = ("unknown", float(qx[i, j]), float(qy[i, j]), float(distances[i]))
+            kind = "obstacle" if covered[i, j] or depth_blocked[i, j] else "unknown"
+            self.last_block = (kind, float(qx[i, j]), float(qy[i, j]), float(distances[i]))
             return max(0., float(distances[i])-step)
         if collision_point is not None:
             self.last_block = ("obstacle", *map(float, collision_point), float(distances[collision_step]))
@@ -497,6 +515,8 @@ class LocalRecovery:
             return Command(state="HOLDING", reason="person_close")
 
         direct = self.clearance(scan, requested_steer, current_steer=current_steer)
+        direct_block = self.last_block
+        path_blocks = [direct_block]
         normal = None
         if target and requested_speed > 0:
             # Search BOTH steering directions, not just reduce the target steer.
@@ -511,6 +531,7 @@ class LocalRecovery:
                     continue
                 clear = direct if steer == requested_steer else self.clearance(
                     scan, steer, current_steer=current_steer)
+                path_blocks.append(direct_block if steer == requested_steer else self.last_block)
                 cap = min(requested_speed, follow_cap, brake_envelope(clear, self.brake))
                 if cap >= 0.08:
                     # Prefer alignment with the person once there is adequate room.
@@ -525,6 +546,16 @@ class LocalRecovery:
                 _, cap, steer = max(choices)
                 normal = Command(cap, steer, "TRACKING" if steer == requested_steer else "ALIGNING",
                                  "follow" if steer == requested_steer else "local_path")
+
+        if (target and requested_speed >= .08 and normal is None
+                and all(b is not None and b[0] in ("unknown", "no_scan") for b in path_blocks)):
+            # Missing observations do not establish a physical blockage. Wait
+            # for new evidence instead of burning gear-change/recovery legs.
+            self.last_block = next(b for b in path_blocks
+                                   if b is not None and b[0] in ("unknown", "no_scan"))
+            self.blocked_since = None
+            self.previous_speed = 0.0
+            return Command(state="OBSERVATION_WAIT", reason="insufficient_observation")
 
         if self.active and target and normal and direct > .45:
             # Person found again with a certified path: hand back to following.
@@ -578,7 +609,7 @@ class LocalRecovery:
                 elif target and requested_speed >= .08 and follow_cap >= .08:
                     # Person visible, the car wants to move, but no steer has a
                     # certified path. Say so, whatever the recovery budget.
-                    out = Command(state="PATH_BLOCKED", reason="no_observed_path")
+                    out = Command(state="PATH_BLOCKED", reason="obstacle_path_blocked")
                 elif target and requested_speed > 0:
                     # Too slow to be worth moving (almost at follow distance).
                     out = Command(state="HOLDING",

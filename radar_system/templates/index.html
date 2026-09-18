@@ -533,7 +533,7 @@ function updateFollowerUI(f, isRunning) {
     // 车不动时把原因直接写出来,现场不用再去查 /follower/status
     const REASONS = {
       hold: '距离已到', person_close: '人太近', follow_envelope: '接近减速',
-      local_path: '绕行对准', no_observed_path: '前方无可行路径', no_target: '无目标',
+      local_path: '绕行对准', no_observed_path: '路径尚未确认', insufficient_observation: '前方观测不足', depth_expired_during_control: '相机深度已过期', obstacle_path_blocked: '障碍物阻挡路径', no_target: '无目标',
       scan_unavailable: '雷达数据中断', driver_unavailable: '底盘未就绪',
       battery: '电量低', recovery_budget_used: '脱困次数已用完',
       wait_stationary: '等待停稳', gear_change_dwell: '换向等待',
@@ -551,7 +551,7 @@ function updateFollowerUI(f, isRunning) {
       fBadge.textContent = '🛑 AEB硬刹停';
     } else if (rawState === 'PATH_BLOCKED') {
       fBadge.classList.add('f-badge-aeb');
-      fBadge.textContent = '⛔ 前方无路';   // 详细原因在「正在执行」里
+      fBadge.textContent = '⛔ 前方障碍受阻';   // 详细原因在「正在执行」里
     } else if (rawState.includes('SEARCH') || rawState.includes('LOST')) {
       fBadge.classList.add('f-badge-lost');
       fBadge.textContent = '🔍 搜寻目标' + why;
@@ -686,7 +686,7 @@ function updateFollowerUI(f, isRunning) {
 
 // ==================== 跟随运行详情:在做什么、为什么、各环节是否正常 ====================
 const F_STATE_TEXT = {
-  TRACKING: '跟随中', ALIGNING: '绕行对准', REAR_ALIGNING: '倒车对准', TURNAROUND: '揉库掉头对准', HOLDING: '停车保持', PATH_BLOCKED: '前方无可行路径',
+  TRACKING: '跟随中', ALIGNING: '绕行对准', REAR_ALIGNING: '倒车对准', TURNAROUND: '揉库掉头对准', HOLDING: '停车保持', OBSERVATION_WAIT: '前方观测不足', PATH_BLOCKED: '前方障碍受阻',
   COLLISION_AEB: '防撞急停', AEB_EMERGENCY: 'AEB 硬急停', SEARCHING_LOST: '目标丢失', SEARCH_SCAN: '原地观察找人',
   SEARCH_TURN: '转弯搜索', RECOVERY_REVERSE: '沿来路倒车脱困', RECOVERY_BRAKE: '停稳换向',
   RECOVERY_WAIT: '等待条件满足', RECOVERY_EXHAUSTED: '脱困次数已用完', LOW_BATTERY: '电量低',
@@ -698,7 +698,7 @@ const F_REASON_TEXT = {
   target_behind: '目标在车后', face_rear_target: '前方开阔,大舵角前向回旋掉头面朝人体',
   k_turn_forward: '掉头揉库中(前向大舵角回旋)', k_turn_reverse: '掉头揉库中(反打舵倒车调整)',
   person_close: '人太近,停车', follow_envelope: '接近目标,提前减速', swept_path: '前方有障碍,减速',
-  no_observed_path: '所有方向都没有确认可走的路', no_target: '没有识别到人', recovery_disabled: '脱困已关闭',
+  no_observed_path: '尚无确认可通行的路径', insufficient_observation: '雷达与相机尚未确认通路', depth_expired_during_control: '计算期间相机深度过期，停车等待新帧', obstacle_path_blocked: '有效障碍回波阻挡候选路径', no_target: '没有识别到人', recovery_disabled: '脱困已关闭',
   recovery_budget_used: '自动脱困次数用完,20 秒后重试', scan_unavailable: '雷达数据中断',
   scan_stale: '雷达数据过期', driver_unavailable: '底盘未连接/未解锁/反馈中断',
   loop_late: '控制周期严重超时(板子太忙)', battery: '电池电压过低', aeb_hard: '车体即将碰撞,硬刹停',
@@ -813,6 +813,15 @@ function renderFollowerDetail(f, live, rawState) {
   head('决策');
   row('状态', `${F_STATE_TEXT[live.state] || live.state}`);
   row('原因', F_REASON_TEXT[live.limit_reason] || live.limit_reason || '--');
+  const depth = live.depth_path || {};
+  const depthReasons = {calibration_missing:'等待相机与雷达高度标定', calibration_invalid:'深度标定不匹配',
+    waiting_depth:'等待深度图', ready:'深度图就绪', depth_stale:'深度图过期', pose_missing:'缺少位姿',
+    intrinsics_mismatch:'深度内参与图像不匹配', intrinsics_invalid:'深度内参无效',
+    intrinsics_changed:'深度内参已变化，等待新图像', invalid_depth:'深度图无效',
+    depth_invalid:'没有有效深度', pose_reset:'位姿已重置，等待新图像'};
+  row('相机通路确认', depth.used ? '深度补充确认 · 限速 0.12 m/s' :
+    (depthReasons[depth.reason] || '等待深度数据'), depth.used ? 'ok' : '');
+
   row('速度上限', fmtNum(live.speed_cap_mps, 2, ' m/s'));
   row('指令速度', fmtNum(live.cmd_vx, 2, ' m/s'));
   row('指令转角', fmtNum(live.cmd_steer_deg, 1, '°'));

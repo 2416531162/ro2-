@@ -72,6 +72,22 @@ class FollowerConfig:
     camera_hfov_deg: float = 58.0       # Astra S 水平视场,用于「在视野里却没看到」的反向证据
     min_target_range_m: float = 0.30    # 目标距车体中心有效滤波下限(小于此距离视为自反射/底盘噪声)
 
+    # ---- 参考量生成器 ----
+    # 'pure-pursuit' 是默认值:几何解,确定性,无依赖。
+    # 'mppi' 把跟随、避障、视野保持放进同一个代价函数里做采样优化,需要
+    # Jetson Orin + PyTorch CUDA。实车验证通过之前不要改这里的默认值 ——
+    # 切换是一个命令行开关的事,没必要用默认值去赌。
+    controller: str = 'pure-pursuit'
+    mppi_device: str = 'auto'
+    mppi_samples: int = 1024
+    mppi_horizon: int = 40       # 前瞻步数。T*dt 必须覆盖一次完整的绕行机动
+    # 回退条件。注意「不可行」在这里几乎不会发生 —— 停在原地永远是一条可行
+    # 计划,而雷达自反射过滤保证了障碍点不会比车头再近 5cm。所以真正会在实车
+    # 上咬人的是**求解超时**:torch 没跑在 CUDA 上、Orin 降频、K 调太大,
+    # 都会让求解时间越过控制周期,而刹车包络是按周期算的,车会以为自己刹得住。
+    mppi_solve_budget_ms: float = 25.0   # 超过这个耗时算一次失败 (20Hz 周期的一半)
+    mppi_fallback_after: int = 12        # 连续失败这么多次就整段回退到纯追踪
+
     # ---- 沿人走过的路跟随 (纯追踪) ----
     follow_breadcrumbs: bool = True
     # 预瞄距离(从后轴算)。满舵转弯半径约 1.77m,预瞄太短转得晚、冲出拐角,
@@ -111,7 +127,7 @@ class FollowerConfig:
     lidar_handoff_after_s: float = 0.15  # 相机超过这么久没看到人,才改由雷达接力
     lidar_handoff_max_s: float = 8.0     # 超过这么久没有相机或无歧义雷达确认,不再相信轨迹
     lidar_track_speed_cap: float = 0.45  # 已确认目标的雷达接力上限，仍受驱动和防撞限幅
-    lidar_reacquire_gate_m: float = 4.00  # 人快速绕到车后时，允许雷达接回原已确认目标的距离门
+    lidar_reacquire_gate_m: float = 0.60  # 兼容旧字段名：仅用于丢失后相机局部重捕；雷达不跨门跳接
 
     # ---- 车后雷达接力后的快速掉头 ----
     # 阿克曼底盘不能原地旋转；在前方扫掠净空合格时，以较高的受限弧线速度转向。
@@ -179,7 +195,7 @@ class FollowerConfig:
             raise ValueError("rear_turn_accel_limit_mps2 超出安全范围")
         if not 0 < self.rear_turn_steer_rate_radps <= 6.0:
             raise ValueError("rear_turn_steer_rate_radps 超出安全范围")
-        if not 0.8 <= self.lidar_reacquire_gate_m <= 4.0:
+        if not 0.2 <= self.lidar_reacquire_gate_m <= 0.6:
             raise ValueError("lidar_reacquire_gate_m 超出安全范围")
         if not -0.6 < self.camera_pitch_rad < 0.6:
             raise ValueError("camera_pitch_rad 超出合理范围 (±34°)")
@@ -222,7 +238,8 @@ def build_config(args):
     for name in ('follow_distance_m', 'follow_stop_m', 'max_speed_mps',
                  'decel_capability_mps2', 'control_latency_s',
                  'aeb_clearance_m', 'obstacle_standoff_m',
-                 'footprint_margin_m', 'aeb_margin_m', 'min_path_clearance_m'):
+                 'footprint_margin_m', 'aeb_margin_m', 'min_path_clearance_m',
+                 'controller', 'mppi_samples', 'mppi_device'):
         value = getattr(args, name, None)
         if value is not None:
             setattr(cfg, name, value)

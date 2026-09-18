@@ -300,61 +300,108 @@ def test_lidar_calibration_adds_residual_to_shared_raw_zero(tmp_path, monkeypatc
     assert path.read_text() == before
 
 
-def test_fast_rear_crossing_reacquires_confirmed_target_from_lidar():
-    from person_tracker import PersonTracker
-    tracker = PersonTracker(confirm_hits=1, reacquire_after_s=.10, reacquire_radius_m=3.0)
-    tracker.step_odom(0., 0., 0.)
-    tracker.add_camera([{'x': 1.8, 'y': 0., 'conf': .95}], 0., 0.)
-    assert tracker.target_id is not None
-    tracker.step_odom(.20, 0., 0.)
-    # A fast person crossed to the rear; the normal 1.2 m gate would reject it.
-    tracker.add_lidar([(-1.0, .1)], .20, .20)
-    view = tracker.target_view(.20, lidar_after_s=.15)
-    assert view is not None and view['source'] == 'lidar'
-    assert view['x'] < 0 and view['update_age'] <= .01
-    assert view['x'] < -.7
-    assert tracker.reacquires == 1
-
-
 @pytest.mark.parametrize('pose', [(0., 0., 0.), (10., -3., math.pi),
                                   (-10., 4., math.pi / 2)])
-def test_rear_handoff_is_independent_of_odometry_origin(pose):
+@pytest.mark.parametrize('front_return', [True, False])
+def test_rear_object_cannot_teleport_confirmed_front_target(pose, front_return):
     from person_tracker import PersonTracker
-    tracker = PersonTracker(confirm_hits=1, reacquire_after_s=.1, reacquire_radius_m=3.)
+    tracker = PersonTracker(confirm_hits=1, reacquire_after_s=.1, reacquire_radius_m=4.)
     tracker.odom.add(0., *pose)
     tracker.add_camera([{'x': 1.8, 'y': 0., 'conf': .95}], 0., 0.)
     original_id = tracker.target_id
     tracker.odom.add(.2, *pose)
-    # Front clutter must not win just because odom +x points behind the car.
-    tracker.add_lidar([(1.8, 0.), (-1., .1)], .2, .2)
+    clusters = [(1.8, 0.), (-1., .1)] if front_return else [(-1., .1)]
+    tracker.add_lidar(clusters, .2, .2)
     view = tracker.target_view(.2)
     assert view['id'] == original_id
-    assert view['x'] == pytest.approx(-1.)
-    assert view['y'] == pytest.approx(.1)
+    assert view['x'] == pytest.approx(1.8)
+    assert tracker.reacquires == 0
+    assert view['lidar_hits'] == int(front_return)
 
 
-def test_rear_radar_handoff_clears_stale_camera_negative_evidence():
+def rear_tracker(pose=(0., 0., 0.)):
+    """Observe a continuous 0.9 m/s semicircle, not a 2.8m/0.2s teleport."""
     from person_tracker import PersonTracker
-    tracker = PersonTracker(confirm_hits=1, reacquire_after_s=.1, reacquire_radius_m=3.)
-    tracker.step_odom(0., 0., 0.)
-    tracker.add_camera([{'x': 1.8, 'y': 0., 'conf': .95}], 0., 0.,
-                       in_view=lambda x, y: x > 0.)
+    tracker = PersonTracker(confirm_hits=1)
+    tracker.odom.add(0., *pose)
+    in_view = lambda x, y: x > 0. and abs(y) < .3
+    tracker.add_camera([{'x': 1.8, 'y': 0., 'conf': .95}], 0., 0., in_view=in_view)
     original_id = tracker.target_id
-    tracker.add_camera([], .1, .1, in_view=lambda x, y: x > 0.)
-    tracker.add_lidar([(-1., .1)], .2, .2)
-    # Simulate a stopped camera stream; valid unique rear returns continue.
-    for i in range(3, 121):
-        now = i / 10.
-        tracker.step_odom(now, 0., 0.)
-        tracker.add_lidar([(-1., .1)], now, now)
+    for i in range(1, 127):
+        now, angle = i * .05, math.pi * i / 126
+        point = (1.8 * math.cos(angle), 1.8 * math.sin(angle))
+        tracker.odom.add(now, *pose)
+        tracker.add_camera([], now, now, in_view=in_view)
+        tracker.add_lidar([point], now, now)
         view = tracker.target_view(now)
-        assert view is not None
-        assert view['id'] == original_id
-        assert view['source'] == 'lidar'
+        assert view is not None and view['id'] == original_id
+        assert math.hypot(view['x'] - point[0], view['y'] - point[1]) < .12
+    return tracker, now
+
+
+@pytest.mark.parametrize('pose', [(0., 0., 0.), (10., -3., math.pi),
+                                  (-10., 4., math.pi / 2)])
+def test_continuous_rear_tracking_then_stationary_with_clutter(pose):
+    tracker, start = rear_tracker(pose)
+    original_id = tracker.target_id
+    for i in range(1, 301):
+        now = start + i * .1
+        tracker.odom.add(now, *pose)
+        clusters = [(-1.8, 0.)]
+        if i >= 20:
+            clusters.append((-1.8, .65))
+        tracker.add_lidar(clusters, now, now)
+        view = tracker.target_view(now)
+        assert view is not None and view['id'] == original_id
+        assert abs(view['x'] + 1.8) < .12 and abs(view['y']) < .12
+    assert math.hypot(view['v_fwd'], view['v_lat']) < .01
     assert tracker.dropped_unseen == 0
-    # A real loss of radar returns must still expire the track.
-    tracker.add_lidar([], 14., 14.)
-    assert tracker.target_view(14.) is None
+    tracker.add_lidar([], now + 2., now + 2.)
+    assert tracker.target_view(now + 2.) is None
+
+
+def test_ambiguous_rear_returns_do_not_change_position_or_refresh_age():
+    tracker, now = rear_tracker()
+    for i in range(1, 21):
+        tracker.add_lidar([(-1.8, 0.)], now + i * .1, now + i * .1)
+    now += 2.
+    tr = tracker._get(tracker.target_id)
+    before = tr.last_update
+    tracker.add_lidar([(-1.8, -.08), (-1.8, .08)], now + .1, now + .1)
+    assert tr.last_update == before
+    assert tracker.lidar_ambiguous_frames == 1
+    assert abs(tr.pos[1]) < .01
+    for i in range(2, 31):
+        tracker.add_lidar([(-1.8, -.08), (-1.8, .08)], now + i * .1, now + i * .1)
+    assert tracker.target_view(now + 3.) is None
+
+
+def test_visible_bystander_does_not_replace_lidar_target():
+    from person_tracker import PersonTracker
+    tracker = PersonTracker(confirm_hits=1, reacquire_after_s=.1, reacquire_radius_m=4.)
+    tracker.add_camera([{'x': 1.8, 'y': 0., 'conf': .95}], 0., 0.)
+    original_id = tracker.target_id
+    tracker.add_lidar([(1.8, 0.)], .2, .2)
+    tracker.add_camera([{'x': 1.8, 'y': 2., 'conf': .95}], .2, .2)
+    assert tracker.target_id == original_id
+    assert tracker.switches == 0
+    for i in range(3, 31):
+        now = i * .1
+        tracker.add_lidar([(1.8, 0.), (1.8, 2.)], now, now)
+    assert len(tracker.tracks) == 1
+    assert tracker.target_id == original_id
+
+
+def test_lost_target_does_not_switch_to_distant_visible_person():
+    from person_tracker import PersonTracker
+    tracker = PersonTracker(confirm_hits=1, reacquire_radius_m=4.)
+    tracker.add_camera([{'x': 1.8, 'y': 0., 'conf': .95}], 0., 0.)
+    original_id = tracker.target_id
+    for i in range(1, 61):
+        now = i * .1
+        tracker.add_camera([{'x': 1.8, 'y': 2., 'conf': .95}], now, now)
+    assert tracker.target_id == original_id
+    assert tracker.target_view(6.) is None
 
 
 def test_front_radar_clutter_still_expires_with_camera_negative_evidence():
@@ -370,30 +417,9 @@ def test_front_radar_clutter_still_expires_with_camera_negative_evidence():
     assert tracker.dropped_unseen == 1
 
 
-@pytest.mark.parametrize('clutter_offset, stays_locked', [(.65, True), (.15, False)])
-def test_stationary_rear_target_with_nearby_radar_cluster(clutter_offset, stays_locked):
+def test_late_radar_return_does_not_revive_expired_identity():
     from person_tracker import PersonTracker
-    tracker = PersonTracker(confirm_hits=1, reacquire_after_s=.1, reacquire_radius_m=3.)
-    tracker.add_camera([{'x': 1.8, 'y': 0., 'conf': .95}], 0., 0.,
-                       in_view=lambda x, y: x > 0.)
-    tracker.add_lidar([(-1., .1)], .2, .2)
-    original_id = tracker.target_id
-    # Settle after running around the car, then stand still beside another
-    # small return. A distant out-of-gate return cannot be this same person.
-    for i in range(3, 301):
-        now = i / 10.
-        clusters = [(-1., .1)]
-        if now >= 2.:
-            clusters.append((-1., .1 + clutter_offset))
-        tracker.add_camera([], now, now, in_view=lambda x, y: x > 0.)
-        tracker.add_lidar(clusters, now, now)
-    view = tracker.target_view(30.)
-    if stays_locked:
-        assert view is not None
-        assert view['id'] == original_id
-        assert view['source'] == 'lidar'
-        assert view['confident_age'] == pytest.approx(0.)
-        assert math.hypot(view['v_fwd'], view['v_lat']) < .01
-    else:
-        # Two plausible returns must not renew identity indefinitely.
-        assert view is None
+    tracker = PersonTracker(confirm_hits=1)
+    tracker.add_camera([{'x': 1.8, 'y': 0., 'conf': .95}], 0., 0.)
+    tracker.add_lidar([(1.8, 0.)], 3., 3.)
+    assert tracker.target_view(3.) is None
