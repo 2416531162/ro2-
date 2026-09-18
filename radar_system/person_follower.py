@@ -46,6 +46,25 @@
 
 局部自主脱困默认开启:双向选路、停稳换向、限量后退、丢人先观察再弧线搜索。
 盲区不是空地;盲区倒车只能沿最近前进路径短退,所有动作受次数/里程/时间上限约束。
+
+=============================================================================
+本轮改动:跟踪人这一层 (详见 docs/TUNING.md 第 10 节)
+=============================================================================
+
+1. 转向改为**纯追踪**几何解。`kp_steer * bearing` 与距离无关:人在 3.5m 外
+   偏 0.30rad,几何上只该打 0.10rad,老式子照样给 0.33rad —— 打过头、冲过
+   中线、再反打,这就是跟人画龙的来源。现在按 kappa = 2*sin(a)/Ld 算曲率,
+   再按固件的 TurnR 定义折成前轮转角,与 yaw_from_steer 完全自洽。
+
+2. 目标关联做**自车运动补偿**。锚点存在车体系里而车自己在动:1.2rad/s 转向、
+   人在 2m 处,一帧就漂 0.45m,关联半径才 0.55m —— 掉一帧检测必然掉锁。
+   所以转弯比直行更容易跟丢,而转弯恰恰最不能丢。现在用底盘实测的
+   (speed, yaw_rate) 把锚点搬到当前车体系,再叠目标速度外推。
+
+3. 加**轻量重识别**。解锁后重选目标的老评分是"谁最正对车头就跟谁",
+   路上迎面来个人就跟错。现在检测器顺手给出可见身高与上半身色调直方图
+   (不占 NPU),签名新鲜时必须长得像才准锁定,宁可继续搜索也不跟陌生人走。
+   检测器没有这两个字段时自动退化成纯几何关联,行为与改造前一致。
 """
 
 import sys
@@ -68,8 +87,8 @@ from std_srvs.srv import SetBool, Trigger
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from motion_safety import (  # noqa: E402
     ChassisGeometry, BrakeProfile, brake_envelope, stopping_distance,
-    yaw_from_steer, AlphaBetaTracker, SlewLimiter, BreakawayKick, clamp,
-    TargetLock, ScanSectors, reconcile_range,
+    yaw_from_steer, pure_pursuit_steer, AlphaBetaTracker, SlewLimiter,
+    BreakawayKick, clamp, TargetLock, ScanSectors, reconcile_range,
 )
 from follower_recovery import LocalRecovery, RecoveryConfig, ScanEvidence  # noqa: E402
 from footprint import (  # noqa: E402
@@ -122,7 +141,8 @@ class FollowerConfig:
 
     # ---- 转向 ----
     max_steer_rad: float = 0.35         # 舵机物理限位
-    kp_steer: float = 1.10              # 视线角 -> 前轮转角 增益
+    pursuit_gain: float = 1.00          # 纯追踪激进度,1.0 = 几何正解
+    min_lookahead_m: float = 0.45       # 前视距离下限,防止贴脸时曲率爆掉
     steer_deadband_rad: float = 0.06    # ~3.4°,身体微晃不打舵
     steer_rate_radps: float = 1.20      # 转角变化率限制
 
@@ -138,6 +158,10 @@ class FollowerConfig:
     lock_radius_m: float = 0.55         # 帧间关联半径,超出即认为不是同一个人
     lock_timeout_s: float = 1.50        # 关联不上多久后解锁、允许重选目标
     min_depth_ratio: float = 0.30       # 深度有效像素占比门限,低于此判无效
+    appearance_floor: float = 0.45      # 外观相似度门限,低于此不认为是同一个人
+    appearance_weight_m: float = 0.60   # 外观不像在关联评分里折算成多少"米"
+    height_tolerance_m: float = 0.25    # 可见身高差多少算完全不像
+    signature_ttl_s: float = 20.0       # 外观签名的保鲜期,过期后允许重新认人
 
     # ---- 车体足迹 (★ 全部必须实测,见 docs/TUNING.md 第 9 节) ----
     # 改造前避障只在前向锥形里取最近点,等于把车当成一个点:既不知道车有多宽,
@@ -241,9 +265,16 @@ class PersonFollowerNode(Node):
                                           gate_base_m=0.35, gate_rate_mps=2.5)
         self.tracker_x = AlphaBetaTracker(alpha=0.50, beta=0.08,
                                           gate_base_m=0.30, gate_rate_mps=2.0)
+        # origin_offset_m 告诉 TargetLock 它存的 z 是「车头到人」而不是
+        # 「后轴中心到人」,否则自车转向补偿会绕错旋转中心。
         self.lock = TargetLock(assoc_radius_m=config.lock_radius_m,
                                lost_timeout_s=config.lock_timeout_s,
-                               confirm_frames=config.confirm_frames)
+                               confirm_frames=config.confirm_frames,
+                               origin_offset_m=config.footprint_front_m,
+                               appearance_floor=config.appearance_floor,
+                               appearance_weight_m=config.appearance_weight_m,
+                               height_tolerance_m=config.height_tolerance_m,
+                               signature_ttl_s=config.signature_ttl_s)
         self.sectors = ScanSectors(half_fov_deg=60.0, bin_deg=5.0)
         self.footprint = config.footprint
         self.footprint_aeb = config.footprint_aeb
@@ -434,13 +465,22 @@ class PersonFollowerNode(Node):
                 self.lidar_fallback_matches += 1
 
             # z 一律是「车头到目标」的水平间距,x 是横向偏移(右为正)
+            # 外观特征由检测器算好带过来(可见身高 + 上半身色调直方图)。
+            # 检测器版本旧、没有这两个字段时为 None,TargetLock 会自动退化成
+            # 纯几何关联,行为与改造前一致。
             candidates.append({'x': lateral, 'z': gap, 'conf': conf,
                                'label': item.get('label'), 'source': source,
                                'bearing': bearing, 'lidar_near': lidar_near,
-                               'depth_ratio': ratio, 'raw_z': z})
+                               'depth_ratio': ratio, 'raw_z': z,
+                               'height_m': item.get('height_m'),
+                               'color': item.get('color')})
 
-        # 目标锁定:按运动一致性关联,避免房间里走过第二个人就跟错
-        chosen = self.lock.update(candidates, now, self.cfg.follow_distance_m)
+        # 目标锁定:按运动一致性 + 外观关联,避免房间里走过第二个人就跟错。
+        # ego 是底盘实测的车速与横摆角速度 —— 锚点存在车体系里,车自己一动
+        # 它就漂,转弯时一帧能漂 0.2m 以上,不补偿的话转弯必掉锁。
+        ego = (self.chassis_speed, self.chassis_yaw_rate) if self.feedback_healthy \
+            else (0.0, 0.0)
+        chosen = self.lock.update(candidates, now, self.cfg.follow_distance_m, ego=ego)
         if chosen is None:
             return
 
@@ -581,7 +621,11 @@ class PersonFollowerNode(Node):
                 desired_vx = max(0.0, cfg.kd_feedforward*max(0.0, target_ground_speed)
                                  + cfg.kp_distance*error)
             if abs(bearing) > cfg.steer_deadband_rad:
-                desired_steer = clamp(cfg.kp_steer*bearing, -cfg.max_steer_rad, cfg.max_steer_rad)
+                # 纯追踪要的是**后轴中心**到目标的位置,不是车头到目标的间距。
+                # 前视距离必须把车头前悬加回去,否则等效于把轴距算长了。
+                desired_steer = pure_pursuit_steer(
+                    z + cfg.footprint_front_m, -self.tracker_x.position,
+                    cfg.geometry, cfg.min_lookahead_m, cfg.pursuit_gain)
             cap_follow = min(cfg.max_speed_mps, brake_envelope(gap, cfg.follow_profile))
             if self.tracker_z.coasting:
                 cap_follow = min(cap_follow, cfg.coasting_speed_cap)
@@ -697,6 +741,9 @@ class PersonFollowerNode(Node):
             "speed_cap_mps": round(self.speed_cap, 3),
             "limit_reason": self.limit_reason,
             "target_locked": self.lock.locked,
+            "target_speed_fl": [round(v, 3) for v in self.lock.velocity_fl],
+            "appearance_rejects": self.lock.rejected_appearance,
+            "signature_ready": self.lock.signature_fresh(now),
             "outliers_rejected": self.tracker_z.rejected_total,
             "range_conflicts": self.range_conflicts,
             "target_messages": self.target_messages,

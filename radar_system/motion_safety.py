@@ -111,6 +111,60 @@ def steer_from_yaw(speed_mps, yaw_radps, geometry):
     return math.copysign(clamp(steer, 0.0, geometry.max_steer_rad), sign)
 
 
+def pure_pursuit_steer(forward_m, left_m, geometry, min_lookahead_m=0.45,
+                       gain=1.0):
+    """纯追踪:由目标在车体系里的位置直接解出前轮转角。
+
+    改造前用的是 `steer = kp * bearing`,一个与距离无关的比例增益。这有两个
+    硬伤,而且都是实车上看得见的:
+
+      近处过打舵  轴距 0.54、人在 1.6m 处偏 0.3rad,几何正解是 0.20rad,
+                  kp=1.1 给出 0.33rad —— 超打 65%,车头冲过头再反打。
+      远处过冲    人在 3.5m 处同样偏 0.3rad,几何上只该打 0.09rad,
+                  老式子照样给 0.33rad。跟人画龙、左右摇摆基本都来自这里。
+
+    纯追踪的曲率是 kappa = 2*sin(alpha)/Ld,其中 alpha 是视线角、Ld 是到目标
+    的直线距离。写成坐标形式 sin(alpha) = left/Ld,于是
+
+        kappa = 2 * left / Ld^2
+
+    再按底盘固件的定义把曲率折成前轮转角(注意固件算的是**左前轮**转角,
+    TurnR 是后轴中心的转弯半径,见 PROTOCOL.md 8.1):
+
+        R = 1/kappa,  tan(steer) = wheelbase / (R - track/2)
+
+    这样解出来的 steer 再经 yaw_from_steer 换回角速度,能精确还原 R,
+    整条链路自洽。
+
+    forward_m  后轴中心 -> 目标的前向距离 (不是车头到人的间距!)
+    left_m     目标在车体中线左侧多少米 (左为正,与转角符号一致)
+    gain       统一的追踪激进度,1.0 为几何正解。想更稳就调小,不要动几何。
+
+    >>> from motion_safety import ChassisGeometry
+    >>> geo = ChassisGeometry()
+    >>> round(pure_pursuit_steer(2.0, 0.0, geo), 6)
+    0.0
+    >>> pure_pursuit_steer(2.0, 0.5, geo) > 0      # 人在左边就往左打
+    True
+    >>> pure_pursuit_steer(4.0, 0.5, geo) < pure_pursuit_steer(2.0, 0.5, geo)
+    True
+    """
+    lookahead = math.hypot(forward_m, left_m)
+    if lookahead < min_lookahead_m:
+        # 贴得极近时 Ld^2 会让曲率爆掉。此时车本来就在停车距离附近、速度接近
+        # 零,把前视距离钳住比让它满舵乱转安全得多。
+        lookahead = min_lookahead_m
+    if abs(left_m) < 1e-9 or lookahead < 1e-6:
+        return 0.0
+    curvature = gain * 2.0 * left_m / (lookahead * lookahead)
+    radius = 1.0 / abs(curvature)
+    denominator = radius - 0.5 * geometry.track_m
+    if denominator <= 1e-6:
+        return math.copysign(geometry.max_steer_rad, left_m)
+    steer = math.atan(geometry.wheelbase_m / denominator)
+    return math.copysign(clamp(steer, 0.0, geometry.max_steer_rad), left_m)
+
+
 def max_yaw_at_speed(speed_mps, geometry):
     """当前车速下物理上能达到的最大横摆角速度 (满舵)。"""
     if abs(speed_mps) < 1e-9:
@@ -389,43 +443,121 @@ class BreakawayKick:
 # 6. 目标锁定 —— 避免"房间里走过第二个人,车就跟着别人走了"
 # --------------------------------------------------------------------------
 
+def appearance_similarity(a_height, a_color, b_height, b_color,
+                          height_tolerance_m=0.25):
+    """两个观测长得有多像,返回 0~1;任何一边没有特征时返回 None。
+
+    两个线索都是「白送」的,不额外占 NPU:
+
+    height_m  bbox 像素高 x 深度 / fy,即**可见部分**的物理高度。
+              人的身高一天之内不会变,是最稳的廉价身份线索。但脚被桌子挡住、
+              半身入镜时它会突然变小,所以只能当软证据,不能硬判。
+    color     上半身 HSV 色调直方图 (L1 归一化)。衣服颜色在一次跟随任务里
+              基本不变,而且对距离、角度都不敏感。
+
+    颜色用 Bhattacharyya 系数 sum(sqrt(p*q)):两个分布完全一致时为 1,
+    完全不重叠时为 0,对直方图幅值的缩放不敏感。
+    """
+    scores = []
+    if (a_height and b_height and a_height > 0.2 and b_height > 0.2):
+        err = abs(a_height - b_height) / max(height_tolerance_m, 1e-6)
+        scores.append((0.4, max(0.0, 1.0 - err)))
+    if a_color and b_color and len(a_color) == len(b_color):
+        sa, sb = sum(a_color), sum(b_color)
+        if sa > 1e-6 and sb > 1e-6:
+            bc = sum(math.sqrt((p / sa) * (q / sb))
+                     for p, q in zip(a_color, b_color))
+            scores.append((0.6, clamp(bc, 0.0, 1.0)))
+    if not scores:
+        return None
+    total_w = sum(w for w, _ in scores)
+    return sum(w * s for w, s in scores) / total_w
+
+
 class TargetLock:
-    """按运动一致性做帧间数据关联,锁定同一个人。
+    """按运动一致性 + 外观特征做帧间数据关联,锁定同一个人。
 
     改造前每帧都独立地挑「最正前方 + 最接近期望距离」的检测框,评分一变就换人。
     这是跟随机器人最经典的失效模式:两个人交错走过,车会跟错。
 
-    规则很简单但有效:
+    规则:
       - 未锁定时,连续 confirm_frames 帧都稳定指向同一位置才锁定;
-      - 已锁定时,只接受落在预测位置 assoc_radius_m 内的检测;
+      - 已锁定时,只接受落在**预测位置** assoc_radius_m 内的检测;
       - 接不上就算丢一帧,靠外推维持,超过 lost_timeout_s 才解锁重选。
 
-    后续要更强的身份保持,可以在这层之上叠 FaceNet 外观特征做重识别,
-    接口不用改 —— 候选项里多带一个 embedding 字段即可。
+    ------------------------------------------------------------------
+    本次改动 1:锚点做自车运动补偿 + 目标速度外推
+    ------------------------------------------------------------------
+    锚点存在**车体坐标系**里,而车自己在动。老代码拿上一帧的观测位置直接和
+    这一帧比,等于假设车是静止的。实际数字:车以 1.2 rad/s 转向、目标在 2m 处,
+    单帧 (0.1s) 光是自车旋转就让目标在车体系里漂 0.24m,加上自车前进 0.055m
+    和人自己走的 0.15m,一帧就是 0.45m —— assoc_radius_m=0.55 已经贴边,
+    **检测掉一帧就必然掉锁**。所以转弯的时候比直行更容易跟丢,而转弯恰恰是
+    跟随最需要它别丢的时候。
+
+    现在每个控制周期用底盘实测的 (speed, yaw_rate) 把锚点搬到当前车体系,
+    再叠上目标自己的速度做外推。关联门限比的是「预测位置」和观测的差,
+    也就是类注释里一直写着、但代码里从来没做的那件事。
+
+    ------------------------------------------------------------------
+    本次改动 2:轻量外观特征,防止重锁时跟错人
+    ------------------------------------------------------------------
+    老代码解锁后重选目标的评分是 `abs(x)*1.5 + abs(z - 期望距离)` ——
+    **谁最正对车头就跟谁**。人转过拐角、被柱子挡两秒、或者路上迎面来个人,
+    回来就跟错了。现在候选项可以带 height_m 与 color 直方图:
+
+      - 锁定期间用它们参与关联评分,位置接近但长得不像的会被压下去;
+      - 解锁后重选时,只要签名还新鲜,就**必须**长得像才允许锁定,
+        宁可继续搜索也不跟一个陌生人走。
+
+    没有这两个字段时行为与改造前完全一致 —— 老的调用方和测试不用改。
     """
 
     def __init__(self, assoc_radius_m=0.55, lost_timeout_s=1.5, confirm_frames=3,
-                 pending_grace_s=0.35):
+                 pending_grace_s=0.35, origin_offset_m=0.0,
+                 appearance_floor=0.45, appearance_weight_m=0.60,
+                 height_tolerance_m=0.25, signature_ttl_s=20.0,
+                 max_target_speed_mps=2.5):
         if assoc_radius_m <= 0:
             raise ValueError("assoc_radius_m 必须为正")
         self.assoc_radius_m = assoc_radius_m
         self.lost_timeout_s = lost_timeout_s
         self.confirm_frames = confirm_frames
         self.pending_grace_s = pending_grace_s
-        self.locked = False
-        self.anchor_xz = None       # 已锁定目标的最近一次位置
-        self.last_seen = None
-        self._pending_xz = None     # 待确认目标
-        self._pending_count = 0
-        self._pending_last_seen = None
+        self.origin_offset_m = origin_offset_m
+        self.appearance_floor = appearance_floor
+        self.appearance_weight_m = appearance_weight_m
+        self.height_tolerance_m = height_tolerance_m
+        self.signature_ttl_s = signature_ttl_s
+        self.max_target_speed_mps = max_target_speed_mps
 
-    def reset(self):
         self.locked = False
-        self.anchor_xz = None
+        self.anchor_xz = None       # 预测位置 (含目标速度外推)
         self.last_seen = None
+        self.velocity_fl = (0.0, 0.0)   # 目标在车体系下的速度 (前, 左)
+        self.sig_height = None
+        self.sig_color = None
+        self.sig_stamp = None
+        self.rejected_appearance = 0
+        self._static_xz = None      # 只做自车补偿、不含目标速度的上一次观测
+        self._advance_t = None      # 上次做自车补偿的时刻
         self._pending_xz = None
         self._pending_count = 0
         self._pending_last_seen = None
+
+    def reset(self, forget_signature=False):
+        """解锁。默认**保留**外观签名 —— 签名正是用来找回同一个人的,
+        跟丢的时候把它一起扔了就等于自愿跟错人。"""
+        self.locked = False
+        self.anchor_xz = None
+        self.last_seen = None
+        self.velocity_fl = (0.0, 0.0)
+        self._static_xz = None
+        self._pending_xz = None
+        self._pending_count = 0
+        self._pending_last_seen = None
+        if forget_signature:
+            self.sig_height = self.sig_color = self.sig_stamp = None
 
     @staticmethod
     def _dist(a, b):
@@ -434,23 +566,127 @@ class TargetLock:
     def age(self, now):
         return None if self.last_seen is None else now - self.last_seen
 
-    def update(self, candidates, now, prefer_distance_m):
-        """candidates: [{'x':.., 'z':.., 'conf':..}, ...]
+    # ------------------------------------------------------------------
+    # 自车运动补偿
+    # ------------------------------------------------------------------
+
+    def _to_body(self, xz):
+        """(右正 x, 车头到人的间距 z) -> (后轴中心前向, 左正)"""
+        return (xz[1] + self.origin_offset_m, -xz[0])
+
+    def _from_body(self, fl):
+        return (-fl[1], fl[0] - self.origin_offset_m)
+
+    def _shift(self, fl, dt, speed, yaw_rate):
+        """把车体系里的一个静止点,搬到 dt 之后的车体系里。
+
+        后轴中心沿圆弧走 (speed/yaw_rate 为半径),车体同时转过 yaw_rate*dt。
+        直行时退化为直线,分开算避免 0 除。
+        """
+        fx, fy = fl
+        if abs(yaw_rate) > 1e-6:
+            radius = speed / yaw_rate
+            dtheta = yaw_rate * dt
+            dx = radius * math.sin(dtheta)
+            dy = radius * (1.0 - math.cos(dtheta))
+        else:
+            dtheta = 0.0
+            dx, dy = speed * dt, 0.0
+        cos_t, sin_t = math.cos(-dtheta), math.sin(-dtheta)
+        rx, ry = fx - dx, fy - dy
+        return (rx * cos_t - ry * sin_t, rx * sin_t + ry * cos_t)
+
+    def advance(self, dt, speed=0.0, yaw_rate=0.0):
+        """控制周期推进:锚点跟着自车运动走,并按目标速度外推。"""
+        if dt <= 0.0:
+            return
+        dt = min(dt, 0.5)
+        if self._static_xz is not None:
+            self._static_xz = self._from_body(
+                self._shift(self._to_body(self._static_xz), dt, speed, yaw_rate))
+        if self.anchor_xz is not None:
+            fx, fy = self._to_body(self.anchor_xz)
+            vf, vl = self.velocity_fl
+            moved = self._shift((fx + vf * dt, fy + vl * dt), dt, speed, yaw_rate)
+            self.anchor_xz = self._from_body(moved)
+        if self._pending_xz is not None:
+            self._pending_xz = self._from_body(
+                self._shift(self._to_body(self._pending_xz), dt, speed, yaw_rate))
+
+    # ------------------------------------------------------------------
+    # 外观
+    # ------------------------------------------------------------------
+
+    def _similarity(self, cand):
+        return appearance_similarity(self.sig_height, self.sig_color,
+                                     cand.get('height_m'), cand.get('color'),
+                                     self.height_tolerance_m)
+
+    def signature_fresh(self, now):
+        return (self.sig_stamp is not None
+                and now - self.sig_stamp <= self.signature_ttl_s
+                and (self.sig_height is not None or self.sig_color is not None))
+
+    def _learn(self, cand, now, rate=0.15):
+        """慢速更新签名。跟得越久越像本人,但单帧坏特征吃不动它。"""
+        h = cand.get('height_m')
+        if h and h > 0.2:
+            self.sig_height = h if self.sig_height is None \
+                else (1.0 - rate) * self.sig_height + rate * h
+        c = cand.get('color')
+        if c:
+            if self.sig_color is None or len(self.sig_color) != len(c):
+                self.sig_color = list(c)
+            else:
+                self.sig_color = [(1.0 - rate) * a + rate * b
+                                  for a, b in zip(self.sig_color, c)]
+            total = sum(self.sig_color)
+            if total > 1e-6:
+                self.sig_color = [v / total for v in self.sig_color]
+        if self.sig_height is not None or self.sig_color is not None:
+            self.sig_stamp = now
+
+    # ------------------------------------------------------------------
+    # 主入口
+    # ------------------------------------------------------------------
+
+    def update(self, candidates, now, prefer_distance_m, ego=None):
+        """candidates: [{'x':.., 'z':.., 'conf':.., 'height_m':?, 'color':?}, ...]
+
+        ego: (speed_mps, yaw_rate_radps) 底盘实测量,用于自车运动补偿。
+             给 None 时退化成老行为(假设车静止)。
 
         返回本帧选中的候选项;接不上或尚未确认时返回 None。
         """
+        # 补偿的基准是**上次补偿的时刻**,不是上次观测的时刻。
+        # 用后者的话,连续几帧关联不上时同一段自车运动会被重复叠加。
+        if ego is not None:
+            if self._advance_t is not None:
+                self.advance(now - self._advance_t, ego[0], ego[1])
+            self._advance_t = now
+
         if self.locked and self.last_seen is not None:
             if now - self.last_seen > self.lost_timeout_s:
-                self.reset()
+                self.reset()            # 签名保留,重锁时还要靠它认人
             else:
-                best, best_d = None, float('inf')
+                best, best_cost, best_sim = None, float('inf'), None
                 for c in candidates:
                     d = self._dist((c['x'], c['z']), self.anchor_xz)
-                    if d < best_d:
-                        best, best_d = c, d
-                if best is not None and best_d <= self.assoc_radius_m:
-                    self.anchor_xz = (best['x'], best['z'])
-                    self.last_seen = now
+                    if d > self.assoc_radius_m:
+                        continue
+                    sim = self._similarity(c)
+                    # 位置贴得极近时不让外观否决:人低头、转身都会让直方图抖,
+                    # 而 0.2m 以内实际上不可能是另一个人。
+                    if (sim is not None and sim < self.appearance_floor
+                            and d > self.assoc_radius_m * 0.35):
+                        self.rejected_appearance += 1
+                        continue
+                    cost = d + (0.0 if sim is None
+                                else self.appearance_weight_m * (1.0 - sim))
+                    if cost < best_cost:
+                        best, best_cost, best_sim = c, cost, sim
+                if best is not None:
+                    self._observe(best, now)
                     return best
                 return None     # 关联不上,这一帧算丢
 
@@ -465,8 +701,19 @@ class TargetLock:
                 self._pending_last_seen = None
             return None
 
-        # 未锁定:挑最正前方且最接近期望距离的,连续几帧稳定才锁
-        best = min(candidates,
+        # 未锁定:先按外观筛,再挑最正前方且最接近期望距离的
+        pool = candidates
+        if self.signature_fresh(now):
+            matched = [c for c in candidates
+                       if (self._similarity(c) or 0.0) >= self.appearance_floor]
+            if matched:
+                pool = matched
+            elif any(self._similarity(c) is not None for c in candidates):
+                # 视野里有人,但没一个像本人。宁可继续搜索也不跟陌生人走。
+                self.rejected_appearance += 1
+                return None
+
+        best = min(pool,
                    key=lambda c: abs(c['x']) * 1.5 + abs(c['z'] - prefer_distance_m))
         xz = (best['x'], best['z'])
         if self._pending_xz is not None and self._dist(xz, self._pending_xz) <= self.assoc_radius_m:
@@ -478,13 +725,31 @@ class TargetLock:
 
         if self._pending_count >= self.confirm_frames:
             self.locked = True
-            self.anchor_xz = xz
-            self.last_seen = now
+            self._observe(best, now)
             self._pending_xz = None
             self._pending_count = 0
             self._pending_last_seen = None
             return best
         return None
+
+    def _observe(self, cand, now):
+        """接受一次观测:更新速度估计、锚点与外观签名。"""
+        xz = (cand['x'], cand['z'])
+        if self._static_xz is not None and self.last_seen is not None:
+            dt = now - self.last_seen
+            if 1e-3 < dt <= 0.5:
+                fx, fy = self._to_body(xz)
+                px, py = self._to_body(self._static_xz)
+                vf = clamp((fx - px) / dt, -self.max_target_speed_mps,
+                           self.max_target_speed_mps)
+                vl = clamp((fy - py) / dt, -self.max_target_speed_mps,
+                           self.max_target_speed_mps)
+                ovf, ovl = self.velocity_fl
+                self.velocity_fl = (0.5 * ovf + 0.5 * vf, 0.5 * ovl + 0.5 * vl)
+        self.anchor_xz = xz
+        self._static_xz = xz
+        self.last_seen = now
+        self._learn(cand, now)
 
 
 # --------------------------------------------------------------------------
