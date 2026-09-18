@@ -251,6 +251,7 @@ class PersonTracker:
         self.switches = 0
         self.reacquires = 0
         self.lidar_enabled = True
+        self.camera_in_view = None
 
     # ---------------------------------------------------------------- 里程计
     def step_odom(self, t, speed, yaw_rate, ok=True):
@@ -331,6 +332,7 @@ class PersonTracker:
         pose = self.odom.pose_at(t_meas)
         if pose is None:
             return
+        self.camera_in_view = in_view
         self._predict_all(t_now)
         high, low = [], []
         for d in detections:
@@ -426,9 +428,13 @@ class PersonTracker:
             # If the old track is still in front, prefer a unique cluster that
             # is already behind the axle.  This is the fast rear crossing case;
             # front candidates are commonly the point which caused the miss.
-            rear = [c for c in candidates
-                    if c[2] < -0.05 or abs(math.atan2(c[3], c[2])) > math.radians(110.0)]
-            old_x = target.state[0]
+            pose_now = self.odom.current()
+            rear = []
+            for candidate in candidates:
+                bx, by = OdomBuffer.odom_to_vehicle(pose_now, candidate[2], candidate[3])
+                if bx < -0.05 or abs(math.atan2(by, bx)) > math.radians(110.0):
+                    rear.append(candidate)
+            old_x, _ = OdomBuffer.odom_to_vehicle(pose_now, *target.pos)
             if old_x >= 0.0 and rear:
                 rear.sort(key=lambda c: c[0])
                 best = rear[0]
@@ -447,10 +453,22 @@ class PersonTracker:
                 continue
             ox, oy, R = meas[j]
             ox, oy = self._shift(ox, oy, t_meas, tr)
+            # Check alternatives against the SAME pre-update prediction and
+            # timestamp used for association. A nearby return outside the gate
+            # cannot be this track; it must not expire a stationary rear target.
+            ambiguous = False
+            for k, (mx, my, other_R) in enumerate(meas):
+                if k == j:
+                    continue
+                mx, my = self._shift(mx, my, t_meas, tr)
+                if (mx - ox) ** 2 + (my - oy) ** 2 > amb2:
+                    continue
+                _, _, _, d2 = tr.innovation(mx, my, other_R)
+                if (d2 <= self.gate_d2
+                        and math.hypot(mx - tr.pos[0], my - tr.pos[1]) <= self.gate_max_m):
+                    ambiguous = True
+                    break
             self._apply(tr, ox, oy, R, "lidar", t_now, None)
-            # 周围没有别的候选点簇:雷达这次说的就是这个人,身份可信
-            ambiguous = any(k != j and (mx - ox) ** 2 + (my - oy) ** 2 <= amb2
-                            for k, (mx, my, _R) in enumerate(meas))
             if not ambiguous:
                 tr.last_confident = t_now
         if forced is not None:
@@ -513,6 +531,12 @@ class PersonTracker:
     def _housekeeping(self, t_now):
         keep = []
         for tr in self.tracks:
+            # Radar may have moved the track outside the camera view since
+            # the last image. Old negative evidence no longer applies there.
+            if tr.unseen_in_view_since is not None and self.camera_in_view is not None:
+                bx, by = OdomBuffer.odom_to_vehicle(self.odom.current(), *tr.pos)
+                if not self.camera_in_view(bx, by):
+                    tr.unseen_in_view_since = None
             age = t_now - tr.last_update
             limit = self.confirmed_timeout_s if tr.confirmed else self.tentative_timeout_s
             if age > limit:

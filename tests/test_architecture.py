@@ -314,3 +314,86 @@ def test_fast_rear_crossing_reacquires_confirmed_target_from_lidar():
     assert view['x'] < 0 and view['update_age'] <= .01
     assert view['x'] < -.7
     assert tracker.reacquires == 1
+
+
+@pytest.mark.parametrize('pose', [(0., 0., 0.), (10., -3., math.pi),
+                                  (-10., 4., math.pi / 2)])
+def test_rear_handoff_is_independent_of_odometry_origin(pose):
+    from person_tracker import PersonTracker
+    tracker = PersonTracker(confirm_hits=1, reacquire_after_s=.1, reacquire_radius_m=3.)
+    tracker.odom.add(0., *pose)
+    tracker.add_camera([{'x': 1.8, 'y': 0., 'conf': .95}], 0., 0.)
+    original_id = tracker.target_id
+    tracker.odom.add(.2, *pose)
+    # Front clutter must not win just because odom +x points behind the car.
+    tracker.add_lidar([(1.8, 0.), (-1., .1)], .2, .2)
+    view = tracker.target_view(.2)
+    assert view['id'] == original_id
+    assert view['x'] == pytest.approx(-1.)
+    assert view['y'] == pytest.approx(.1)
+
+
+def test_rear_radar_handoff_clears_stale_camera_negative_evidence():
+    from person_tracker import PersonTracker
+    tracker = PersonTracker(confirm_hits=1, reacquire_after_s=.1, reacquire_radius_m=3.)
+    tracker.step_odom(0., 0., 0.)
+    tracker.add_camera([{'x': 1.8, 'y': 0., 'conf': .95}], 0., 0.,
+                       in_view=lambda x, y: x > 0.)
+    original_id = tracker.target_id
+    tracker.add_camera([], .1, .1, in_view=lambda x, y: x > 0.)
+    tracker.add_lidar([(-1., .1)], .2, .2)
+    # Simulate a stopped camera stream; valid unique rear returns continue.
+    for i in range(3, 121):
+        now = i / 10.
+        tracker.step_odom(now, 0., 0.)
+        tracker.add_lidar([(-1., .1)], now, now)
+        view = tracker.target_view(now)
+        assert view is not None
+        assert view['id'] == original_id
+        assert view['source'] == 'lidar'
+    assert tracker.dropped_unseen == 0
+    # A real loss of radar returns must still expire the track.
+    tracker.add_lidar([], 14., 14.)
+    assert tracker.target_view(14.) is None
+
+
+def test_front_radar_clutter_still_expires_with_camera_negative_evidence():
+    from person_tracker import PersonTracker
+    tracker = PersonTracker(confirm_hits=1)
+    tracker.add_camera([{'x': 1.8, 'y': 0., 'conf': .95}], 0., 0.,
+                       in_view=lambda x, y: x > 0.)
+    for i in range(1, 21):
+        now = i / 10.
+        tracker.add_camera([], now, now, in_view=lambda x, y: x > 0.)
+        tracker.add_lidar([(1.8, 0.)], now, now)
+    assert tracker.target_view(2.) is None
+    assert tracker.dropped_unseen == 1
+
+
+@pytest.mark.parametrize('clutter_offset, stays_locked', [(.65, True), (.15, False)])
+def test_stationary_rear_target_with_nearby_radar_cluster(clutter_offset, stays_locked):
+    from person_tracker import PersonTracker
+    tracker = PersonTracker(confirm_hits=1, reacquire_after_s=.1, reacquire_radius_m=3.)
+    tracker.add_camera([{'x': 1.8, 'y': 0., 'conf': .95}], 0., 0.,
+                       in_view=lambda x, y: x > 0.)
+    tracker.add_lidar([(-1., .1)], .2, .2)
+    original_id = tracker.target_id
+    # Settle after running around the car, then stand still beside another
+    # small return. A distant out-of-gate return cannot be this same person.
+    for i in range(3, 301):
+        now = i / 10.
+        clusters = [(-1., .1)]
+        if now >= 2.:
+            clusters.append((-1., .1 + clutter_offset))
+        tracker.add_camera([], now, now, in_view=lambda x, y: x > 0.)
+        tracker.add_lidar(clusters, now, now)
+    view = tracker.target_view(30.)
+    if stays_locked:
+        assert view is not None
+        assert view['id'] == original_id
+        assert view['source'] == 'lidar'
+        assert view['confident_age'] == pytest.approx(0.)
+        assert math.hypot(view['v_fwd'], view['v_lat']) < .01
+    else:
+        # Two plausible returns must not renew identity indefinitely.
+        assert view is None

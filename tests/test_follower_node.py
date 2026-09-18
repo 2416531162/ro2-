@@ -313,13 +313,14 @@ class TestCrossCheckAndHandoff(unittest.TestCase):
         finally:
             sim.close()
 
-    def test_ambiguous_lidar_track_expires(self):
-        """出了相机视野,且腿旁边总有别的点簇(椅子腿):雷达单独维持有时间上限。"""
+    def test_out_of_gate_clutter_does_not_expire_lidar_track(self):
+        """视野外连续命中的轨迹，不被关联门外 0.7m 的椅子腿拖到身份超时。"""
         sim = WorldSim(lidar_handoff_max_s=1.0)
         try:
             for _ in range(30):
                 sim.step((2.6, 0.0))
             node = sim.h.node
+            original_id = node.people.target_id
             y = 0.0
             gone = False
             for k in range(120):
@@ -337,7 +338,10 @@ class TestCrossCheckAndHandoff(unittest.TestCase):
                 if sim.h.status()['target'] is None:
                     gone = True
                     break
-            self.assertTrue(gone, sim.h.status())
+            self.assertFalse(gone, sim.h.status())
+            self.assertEqual(node.people.target_id, original_id)
+            self.assertTrue(sim.h.status()['lidar_track']['valid'])
+            self.assertGreater(sim.h.status()['lidar_track']['since_camera_s'], 1.0)
         finally:
             sim.close()
 

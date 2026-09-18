@@ -109,7 +109,7 @@ class FollowerConfig:
     # ---- 雷达接力跟踪 (人走出相机视野后继续用雷达跟) ----
     lidar_handoff: bool = True
     lidar_handoff_after_s: float = 0.15  # 相机超过这么久没看到人,才改由雷达接力
-    lidar_handoff_max_s: float = 8.0     # 超过这么久未被相机重新确认,不再相信雷达轨迹
+    lidar_handoff_max_s: float = 8.0     # 超过这么久没有相机或无歧义雷达确认,不再相信轨迹
     lidar_track_speed_cap: float = 0.45  # 已确认目标的雷达接力上限，仍受驱动和防撞限幅
     lidar_reacquire_gate_m: float = 4.00  # 人快速绕到车后时，允许雷达接回原已确认目标的距离门
 
