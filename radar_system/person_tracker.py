@@ -23,7 +23,7 @@
   7. 目标轨迹记录走过的路径点(breadcrumbs),供跟随控制「沿人走过的路走」。
 
 纯 Python,不依赖 ROS / numpy,便于单元测试。
-坐标约定:车体系原点在后轴中心,x 前 y 左;odom 系由本模块积分底盘速度得到。
+坐标约定:车体系原点在后轴中心,x 前 y 左；实车位姿由共享 /odom 输入。
 """
 
 import math
@@ -38,66 +38,8 @@ CHI2_2DOF_99 = 9.21
 # 里程计:积分底盘实测速度,保存最近一段位姿,供「按采集时刻换算」
 # =============================================================================
 
-class OdomBuffer:
-    def __init__(self, horizon_s=3.0):
-        self.horizon_s = horizon_s
-        self.poses = deque()            # (t, x, y, th)
-        self.x = self.y = self.th = 0.0
-        self.t = None
-
-    def reset(self):
-        self.poses.clear()
-        self.x = self.y = self.th = 0.0
-        self.t = None
-
-    def step(self, t, speed, yaw_rate):
-        if self.t is not None:
-            dt = t - self.t
-            if 0.0 < dt <= 0.5:
-                mid = self.th + yaw_rate * dt / 2
-                self.x += speed * dt * math.cos(mid)
-                self.y += speed * dt * math.sin(mid)
-                self.th += yaw_rate * dt
-        self.t = t
-        self.poses.append((t, self.x, self.y, self.th))
-        while self.poses and t - self.poses[0][0] > self.horizon_s:
-            self.poses.popleft()
-
-    def pose_at(self, t):
-        """t 时刻的位姿(线性插值);超出缓存范围时取最近端点。"""
-        if not self.poses:
-            return (self.x, self.y, self.th)
-        if t >= self.poses[-1][0]:
-            return self.poses[-1][1:]
-        if t <= self.poses[0][0]:
-            return self.poses[0][1:]
-        prev = self.poses[0]
-        for cur in self.poses:
-            if cur[0] >= t:
-                span = cur[0] - prev[0]
-                k = 0.0 if span <= 0 else (t - prev[0]) / span
-                dth = math.atan2(math.sin(cur[3] - prev[3]), math.cos(cur[3] - prev[3]))
-                return (prev[1] + k * (cur[1] - prev[1]),
-                        prev[2] + k * (cur[2] - prev[2]),
-                        prev[3] + k * dth)
-            prev = cur
-        return self.poses[-1][1:]
-
-    @staticmethod
-    def vehicle_to_odom(pose, px, py):
-        x, y, th = pose
-        c, s = math.cos(th), math.sin(th)
-        return x + c * px - s * py, y + s * px + c * py
-
-    @staticmethod
-    def odom_to_vehicle(pose, ox, oy):
-        x, y, th = pose
-        c, s = math.cos(th), math.sin(th)
-        dx, dy = ox - x, oy - y
-        return c * dx + s * dy, -s * dx + c * dy
-
-    def current(self):
-        return (self.x, self.y, self.th)
+from runtime_config import PROFILE
+from robot_core.odometry import PoseHistory as OdomBuffer
 
 
 # =============================================================================
@@ -307,6 +249,7 @@ class PersonTracker:
         self.last_target_pos = None
         self.rejected = 0
         self.switches = 0
+        self.reacquires = 0
         self.lidar_enabled = True
 
     # ---------------------------------------------------------------- 里程计
@@ -318,8 +261,9 @@ class PersonTracker:
             return
         self.odom.step(t, speed, yaw_rate)
 
-    def reset(self):
-        self.odom.reset()
+    def reset(self, keep_odom=False):
+        if not keep_odom:
+            self.odom.reset()
         self.tracks = []
         self.target_id = None
         self.target_lost_at = None
@@ -385,6 +329,8 @@ class PersonTracker:
         (雷达把柱子、椅子腿当成了人),删掉。
         """
         pose = self.odom.pose_at(t_meas)
+        if pose is None:
+            return
         self._predict_all(t_now)
         high, low = [], []
         for d in detections:
@@ -447,6 +393,8 @@ class PersonTracker:
         if not self.lidar_enabled:
             return
         pose = self.odom.pose_at(t_meas)
+        if pose is None:
+            return
         self._predict_all(t_now)
         meas = []
         for cx, cy in clusters:
@@ -454,7 +402,49 @@ class PersonTracker:
             meas.append((ox, oy, self.LIDAR_R))
         tracks = [tr for tr in self.tracks if tr.confirmed]
         amb2 = self.lidar_ambiguity_m ** 2
-        for tr, j in self._associate(tracks, meas, t_meas):
+        pairs = self._associate(tracks, meas, t_meas)
+        target = self._get(self.target_id) if self.target_id is not None else None
+
+        # A normal gate is deliberately tight so a chair leg cannot move a
+        # track by a metre in one frame.  A confirmed target crossing the rear
+        # of the car is the one exception: once the camera has gone quiet, a
+        # unique rear cluster inside the short handoff window is stronger
+        # evidence than a stale front association.  Work this out before
+        # applying the normal pairs so a front clutter hit cannot suppress it.
+        forced = None
+        target_pair = next(((tr, j) for tr, j in pairs if tr is target), None)
+        occupied_by_other = {j for tr, j in pairs if tr is not target}
+        if (target is not None and target.confirmed and target.last_camera is not None
+                and t_now - target.last_camera >= self.reacquire_after_s):
+            candidates = []
+            for j, (mx, my, R) in enumerate(meas):
+                sx, sy = self._shift(mx, my, t_meas, target)
+                d = math.hypot(sx - target.state[0], sy - target.state[1])
+                if d <= self.reacquire_radius_m and j not in occupied_by_other:
+                    candidates.append((d, j, sx, sy, R))
+
+            # If the old track is still in front, prefer a unique cluster that
+            # is already behind the axle.  This is the fast rear crossing case;
+            # front candidates are commonly the point which caused the miss.
+            rear = [c for c in candidates
+                    if c[2] < -0.05 or abs(math.atan2(c[3], c[2])) > math.radians(110.0)]
+            old_x = target.state[0]
+            if old_x >= 0.0 and rear:
+                rear.sort(key=lambda c: c[0])
+                best = rear[0]
+                ambiguous = len(rear) > 1 and rear[1][0] - best[0] < self.lidar_ambiguity_m
+                if not ambiguous:
+                    forced = best
+            elif old_x >= 0.0 and target_pair is None and candidates:
+                candidates.sort(key=lambda c: c[0])
+                best = candidates[0]
+                ambiguous = len(candidates) > 1 and candidates[1][0] - best[0] < self.lidar_ambiguity_m
+                if not ambiguous:
+                    forced = best
+
+        for tr, j in pairs:
+            if forced is not None and tr is target:
+                continue
             ox, oy, R = meas[j]
             ox, oy = self._shift(ox, oy, t_meas, tr)
             self._apply(tr, ox, oy, R, "lidar", t_now, None)
@@ -463,7 +453,41 @@ class PersonTracker:
                             for k, (mx, my, _R) in enumerate(meas))
             if not ambiguous:
                 tr.last_confident = t_now
+        if forced is not None:
+            _, j, ox, oy, R = forced
+            self._relocate(target, ox, oy, R, t_now)
         self._housekeeping(t_now)
+
+    def _relocate(self, tr, ox, oy, R, t_now):
+        """Snap a confirmed track to a unique rear radar return.
+
+        A Kalman update is intentionally gradual.  For a front-to-rear
+        crossing that would make the estimated person pass through the car
+        for several control cycles, exactly when the controller must turn.
+        The radar association has already been gated and ambiguity checked;
+        relocate the position immediately while bounding the derived velocity.
+        """
+        old_x, old_y = tr.pos
+        dt = max(t_now - tr.last_update, 0.05)
+        vx, vy = (ox - old_x) / dt, (oy - old_y) / dt
+        speed = math.hypot(vx, vy)
+        if speed > 2.5:
+            scale = 2.5 / speed
+            vx, vy = vx * scale, vy * scale
+        tr.state = [ox, oy, vx, vy]
+        tr.P[0][0] = max(R[0], 0.08 ** 2)
+        tr.P[1][1] = max(R[1], 0.08 ** 2)
+        tr.P[0][1] = tr.P[1][0] = 0.0
+        tr.P[0][2] = tr.P[0][3] = tr.P[1][2] = tr.P[1][3] = 0.0
+        tr.P[2][0] = tr.P[2][1] = tr.P[3][0] = tr.P[3][1] = 0.0
+        tr.t = tr.last_update = t_now
+        tr.last_source = "lidar"
+        tr.last_confident = t_now
+        tr.misses = 0
+        tr.lidar_hits += 1
+        self.reacquires += 1
+        if tr.id == self.target_id:
+            tr.add_crumb(self.crumb_spacing_m, self.crumb_max)
 
     def _apply(self, tr, ox, oy, R, source, t_now, det):
         tr.update(ox, oy, R)

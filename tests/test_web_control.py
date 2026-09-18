@@ -44,6 +44,25 @@ ros_stubs.Node.create_client = lambda self, *a, **k: types.SimpleNamespace(
     service_is_ready=lambda: False)
 
 import radar_web_server as web  # noqa: E402
+from runtime_config import PROFILE, profile_hash  # noqa: E402
+
+
+class FakeMotionService:
+    def __init__(self, success=True, message='IDLE; select a new task'):
+        self.success = success
+        self.message = message
+        self.calls = 0
+
+    def service_is_ready(self):
+        return True
+
+    def call_async(self, _request):
+        self.calls += 1
+        result = types.SimpleNamespace(success=self.success, message=self.message)
+        future = types.SimpleNamespace()
+        future.add_done_callback = lambda callback: callback(future)
+        future.result = lambda: result
+        return future
 
 
 class TestWebControl(unittest.TestCase):
@@ -66,6 +85,10 @@ class TestWebControl(unittest.TestCase):
     def setUp(self):
         self.conn = http.client.HTTPConnection('127.0.0.1', self.server.server_address[1],
                                                timeout=1.0)
+        with self.bridge.motion.lock:
+            self.bridge.motion.state = {}
+            self.bridge.motion.received = None
+        self.bridge.cli_reset = types.SimpleNamespace(service_is_ready=lambda: False)
 
     def tearDown(self):
         self.conn.close()
@@ -111,11 +134,57 @@ class TestWebControl(unittest.TestCase):
         self.assertFalse(active)
         self.assertEqual(vx, 0.0)
 
+    def set_motion_fault(self, *, healthy=True, waiting_stationary=False):
+        with self.bridge.motion.lock:
+            self.bridge.motion.state = {
+                'mode': 'FAULT',
+                'epoch': 'test-epoch',
+                'profile_hash': profile_hash(PROFILE),
+                'legacy_commands': False,
+                'healthy': healthy,
+                'waiting_stationary': waiting_stationary,
+            }
+            self.bridge.motion.received = web.time.monotonic()
+
+    def test_manual_command_resets_recovered_latched_fault(self):
+        self.set_motion_fault()
+        reset = FakeMotionService()
+        self.bridge.cli_reset = reset
+
+        status, data = self.drive('forward', seq=101, client='recover')
+
+        self.assertEqual(status, 200)
+        self.assertTrue(data['ok'])
+        self.assertEqual(reset.calls, 1)
+
+    def test_manual_command_does_not_reset_active_fault(self):
+        self.set_motion_fault(healthy=False)
+        reset = FakeMotionService()
+        self.bridge.cli_reset = reset
+
+        status, data = self.drive('forward', seq=102, client='active-fault')
+
+        self.assertEqual(status, 409)
+        self.assertFalse(data['ok'])
+        self.assertIn('仍有故障', data['error'])
+        self.assertEqual(reset.calls, 0)
+
+    def test_stop_never_clears_latched_fault(self):
+        self.set_motion_fault()
+        reset = FakeMotionService()
+        self.bridge.cli_reset = reset
+
+        status, data = self.drive('stop', seq=103, client='stop-fault')
+
+        self.assertEqual(status, 200)
+        self.assertTrue(data['ok'])
+        self.assertEqual(reset.calls, 0)
+
     def test_tracking_bridge_has_no_retired_subscriptions(self):
         topics = {topic for topic, _ in self.bridge.subscriptions_}
         self.assertEqual(topics, {'/scan', '/camera/ai_detection/targets',
                                  '/camera/ai_detection/status', '/voltage',
-                                 '/follower/status', '/wheeltec/status'})
+                                 '/follower/status', '/wheeltec/status', '/motion/status'})
 
     def test_retired_map_and_rtk_routes_are_gone(self):
         for path in ('/map', '/map2d', '/api/cors', '/api/live_map/state'):

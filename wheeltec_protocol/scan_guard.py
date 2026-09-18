@@ -4,7 +4,7 @@
 
 为什么放在驱动里
 ----------------
-跟随程序、网页遥控、以后的导航都往 /cmd_vel 发指令。碰撞检查只写在跟随程序里时:
+跟随程序、网页遥控、导航经各自租约入口汇入同一驱动。碰撞检查只写在跟随程序里时:
   - 跟随程序崩溃 / 卡死 / 有 bug,底盘照样执行它最后发的指令(直到命令超时);
   - 网页手动遥控完全没有防撞。
 驱动是所有指令的必经之路,在这里按雷达实测再兜一层底,谁发的指令都管得住。
@@ -13,13 +13,14 @@
 --------------------------------------------
 - 只看**行驶方向**上、车宽(+余量)范围内的雷达点;转弯时走廊再加宽一点。
 - 允许车速 v 满足:延迟距离 + 刹车距离 + 停车余量 <= 到最近障碍的距离。
-- 从没收到过雷达:直通(雷达没开时手动遥控仍可用),状态里注明。
-- 雷达收到过但断流:限速到 stale_speed_cap。
+- 类本身保留 legacy 无雷达直通；正常租约入口另由 MotionAuthority 门控禁止。
+- 类本身保留 legacy 断流限速；正常租约入口遇到断流会锁存故障停车。
 纯 Python,不依赖 ROS。坐标:原点后轴中心,x 前 y 左。
 """
 
 import math
 from dataclasses import dataclass
+from runtime_config import PROFILE
 
 __all__ = ["GuardConfig", "ScanGuard"]
 
@@ -27,12 +28,12 @@ __all__ = ["GuardConfig", "ScanGuard"]
 @dataclass(frozen=True)
 class GuardConfig:
     enabled: bool = True
-    lidar_x_m: float = 0.53
-    lidar_y_m: float = 0.0
-    lidar_yaw_rad: float = 0.0
-    front_m: float = 0.67          # 后轴 -> 车头
-    rear_m: float = 0.18           # 后轴 -> 车尾
-    half_width_m: float = 0.335
+    lidar_x_m: float = PROFILE["sensors"]["lidar_x_m"]
+    lidar_y_m: float = PROFILE["sensors"]["lidar_y_m"]
+    lidar_yaw_rad: float = PROFILE["sensors"]["lidar_yaw_rad"]
+    front_m: float = PROFILE["geometry"]["front_m"]    # 后轴 -> 车头
+    rear_m: float = PROFILE["geometry"]["rear_m"]    # 后轴 -> 车尾
+    half_width_m: float = PROFILE["geometry"]["half_width_m"]
     # 车身自反射过滤余量。故意比跟随程序的 0.05 小:用 0.05 时车头 5cm 内的
     # 障碍物也被当成「车自己」,防撞层永远不会停车。实测自反射点都在车身后部
     # (x <= 0.39m),车头附近没有。
@@ -40,10 +41,10 @@ class GuardConfig:
     lateral_margin_m: float = 0.05
     turn_extra_m: float = 0.10     # 转弯时走廊额外加宽
     stop_margin_m: float = 0.04    # 停车后与障碍的最小距离(跟随程序是 0.06~0.12)
-    decel_m_s2: float = 1.0
-    latency_s: float = 0.20
+    decel_m_s2: float = PROFILE["safety"]["decel_mps2"]
+    latency_s: float = PROFILE["safety"]["guard_latency_s"]
     range_min_m: float = 0.15
-    scan_timeout_s: float = 0.50
+    scan_timeout_s: float = PROFILE["safety"]["scan_timeout_s"]
     stale_speed_cap: float = 0.15
     min_speed_m_s: float = 0.03    # 允许速度低于此值直接停
 

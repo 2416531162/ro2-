@@ -30,6 +30,7 @@ x 向前为正,y 向左为正。雷达装在别处,用 SensorMount 换算过来�
 
 import math
 from dataclasses import dataclass
+from runtime_config import PROFILE
 
 __all__ = ["VehicleFootprint", "SensorMount", "scan_to_vehicle_frame",
            "optical_to_vehicle", "is_self_hit", "drop_self_hits", "in_blind_sector",
@@ -51,9 +52,9 @@ class VehicleFootprint:
     margin_m      侧向安全余量。建议至少 0.05m:雷达有角分辨率误差,
                   车也不会绝对笔直地走。
     """
-    front_m: float = 0.67          # 实测 2026-09-16
-    rear_m: float = 0.18
-    half_width_m: float = 0.335     # 全宽 0.67 的一半,按轮胎外沿
+    front_m: float = PROFILE["geometry"]["front_m"]    # 实测 2026-09-16
+    rear_m: float = PROFILE["geometry"]["rear_m"]
+    half_width_m: float = PROFILE["geometry"]["half_width_m"]    # 全宽 0.67 的一半,按轮胎外沿
     margin_m: float = 0.06
 
     def __post_init__(self):

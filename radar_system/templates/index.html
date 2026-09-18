@@ -690,9 +690,10 @@ const F_STATE_TEXT = {
   COLLISION_AEB: '防撞急停', AEB_EMERGENCY: 'AEB 硬急停', SEARCHING_LOST: '目标丢失', SEARCH_SCAN: '原地观察找人',
   SEARCH_TURN: '转弯搜索', RECOVERY_REVERSE: '沿来路倒车脱困', RECOVERY_BRAKE: '停稳换向',
   RECOVERY_WAIT: '等待条件满足', RECOVERY_EXHAUSTED: '脱困次数已用完', LOW_BATTERY: '电量低',
-  SENSOR_CONFLICT: '传感器冲突', STARTING: '启动中', OFFLINE: '未运行', STANDBY: '待命',
+  PAUSED: '跟随已暂停', SENSOR_CONFLICT: '传感器冲突', STARTING: '启动中', OFFLINE: '未运行', STANDBY: '待命',
 };
 const F_REASON_TEXT = {
+  motion_authority: '当前未选择跟随模式，或控制链路不可用',
   follow: '按目标距离正常跟随', local_path: '正前方不通,选了一条可行的弯道', hold: '已到保持距离',
   target_behind: '目标在车后', face_rear_target: '前方开阔,大舵角前向回旋掉头面朝人体',
   k_turn_forward: '掉头揉库中(前向大舵角回旋)', k_turn_reverse: '掉头揉库中(反打舵倒车调整)',
@@ -866,6 +867,7 @@ function renderFollowerDetail(f, live, rawState) {
   row('底盘实测', `${fmtNum(live.chassis_speed, 2, ' m/s')}`);
   row('视觉帧/命中', `${live.target_messages ?? '--'} / ${live.visual_matches ?? '--'}`);
   row('雷达接力帧', `${live.lidar_handoff_frames ?? 0}`);
+  row('雷达重捕获', `${live.target_reacquires ?? 0}`);
   row('视线遮挡计数', `${live.range_conflicts ?? 0}`);
   row('排除的非人轨迹', `${live.dropped_not_person ?? 0}`);
   row('关联门控拒绝', `${live.outliers_rejected ?? 0}`);
@@ -896,6 +898,7 @@ async function toggleFollower() {
   try {
     const res = await fetch('/api/follower/toggle', { method: 'POST' });
     const data = await res.json();
+    if (!data.ok) throw new Error(data.message || '跟随模式切换失败');
     if (typeof data.running !== 'boolean') {
       notify('切换跟屁虫失败: 服务端响应异常');
       return;

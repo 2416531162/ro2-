@@ -5,6 +5,7 @@ cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
 export ROS_AUTOMATIC_DISCOVERY_RANGE="${ROS_AUTOMATIC_DISCOVERY_RANGE:-LOCALHOST}"
 export N10P_PORT="${N10P_PORT:-/dev/serial/by-id/usb-WCH.CN_USB_Single_Serial_0001-if00}"
 case "${1:-}" in
+  follower) exec /usr/bin/python3 -u person_follower.py --passive ;;
   camera) exec bash ./run_camera.sh ;;
   lidar) exec /usr/bin/python3 -u real_lidar_node.py ;;
   ai) exec bash ./run_ai.sh ;;
@@ -15,5 +16,5 @@ case "${1:-}" in
     until test -r "$XAUTHORITY" && xset q >/dev/null 2>&1; do sleep 1; done
     exec bash ./run_gui.sh
     ;;
-  *) echo 'Expected camera|lidar|ai|web|gui' >&2; exit 2 ;;
+  *) echo 'Expected camera|lidar|ai|web|gui|follower' >&2; exit 2 ;;
 esac

@@ -246,6 +246,7 @@ def install():
     nav = types.ModuleType('nav_msgs'); nav_msg = types.ModuleType('nav_msgs.msg')
     nav_msg.OccupancyGrid = _simple('OccupancyGrid')
     nav_msg.Path = _simple('Path')
+    nav_msg.Odometry = _simple('Odometry')
     nav.msg = nav_msg
 
     geo = types.ModuleType('geometry_msgs'); geo_msg = types.ModuleType('geometry_msgs.msg')

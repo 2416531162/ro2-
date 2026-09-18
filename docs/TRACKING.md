@@ -8,7 +8,11 @@
 | `person_pose_node.py` | RGB-D 最新帧缓冲、人体姿态与测距发布 |
 | `pose_inference.py` | RKNN NPU、NumPy DFL 解码、NMS、17 点骨架 |
 | `depth_measurement.py` | 深度有效比例与近百分位测距，图像 stride/大小端处理 |
-| `person_follower.py` / `lidar_track.py` | 人体锁定、相机与雷达关联及接力 |
+| `robot_core` / `follower_config.py` | 共享物理配置、运动学和位姿历史；跟随行为参数 |
+| `motion_client.py` / `wheeltec_protocol/motion_authority.py` | 带时间戳、控制租约的运动请求与控制权仲裁 |
+| `person_follower.py` | ROS 消息/时钟/控制租约适配 |
+| `follower_engine.py` / `follower_perception.py` / `follower_controller.py` | 纯跟随引擎，感知关联与控制策略 |
+| `person_tracker.py` / `lidar_track.py` | 使用共享本地位姿的人体轨迹、相机/雷达关联及接力 |
 | `follower_recovery.py` / `footprint.py` / `motion_safety.py` | 局部扫掠路径、脱困和速度约束 |
 | `radar_web_server.py` / `board_radar_gui.py` | 网页遥测/手动接管、板载相机与雷达画面 |
 
@@ -80,15 +84,13 @@ bash radar_system/run_follower.sh --dry-run
 ros2 topic echo /camera/ai_detection/status
 ```
 
-260 项硬件无关测试通过（Python 3.11 / NumPy 1.26.4），覆盖姿态头/关键点对应关系、NMS、大小端/行填充、消息发布、深度失效回退、
-光束批量查询对照、狭窄门、盲区、雷达接力、换向停车、手动控制及已删除接口。
-浏览器验证桌面/手机页面、遥测、暂停、缩放；Qt 离屏验证窗口与相机模式。
+当前完整测试入口为 `python3 -m pytest tests -q`，涵盖视觉、跟随、控制仲裁、共享定位和部署回滚。历史性能及显示验证记录不表示本次在设备上重新验收。
 真实传感器 QoS、板端 NPU 性能、相机外参与深度配准、运动延迟和实车避障仍需设备验收。
 
 ## 部署迁移
 
-更新实际 systemd 工作目录中的文件后执行 `bash radar_system/start_all.sh`。
-该脚本先停止并禁用旧 `mapping/mapping3d/rtk/foxglove` 服务，再启动 `camera/lidar/ai/web/gui`。
+使用 `deployment/manage.py` 成套打包并部署 `robot_core`、`radar_system`、`wheeltec_protocol`、`deployment`，见 [升级与回滚](ARCHITECTURE_ROADMAP.md)。
+`start_all.sh headless` 启动已安装服务及被动跟随进程，等待网页明确选择 FOLLOW。它不替代部署器，也不会修改其他服务的启用状态。
 `ai` 改为 `run_ai.sh → person_pose_node.py`；如设备另有直接指向旧检测器的自定义服务，需修改其 `ExecStart`。
 相机启动只保留 RGB-D 驱动，已移除点云生成和仅供建图使用的静态 TF 发布。
 网页主入口回到 `/`，旧 `/map`、`/map2d`、地图管理与 CORS 接口均不再提供。

@@ -85,7 +85,7 @@ class FollowerHarness(unittest.TestCase):
         cfg = FollowerConfig()
         cfg.confirm_frames = 1
         cfg.scan_blind_sectors_deg = ()
-        self.node = PersonFollowerNode(cfg, dry_run=True)
+        self.node = PersonFollowerNode(cfg, dry_run=True, simulated_odometry=True)
         self.node.people.confirm_hits = 1
         self.node.print_dashboard = lambda _: None
 

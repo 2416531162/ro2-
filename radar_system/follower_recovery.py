@@ -405,7 +405,7 @@ class LocalRecovery:
             return max(0., float(distances[collision_step])-step)
         return horizon
 
-    def _observe(self, now, speed, yaw_rate, healthy, odom_ok=None):
+    def _observe(self, now, speed, yaw_rate, healthy, odom_ok=None, local_pose=None):
         dt = 0.0 if self.last_time is None else now-self.last_time
         self.last_time = now
         odom_ok = healthy if odom_ok is None else odom_ok
@@ -418,8 +418,15 @@ class LocalRecovery:
             self.trail_length = 0.0
             return 0.0
         x, y, a = self.pose
-        self.pose = (x+speed*dt*math.cos(a+yaw_rate*dt/2),
-                     y+speed*dt*math.sin(a+yaw_rate*dt/2), a+yaw_rate*dt)
+        if local_pose is None:  # explicitly simulated/legacy odometry
+            self.pose = (x+speed*dt*math.cos(a+yaw_rate*dt/2),
+                         y+speed*dt*math.sin(a+yaw_rate*dt/2), a+yaw_rate*dt)
+            distance, yaw_distance = abs(speed)*dt, abs(yaw_rate)*dt
+        else:
+            # Same pose history as person tracking, never integrate a second frame.
+            self.pose = tuple(local_pose)
+            distance = math.hypot(self.pose[0]-x, self.pose[1]-y) if dt > 0 else 0.
+            yaw_distance = abs(math.atan2(math.sin(self.pose[2]-a), math.cos(self.pose[2]-a))) if dt > 0 else 0.
         self.scan_history = [h for h in self.scan_history if now-h[0] <= self.cfg.history_s]
         # Trail of footprints the car physically occupied while driving forward
         # (normal follow AND forward recovery legs), kept by distance and age.
@@ -436,13 +443,13 @@ class LocalRecovery:
                             and newest-h[4] <= self.cfg.trail_m]
         self.trail_length = (self.history[-1][4]-self.history[0][4]) if self.history else 0.0
         if not self.active and self.previous_speed > 0.03 and speed > 0.03:
-            self.normal_distance += speed*dt
+            self.normal_distance += distance
         if self.active:
-            self.leg_distance += abs(speed)*dt
-            self.total_distance += abs(speed)*dt
-            self.total_yaw += abs(yaw_rate)*dt
+            self.leg_distance += distance
+            self.total_distance += distance
+            self.total_yaw += yaw_distance
             if self.blind_leg and speed < 0:
-                self.blind_distance += abs(speed)*dt
+                self.blind_distance += distance
         return dt
 
     def cancel(self):
@@ -467,8 +474,8 @@ class LocalRecovery:
 
     def update(self, *, now, scan, healthy, speed, yaw_rate, target, gap,
                bearing, requested_speed, requested_steer, current_steer,
-               follow_cap, lost_age, odom_ok=None):
-        dt = self._observe(now, speed, yaw_rate, healthy, odom_ok)
+               follow_cap, lost_age, odom_ok=None, local_pose=None):
+        dt = self._observe(now, speed, yaw_rate, healthy, odom_ok, local_pose)
         if not healthy:
             self.cancel()
             return Command(state="RECOVERY_WAIT", reason="sensor_or_driver_unavailable")

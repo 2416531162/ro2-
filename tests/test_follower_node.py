@@ -105,7 +105,7 @@ class FollowerHarness:
         cfg = pf.FollowerConfig()
         for k, v in overrides.items():
             setattr(cfg, k, v)
-        self.node = pf.PersonFollowerNode(cfg, dry_run=True)
+        self.node = pf.PersonFollowerNode(cfg, dry_run=True, simulated_odometry=True)
         self.node.print_dashboard = lambda s: None
 
     def driver_ok(self, speed=0.0, yaw_rate=0.0):
@@ -288,7 +288,7 @@ class TestCrossCheckAndHandoff(unittest.TestCase):
         self.assertLess(s['target']['x'], -0.8, "人在左边,横向偏移为负")
         self.assertGreater(s['cmd_steer_deg'], 5.0, s)
         self.assertGreater(s['cmd_vx'], 0.0, s)
-        self.assertLessEqual(s['speed_cap_mps'], 0.35 + 1e-9, s)
+        self.assertLessEqual(s['speed_cap_mps'], pf.FollowerConfig().lidar_track_speed_cap + 1e-9, s)
 
     def test_in_view_but_never_seen_is_dropped(self):
         """雷达还在跟一个点簇,但它就在相机视野正中、相机却一直看不到:不是人,丢弃。"""
@@ -807,8 +807,22 @@ class TestRearTargetFollowing(unittest.TestCase):
         self._set_target_at(h, -2.0, 0.5)
         for _ in range(5):
             h.tick(n10p_scan(half_size=5.0))
-        self.assertGreater(h.node.cmd_vx, 0.10)
+        self.assertGreater(h.node.cmd_vx, 0.20)
         self.assertEqual(h.node.state, 'TURNAROUND')
+
+    def test_open_rear_turnaround_keeps_forward_arc_instead_of_flipping(self):
+        """前方持续开阔时，掉头应连续回旋，不应按时间反复换向。"""
+        h = FollowerHarness(enable_rear_turnaround=True, scan_blind_sectors_deg=())
+        h.tick(n10p_scan(half_size=8.0))
+        self._set_target_at(h, -2.0, 0.6)
+        phases = []
+        for _ in range(80):
+            h.tick(n10p_scan(half_size=8.0))
+            phases.append(h.node.turnaround_phase)
+        self.assertEqual(phases[0], 'FORWARD')
+        self.assertNotIn('REVERSE', phases)
+        self.assertGreater(h.node.cmd_vx, 0.35)
+        self.assertGreater(abs(h.node.cmd_steer), 0.30)
 
     def test_target_behind_turnaround_blocked_falls_back_to_reverse(self):
         """当开启 enable_rear_turnaround 但前方受阻时，安全执行反打舵倒车揉库。"""
@@ -818,6 +832,8 @@ class TestRearTargetFollowing(unittest.TestCase):
         self._set_target_at(h, -2.0, 0.0)
         h.tick(n10p_scan(half_size=5.0, extra=front_obstacle))
         self.assertLess(h.node.cmd_vx, -0.01)
+        self.assertLess(h.node.cmd_vx, -0.08,
+                        "后方雷达可见时反打倒车不应误用盲区 0.08m/s 限速")
         self.assertEqual(h.node.state, 'TURNAROUND')
         self.assertEqual(h.node.limit_reason, 'k_turn_reverse')
 
@@ -864,4 +880,3 @@ class TestRearTargetFollowing(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
-

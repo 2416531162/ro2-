@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """RK3588 Wheeltec adapter: latest command, sole serial owner, explicit arming.
 
-/cmd_vel is SI body velocity; /ackermann_cmd is speed + front steering angle.
+Normal motion uses leased /follow|manual|navigation/command requests.
+Legacy /cmd_vel and /ackermann_cmd are available only in exclusive commissioning mode.
 The firmware profile must be confirmed before enabling nonzero transmission.
 This file's protocol and ControlPolicy also run without ROS for regression tests.
 """
@@ -11,10 +12,14 @@ import os
 import struct
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from runtime_config import PROFILE, profile_hash
+from robot_core.kinematics import ChassisGeometry, yaw_from_steer, steer_from_yaw, max_yaw_at_speed
+from motion_authority import MotionAuthority
 from scan_guard import GuardConfig, ScanGuard  # noqa: E402
 
 FRAME_HEADER, FRAME_TAIL = 0x7B, 0x7D
@@ -88,6 +93,7 @@ class Config:
     receive_only: bool = True
     mode_byte: int = 0
     steering_scale: float = 1.0
+    track_m: float = PROFILE["geometry"]["track_m"]
     wheelbase_m: float = 0.0        # no guessed wheelbase
     max_speed_m_s: float = 0.15
     max_steering_rad: float = 0.35
@@ -114,7 +120,7 @@ class Config:
             raise ValueError("invalid mode byte")
         nums = [v for k, v in vars(self).items() if isinstance(v, (float, int)) and not isinstance(v, bool)]
         finite(*nums)
-        if self.wheelbase_m < 0 or not 0 < abs(self.steering_scale) <= 10:
+        if self.wheelbase_m < 0 or self.track_m < 0 or not 0 < abs(self.steering_scale) <= 10:
             raise ValueError("invalid geometry or steering scale")
         if not 0 < self.max_speed_m_s <= 2.5 or not 0 < self.max_steering_rad < math.pi / 3:
             raise ValueError("invalid speed or steering limit")
@@ -238,6 +244,7 @@ class ControlPolicy:
         if not self.armed:
             raise ValueError("not armed")
         speed = max(-c.max_speed_m_s, min(c.max_speed_m_s, speed))
+        geometry = ChassisGeometry(c.wheelbase_m, c.track_m, c.max_steering_rad) if c.wheelbase_m > 0 else None
         if kind == "ackermann":
             steering = max(-c.max_steering_rad, min(c.max_steering_rad, turn))
             if c.protocol == "steering_angle":
@@ -248,7 +255,7 @@ class ControlPolicy:
                 if c.wheelbase_m <= 0:
                     self.stop("wheelbase_unconfigured")
                     raise ValueError(self.reason)
-                value = speed * math.tan(steering) / c.wheelbase_m
+                value = yaw_from_steer(speed, steering, geometry)
         elif kind == "twist":
             yaw = max(-c.max_yaw_rate_rad_s, min(c.max_yaw_rate_rad_s, turn))
             if abs(speed) < 1e-6 and abs(yaw) > 1e-6:
@@ -257,10 +264,11 @@ class ControlPolicy:
                 if c.wheelbase_m <= 0:
                     self.stop("wheelbase_unconfigured")
                     raise ValueError(self.reason)
-                value = math.atan(c.wheelbase_m * yaw / speed) if abs(speed) > 1e-6 else 0.0
+                value = steer_from_yaw(speed, yaw, geometry)
                 value = max(-c.max_steering_rad, min(c.max_steering_rad, value))
             else:
-                value = yaw
+                limit = max_yaw_at_speed(speed, geometry) if geometry else c.max_yaw_rate_rad_s
+                value = max(-limit, min(limit, yaw))
         else:
             self.stop("unknown_command")
             raise ValueError(self.reason)
@@ -306,7 +314,10 @@ class ControlPolicy:
         old_speed, old_turn = self.output
         self.guard_reason = None
         if self.speed_filter is not None:
+            original_speed = speed
             speed, self.guard_reason = self.speed_filter(speed, turn, now)
+            if c.protocol == 'twist' and abs(original_speed) > 1e-9:
+                turn *= abs(speed / original_speed)
         # Brake immediately on zero or reversal; never continue accelerating an old direction.
         if speed == 0 or old_speed * speed < 0:
             out_speed = 0.0
@@ -316,6 +327,9 @@ class ControlPolicy:
                 # 防撞限速立即生效,不走减速斜坡
                 out_speed = speed
         out_turn = old_turn + max(-c.steering_rate_rad_s * dt, min(c.steering_rate_rad_s * dt, turn - old_turn))
+        if c.protocol == 'twist' and c.wheelbase_m > 0:
+            limit = max_yaw_at_speed(out_speed, ChassisGeometry(c.wheelbase_m, c.track_m, c.max_steering_rad))
+            out_turn = max(-limit, min(limit, out_turn))
         self.output = (out_speed, out_turn)
         wire_turn = out_turn * c.steering_scale if c.protocol == "steering_angle" else out_turn
         return build_frame(out_speed, wire_turn, c.mode_byte)
@@ -348,7 +362,10 @@ class WheeltecDriver(Node):
             raise RuntimeError("ROS 2 Jazzy, pyserial and ackermann_msgs are required")
         super().__init__("wheeltec_driver")
         defaults = vars(Config()).copy()
-        defaults.update(port=DEFAULT_PORT, baud=115200, frame_id="odom", base_frame_id="base_footprint", publish_tf=False, allow_test_port=False)
+        defaults.update(PROFILE['driver'])
+        defaults.update(wheelbase_m=PROFILE['geometry']['wheelbase_m'],
+                        max_steering_rad=PROFILE['geometry']['max_steer_rad'])
+        defaults.update(port=DEFAULT_PORT, baud=115200, frame_id=PROFILE["frames"]["odom"], base_frame_id=PROFILE["frames"]["base"], publish_tf=False, allow_test_port=False, legacy_commands=False)
         for name, value in defaults.items():
             self.declare_parameter(name, value, ParameterDescriptor(read_only=True))
         gp = lambda k: self.get_parameter(k).value
@@ -366,7 +383,29 @@ class WheeltecDriver(Node):
         for name, value in guard_defaults.items():
             self.declare_parameter("guard_" + name, value, ParameterDescriptor(read_only=True))
         self.guard = ScanGuard(GuardConfig(**{k: gp("guard_" + k) for k in guard_defaults}))
+        for field, expected in {
+                **PROFILE['driver'],
+                'frame_id': PROFILE['frames']['odom'],
+                'base_frame_id': PROFILE['frames']['base'],
+                'guard_decel_m_s2': PROFILE['safety']['decel_mps2'],
+                'guard_latency_s': PROFILE['safety']['guard_latency_s'],
+                'guard_scan_timeout_s': PROFILE['safety']['scan_timeout_s'],
+                'wheelbase_m': PROFILE['geometry']['wheelbase_m'],
+                'track_m': PROFILE['geometry']['track_m'],
+                'max_steering_rad': PROFILE['geometry']['max_steer_rad'],
+                'guard_front_m': PROFILE['geometry']['front_m'],
+                'guard_rear_m': PROFILE['geometry']['rear_m'],
+                'guard_half_width_m': PROFILE['geometry']['half_width_m'],
+                'guard_lidar_x_m': PROFILE['sensors']['lidar_x_m'],
+                'guard_lidar_y_m': PROFILE['sensors']['lidar_y_m'],
+                'guard_lidar_yaw_rad': PROFILE['sensors']['lidar_yaw_rad']}.items():
+            if gp(field) != expected:
+                raise ValueError(field + ': change shared robot profile, not an isolated ROS override')
         self.publish_tf = gp("publish_tf")
+        # Commissioning-only compatibility is exclusive with the leased interface.
+        self.legacy_commands = gp("legacy_commands")
+        self.authority = MotionAuthority(PROFILE['safety']['command_timeout_s'], PROFILE['safety']['stationary_s'])
+        self.scan_health_at = None
         self.lock = threading.RLock()
         self.policy = ControlPolicy(self.config, time.monotonic())
         if self.guard.cfg.enabled:
@@ -382,17 +421,30 @@ class WheeltecDriver(Node):
         self.backlog_streak = 0
         self.started = time.monotonic()
         self.last_odom = None
+        self.odometry_epoch = uuid.uuid4().hex
         self.position = [0.0, 0.0, 0.0]
         self.rx_times = []
-        self.pub_odom = self.create_publisher(Odometry, "/odom", 10)
+        self.pub_odom = self.create_publisher(Odometry, PROFILE["localization"]["driver_topic"], 10)
         self.pub_imu = self.create_publisher(Imu, "/imu", 10)
         self.pub_voltage = self.create_publisher(Float32, "/voltage", 10)
         self.pub_status = self.create_publisher(String, "/wheeltec/status", 10)
+        self.pub_motion = self.create_publisher(String, "/motion/status", 1)
         self.tf = TransformBroadcaster(self) if self.publish_tf else None
         qos = QoSProfile(depth=1, history=HistoryPolicy.KEEP_LAST,
                          durability=DurabilityPolicy.VOLATILE, lifespan=Duration(seconds=self.config.cmd_timeout_s))
-        self.create_subscription(Twist, "/cmd_vel", self.on_twist, qos)
-        self.create_subscription(AckermannDriveStamped, "/ackermann_cmd", self.on_ackermann, qos)
+        if self.legacy_commands:
+            self.create_subscription(Twist, "/cmd_vel", self.on_twist, qos)
+            self.create_subscription(AckermannDriveStamped, "/ackermann_cmd", self.on_ackermann, qos)
+        else:
+            for source in MotionAuthority.SOURCES:
+                self.create_subscription(String, '/' + source + '/command',
+                                         lambda msg, src=source: self.on_motion(src, msg), qos)
+            self.create_service(SetBool, '/motion/follow',
+                                lambda req, res: self.select_motion('follow', req, res))
+            self.create_service(SetBool, '/motion/navigation',
+                                lambda req, res: self.select_motion('navigation', req, res))
+            self.create_service(Trigger, '/motion/reset', self.reset_motion)
+            self.create_service(Trigger, '/motion/stop', self.on_stop)
         self.create_subscription(LaserScan, "/scan", self.on_scan,
                                  QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT))
         self.create_service(SetBool, "/wheeltec/arm", self.on_arm)
@@ -406,18 +458,100 @@ class WheeltecDriver(Node):
         with self.lock:
             self.guard.update_scan(msg.ranges, msg.angle_min, msg.angle_increment,
                                    msg.range_min, msg.range_max, points_ready)
+            stamp = msg.header.stamp.sec + msg.header.stamp.nanosec / 1e9
+            age = self.get_clock().now().nanoseconds / 1e9 - stamp
+            valid = (math.isfinite(msg.angle_min) and math.isfinite(msg.angle_increment)
+                     and msg.angle_increment != 0 and math.isfinite(msg.range_min)
+                     and math.isfinite(msg.range_max) and 0 <= msg.range_min < msg.range_max
+                     and len(self.guard.points) >= PROFILE['safety']['min_scan_points'])
+            self.scan_health_at = points_ready - age if valid and 0 <= age < PROFILE['safety']['scan_timeout_s'] else None
+
+    def refresh_motion_health(self, now):
+        p = self.policy
+        telemetry = p.last_received or {}
+        voltage = telemetry.get('voltage', float('nan'))
+        healthy = (p.connected and not p.holding and p.last_rx is not None
+                   and 0 <= now - p.last_rx <= self.config.feedback_timeout_s
+                   and self.scan_health_at is not None and 0 <= now - self.scan_health_at < PROFILE['safety']['scan_timeout_s']
+                   and math.isfinite(voltage) and voltage >= PROFILE['safety']['battery_min_v']
+                   and not self.config.receive_only and self.config.protocol_confirmed
+                   and self.config.protocol != 'unconfigured'
+                   and now - p.connect_at >= self.config.startup_stop_s)
+        self.authority.health(healthy, p.stationary_frames >= 5, now)
+
+    def clear_motion_output(self):
+        self.policy.latest = None
+        self.policy.output = (0.0, 0.0)
+
+    def on_motion(self, source, message):
+        try:
+            data = json.loads(message.data)
+        except (ValueError, TypeError):
+            return
+        if not isinstance(data, dict) or data.get('profile_hash') != profile_hash(PROFILE):
+            return
+        with self.lock:
+            now = time.monotonic()
+            self.refresh_motion_health(now)
+            epoch = self.authority.epoch
+            self.authority.submit(source, data, now, self.get_clock().now().nanoseconds / 1e9)
+            if epoch != self.authority.epoch:
+                self.clear_motion_output()
+
+    def select_motion(self, source, request, response):
+        with self.lock:
+            self.refresh_motion_health(time.monotonic())
+            if request.data:
+                response.success = self.authority.select(source)
+            else:
+                self.authority.release(source)
+                response.success = True
+            # Only the selected source may be released; a follower shutdown
+            # after manual takeover must not clear manual authority.
+            if request.data or self.authority.mode == 'IDLE':
+                self.clear_motion_output()
+            response.message = self.authority.mode + ': ' + self.authority.reason
+        return response
+
+    def reset_motion(self, request, response):
+        with self.lock:
+            now = time.monotonic()
+            self.refresh_motion_health(now)
+            response.success = self.authority.reset()
+            if response.success:
+                self.clear_motion_output()
+                response.success, _ = self.policy.arm(now)
+            response.message = 'IDLE; select a new task' if response.success else 'wait for healthy sensors and stationary chassis'
+        return response
+
+    def apply_motion(self, now):
+        # Runs under the SAME lock and serial tick as the final safety filter.
+        self.refresh_motion_health(now)
+        command = self.authority.output(now)
+        active = self.authority.mode in ('MANUAL', 'FOLLOW', 'NAVIGATION')
+        if active and not self.policy.armed and self.policy.ready(now) == 'ready':
+            self.policy.arm(now)
+        if not active or not self.policy.armed:
+            self.clear_motion_output()
+            return
+        self.policy.command('twist', command.vx, command.wz, now)
 
     def on_arm(self, request, response):
         with self.lock:
             if request.data:
+                if not self.legacy_commands and self.authority.mode in ('ESTOP', 'FAULT'):
+                    response.success, response.message = False, 'use /motion/reset first'
+                    return response
                 response.success, response.message = self.policy.arm(time.monotonic())
             else:
+                self.authority.stop(emergency=True)
                 self.policy.stop("operator_disarmed")
                 response.success, response.message = True, "disarmed; zero frames scheduled"
         return response
 
     def on_stop(self, request, response):
         with self.lock:
+            self.authority.stop(emergency=True)
             self.policy.stop("operator_stop")
             # Serial writes have no software backlog; state change takes effect at next tick.
         response.success, response.message = True, "stop latched; check telemetry and physical stop"
@@ -450,9 +584,13 @@ class WheeltecDriver(Node):
                     self.policy.stop(reason)
 
     def on_twist(self, message):
+        if not self.legacy_commands:
+            return
         self.submit("twist", message.linear.x, message.angular.z, message.linear.y)
 
     def on_ackermann(self, message):
+        if not self.legacy_commands:
+            return
         stamp = message.header.stamp.sec + message.header.stamp.nanosec / 1e9
         age = self.get_clock().now().nanoseconds / 1e9 - stamp
         if stamp <= 0 or not -0.1 <= age <= self.config.cmd_timeout_s:
@@ -500,6 +638,7 @@ class WheeltecDriver(Node):
                     with self.lock:
                         self.parser.buffer.clear()
                         self.last_odom = None
+                        self.odometry_epoch = uuid.uuid4().hex
                         self.rx_times.clear()
                         self.policy.link(True, time.monotonic())
                     next_tx = time.monotonic()
@@ -513,6 +652,8 @@ class WheeltecDriver(Node):
                         self.rx_times = self.rx_times[-100:]
                         self.publish_telemetry(telemetry, now)
                     if now >= next_tx:
+                        if not self.legacy_commands:
+                            self.apply_motion(now)
                         frame = self.policy.tick(now)
                         if not self.config.receive_only:
                             self.write_frame(frame)
@@ -524,6 +665,7 @@ class WheeltecDriver(Node):
                     self.io_errors += 1
                     self.last_error = str(exc)
                     self.policy.link(False, time.monotonic())
+                    self.authority.health(False, False, time.monotonic())
                 try:
                     if self.ser:
                         self.ser.close()
@@ -568,7 +710,7 @@ class WheeltecDriver(Node):
             odom.pose.covariance[i] = odom.twist.covariance[i] = 1e6
         self.pub_odom.publish(odom)
         imu = Imu()
-        imu.header.stamp, imu.header.frame_id = stamp, "imu_link"
+        imu.header.stamp, imu.header.frame_id = stamp, PROFILE["frames"]["imu"]
         imu.linear_acceleration.x, imu.linear_acceleration.y, imu.linear_acceleration.z = t["acceleration"]
         imu.angular_velocity.x, imu.angular_velocity.y, imu.angular_velocity.z = t["gyro"]
         imu.orientation_covariance[0] = -1.0
@@ -606,7 +748,15 @@ class WheeltecDriver(Node):
                                         if self.guard.last_gap not in (None, float("inf")) else None),
                               "interventions": self.guard.interventions},
                     "steering_feedback_available": False, "stop_confirmed": bool(age is not None and age < self.config.feedback_timeout_s and p.stationary_frames >= 5)}
+            data['odometry_epoch'] = self.odometry_epoch
+            data['profile_hash'] = profile_hash(PROFILE)
+            data['legacy_commands'] = self.legacy_commands
+            motion = self.authority.status(now)
+            motion['legacy_commands'] = self.legacy_commands
+            motion['profile_hash'] = profile_hash(PROFILE)
+            data['motion'] = motion
         self.pub_status.publish(String(data=json.dumps(data, ensure_ascii=False)))
+        self.pub_motion.publish(String(data=json.dumps(motion)))
 
     def shutdown(self):
         with self.lock:

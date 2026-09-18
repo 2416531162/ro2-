@@ -9,6 +9,14 @@ FRAME = 108
 BINS = 720
 RANGE_MIN = 0.15
 RANGE_MAX = 12.0
+# Standard robot/ROS planar convention used by every downstream consumer:
+# +X/front = 0 deg, +Y/left = 90 deg, rear = 180 deg, right = 270 deg.
+DIRECTION_CENTERS_DEG = (
+    ('front', 0),
+    ('left', 90),
+    ('back', 180),
+    ('right', 270),
+)
 
 
 def be16(packet, offset):
@@ -123,7 +131,7 @@ def scan_payload(ranges, range_min, range_max, angle_min=0.0,
             continue
         valid.append(distance)
         angle = math.degrees(angle_min + i * angle_increment) % 360
-        for name, center in [('front', 0), ('left', 90), ('back', 180), ('right', 270)]:
+        for name, center in DIRECTION_CENTERS_DEG:
             if abs((angle - center + 180) % 360 - 180) <= 15:
                 sectors[name].append(distance)
     return dict(ranges=list(ranges), range_min=range_min, range_max=range_max,

@@ -14,24 +14,12 @@ from n10p_pipeline import N10PDecoder, SweepAssembler, BINS, RANGE_MIN, RANGE_MA
 
 PORT = os.environ.get('N10P_PORT', '/dev/serial/by-id/usb-WCH.CN_USB_Single_Serial_0001-if00')
 BAUD = 460800
-CALIB_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config', 'lidar_calib.json')
+from runtime_config import PROFILE
 
 
 def load_calib_yaw_deg():
-    env_val = os.environ.get('LIDAR_YAW_DEG')
-    if env_val is not None:
-        try:
-            return float(env_val)
-        except ValueError:
-            pass
-    if os.path.isfile(CALIB_FILE):
-        try:
-            with open(CALIB_FILE, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                return float(data.get('lidar_yaw_deg', 0.0))
-        except Exception:
-            pass
-    return 0.0
+    # Published scan is already rotated; downstream mount yaw is residual only.
+    return PROFILE['sensors']['raw_lidar_yaw_deg']
 
 
 class RealLidarNode(Node):
@@ -44,6 +32,8 @@ class RealLidarNode(Node):
         self.yaw_bins = int(round(self.yaw_deg / 360.0 * BINS)) % BINS
         if self.yaw_bins:
             self.get_logger().info(f'N10P 零点偏航校准生效: {self.yaw_deg:+.1f}° ({self.yaw_bins} bins)')
+        else:
+            self.get_logger().info('N10P 标准方向: 前 0° / 左 90° / 后 180° / 右 270°')
         self.ser = None
         self.last_reconnect = -math.inf
         self.last_scan = None
@@ -106,7 +96,7 @@ class RealLidarNode(Node):
         # Host receive estimate of sweep start, not a hardware clock timestamp.
         start_ns = self.get_clock().now().nanoseconds - int(scan['scan_time'] * 1e9)
         msg.header.stamp.sec, msg.header.stamp.nanosec = divmod(start_ns, 10**9)
-        msg.header.frame_id = 'laser'
+        msg.header.frame_id = PROFILE['frames']['lidar']
         msg.angle_min = 0.0
         msg.angle_increment = 2 * math.pi / BINS
         msg.angle_max = (BINS - 1) * msg.angle_increment
@@ -133,6 +123,7 @@ class RealLidarNode(Node):
                       stale=age is None or age > 0.5, age_ms=round(age*1000) if age is not None else None,
                       hz=round(1/self.scan_time, 2) if self.scan_time and age is not None and age < 0.5 else 0,
                       valid=self.valid if age is not None and age < 0.5 else 0, bins=BINS,
+                      direction_convention='front=0,left=90,back=180,right=270',
                       calib_yaw_deg=self.yaw_deg,
                       bytes=d.bytes_received, frames=d.frames, crc_errors=d.crc_errors,
                       angle_errors=d.angle_errors, discarded_bytes=d.discarded_bytes,

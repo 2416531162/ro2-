@@ -29,8 +29,6 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import String
 
-CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "person_follower.py")
-
 
 class LidarCalibrator(Node):
 
@@ -191,21 +189,21 @@ class LidarCalibrator(Node):
             self.result_yaw_deg = round(mean, 1)
 
 
-CALIB_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config", "lidar_calib.json")
+from runtime_config import load_profile
+from robot_core.config import DEFAULT_PATH
+CALIB_FILE = os.environ.get('RK3588_ROBOT_CONFIG', str(DEFAULT_PATH))
 
 
-def update_config_file(yaw_deg):
-    os.makedirs(os.path.dirname(CALIB_FILE), exist_ok=True)
-    with open(CALIB_FILE, 'w', encoding='utf-8') as f:
-        json.dump({
-            "lidar_yaw_deg": round(float(yaw_deg), 1),
-            "calibrated_at": time.strftime("%Y-%m-%d %H:%M:%S")
-        }, f, indent=2)
-    print(f"✅ 已写入驱动校准配置: {CALIB_FILE} (lidar_yaw_deg = {yaw_deg:+.1f}°)")
-
-    # 自动重启动雷达驱动, 让网页端、屏幕GUI、ROS话题全链路即刻生效
-    os.system("pkill -f real_lidar_node.py 2>/dev/null")
-    print("🔄 已重启雷达驱动, 网页屏幕显示已实时对正！")
+def update_config_file(delta_yaw_deg):
+    from pathlib import Path
+    path = Path(CALIB_FILE)
+    data = load_profile(path)
+    data['sensors']['raw_lidar_yaw_deg'] = round(data['sensors']['raw_lidar_yaw_deg'] + float(delta_yaw_deg), 1)
+    temporary = path.with_suffix('.pending.json')
+    temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n')
+    load_profile(temporary)
+    temporary.replace(path)
+    print(f'已更新统一配置 {path}；停车后重启底盘和感知服务以使用同一配置版本。')
     return True
 
 
@@ -252,20 +250,20 @@ def main():
         print("=" * 60)
         print(f"🎉 标定完成！")
         print(f"   雷达实际偏航安装角偏差 (Yaw Offset): {yaw:+.1f}° (相对车头中轴线偏向 {direction} {abs(yaw):.1f}°)")
-        print(f"   软件补偿参数: --lidar-yaw-deg {yaw:+.1f}")
+        print(f"   在当前原始零点校正基础上追加: {yaw:+.1f}°")
         print("=" * 60)
 
         if args.auto_save:
             update_config_file(yaw)
         else:
             try:
-                ans = input(f"\n是否将 lidar_yaw_deg = {yaw:+.1f}° 直接写入配置文件 person_follower.py？[Y/n]: ").strip().lower()
+                ans = input(f"\n是否将偏差 {yaw:+.1f}° 累加到统一配置 {CALIB_FILE}？[Y/n]: ").strip().lower()
             except EOFError:
                 ans = "y"
             if ans in ('', 'y', 'yes'):
                 update_config_file(yaw)
                 print("\n提示: 如果跟随服务已经在后台运行, 重启即可生效:")
-                print("  网页端重新点击启动跟随，或者执行: ./run_follower.sh")
+                print("  停车后重启整套底盘与感知服务，确保配置摘要一致。")
         return 0
 
     return 1

@@ -14,7 +14,6 @@ import math
 import time
 import threading
 import subprocess
-import signal
 import sys
 import rclpy
 from rclpy.node import Node
@@ -23,13 +22,14 @@ from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 
 import numpy as np
 from sensor_msgs.msg import LaserScan
-from geometry_msgs.msg import Twist
 from std_msgs.msg import String, Float32
 from std_srvs.srv import SetBool, Trigger
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from motion_safety import ChassisGeometry, yaw_from_steer, steer_from_yaw, clamp
 from scan_utils import clean_ranges, sector_min
+from runtime_config import PROFILE
+from motion_client import MotionClient
 from manual_drive import ManualDriveLatch
 
 PORT = 8088
@@ -49,8 +49,8 @@ MANUAL_HEARTBEAT_TIMEOUT_S = 0.75
 CHASSIS = ChassisGeometry()
 
 # 与页面按钮的标称保持一致；高档仍低于驱动层 1.30m/s 硬上限。
-SPEED_TIERS_MPS = {'low': 0.50, 'med': 0.85, 'high': 1.20}
-REVERSE_SCALE = 0.6                      # 倒车是盲区方向,统一降速
+SPEED_TIERS_MPS = {tier: PROFILE['manual'][tier + '_mps'] for tier in ('low', 'med', 'high')}
+REVERSE_SCALE = PROFILE['manual']['reverse_scale']                      # 倒车是盲区方向,统一降速
 STEER_TIERS_DEG = {'gentle': 8.0, 'normal': 14.0, 'full': 20.0}
 
 # 每个方向键:(前进符号, 转角占该档的比例, 车速折扣)
@@ -159,45 +159,45 @@ def check_follower_running_cached():
         cached_proc_running = is_follower_running()
     return cached_proc_running
 
+def is_follow_active():
+    return bool(bridge_node and bridge_node.motion.fresh()
+                and bridge_node.motion.state.get('mode') == 'FOLLOW')
+
+
 def start_follower():
     global follower_proc
-    if is_follower_running():
-        return True, "already_running"
-    script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'person_follower.py')
-    cmd = [sys.executable, "-u", script_path]
-    env = os.environ.copy()
-    try:
-        follower_proc = subprocess.Popen(
-            cmd,
-            cwd=os.path.dirname(os.path.abspath(__file__)),
-            env=env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            preexec_fn=os.setsid
-        )
-        return True, "started"
-    except Exception as e:
-        return False, str(e)
+    if bridge_node is None:
+        return False, 'motion bridge unavailable'
+    with bridge_node.control_lock:
+        if os.environ.get('RK3588_MANAGED_FOLLOWER') == '1':
+            try:
+                subprocess.run(['systemctl', 'start', 'rk3588-perception@follower.service'],
+                               check=True, timeout=5, capture_output=True)
+            except Exception as exc:
+                return False, str(exc)
+        elif not is_follower_running():
+            script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'person_follower.py')
+            try:
+                # Web selects the mode after spawning. The child never requests a
+                # delayed takeover after a subsequent manual command.
+                follower_proc = subprocess.Popen(
+                    [sys.executable, '-u', script_path, '--passive'],
+                    cwd=os.path.dirname(script_path), start_new_session=True)
+            except Exception as exc:
+                return False, str(exc)
+        bridge_node.manual_drive.set(0.0, 0.0)
+        bridge_node.manual_drive.sample()  # discard the old manual zero
+        ok, message = bridge_node.recover_latched_fault()
+        if not ok:
+            return False, message
+        return bridge_node.select_follow(True)
+
 
 def stop_follower():
-    global follower_proc, cached_proc_running, last_check_proc
-    try:
-        subprocess.run(['pkill', '-9', '-f', 'person_follower.py'], check=False)
-    except Exception:
-        pass
-    if follower_proc is not None:
-        try:
-            os.killpg(os.getpgid(follower_proc.pid), signal.SIGKILL)
-        except Exception:
-            pass
-        follower_proc = None
-    cached_proc_running = False
-    last_check_proc = time.time()
-    if bridge_node:
-        bridge_node.send_manual_twist(0.0, 0.0)
-    with data_lock:
-        state['follower'] = {'state': 'OFFLINE', 'aeb_min_scan_m': state.get('front_dist', 99.0)}
-    return True, "stopped"
+    if bridge_node is None:
+        return False, 'motion bridge unavailable'
+    with bridge_node.control_lock:
+        return bridge_node.select_follow(False)
 
 
 class TrackingBridgeNode(Node):
@@ -210,12 +210,12 @@ class TrackingBridgeNode(Node):
         self.sub_follower = self.create_subscription(String, '/follower/status', self.follower_cb, 10)
         self.sub_wheeltec = self.create_subscription(String, '/wheeltec/status', self.wheeltec_cb, 10)
 
-        # 手动介入控制发布者与底盘解锁使能客户端
-        self.pub_cmd_vel = self.create_publisher(Twist, '/cmd_vel', 10)
-        self.cli_arm = self.create_client(SetBool, '/wheeltec/arm')
-        self.cli_stop = self.create_client(Trigger, '/wheeltec/stop')
+        self.motion = MotionClient(self, 'manual')
+        self.follow_selector = self.create_client(SetBool, '/motion/follow')
+        self.cli_reset = self.create_client(Trigger, '/motion/reset')
+        self.cli_stop = self.create_client(Trigger, '/motion/stop')
+        self.control_lock = threading.RLock()
         self.is_armed = False
-        self.last_arm_request = 0.0
 
         self.manual_drive = ManualDriveLatch(MANUAL_HEARTBEAT_TIMEOUT_S)
         # HTTP 工作线程只写入最新期望值，ROS executor 线程以 50Hz 稳定发布。
@@ -237,33 +237,58 @@ class TrackingBridgeNode(Node):
             self.is_armed = armed
             with data_lock:
                 state['wheeltec'] = d
-            now = time.monotonic()
-            if not armed and ready and (now - self.last_arm_request > 0.50):
-                self.last_arm_request = now
-                self.arm_chassis(True)
         except Exception:
             pass
 
-    def arm_chassis(self, enable=True):
-        if self.cli_arm.service_is_ready():
-            req = SetBool.Request()
-            req.data = enable
-            self.last_arm_request = time.monotonic()
-            self.cli_arm.call_async(req)
+    @staticmethod
+    def call_motion_service(client, request):
+        if not client.service_is_ready():
+            return False, 'motion service unavailable; update and restart chassis driver'
+        future = client.call_async(request)
+        done = threading.Event()
+        future.add_done_callback(lambda _: done.set())
+        if not done.wait(2.0):
+            return False, 'motion service response timeout; inspect /motion/status'
+        try:
+            result = future.result()
+            return result.success, result.message
+        except Exception as exc:
+            return False, str(exc)
+
+    def select_follow(self, enable):
+        return self.call_motion_service(self.follow_selector, SetBool.Request(data=enable))
+
+    def recover_latched_fault(self):
+        """Reset a recovered, stationary FAULT before an explicit new command.
+
+        MotionAuthority deliberately latches FAULT after a transient sensor/driver
+        outage. Keeping that latch is important, but the web UI previously had no
+        recovery path: every later manual/follow request was rejected even after all
+        sensors were healthy again. A fresh user command is explicit intent to
+        continue, so let the driver's /motion/reset service perform its own health
+        and stationary checks, then retry the command.
+        """
+        with self.motion.lock:
+            current = dict(self.motion.state)
+            fresh = self.motion.fresh()
+
+        if current.get('mode') != 'FAULT':
+            return True, ''
+        if not fresh:
+            return False, '运动状态已过期，请检查底盘服务'
+        if not current.get('healthy', False):
+            return False, '传感器或底盘仍有故障，拒绝复位'
+        if current.get('waiting_stationary', True):
+            return False, '等待车辆确认静止后才能复位'
+        return self.call_motion_service(self.cli_reset, Trigger.Request())
 
     def manual_loop(self):
-        now = time.monotonic()
-        vx, wz, active, publish_zero = self.manual_drive.sample(now)
-
-        if active:
-            if not self.is_armed and now - self.last_arm_request > 0.10:
-                self.arm_chassis(True)
-            cmd = Twist()
-            cmd.linear.x = float(vx)
-            cmd.angular.z = float(wz)
-            self.pub_cmd_vel.publish(cmd)
-        elif publish_zero:
-            self.pub_cmd_vel.publish(Twist())
+        with self.control_lock:
+            vx, wz, active, publish_zero = self.manual_drive.sample(time.monotonic())
+            if active or publish_zero:
+                self.motion.publish(vx if active else 0.0, wz if active else 0.0)
+        with data_lock:
+            state['motion'] = dict(self.motion.state)
 
     def send_manual_twist(self, vx, wz):
         self.manual_drive.set(vx, wz)
@@ -435,7 +460,7 @@ class RadarHTTPHandler(http.server.BaseHTTPRequestHandler):
             with data_lock:
                 f_data = dict(state.get('follower', {}))
             f_data = mark_follower_staleness(f_data)
-            f_data['running'] = check_follower_running_cached()
+            f_data['running'] = is_follow_active()
             self._send_json(f_data)
 
         elif self.path == '/api/stream':
@@ -450,7 +475,7 @@ class RadarHTTPHandler(http.server.BaseHTTPRequestHandler):
             try:
                 while True:
                     # pgrep 是子进程调用,不能放在 data_lock 里,否则会卡住 ROS 回调和其他请求
-                    running = check_follower_running_cached()
+                    running = is_follow_active()
                     with data_lock:
                         state['follower_running'] = running
                         snapshot = dict(state)
@@ -491,22 +516,33 @@ class RadarHTTPHandler(http.server.BaseHTTPRequestHandler):
             ok, msg = start_follower()
             with data_lock:
                 f_data = mark_follower_staleness(dict(state.get('follower', {})))
-            self._send_json({'ok': ok, 'message': msg, 'running': is_follower_running(), 'follower': f_data})
+            self._send_json({'ok': ok, 'message': msg, 'running': (msg.startswith('FOLLOW:') if ok else is_follow_active()), 'follower': f_data})
 
         elif self.path == '/api/follower/stop':
             ok, msg = stop_follower()
             with data_lock:
                 f_data = mark_follower_staleness(dict(state.get('follower', {})))
-            self._send_json({'ok': ok, 'message': msg, 'running': is_follower_running(), 'follower': f_data})
+            self._send_json({'ok': ok, 'message': msg, 'running': (msg.startswith('FOLLOW:') if ok else is_follow_active()), 'follower': f_data})
 
         elif self.path == '/api/follower/toggle':
-            if is_follower_running():
+            if is_follow_active():
                 ok, msg = stop_follower()
             else:
                 ok, msg = start_follower()
             with data_lock:
                 f_data = mark_follower_staleness(dict(state.get('follower', {})))
-            self._send_json({'ok': ok, 'message': msg, 'running': is_follower_running(), 'follower': f_data})
+            self._send_json({'ok': ok, 'message': msg, 'running': (msg.startswith('FOLLOW:') if ok else is_follow_active()), 'follower': f_data})
+
+        elif self.path in ('/api/motion/stop', '/api/motion/reset'):
+            if bridge_node is None:
+                self._send_json({'ok': False, 'message': 'motion bridge unavailable'}, status=503)
+                return
+            with bridge_node.control_lock:
+                bridge_node.manual_drive.set(0.0, 0.0)
+                bridge_node.manual_drive.sample()
+                client = bridge_node.cli_stop if self.path.endswith('/stop') else bridge_node.cli_reset
+                ok, message = bridge_node.call_motion_service(client, Trigger.Request())
+            self._send_json({'ok': ok, 'message': message})
 
         elif self.path == '/api/manual_drive':
             try:
@@ -524,29 +560,37 @@ class RadarHTTPHandler(http.server.BaseHTTPRequestHandler):
                 else:
                     # 旧接口保留兼容,但要把物理上做不到的角速度掐掉:
                     # 超过满舵能达到的 wz 只会让固件把舵机打死,反而丢失档位区分度
-                    vx = max(-0.6, min(1.0, float(req.get('vx', 0.0))))
-                    wz = max(-1.5, min(1.5, float(req.get('wz', 0.0))))
+                    vx, wz = float(req.get('vx', 0.0)), float(req.get('wz', 0.0))
+                    if not all(math.isfinite(v) for v in (vx, wz)):
+                        raise ValueError('速度必须是有限数值')
+                    vx = max(-0.6, min(1.0, vx))
+                    wz = max(-1.5, min(1.5, wz))
                     steer_rad = steer_from_yaw(vx, wz, CHASSIS)
                     wz = yaw_from_steer(vx, steer_rad, CHASSIS)
                     steer_deg = round(math.degrees(steer_rad), 1)
 
-                # 按页面会话 + 序号丢弃迟到的旧指令:网络抖动时,先发的「前进」
-                # 可能晚于「刹车」到达,不能让它在松手后又把车开起来。
-                client_id = str(req.get('client_id', ''))[:64] or None
-                seq = req.get('seq')
-                seq = int(seq) if isinstance(seq, (int, float)) and math.isfinite(seq) else None
-                if bridge_node and not bridge_node.manual_drive.accept(client_id, seq, vx, wz):
-                    self._send_json({'ok': True, 'stale': True, 'action': action})
+                if bridge_node is None:
+                    self._send_json({'ok': False, 'error': 'motion bridge unavailable'}, status=503)
                     return
+                with bridge_node.control_lock:
+                    # 按页面会话 + 序号丢弃迟到的旧指令:网络抖动时,先发的「前进」
+                    # 可能晚于「刹车」到达,不能让它在松手后又把车开起来。
+                    client_id = str(req.get('client_id', ''))[:64] or None
+                    seq = req.get('seq')
+                    seq = int(seq) if isinstance(seq, (int, float)) and math.isfinite(seq) else None
+                    if bridge_node and not bridge_node.manual_drive.accept(client_id, seq, vx, wz):
+                        self._send_json({'ok': True, 'stale': True, 'action': action})
+                        return
 
-                # 强行介入：若自动跟随正在运行，强行介入必须先停掉自动跟随！
-                if check_follower_running_cached():
-                    stop_follower()
-
-                if bridge_node:
-                    if not bridge_node.is_armed and (abs(vx) > 1e-4 or abs(wz) > 1e-4):
-                        bridge_node.arm_chassis(True)
-                    bridge_node.send_manual_twist(vx, wz)
+                    if bridge_node:
+                        # 停车指令始终可以直接下发；只有新的非零驾驶意图才尝试
+                        # 恢复“故障已消失但仍锁存”的 FAULT。
+                        if abs(vx) > 1e-6 or abs(wz) > 1e-6:
+                            ok, message = bridge_node.recover_latched_fault()
+                            if not ok:
+                                self._send_json({'ok': False, 'error': message}, status=409)
+                                return
+                        bridge_node.send_manual_twist(vx, wz)
 
                 with data_lock:
                     state['manual_override'] = {

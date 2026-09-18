@@ -23,12 +23,14 @@ import argparse
 import json
 import sys
 from collections import Counter
+from runtime_config import PROFILE
 
 TOPICS = {
     '/scan': 'on_scan',
     '/camera/ai_detection/targets': 'on_targets',
     '/wheeltec/status': 'on_driver_status',
     '/voltage': 'on_voltage',
+    PROFILE['localization']['topic']: 'on_odom',
 }
 
 
@@ -169,6 +171,7 @@ def main():
                    help='覆盖 FollowerConfig 参数,可多次使用')
     p.add_argument('--out', help='逐周期状态写成 JSON Lines')
     p.add_argument('--target', default='person')
+    p.add_argument('--legacy-velocity-odometry', action='store_true', help='显式为旧包启用速度积分，不用于实车')
     args = p.parse_args()
 
     import rclpy
@@ -198,7 +201,8 @@ def main():
     rclpy.init()
     out = open(args.out, 'w', encoding='utf-8') if args.out else None
     try:
-        node = pf.PersonFollowerNode(cfg, dry_run=True, target_class=args.target)
+        node = pf.PersonFollowerNode(cfg, dry_run=True, target_class=args.target,
+                                     simulated_odometry=args.legacy_velocity_odometry)
         node.timer.cancel()
         writer = (lambda t, payload: out.write(json.dumps(payload, ensure_ascii=False) + '\n')) \
             if out else None
