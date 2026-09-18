@@ -1,0 +1,9 @@
+FROM amd64/python:3.11-slim
+ENV DEBIAN_FRONTEND=noninteractive PIP_DISABLE_PIP_VERSION_CHECK=1
+RUN apt-get update -qq && apt-get install -y -qq libgl1 libglib2.0-0 && rm -rf /var/lib/apt/lists/*
+# toolkit2 2.3.2 uses onnx.mapping, removed by newer ONNX releases.
+RUN pip install --no-cache-dir --no-compile --extra-index-url https://download.pytorch.org/whl/cpu \
+    rknn-toolkit2==2.3.2 torch==2.4.0+cpu onnx==1.16.1 onnxruntime==1.20.1 \
+    numpy==1.26.4 scipy==1.14.1 opencv-python==4.11.0.86
+WORKDIR /work
+CMD ["python", "tools/convert_pose.py"]

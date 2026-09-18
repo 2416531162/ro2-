@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import math
 import time
 import rclpy
 from sensor_msgs.msg import LaserScan
@@ -9,14 +10,15 @@ box = {}
 
 
 def cb(msg):
-    if box:
+    if box or not msg.ranges:
         return
-    vals = [(i, r) for i, r in enumerate(msg.ranges) if r == r and msg.range_min < r < msg.range_max]
-    print("n", len(msg.ranges), "valid", len(vals), "range_max", msg.range_max, "scan_time", round(msg.scan_time, 3))
-    if vals:
+    vals = [(i, r) for i, r in enumerate(msg.ranges) if math.isfinite(r) and msg.range_min < r < msg.range_max]
+    n = len(msg.ranges)
+    print("n", n, "valid", len(vals), "range_max", msg.range_max, "scan_time", round(msg.scan_time, 3))
+    if vals and n > 0:
         rs = [r for _, r in vals]
         print("min", round(min(rs), 3), "max", round(max(rs), 3), "mean", round(sum(rs) / len(rs), 3))
-        print("angle_span", round(vals[0][0] * 360.0 / len(msg.ranges), 1), round(vals[-1][0] * 360.0 / len(msg.ranges), 1))
+        print("angle_span", round(vals[0][0] * 360.0 / n, 1), round(vals[-1][0] * 360.0 / n, 1))
         buckets = [0] * 17
         for r in rs:
             buckets[min(16, int(r))] += 1

@@ -1,40 +1,19 @@
-# RK3588 × 轮趣阿克曼底盘
+# RK3588 轮趣底盘驱动
 
-当前部署：`rk3588-wheeltec.service` 已启用，开机采集串口 0002 的真实遥测。默认 `receive_only: true`，发送计数为 0。阿克曼的原地打方向是停车时改变前轮转角。
+`wheeltec_driver.py` 是唯一串口拥有者，发布原始里程计、IMU、电压及驱动/控制权状态。当前仓库 YAML 选择 `twist` 协议、115200 波特率、串口 0002；这描述仓库配置，不表示本次已部署或重新验证固件。
 
-## 已完成
+物理尺寸、速度上限、超时和防撞物理参数统一读取 `robot_core/robot.json`；协议、设备端口和 TF 发布开关保留在 `wheeltec.yaml`。正常模式拒绝孤立覆盖共享参数。默认速度上限是共享配置中的 1.3 m/s，跟随行为另有限速，不应把驱动上限视为推荐行驶速度。
 
-- 固定 `/dev/serial/by-id/usb-WCH.CN_USB_Single_Serial_0002-if00`，115200 8N1；不按 ACM 编号猜设备。
-- 发布 `/odom`、`/imu`、`/voltage`、`/wheeltec/status`，实车反馈约 20 Hz。
-- `/ackermann_cmd` 使用 `ackermann_msgs/AckermannDriveStamped`：速度 m/s、前轮转角 rad；消息必须带当前时间戳。
-- `/cmd_vel` 使用标准 `geometry_msgs/Twist`：纵向速度与车体角速度。停车打方向使用 `/ackermann_cmd`。
-- 50 Hz 单线程串口发送、最新指令覆盖、300 ms 指令/反馈超时、连续零帧停车、断连清除旧指令、重新启用后才接受新动作。
-- 默认限速 0.15 m/s、转角限制 0.35 rad。参数在启动时读取，运行中只读。
-
-## 板子上的命令
+正常运行只接收 `/manual/command`、`/follow/command`、`/navigation/command`，请求携带 `vx/wz/stamp/epoch/profile_hash`。`motion_authority.py` 在驱动锁内完成仲裁，`ControlPolicy` 和 `ScanGuard` 再执行限幅、看门狗及防撞。旧 Twist/Ackermann 入口仅在显式 `legacy_commands: true` 的互斥调试模式中开放。
 
 ```bash
-source /opt/ros/jazzy/setup.bash
-export ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST
-python3 /root/wheeltec/control.py status
-systemctl status rk3588-wheeltec.service
-ros2 topic echo /wheeltec/status std_msgs/msg/String --once
+python3 wheeltec_protocol/control.py status
+python3 wheeltec_protocol/control.py stop
+python3 wheeltec_protocol/control.py reset
 ```
 
-`control.py stop` 请求驱动锁存停车；仅在已配置发送模式时发送停车帧。遥测模式不会接管遥控器或发送控制字节，服务响应成功也不代表机械急停。驱动运行时不要直接打开同一串口；`wheeltec_monitor.py` 已改为独占打开。
+`control.py drive --speed ... --steering-deg ... --seconds ...` 是有界手动运动请求，结束后锁存停车。reset 只回到 IDLE，不恢复旧任务。不要在驱动运行时用其他程序打开相同串口。
 
-## 尚待实车确认
+默认底盘发布 `/odom` 及 `odom → base_link`，base_link 为后轴中心。融合定位接管该 TF 时需关闭 `publish_tf`，并配置行为消费的本地位姿话题；原始与融合话题可分开。
 
-具体控制板型号、固件版本、轴距、转向字段定义与方向/倍率尚未确认。仓库中发现的两种协议并不相同：通用 11 字节速度帧采用 mode=0，阿克曼参考分支采用 mode=1、转角乘 0.5；它们均不是当前控制板固件身份证明。因此 `/root/wheeltec/wheeltec.yaml` 保留 `protocol: unconfigured`、`protocol_confirmed: false`、`wheelbase_m: 0.0`。ROS arm 服务会明确拒绝启用运动。
-
-确认固件后配置 `protocol: steering_angle`（或只支持速度的 `twist`）、`mode_byte`、`steering_scale`、`wheelbase_m`，再完成架空验证。`twist` 固件没有可验证的静止转角接口时，适配器会拒绝通过虚构行驶速度实现打方向。
-
-此前实车存在命令延迟与意外前冲记录。新的发送和停车逻辑已通过模拟串口测试；这并不证明下位机内部延迟已经消除。实际运动验证仍需按 [交接记录](交接文档.md#7--安全红线血泪教训务必遵守) 先架空驱动轮，并确认物理断电开关可随时操作。主机端软件也不能代替下位机通信超时保护。
-
-## 验证与回滚
-
-适配包在 `ackermann_adaptation_20260915/`：包含原版、修改版、差异、20 项核心测试、ROS 模拟串口测试、实车遥测验收与回滚记录。见 `VERIFICATION.txt`。
-
-本地指定副本回滚：`ackermann_adaptation_20260915/ROLLBACK.sh /absolute/path/to/driver.py`。
-
-在 Mac 上回滚板端部署：`ackermann_adaptation_20260915/ROLLBACK.sh --board`。这会停用新增服务并恢复原驱动及脚本；保留审计目录和新增的 ackermann_msgs 依赖，不自动启动原版运动驱动。
+完整服务安装、回滚、模式契约与测试说明见 [架构说明](../docs/ARCHITECTURE_ROADMAP.md)。历史协议资料见 [PROTOCOL.md](PROTOCOL.md)，其中参考固件公式不代替当前实车左右转向和倒车验证。本次没有发实车运动指令。

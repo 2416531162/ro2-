@@ -37,7 +37,6 @@ import cv2
 cv2.setNumThreads(2)
 cv2.ocl.setUseOpenCL(False)
 
-CORS_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cors_config.json")
 
 DEPTH_VALID_MIN_MM = 200
 DEPTH_VALID_MAX_MM = 5500
@@ -221,7 +220,6 @@ class ROSThread(QThread):
     depth_signal = pyqtSignal(QImage, int, int, int)
     ai_signal = pyqtSignal(QImage)
     targets_signal = pyqtSignal(str)
-    rtk_signal = pyqtSignal(dict)
     voltage_signal = pyqtSignal(float)
 
     def __init__(self):
@@ -251,7 +249,7 @@ class ROSThread(QThread):
             self.latest_scan = payload
 
         def rgb_callback(msg):
-            if self.display_mode not in ('rgb', 'ai'):
+            if self.display_mode != 'rgb':
                 return
             try:
                 self.latest_rgb = (msg.width, msg.height, msg.step, bytes(msg.data), time.monotonic())
@@ -289,13 +287,7 @@ class ROSThread(QThread):
             except Exception:
                 pass
 
-        def rtk_callback(msg):
-            try:
-                self.rtk_signal.emit(json.loads(msg.data))
-            except Exception:
-                pass
 
-        node.create_subscription(String, '/rtk/status', rtk_callback, 10)
         node.create_subscription(Float32, '/voltage', voltage_callback, 10)
         node.create_subscription(LaserScan, '/scan', scan_callback, QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT))
         node.create_subscription(Image, '/camera/rgb/image_raw', rgb_callback, QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT))
@@ -319,48 +311,6 @@ class ROSThread(QThread):
                 pass
 
 
-class CloudDataWorker(QThread):
-    state_signal = pyqtSignal(dict)
-    cloud_signal = pyqtSignal(bytes, dict)
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.running = True
-        self.active = False
-        self.base = os.environ.get('RO2_MAP_URL', 'http://127.0.0.1:8088').rstrip('/')
-        self.last_key = None
-
-    def set_active(self, active):
-        self.active = active
-
-    def stop(self):
-        self.running = False
-        self.wait(1500)
-
-    def run(self):
-        while self.running:
-            if not self.active:
-                time.sleep(0.3)
-                continue
-            try:
-                req = urllib.request.Request(f"{self.base}/api/live_map")
-                with urllib.request.urlopen(req, timeout=1.5) as resp:
-                    raw = resp.read()
-                state = json.loads(raw.decode('utf-8'))
-                self.state_signal.emit(state)
-
-                meta = state.get('scene')
-                if meta and meta.get('format') == 'xyzi-f32le':
-                    key = (meta.get('epoch', ''), meta.get('revision', 0))
-                    if key != self.last_key:
-                        bin_url = f"{self.base}/api/live_map/scene.bin?epoch={key[0]}&v={key[1]}"
-                        with urllib.request.urlopen(bin_url, timeout=2.5) as bin_resp:
-                            bin_data = bin_resp.read()
-                        self.last_key = key
-                        self.cloud_signal.emit(bin_data, meta)
-            except Exception:
-                pass
-            time.sleep(0.25)
 
 
 class RadarCanvas(QWidget):
@@ -370,7 +320,6 @@ class RadarCanvas(QWidget):
         self.max_range = 5.0
         self.angle_min = 0.0
         self.angle_increment = math.pi / 360
-        self.rtk_data = None
         self.paused = False
         self.stale = True
         self.range_min = 0.15
@@ -388,9 +337,6 @@ class RadarCanvas(QWidget):
             pass
         self.update()
 
-    def set_rtk(self, data):
-        # RTK belongs in its own card, not in the metric LiDAR plane.
-        self.rtk_data = data
 
     def set_range(self, meters):
         self.max_range = float(meters)
@@ -540,228 +486,6 @@ class RadarCanvas(QWidget):
 
         painter.restore()
 
-class CorsConfigDialog(QDialog):
-    def __init__(self, parent=None, ros_thread=None):
-        super().__init__(parent)
-        self.ros_thread = ros_thread
-        self.setWindowTitle("CORS 厘米级差分设置")
-        self.setFixedSize(620, 660)
-        self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
-        self.setStyleSheet("""
-            QDialog {
-                background: #DFE7ED;
-                border: 2px solid #087F83;
-                border-radius: 12px;
-            }
-            QLabel {
-                color: #243B50;
-                font-family: sans-serif;
-            }
-            QLineEdit, QComboBox {
-                background: #DFE7ED;
-                border: 1px solid #CAD8E2;
-                border-radius: 6px;
-                color: #243B50;
-                font-size: 13px;
-                padding: 7px 10px;
-                font-family: monospace;
-            }
-            QLineEdit:focus, QComboBox:focus {
-                border: 1px solid #087F83;
-            }
-        """)
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 20, 24, 20)
-        layout.setSpacing(12)
-
-        # 标题栏
-        top_bar = QHBoxLayout()
-        title = QLabel("🛰️ CORS 厘米级差分设置")
-        title.setFont(QFont("sans-serif", 13, QFont.Bold))
-        title.setStyleSheet("color: #087F83;")
-        top_bar.addWidget(title)
-
-        btn_close = QPushButton("✕")
-        btn_close.setFixedSize(30, 30)
-        btn_close.setStyleSheet("background: transparent; color: #607488; font-size: 18px; border: none; font-weight: bold;")
-        btn_close.clicked.connect(self.close)
-        top_bar.addWidget(btn_close)
-        layout.addLayout(top_bar)
-
-        desc = QLabel("注入 RTCM3 差分流消除电离层延迟，左右天线实时独立解算 单点 / 浮点 / 固定。")
-        desc.setStyleSheet("color: #60768A; font-size: 11px;")
-        desc.setWordWrap(True)
-        layout.addWidget(desc)
-
-        # 预设
-        layout.addWidget(QLabel("服务商快速预设:"))
-        self.preset_combo = QComboBox()
-        self.preset_combo.addItem("千寻位置 (rtk.ntrip.qxwz.com:8002 / AUTO)", "qxwz")
-        self.preset_combo.addItem("六分科技 (rtk.sixents.com:8002 / RTCM32_GGB)", "liufen")
-        self.preset_combo.addItem("中国移动高精度 (221.178.251.100:8002 / RTCM33_GRCEJ)", "cmcc")
-        self.preset_combo.addItem("自定义私有 CORS / NTRIP 基准站", "custom")
-        self.preset_combo.currentIndexChanged.connect(self.on_preset_changed)
-        layout.addWidget(self.preset_combo)
-
-        # 服务器 & 端口
-        grid = QGridLayout()
-        grid.addWidget(QLabel("服务器地址 (Host):"), 0, 0)
-        grid.addWidget(QLabel("端口 (Port):"), 0, 1)
-        self.input_host = QLineEdit()
-        self.input_host.setPlaceholderText("rtk.ntrip.qxwz.com")
-        self.input_port = QLineEdit()
-        self.input_port.setPlaceholderText("8002")
-        grid.addWidget(self.input_host, 1, 0)
-        grid.addWidget(self.input_port, 1, 1)
-        layout.addLayout(grid)
-
-        # 挂载点
-        layout.addWidget(QLabel("挂载点 (MountPoint):"))
-        self.input_mount = QLineEdit()
-        self.input_mount.setPlaceholderText("AUTO")
-        layout.addWidget(self.input_mount)
-
-        # 账号
-        layout.addWidget(QLabel("差分账号 (Username):"))
-        self.input_user = QLineEdit()
-        self.input_user.setPlaceholderText("输入 CORS 账号")
-        layout.addWidget(self.input_user)
-
-        # 密码
-        layout.addWidget(QLabel("差分密码 (Password):"))
-        self.input_pwd = QLineEdit()
-        self.input_pwd.setEchoMode(QLineEdit.Password)
-        self.input_pwd.setPlaceholderText("输入密码")
-        layout.addWidget(self.input_pwd)
-
-        # 实时状态显示卡片
-        self.stat_frame = QFrame()
-        self.stat_frame.setStyleSheet("background: #DFE7ED; border: 1px solid #B5C4D0; border-radius: 6px; padding: 8px 12px;")
-        stat_l = QVBoxLayout(self.stat_frame)
-        stat_l.setSpacing(4)
-        stat_l.setContentsMargins(4, 4, 4, 4)
-        self.lbl_status = QLabel("运行状态: 未启用")
-        self.lbl_status.setStyleSheet("color: #8B621A; font-weight: bold; font-size: 11px;")
-        self.lbl_rate = QLabel("差分速率: 0.0 KB/s")
-        self.lbl_rate.setStyleSheet("color: #60768A; font-size: 11px;")
-        stat_l.addWidget(self.lbl_status)
-        stat_l.addWidget(self.lbl_rate)
-        layout.addWidget(self.stat_frame)
-
-        # 底部按钮
-        btn_layout = QHBoxLayout()
-        self.btn_save = QPushButton("💾 保存并连接差分")
-        self.btn_save.setStyleSheet("""
-            QPushButton {
-                background: #247451;
-                border: none;
-                border-radius: 6px;
-                color: #ffffff;
-                font-weight: bold;
-                font-size: 12px;
-                padding: 10px 16px;
-            }
-            QPushButton:hover { background: #087F83; }
-        """)
-        self.btn_save.clicked.connect(lambda: self.save_config(True))
-        btn_layout.addWidget(self.btn_save)
-
-        self.btn_disconnect = QPushButton("⏹ 断开差分")
-        self.btn_disconnect.setStyleSheet("""
-            QPushButton {
-                background: #FFF0F1;
-                border: 1px solid #E6ABB2;
-                border-radius: 6px;
-                color: #B9404A;
-                font-weight: bold;
-                font-size: 12px;
-                padding: 10px 16px;
-            }
-            QPushButton:hover { background: #FFE5E8; }
-        """)
-        self.btn_disconnect.clicked.connect(lambda: self.save_config(False))
-        btn_layout.addWidget(self.btn_disconnect)
-
-        self.btn_cancel = QPushButton("关闭")
-        self.btn_cancel.setStyleSheet("""
-            QPushButton {
-                background: #EDF2F6;
-                border: 1px solid #CAD8E2;
-                border-radius: 6px;
-                color: #243B50;
-                font-size: 12px;
-                padding: 10px 16px;
-            }
-        """)
-        self.btn_cancel.clicked.connect(self.close)
-        btn_layout.addWidget(self.btn_cancel)
-        layout.addLayout(btn_layout)
-
-        self.load_config()
-
-    def on_preset_changed(self, idx):
-        preset_key = self.preset_combo.currentData()
-        presets = {
-            'qxwz': ('rtk.ntrip.qxwz.com', '8002', 'AUTO'),
-            'liufen': ('rtk.sixents.com', '8002', 'RTCM32_GGB'),
-            'cmcc': ('221.178.251.100', '8002', 'RTCM33_GRCEJ'),
-            'custom': ('', '8002', '')
-        }
-        if preset_key in presets:
-            host, port, mount = presets[preset_key]
-            if host: self.input_host.setText(host)
-            if port: self.input_port.setText(port)
-            if mount: self.input_mount.setText(mount)
-
-    def load_config(self):
-        cfg = {}
-        if os.path.exists(CORS_CONFIG_PATH):
-            try:
-                with open(CORS_CONFIG_PATH, 'r', encoding='utf-8') as f:
-                    cfg = json.load(f)
-            except Exception:
-                pass
-        preset = cfg.get('preset', 'qxwz')
-        idx = self.preset_combo.findData(preset)
-        if idx >= 0:
-            self.preset_combo.setCurrentIndex(idx)
-        self.input_host.setText(cfg.get('server', 'rtk.ntrip.qxwz.com'))
-        self.input_port.setText(str(cfg.get('port', 8002)))
-        self.input_mount.setText(cfg.get('mountpoint', 'AUTO'))
-        self.input_user.setText(cfg.get('username', ''))
-        self.input_pwd.setText(cfg.get('password', ''))
-
-    def save_config(self, enabled=True):
-        cfg = {
-            'enabled': bool(enabled),
-            'preset': self.preset_combo.currentData() or 'custom',
-            'server': self.input_host.text().strip(),
-            'port': int(self.input_port.text().strip() or 8002),
-            'mountpoint': self.input_mount.text().strip(),
-            'username': self.input_user.text().strip(),
-            'password': self.input_pwd.text().strip()
-        }
-        try:
-            with open(CORS_CONFIG_PATH, 'w', encoding='utf-8') as f:
-                json.dump(cfg, f, indent=2, ensure_ascii=False)
-            if self.ros_thread:
-                self.ros_thread.send_cors_cmd("reload")
-            self.lbl_status.setText("运行状态: 已发送连接指令" if enabled else "运行状态: 差分已断开")
-            self.lbl_status.setStyleSheet("color: #247451; font-weight: bold;" if enabled else "color: #B9404A; font-weight: bold;")
-        except Exception as e:
-            self.lbl_status.setText(f"保存配置失败: {e}")
-
-    def update_cors_status(self, cors_data):
-        if not self.isVisible():
-            return
-        status = cors_data.get('status', '未启用')
-        conn = cors_data.get('connected', False)
-        rate = cors_data.get('rate_kbs', 0.0)
-        bytes_recv = round(cors_data.get('bytes_received', 0) / 1024)
-        self.lbl_status.setText(f"运行状态: {status}")
-        self.lbl_status.setStyleSheet("color: #247451; font-weight: bold;" if conn else "color: #8B621A; font-weight: bold;")
-        self.lbl_rate.setText(f"差分速率: {rate} KB/s (累计接收 {bytes_recv} KB)")
 
 
 LIGHT_STYLE = """
@@ -810,7 +534,6 @@ class BoardRadarMainWindow(QWidget):
         except Exception:
             pass
         self.ros_thread = ROSThread()
-        self.cors_dialog = CorsConfigDialog(self, self.ros_thread)
 
         self.init_ui()
 
@@ -832,27 +555,16 @@ class BoardRadarMainWindow(QWidget):
         self._depth_timer.start(40)
         self.ros_thread.ai_signal.connect(self.on_ai_frame)
         self.ros_thread.targets_signal.connect(self.on_targets_data)
-        self.ros_thread.rtk_signal.connect(self.on_rtk_data)
         self.ros_thread.voltage_signal.connect(self.on_voltage_data)
         self.ros_thread.display_mode = self.cam_mode
         self.ros_thread.start()
         self._fps_times = []
         self.last_targets = []
         self._is_closed = False
-        self.cloud_epoch = ''
-        self.cloud_last_ok = 0.0
-        self.cloud_last_state = {}
-        self.cloud_worker = CloudDataWorker(self)
-        self.cloud_worker.state_signal.connect(self._on_cloud_state)
-        self.cloud_worker.cloud_signal.connect(self._on_cloud_binary)
-        self.cloud_worker.start()
-
-        if '--open-cors' in sys.argv:
-            QTimer.singleShot(800, self.open_cors_dialog)
         for arg in sys.argv:
             if arg.startswith('--cam-mode='):
                 mode = arg.split('=', 1)[1]
-                if mode in ('ai', 'rgb', 'depth', 'cloud'):
+                if mode in ('ai', 'rgb', 'depth'):
                     QTimer.singleShot(200, lambda m=mode: self.switch_cam_mode(m))
 
     def init_ui(self):
@@ -860,7 +572,6 @@ class BoardRadarMainWindow(QWidget):
         self.setFont(QFont('Noto Sans CJK SC', 11))
         self.setStyleSheet(LIGHT_STYLE)
         self._camera_received = 0.0
-        self._rtk_connected = False
         root = QVBoxLayout(self)
         root.setContentsMargins(24, 20, 24, 20)
         root.setSpacing(16)
@@ -884,14 +595,10 @@ class BoardRadarMainWindow(QWidget):
         header.addStretch()
         self.lidar_badge = QLabel('雷达 · 等待数据')
         self.camera_badge = QLabel('相机 · 等待数据')
-        self.dev_badge = QLabel('定位 · 未连接')
         self.battery_badge = QLabel('电量 · -- V')
-        for badge in (self.lidar_badge, self.camera_badge, self.dev_badge, self.battery_badge):
+        for badge in (self.lidar_badge, self.camera_badge, self.battery_badge):
             badge.setStyleSheet(chip_style('muted'))
             header.addWidget(badge)
-        self.rtk_details_btn = QPushButton('定位详情')
-        self.rtk_details_btn.clicked.connect(self.open_rtk_details)
-        header.addWidget(self.rtk_details_btn)
         self.btn_fs = QPushButton('窗口模式')
         self.btn_fs.clicked.connect(self.toggle_fullscreen)
         header.addWidget(self.btn_fs)
@@ -929,20 +636,14 @@ class BoardRadarMainWindow(QWidget):
 
         modes = QHBoxLayout()
         modes.setSpacing(8)
-        self.btn_ai = QPushButton('AI 目标测距')
+        self.btn_ai = QPushButton('人体姿态测距')
         self.btn_rgb = QPushButton('彩色画面')
         self.btn_depth = QPushButton('深度距离图')
-        self.btn_cloud = QPushButton('3D 点云')
-        for mode, button in [('ai', self.btn_ai), ('rgb', self.btn_rgb), ('depth', self.btn_depth), ('cloud', self.btn_cloud)]:
+        for mode, button in [('ai', self.btn_ai), ('rgb', self.btn_rgb), ('depth', self.btn_depth)]:
             button.setCheckable(True)
             button.setMinimumHeight(44)
             button.clicked.connect(lambda _, m=mode: self.switch_cam_mode(m))
             modes.addWidget(button)
-        self.btn_rviz = QPushButton('🖥️ RViz2 原生三维')
-        self.btn_rviz.setMinimumHeight(44)
-        self.btn_rviz.setStyleSheet('QPushButton { background: #008080; color: white; font-weight: bold; border-radius: 6px; } QPushButton:hover { background: #006666; }')
-        self.btn_rviz.clicked.connect(self._toggle_rviz)
-        modes.addWidget(self.btn_rviz)
         cam.addLayout(modes)
 
         self.cam_display_stack = QStackedWidget()
@@ -953,10 +654,6 @@ class BoardRadarMainWindow(QWidget):
         self.video_box.setStyleSheet('background:#C7D4DE;color:#677A8C;border:1px solid #B5C4D0;border-radius:10px;font-size:17px;')
         self.cam_display_stack.addWidget(self.video_box)
 
-        from cloud_gui import CloudCanvas
-        self.cloud_canvas = CloudCanvas()
-        self.cloud_canvas.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
-        self.cam_display_stack.addWidget(self.cloud_canvas)
         cam.addWidget(self.cam_display_stack, 1)
 
         self.cam_dist_badge = QLabel('等待目标信息')
@@ -986,72 +683,6 @@ class BoardRadarMainWindow(QWidget):
         controls.addWidget(self.depth_hint)
         cam.addWidget(self.depth_controls)
 
-        self.cloud_controls = QWidget()
-        c_layout = QVBoxLayout(self.cloud_controls)
-        c_layout.setContentsMargins(0, 0, 0, 0)
-        c_layout.setSpacing(8)
-        c_tools = QHBoxLayout()
-        c_tools.setSpacing(6)
-        for label, cb in [
-            ('三维', lambda: self.cloud_canvas.set_view('orbit')),
-            ('俯视', lambda: self.cloud_canvas.set_view('top')),
-            ('低视角', lambda: self.cloud_canvas.set_view('front')),
-            ('全图', self.cloud_canvas.fit),
-        ]:
-            b = QPushButton(label)
-            b.setMinimumHeight(38)
-            b.clicked.connect(cb)
-            c_tools.addWidget(b)
-        self.cloud_follow = QPushButton('跟随车位')
-        self.cloud_follow.setCheckable(True)
-        self.cloud_follow.setChecked(True)
-        self.cloud_follow.setMinimumHeight(38)
-        self.cloud_follow.clicked.connect(self._set_cloud_follow)
-        c_tools.addWidget(self.cloud_follow)
-        self.cloud_theme = QPushButton('浅色')
-        self.cloud_theme.setMinimumHeight(38)
-        self.cloud_theme.clicked.connect(self._toggle_cloud_theme)
-        c_tools.addWidget(self.cloud_theme)
-        c_layout.addLayout(c_tools)
-
-        c_opts = QHBoxLayout()
-        c_opts.setSpacing(6)
-        self.cloud_color = QComboBox()
-        self.cloud_color.addItems(['真实 RGB 彩色', '高度 Z', '距车距离', '反射强度'])
-        self.cloud_color.currentIndexChanged.connect(self._update_cloud_settings)
-        c_opts.addWidget(self.cloud_color)
-
-        c_opts.addWidget(QLabel('Z/m'))
-        self.cloud_low = QDoubleSpinBox()
-        self.cloud_low.setRange(-100., 100.)
-        self.cloud_low.setSingleStep(0.2)
-        self.cloud_low.setValue(-0.2)
-        self.cloud_low.valueChanged.connect(self._update_cloud_settings)
-        c_opts.addWidget(self.cloud_low)
-
-        self.cloud_high = QDoubleSpinBox()
-        self.cloud_high.setRange(-100., 100.)
-        self.cloud_high.setSingleStep(0.5)
-        self.cloud_high.setValue(3.0)
-        self.cloud_high.valueChanged.connect(self._update_cloud_settings)
-        c_opts.addWidget(self.cloud_high)
-
-        c_opts.addWidget(QLabel('点径'))
-        self.cloud_size = QSlider(Qt.Horizontal)
-        self.cloud_size.setRange(1, 4)
-        self.cloud_size.setValue(2)
-        self.cloud_size.setMaximumWidth(80)
-        self.cloud_size.valueChanged.connect(self._update_cloud_settings)
-        c_opts.addWidget(self.cloud_size)
-
-        self.cloud_rings = QCheckBox('环')
-        self.cloud_rings.setChecked(True)
-        self.cloud_rings.toggled.connect(self._update_cloud_settings)
-        c_opts.addWidget(self.cloud_rings)
-        c_layout.addLayout(c_opts)
-
-        cam.addWidget(self.cloud_controls)
-        self.cloud_controls.hide()
         body.addWidget(camera, 60)
 
         radar = QFrame()
@@ -1111,17 +742,6 @@ class BoardRadarMainWindow(QWidget):
         self.alarm_box.setStyleSheet('background:#FFF6E5;color:#8B5D16;border-radius:10px;padding:8px 18px;font-size:16px;')
         root.addWidget(self.alarm_box)
 
-        self.rtk_dialog = QDialog(self)
-        self.rtk_dialog.setWindowTitle('定位与设备详情')
-        self.rtk_dialog.resize(850, 570)
-        self.rtk_dialog.setStyleSheet(LIGHT_STYLE)
-        layout = QVBoxLayout(self.rtk_dialog)
-        layout.setContentsMargins(24, 24, 24, 24)
-        self.rtk_card = self.create_rtk_card()
-        layout.addWidget(self.rtk_card, 1)
-        close = QPushButton('完成')
-        close.clicked.connect(self.rtk_dialog.close)
-        layout.addWidget(close, 0, Qt.AlignRight)
         self.update_mode_buttons()
         self.depth_range.setEnabled(False)
         self.depth_style.setEnabled(False)
@@ -1146,43 +766,7 @@ class BoardRadarMainWindow(QWidget):
         frame.setMinimumHeight(90)
         return frame
 
-    def open_cors_dialog(self):
-        self.cors_dialog.load_config()
-        self.cors_dialog.exec_()
 
-    def create_rtk_card(self):
-        card = QFrame()
-        layout = QVBoxLayout(card)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(16)
-        title = QLabel('卫星定位')
-        title.setStyleSheet('font-size:24px;font-weight:700;')
-        layout.addWidget(title)
-        subtitle = QLabel('C-RTK 2HP · 双天线定位与航向')
-        subtitle.setStyleSheet('font-size:15px;color:#64788A;')
-        layout.addWidget(subtitle)
-        statuses = QHBoxLayout()
-        self.rtk_ant1_badge = QLabel('左天线 · 等待数据')
-        self.rtk_ant2_badge = QLabel('右天线 · 等待数据')
-        for badge in (self.rtk_ant1_badge, self.rtk_ant2_badge):
-            badge.setStyleSheet(chip_style('muted'))
-            statuses.addWidget(badge)
-        statuses.addStretch()
-        self.rtk_cors_btn = QPushButton('差分连接设置')
-        self.rtk_cors_btn.clicked.connect(self.open_cors_dialog)
-        statuses.addWidget(self.rtk_cors_btn)
-        layout.addLayout(statuses)
-        grid = QGridLayout()
-        grid.setSpacing(12)
-        specs = [('rtk_sats_ant1_box', '左天线 · 主 ANT1'), ('rtk_sats_ant2_box', '右天线 · 辅 ANT2'),
-                 ('rtk_sats_sky_box', '天空卫星分布'), ('rtk_heading_box', '航向 / 共视卫星'),
-                 ('rtk_coord_box', '经纬度'), ('rtk_alt_box', '海拔 / 精度')]
-        for i, (name, title) in enumerate(specs):
-            metric = self._create_sub_metric(title, '--')
-            setattr(self, name, metric)
-            grid.addWidget(metric, i // 2, i % 2)
-        layout.addLayout(grid, 1)
-        return card
 
     def _create_sub_metric(self, title, val):
         frame = QFrame()
@@ -1200,28 +784,6 @@ class BoardRadarMainWindow(QWidget):
         frame.val_lbl = value
         return frame
 
-    def on_rtk_data(self, data):
-        self.canvas.set_rtk(data)
-        connected = bool(data.get('connected', False))
-        fix_q = data.get('fix_quality', 0)
-        ant1_used = data.get('ant1_used', data.get('sats_used', 0))
-        ant2_used = data.get('ant2_used', 0)
-        ant1_fix = data.get('ant1_fix') or ('固定' if fix_q == 4 else '浮点' if fix_q == 5 else '单点' if fix_q > 0 else '搜星中')
-        ant2_fix = data.get('ant2_fix') or '搜星中'
-        for side, badge, fix in [('左天线', self.rtk_ant1_badge, ant1_fix), ('右天线', self.rtk_ant2_badge, ant2_fix)]:
-            badge.setText(f'{side} · {fix}' if connected else f'{side} · 未连接')
-            badge.setStyleSheet(chip_style('good' if connected and fix == '固定' else 'warn' if connected else 'muted'))
-        self.rtk_sats_ant1_box.val_lbl.setText(f'{ant1_fix}  ·  解算 {ant1_used} / 跟踪 {data.get("ant1_tracked", 0)}')
-        self.rtk_sats_ant2_box.val_lbl.setText(f'{ant2_fix}  ·  解算 {ant2_used} / 跟踪 {data.get("ant2_tracked", 0)}')
-        self.rtk_sats_sky_box.val_lbl.setText(f'左侧 {data.get("sats_left", 0)} 颗  /  右侧 {data.get("sats_right", 0)} 颗')
-        self.rtk_heading_box.val_lbl.setText(f'{data.get("heading", 0):.1f}°  ·  共视 {data.get("heading_sats_common", 0)} 颗' if data.get('has_heading') else '等待航向解算')
-        lat, lon = data.get('lat', 0), data.get('lon', 0)
-        self.rtk_coord_box.val_lbl.setText(f'{lat:.6f}, {lon:.6f}' if connected and fix_q > 0 else '等待定位解算')
-        self.rtk_alt_box.val_lbl.setText(f'{data.get("alt", 0):.1f} m  ·  HDOP {data.get("hdop", 99):.1f}' if connected and fix_q > 0 else '--')
-        cors = data.get('cors', {})
-        self.cors_dialog.update_cors_status(cors)
-        self.dev_badge.setText(f'定位 · {ant1_fix}' if connected else '定位 · 未连接')
-        self.dev_badge.setStyleSheet(chip_style('good' if connected and fix_q == 4 else 'warn' if connected else 'muted'))
 
     def on_voltage_data(self, voltage):
         self.canvas.set_voltage(voltage)
@@ -1232,8 +794,6 @@ class BoardRadarMainWindow(QWidget):
             self.battery_badge.setStyleSheet(chip_style(style_type))
 
     def _note_fps(self):
-        if self.cam_mode == 'cloud':
-            return
         now = time.time()
         self._fps_times.append(now)
         self._fps_times = [t for t in self._fps_times if now - t < 1.0]
@@ -1242,145 +802,48 @@ class BoardRadarMainWindow(QWidget):
 
     def switch_cam_mode(self, mode):
         self.cam_mode = mode
-        self.ros_thread.display_mode = mode if mode != 'cloud' else 'ai'
+        self.ros_thread.display_mode = mode
         self.depth_range.setEnabled(mode == 'depth')
         self.depth_style.setEnabled(mode == 'depth')
         self._depth_shown = None
         self._fps_times = []
         self.update_mode_buttons()
 
-        if mode == 'cloud':
-            self.cam_title.setText('三维实测点云')
-            self.cam_subtitle.setText('Astra S + N10P · 空间重建与建图')
-            self.cam_display_stack.setCurrentWidget(self.cloud_canvas)
-            self.depth_controls.hide()
-            self.cloud_controls.show()
-            self.cam_fps_badge.setText(f"{self.cloud_canvas.render_ms:.0f} ms")
-            self.cloud_worker.set_active(True)
-        else:
-            self.cam_title.setText('实时画面')
-            self.cam_subtitle.setText('Astra S · 3D 深度相机')
-            self.cam_display_stack.setCurrentWidget(self.video_box)
-            self.cloud_controls.hide()
-            self.depth_controls.setVisible(mode == 'depth')
-            self.cloud_worker.set_active(False)
-            if mode == 'ai':
-                if self.latest_ai_pixmap:
-                    self.video_box.setPixmap(self.latest_ai_pixmap)
-                self.cam_dist_badge.setText(getattr(self, 'ai_badge_text', 'AI 空间目标检测就绪'))
-            elif mode == 'rgb':
-                if self.latest_rgb_pixmap:
-                    self.video_box.setPixmap(self.latest_rgb_pixmap)
-                self.cam_dist_badge.setText("彩色实景 · 实时画面")
-            elif mode == 'depth':
-                self.latest_depth_pixmap = None
-                self.video_box.clear()
-                self.video_box.setText('等待新的深度帧…')
-                if self.latest_depth_pixmap:
-                    self.video_box.setPixmap(self.latest_depth_pixmap)
-                self._set_depth_badge(self.center_depth_mm, getattr(self, 'heat_near_mm', 0), getattr(self, 'heat_far_mm', 0))
+        self.cam_title.setText('实时画面')
+        self.cam_subtitle.setText('Astra S · 3D 深度相机')
+        self.cam_display_stack.setCurrentWidget(self.video_box)
+        self.depth_controls.setVisible(mode == 'depth')
+        if mode == 'ai':
+            if self.latest_ai_pixmap:
+                self.video_box.setPixmap(self.latest_ai_pixmap)
+            else:
+                self.video_box.setText('等待人体姿态画面…')
+            self.cam_dist_badge.setText(getattr(self, 'ai_badge_text', '等待人体姿态检测数据'))
+        elif mode == 'rgb':
+            if self.latest_rgb_pixmap:
+                self.video_box.setPixmap(self.latest_rgb_pixmap)
+            else:
+                self.video_box.setText('等待彩色画面…')
+            self.cam_dist_badge.setText("彩色实景 · 实时画面")
+        elif mode == 'depth':
+            self.latest_depth_pixmap = None
+            self.video_box.clear()
+            self.video_box.setText('等待新的深度帧…')
+            if self.latest_depth_pixmap:
+                self.video_box.setPixmap(self.latest_depth_pixmap)
+            self._set_depth_badge(self.center_depth_mm, getattr(self, 'heat_near_mm', 0), getattr(self, 'heat_far_mm', 0))
 
     def update_mode_buttons(self):
-        for mode, button in [('ai', self.btn_ai), ('rgb', self.btn_rgb), ('depth', self.btn_depth), ('cloud', self.btn_cloud)]:
+        for mode, button in [('ai', self.btn_ai), ('rgb', self.btn_rgb), ('depth', self.btn_depth)]:
             button.setChecked(self.cam_mode == mode)
         self.depth_controls.setVisible(self.cam_mode == 'depth')
-        self.cloud_controls.setVisible(self.cam_mode == 'cloud')
 
-    def _on_cloud_state(self, state):
-        meta = state.get('scene')
-        if not meta or meta.get('format') != 'xyzi-f32le':
-            return
-        self.cloud_last_ok = time.monotonic()
-        self.cloud_last_state = state
-        if self.cloud_epoch != meta.get('epoch'):
-            self.cloud_epoch = meta.get('epoch')
-            self.cloud_canvas.clear()
-        self.cloud_canvas.set_state(state, True)
-        if self.cam_mode == 'cloud':
-            count = meta.get('count', 0)
-            source = meta.get('source', '3D建图')
-            live = '实时' if meta.get('live') else '历史/等待'
-            frame = meta.get('frame', 'map')
-            frame_label = '局部' if frame == 'base_link' else '全局'
-            err = meta.get('error') or state.get('error', '')
-            status_text = f"三维点云 {count:,} 点 · {source} · {frame_label} · {live}"
-            if err and not meta.get('live'):
-                status_text += f" ({err})"
-            self.cam_dist_badge.setText(status_text)
-            self.cam_fps_badge.setText(f"{self.cloud_canvas.render_ms:.0f} ms")
 
-        avail_int = meta.get('intensity_available', False)
-        self.cloud_color.model().item(3).setEnabled(avail_int)
-        dist_avail = bool(state.get('localized') or meta.get('frame') == 'base_link')
-        self.cloud_color.model().item(2).setEnabled(dist_avail)
-        if (self.cloud_color.currentIndex() == 3 and not avail_int) or \
-           (self.cloud_color.currentIndex() == 2 and not dist_avail):
-            self.cloud_color.setCurrentIndex(0)
 
-    def _on_cloud_binary(self, body, meta):
-        if not body or self.cloud_epoch != meta.get('epoch'):
-            return
-        try:
-            expected = meta['count'] * 16
-            if len(body) != expected:
-                return
-            arr = np.frombuffer(body, dtype='<f4').reshape(-1, 4)
-            self.cloud_canvas.set_cloud(arr, meta)
-            self.cloud_follow.setChecked(self.cloud_canvas.follow)
-        except Exception:
-            pass
 
-    def _set_cloud_follow(self, checked):
-        self.cloud_canvas.follow = checked
-        self.cloud_canvas.set_state(self.cloud_last_state, self.cloud_canvas.online)
 
-    def _toggle_cloud_theme(self):
-        self.cloud_canvas.light = not self.cloud_canvas.light
-        self.cloud_theme.setText('深色' if self.cloud_canvas.light else '浅色')
-        self.cloud_canvas.invalidate()
 
-    def _toggle_rviz(self):
-        try:
-            import subprocess
-            res = subprocess.run(['pgrep', '-f', 'rviz2'], stdout=subprocess.PIPE, text=True)
-            if res.returncode == 0 and res.stdout.strip():
-                subprocess.run(['pkill', '-9', '-f', 'rviz2'])
-                self.btn_rviz.setText('🖥️ RViz2 原生三维')
-                self.btn_rviz.setStyleSheet('QPushButton { background: #008080; color: white; font-weight: bold; border-radius: 6px; } QPushButton:hover { background: #006666; }')
-            else:
-                subprocess.Popen(['/root/radar_system/run_rviz.sh'])
-                self.btn_rviz.setText('❌ 关闭 RViz2')
-                self.btn_rviz.setStyleSheet('QPushButton { background: #C0392B; color: white; font-weight: bold; border-radius: 6px; } QPushButton:hover { background: #962D22; }')
-        except Exception as e:
-            print(f"Failed to toggle RViz2: {e}")
 
-    def _check_rviz_status(self):
-        try:
-            import subprocess
-            res = subprocess.run(['pgrep', '-f', 'rviz2'], stdout=subprocess.PIPE, text=True)
-            running = (res.returncode == 0 and bool(res.stdout.strip()))
-            if running:
-                if self.btn_rviz.text() != '❌ 关闭 RViz2':
-                    self.btn_rviz.setText('❌ 关闭 RViz2')
-                    self.btn_rviz.setStyleSheet('QPushButton { background: #C0392B; color: white; font-weight: bold; border-radius: 6px; } QPushButton:hover { background: #962D22; }')
-            else:
-                if self.btn_rviz.text() != '🖥️ RViz2 原生三维':
-                    self.btn_rviz.setText('🖥️ RViz2 原生三维')
-                    self.btn_rviz.setStyleSheet('QPushButton { background: #008080; color: white; font-weight: bold; border-radius: 6px; } QPushButton:hover { background: #006666; }')
-        except Exception:
-            pass
-
-    def _update_cloud_settings(self, *args):
-        if self.cloud_low.value() >= self.cloud_high.value():
-            return
-        modes = ['rgb', 'height', 'distance', 'intensity']
-        idx = max(0, min(len(modes)-1, self.cloud_color.currentIndex()))
-        self.cloud_canvas.color_mode = modes[idx]
-        self.cloud_canvas.z_low = self.cloud_low.value()
-        self.cloud_canvas.z_high = self.cloud_high.value()
-        self.cloud_canvas.point_size = self.cloud_size.value()
-        self.cloud_canvas.rings = self.cloud_rings.isChecked()
-        self.cloud_canvas.invalidate()
 
     def on_targets_data(self, json_str):
         try:
@@ -1405,15 +868,10 @@ class BoardRadarMainWindow(QWidget):
         box = self.video_box.size()
         if box.width() < 2 or box.height() < 2:
             return pix
-        return pix.scaled(box, Qt.KeepAspectRatio, Qt.FastTransformation)
+        return pix.scaled(box, Qt.KeepAspectRatio, Qt.SmoothTransformation)
 
     def closeEvent(self,event):
         self._is_closed = True
-        if hasattr(self, 'cloud_worker'):
-            self.cloud_worker.stop()
-        if hasattr(self, 'cloud_canvas'):
-            self.cloud_canvas.timer.stop()
-            self.cloud_canvas.worker.stop()
         self.depth_renderer.stop()
         super().closeEvent(event)
 
@@ -1501,7 +959,7 @@ class BoardRadarMainWindow(QWidget):
         self.heat_near_mm = near_mm
         self.heat_far_mm = far_mm
         available=QSize(max(1,self.video_box.width()-24),max(1,self.video_box.height()-24))
-        scaled_pix = QPixmap.fromImage(qimage).scaled(available, Qt.KeepAspectRatio, Qt.SmoothTransformation if self.depth_style.currentData()=='smooth' else Qt.FastTransformation)
+        scaled_pix = QPixmap.fromImage(qimage).scaled(available, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self.latest_depth_pixmap = scaled_pix
         if self.cam_mode == 'depth':
             self._set_depth_badge(center_val_mm, near_mm, far_mm)
@@ -1565,8 +1023,6 @@ class BoardRadarMainWindow(QWidget):
             self.showFullScreen()
             self.btn_fs.setText("窗口模式")
 
-    def open_rtk_details(self):
-        self.rtk_dialog.exec_()
 
     def refresh_connection_badges(self):
         now = time.monotonic()
@@ -1577,20 +1033,13 @@ class BoardRadarMainWindow(QWidget):
         if self.cam_mode == 'depth':
             record = self.ros_thread.latest_depth
             live_cam = record is not None and now - record['received'] + record['age'] < 0.6
-        elif self.cam_mode == 'cloud':
-            live_cam = (now - self.cloud_last_ok < 2.0)
         else:
             live_cam = self._camera_received > 0 and now - self._camera_received < 1.0
-        self.camera_badge.setText(('点云' if self.cam_mode == 'cloud' else '相机') + (' · 在线' if live_cam else ' · 等待数据'))
+        self.camera_badge.setText('相机' + (' · 在线' if live_cam else ' · 等待数据'))
         self.camera_badge.setStyleSheet(chip_style('good' if live_cam else 'muted'))
         self.cam_fps_badge.setStyleSheet(chip_style('good' if live_cam else 'muted'))
-        if self.cam_mode == 'cloud':
-            self.cam_fps_badge.setText(f"{self.cloud_canvas.render_ms:.0f} ms")
-        elif not live_cam:
+        if not live_cam:
             self.cam_fps_badge.setText('-- FPS')
-        if not hasattr(self, '_last_rviz_check') or now - self._last_rviz_check > 1.0:
-            self._last_rviz_check = now
-            self._check_rviz_status()
 
 def main():
     import signal

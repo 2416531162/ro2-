@@ -13,6 +13,7 @@ import sys
 import os
 import time
 import math
+import json
 import threading
 import cv2
 import numpy as np
@@ -187,6 +188,7 @@ class AI3DDetectorNode(Node):
         self.yolo = YoloRKNN(self.yolo_model)
         self.get_logger().info(">>> YOLOv8n / RK3588 NPU / 80 classes + face detector ready")
 
+        self._last_annotated = 0.0
         self.latest_rgb = None
         self.latest_depth = None
         self.latest_depth_stamp = None
@@ -242,9 +244,55 @@ class AI3DDetectorNode(Node):
     DEPTH_MAX_MM = 6000.0
     DEPTH_INSET = 0.20          # bbox 四边各内缩 20%,避开边缘穿透到背景
     DEPTH_PERCENTILE = 20.0     # 取第 20 百分位而非中位数,保守偏近
-    DEPTH_MIN_VALID_RATIO = 0.15
-    DEPTH_MIN_PIXELS = 30
+    DEPTH_MIN_VALID_RATIO = 0.30
+    DEPTH_MIN_PIXELS = 60
     DEPTH_MAX_PAIR_AGE_S = 0.15  # RGB 与深度帧的最大允许时间差
+
+    # ---- 轻量身份特征 ----
+    # 跟随器的 TargetLock 解锁后重选目标时,评分只看"谁最正对车头",路上迎面
+    # 走来一个人就会跟错。这里顺手算两个几乎不要钱的身份线索一起发出去:
+    #   height_m  bbox 像素高 x 深度 / fy,即**可见部分**的物理高度
+    #   color     上半身 HSV 色调直方图,衣服颜色在一次任务里基本不变
+    # 都在已有的 RGB/深度上做,不占 NPU,单人每帧折合几十微秒。
+    ANNOTATED_PERIOD_S = 0.20   # 标注图发布周期 (5Hz);JSON 目标不受影响
+    COLOR_BINS = 12
+    COLOR_TOP = 0.20            # 躯干 ROI 上边界 (bbox 高度比例),避开人脸
+    COLOR_BOTTOM = 0.55         # 下边界,避开裤子和背景地面
+    COLOR_MIN_SAT = 40          # 太灰的像素色调没有意义
+    COLOR_MIN_VAL = 40          # 太暗的像素色调是噪声
+    COLOR_MIN_PIXELS = 40
+
+    @classmethod
+    def torso_color(cls, bgr, x1, y1, x2, y2):
+        """上半身色调直方图 (L1 归一化)。样本太少或全是灰/暗像素时返回 None。"""
+        bw, bh = x2 - x1, y2 - y1
+        if bw < 8 or bh < 16:
+            return None
+        h, w = bgr.shape[:2]
+        ix1 = max(0, int(x1 + bw * 0.20))
+        ix2 = min(w, int(x2 - bw * 0.20))
+        iy1 = max(0, int(y1 + bh * cls.COLOR_TOP))
+        iy2 = min(h, int(y1 + bh * cls.COLOR_BOTTOM))
+        if ix2 - ix1 < 4 or iy2 - iy1 < 4:
+            return None
+        roi = bgr[iy1:iy2, ix1:ix2]
+        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+        mask = ((hsv[:, :, 1] >= cls.COLOR_MIN_SAT)
+                & (hsv[:, :, 2] >= cls.COLOR_MIN_VAL)).astype(np.uint8)
+        if int(mask.sum()) < cls.COLOR_MIN_PIXELS:
+            return None
+        hist = cv2.calcHist([hsv], [0], mask, [cls.COLOR_BINS], [0, 180])
+        total = float(hist.sum())
+        if total <= 0.0:
+            return None
+        return [round(float(v) / total, 4) for v in hist.flatten()]
+
+    @classmethod
+    def visible_height_m(cls, bbox_h_px, depth_m, fy):
+        """bbox 可见部分的物理高度。脚被挡住时它会变小,所以只能当软证据。"""
+        if not (bbox_h_px > 0 and depth_m and depth_m > 0.2 and fy > 1.0):
+            return None
+        return round(float(bbox_h_px) * float(depth_m) / float(fy), 3)
 
     @classmethod
     def robust_depth(cls, depth, x1, y1, x2, y2):
@@ -321,6 +369,9 @@ class AI3DDetectorNode(Node):
             try:
                 bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
                 h, w = bgr.shape[:2]
+                # 身份特征必须在**画框之前**的干净图上取:中心准星正好落在
+                # 躯干 ROI 里,画完再采样等于把自己画的颜色学进签名。
+                bgr_clean = bgr.copy()
 
                 # RGB 与深度来自两个独立回调,没有硬件同步。相差太多时
                 # 像素位置对不上,bbox 会框到错误的深度区域 —— 宁可不给距离。
@@ -395,6 +446,15 @@ class AI3DDetectorNode(Node):
                         "range_valid": False,
                     }
 
+                    # 只给人算身份特征:椅子桌子不需要认人,省算力
+                    if label.lower() in ("person", "face"):
+                        height_m = self.visible_height_m(y2 - y1, Z, self.fy)
+                        if height_m is not None:
+                            item["height_m"] = height_m
+                        swatch = self.torso_color(bgr_clean, x1, y1, x2, y2)
+                        if swatch is not None:
+                            item["color"] = swatch
+
                     if dist_m is not None and 0.2 < dist_m < 12.0:
                         dist_str = f"{dist_m:.2f}m"
                         coord_str = f"X:{X:+.2f} Y:{Y:+.2f} Z:{Z:.2f}m"
@@ -431,20 +491,26 @@ class AI3DDetectorNode(Node):
                 cv2.putText(bgr, hud_text, (12, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 242, 254), 1, cv2.LINE_AA)
 
                 # 5. 发布带 3D 标注的图像
-                rgb_out = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-                out_msg = Image()
-                if header:
-                    out_msg.header = header
-                out_msg.height = h
-                out_msg.width = w
-                out_msg.encoding = "rgb8"
-                out_msg.is_bigendian = 0
-                out_msg.step = w * 3
-                out_msg.data = rgb_out.tobytes()
-                self.pub_annotated.publish(out_msg)
+                # 这一步是整个循环里最贵的:一次色彩转换 + 一次全分辨率
+                # tobytes() + 一次 ROS 序列化,640x480 下约 1MB/帧。满帧发布会
+                # 直接压低检测帧率,而刹车包络的 control_latency_s=0.35s 正是
+                # 建立在检测帧率之上的 —— 图好看一点换来的是刹车距离变长。
+                # 人眼看画面 5Hz 完全够,JSON 目标数据保持满帧。
+                if now - self._last_annotated >= self.ANNOTATED_PERIOD_S:
+                    self._last_annotated = now
+                    rgb_out = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+                    out_msg = Image()
+                    if header:
+                        out_msg.header = header
+                    out_msg.height = h
+                    out_msg.width = w
+                    out_msg.encoding = "rgb8"
+                    out_msg.is_bigendian = 0
+                    out_msg.step = w * 3
+                    out_msg.data = rgb_out.tobytes()
+                    self.pub_annotated.publish(out_msg)
 
                 # 发布 JSON 目标数据
-                import json
                 json_msg = String()
                 json_msg.data = json.dumps(target_list)
                 self.pub_json.publish(json_msg)

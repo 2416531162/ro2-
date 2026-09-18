@@ -1,76 +1,94 @@
-# 实车标定手册
+# 统一配置与现场标定
 
-本次重写把「跟多快、什么时候减速、方向盘打多少」这三件事的计算全部收进
-`radar_system/motion_safety.py`。代码里所有默认值都按**保守**取,目的是先保证
-不撞人;真实性能要靠下面两个参数标定出来。
+物理参数唯一来源是 `robot_core/robot.json`，现场可通过 `RK3588_ROBOT_CONFIG` 指向 `/etc/rk3588/robot.json`。所有服务必须读取同一份配置，修改后整套重启。驱动和行为的 `profile_hash` 不一致时不执行运动请求。
 
-标有 ★ 的两个参数没量过之前,不要把 `max_speed_mps` 往上调。
+不要再分别修改跟随常量、网页速度、驱动 YAML 中的几何或旧 `lidar_calib.json`。跟随 CLI 的物理标定参数只接受与共享配置相同的值；保持距离、任务限速等行为参数仍可用 CLI 调整。发布目录应保持不变，现场标定写入外部配置。
 
----
+## 参数归属
 
-## 0. 先跑无硬件测试
+| 配置键 | 当前值 | 含义 |
+|---|---|---|
+| `geometry.wheelbase_m` / `track_m` | 0.54 / 0.59 m | 前后轴距、左右轮距 |
+| `geometry.front_m` / `rear_m` | 0.67 / 0.18 m | 后轴中心至最前/最后端 |
+| `geometry.half_width_m` | 0.335 m | 轮胎外沿半宽 |
+| `geometry.max_steer_rad` | 0.35 rad | 标称舵角限位，需实车确认 |
+| `sensors.lidar_x_m` | 0.53 m | 雷达至后轴中心前向距离 |
+| `sensors.camera_x_m` / `camera_pitch_rad` | 0.54 m / 0.2618 rad | 相机位置、向下俯角 |
+| `sensors.raw_lidar_yaw_deg` | 0° | 标准协议原始扫描零点；现场标定后才改为实测偏移 |
+| `sensors.lidar_yaw_rad` | 0 | 已发布扫描的残余安装偏角 |
+| `safety.decel_mps2` | 1.0 m/s² | 制动包络使用的减速度，需实测 |
+| `safety.control_latency_s` / `guard_latency_s` | 0.35 / 0.20 s | 跟随链路与驱动雷达防撞链路延迟 |
+| `manual.low_mps` / `med_mps` / `high_mps` | 0.50 / 0.85 / 1.20 m/s | 网页手动档位，驱动仍最终限幅 |
 
-```bash
-cd <仓库根目录>
-python3 tests/test_motion_safety.py      # 33 条,应当全绿
-python3 radar_system/motion_safety.py    # 打印刹车包络与旧档位换算,自检用
-```
+这些值沿用仓库已有配置，不表示本次在设备上重新测量。机器人转向换算在 `robot_core/kinematics.py`，跟随、网页和驱动共用；按当前对称转向模型，0.35 rad 的最小半径约 1.77 m。实际左右转向和倒车还需验证固件约定。车后快速掉头使用跟随上限 0.45 m/s，但仍受扫掠净空、雷达门控和驱动限幅约束。
 
----
+## 制动与延迟
 
-## 1. ★ 标定 `decel_capability_mps2`(实测减速度)
+在对应地面记录停车前实测速度 `v` 和开始减速至停稳距离 `d`，估算 `a = v²/(2d)`。重复测量，并考虑载荷、电池及地面变化，使用保守值写入 `safety.decel_mps2`。例如 0.5 m/s、减速段 0.20 m，对应约 0.63 m/s²。
 
-阿克曼车没有主动刹车,PWM 归零后靠滚动阻力和齿轮箱反拖减速。这个值直接决定
-刹车包络的陡峭程度,**估高了就会撞**。
+从相机曝光或障碍出现，到实际轮速开始下降的时间用于估算总链路延迟。仅观察终端状态变化只能测到算法响应，不能代表执行器开始减速。跟随与驱动防撞链路不同，分别填写两个延迟字段。不要为了缩短跟车距离而乐观提高减速度或缩短延迟。
 
-在实际跑的地面上(地砖、水泥、地毯阻力差很多)量:
-
-```bash
-# 1. 关掉跟随,只起驱动
-python3 wheeltec_protocol/wheeltec_driver.py --ros-args --params-file wheeltec.yaml
-
-# 2. 另开一个终端,给 1 秒定速,记录从松油门到停住的距离
-python3 wheeltec_protocol/control.py drive --speed 0.5 --seconds 1.0
-```
-
-在地面贴胶带,量出**松开指令那一刻的车头位置**到**完全静止**的距离 `d`:
-
-```
-a = v² / (2 × d)
-```
-
-例:0.5 m/s 滑行 0.20 m → a = 0.25 / 0.40 = **0.63 m/s²**
-
-多做 3 次取**最小值**(最保守的那次),填进去:
+新控制入口要求雷达、底盘、电池健康。`control.py drive` 是有界手动命令，结束会锁存停车；再次使用前执行 reset，不会自动恢复任务。初次验证保持实际停车条件可控，不能用软件测试替代实车刹停检查。
 
 ```bash
-python3 radar_system/person_follower.py --decel-mps2 0.63
+python3 -m pytest tests -q
+# 避免与已有 follower 服务重复运行
+bash radar_system/run_follower.sh --dry-run
+bash radar_system/run_follower.sh --safe-mode
 ```
 
-> 默认值 1.00 对多数硬地板偏乐观。如果量出来低于 1.0,**一定要改**。
+`--dry-run` 仍消费实际 `/odom`，只计算不发请求；不自动用速度积分掩盖定位缺失。`--safe-mode` 限制跟随速度及距离包络，具体值见 `follower_config.build_config`；它不改变共享驱动物理标定。
 
----
+## 跟随行为参数
 
-## 2. ★ 标定 `control_latency_s`(感知到执行的总死时间)
+`radar_system/follower_config.py` 保留任务参数。当前常用默认值：期望车头至人 1.00 m、包络归零 0.80 m、巡航上限 0.45 m/s、障碍停车净空 0.15 m、硬急停净空 0.08 m。这些是算法门限，不是经过本次实车验收的性能承诺。
 
-这是从「相机那一帧曝光」到「轮子真的开始减速」的全链路延迟:
+```bash
+bash radar_system/run_follower.sh --follow-distance-m 1.2 --max-speed-mps 0.3
+bash radar_system/run_follower.sh --no-recovery --no-turnaround
+```
 
-| 环节 | 典型值 |
+目标身份由统一人体轨迹维护；相机与雷达关联默认门限 1.2 m；车后快速穿越时，已确认目标可在 4.0 m 的无歧义扩展门内被雷达重捕，车前到车后的跳变会直接重定位，避免目标估计穿过车体；多候选点簇不会触发扩展重捕。高置信相机观测可新建轨迹，低置信观测和雷达只延续匹配目标。相机观测按采集时间对齐共享本地位姿，超时或没有可用历史时丢弃，不补成“刚刚收到的新观测”。相机暂时看不到时可有限雷达接力；质量不够、时间到期则停车或按已有恢复策略处理。
+
+脱困及 K-turn 使用同一位姿来源，依实测位移/转角计算机动预算。具体路径、盲区和换向限制见 [脱困行为](FOLLOWER_RECOVERY.md)。它们不是全局导航规划器。
+
+## 相机与雷达对齐
+
+```bash
+python3 radar_system/calib_check.py --seconds 40
+python3 radar_system/scan_doctor.py --seconds 10
+```
+
+让目标在左/中/右及不同距离站定，检查光学坐标变换后的目标与雷达腿部点簇是否重合。`calib_check.py` 输出的外参建议应写入共享 `sensors` 字段。先确认雷达安装位置，再调整相机偏移和偏角。
+
+`calibrate_lidar.py` 现在原子更新共享配置中的 `raw_lidar_yaw_deg`，不再自动 pkill 雷达进程。默认采用标准协议方向（前 0°、左 90°、后 180°、右 270°）；只有完成现场标定后才填写偏移。使用前设置外部配置环境变量；完成后在停车状态重启整套服务，跟随层不可重复叠加同一个角度。
+
+自反射与盲区从实测剖面判断。跟随 `self_hit_skin_m` 默认 5 cm，驱动防撞层为 2 cm；增加它会同时扩大真实近障碍被滤掉的范围。宽缺口保持未知，不应仅为消除“无路”提示扩大过滤或屏蔽范围。
+
+## 状态诊断
+
+| 现象 | 重点检查 |
 |---|---|
-| 相机曝光 + 传输 | 30~60 ms |
-| YOLO 推理 (RK3588 NPU) | 30~120 ms |
-| alpha-beta 滤波剩余滞后 | 20~50 ms |
-| 控制周期 (20 Hz) | 50 ms |
-| 串口 + 固件响应 | 20~40 ms |
+| PAUSED / motion_authority | 是否明确选择 FOLLOW，配置摘要是否一致 |
+| FAULT / ESTOP | 驱动状态中的原因；修复后停稳 reset，再选择任务 |
+| 定位不健康 | 本地话题、frame、时间戳、跳变及驱动 epoch |
+| 目标频繁切换 | 相机深度质量、相机/雷达外参、关联门限 |
+| swept_path / aeb_hard | 障碍、完整车身尺寸、未知区域、自反射 |
+| 手动与跟随都无输出 | 雷达全帧时效、底盘反馈、电压、租约龄期 |
 
-**测法**:开 `--dry-run`,人拿一块板子在相机前突然遮挡,用手机慢动作录屏,
-对比「板子遮住镜头」与「终端 state 变成 SEARCHING_LOST」的帧差。
+正常新入口中雷达缺失或过期会锁存故障停车。`ScanGuard` 单独类保留旧调试降级行为，但不能把它当作新控制入口允许无雷达驾驶的依据。碰撞走廊兜底也不等于完整局部规划。
+
+## 录包与复现
 
 ```bash
-python3 radar_system/person_follower.py --dry-run
+bash radar_system/record_follow_bag.sh
+python3 radar_system/bag_replay.py BAG --out timeline.jsonl
+python3 radar_system/bag_replay.py BAG --set follow_breadcrumbs=False
+# 仅用于没有里程计的历史包，明确选择旧式合成积分
+python3 radar_system/bag_replay.py OLD_BAG --legacy-velocity-odometry
 ```
 
-默认 0.35 s。测出来更大就往上填,**宁大勿小**。
+录包包括感知、原始/配置的本地位姿、IMU/TF、驱动状态和三种控制请求。回放只计算，不下发运动。使用与录制时匹配的配置；这是开环回放，改算法不会改变录下的真实车身轨迹，不能据此宣称新的路线已通过实车验证。
 
 ---
 
@@ -79,6 +97,7 @@ python3 radar_system/person_follower.py --dry-run
 ```bash
 python3 radar_system/person_follower.py --safe-mode --decel-mps2 <你测的值>
 ```
+
 
 `--safe-mode` 会强制:极速 ≤ 0.30 m/s、保持距离 ≥ 1.20 m、包络归零点 ≥ 0.90 m、
 减速度按 0.70 m/s² 保守估计。先确认逻辑对,再逐步放开。
@@ -570,3 +589,236 @@ i = round((目标方位 - angle_min) / 角分辨率)
 > 那是全向门限,会让所有方向都看不见 0.22m 以内的东西,包括真正挡在
 > 车头前的障碍物。自反射全在侧后方时不需要任何配置 —— `drop_self_hits()`
 > 的车体轮廓过滤会自动处理。新版 scan_doctor 已经会这么提示。
+
+---
+
+## 10. 跟踪人:纯追踪转向、自车运动补偿、轻量重识别
+
+这一轮改的是「跟人」本身,不是避障。三件事各自对应一个实车上能看见的毛病。
+
+### 10.1 转向律 — `motion_safety.pure_pursuit_steer`
+
+```python
+pursuit_gain    = 1.00   # 1.0 = 几何正解,想更稳就往下调
+min_lookahead_m = 0.45   # 前视距离下限,防止贴脸时曲率爆掉
+```
+
+改造前是 `steer = kp_steer * bearing`,一个**与距离无关**的比例增益。
+轴距 0.54 m 下的实际数字:
+
+| 人在哪 | 视线角 | 几何正解 | 老式子 (kp=1.1) |
+|---|---|---|---|
+| 1.6 m | 0.30 rad | **0.22 rad** | 0.33 rad(超打 50%) |
+| 2.5 m | 0.30 rad | **0.14 rad** | 0.33 rad |
+| 3.5 m | 0.30 rad | **0.10 rad** | 0.33 rad(超打 240%) |
+
+远处那一档就是「跟人画龙 / 左右摇摆」的来源:打过头 → 冲过中线 → 反打。
+纯追踪按 `κ = 2·sin α / L_d` 算曲率,再按固件的 `TurnR` 定义折成前轮转角,
+`yaw_from_steer` 换回角速度时能精确还原同一个转弯半径,整条链路自洽。
+
+- 还是觉得跟得太急 → `pursuit_gain` 调到 0.8,**不要**去改轴距或轮距
+- 贴近时原地摆头 → 调大 `min_lookahead_m`
+- `kp_steer` 已删除。它和纯追踪是两套东西,留着只会让人以为还能调
+
+### 10.2 自车运动补偿 — `TargetLock.advance`
+
+锚点存在**车体坐标系**里,而车自己在动。改造前拿上一帧的观测位置直接和这一帧
+比,等于假设车是静止的。实测量级:车 1.2 rad/s 转向、人在 2 m 处,
+
+```
+自车旋转  2.67 m × sin(1.2 × 0.1) ≈ 0.24 m
+自车前进  0.55 × 0.1              ≈ 0.055 m
+人自己走  1.5 × 0.1               ≈ 0.15 m
+                                  合计 ≈ 0.45 m   (关联半径 0.55 m)
+```
+
+单帧勉强够,**检测掉一帧就是 0.9 m,必然掉锁** —— 所以转弯比直行更容易跟丢,
+而转弯恰恰是最不能跟丢的时候。现在每个周期用底盘实测的 `(speed, yaw_rate)`
+把锚点搬到当前车体系,再叠目标自己的速度做外推。
+
+遥测新增 `target_speed_fl`(目标在车体系下的前向/左向速度,m/s)。
+**这两个数持续为零而人在走,说明 `/wheeltec/status` 的速度反馈没进来**,
+补偿等于没开 —— 先查底盘反馈,不要去调 `lock_radius_m`。
+
+### 10.3 轻量重识别 — `appearance_similarity`
+
+```python
+appearance_floor    = 0.45   # 相似度门限,低于此不认为是同一个人
+appearance_weight_m = 0.60   # 外观不像在关联评分里折算成多少"米"
+height_tolerance_m  = 0.25   # 可见身高差多少算完全不像
+signature_ttl_s     = 20.0   # 签名保鲜期,过期后允许重新认人
+```
+
+改造前解锁后重选目标的评分是 `abs(x)*1.5 + abs(z - 期望距离)` ——
+**谁最正对车头就跟谁**。人转过拐角、被柱子挡两秒、或者迎面来个人,回来就跟错了。
+
+检测器现在顺手输出两个不要钱的身份线索(都在已有 RGB/深度上算,不占 NPU):
+
+- `height_m` —— bbox 像素高 × 深度 / fy,即**可见部分**的物理高度
+- `color` —— 上半身 HSV 色调直方图(12 bin,L1 归一化)
+
+锁定期间它们参与关联评分;解锁后重选时,只要签名还新鲜就**必须**长得像
+才允许锁定,宁可继续搜索也不跟陌生人走。
+
+遥测新增 `signature_ready` 与 `appearance_rejects`。
+
+- `signature_ready` 一直是 `false` → 检测器版本旧,或者人穿得太暗/太灰
+  (`COLOR_MIN_SAT/VAL` 滤掉了全部像素)。此时系统自动退化成纯几何关联,
+  行为与改造前一致,**不会更差**
+- `appearance_rejects` 持续增长但人就在眼前 → `appearance_floor` 太高,
+  先调到 0.35 试;逆光环境下色调直方图本来就不稳
+- 中途换外套会掉锁 → 这是设计如此。等 `signature_ttl_s` 过期会自动重新认人
+
+### 10.4 检测器发布频率
+
+```python
+ANNOTATED_PERIOD_S = 0.20    # 标注图 5Hz;JSON 目标数据不受影响,仍是满帧
+```
+
+标注图是整个推理循环里最贵的一步(色彩转换 + 全分辨率 `tobytes()` + ROS 序列化,
+640×480 下约 1 MB/帧)。满帧发布会直接压低检测帧率,而刹车包络的
+`control_latency_s = 0.35 s` 正是建立在检测帧率之上的 —— 画面好看一点,
+换来的是刹车距离变长。要看流畅画面就调小这个值,但先确认帧率没掉。
+
+---
+
+## 11. MPPI 参考量生成器(可选,需 Jetson Orin + Torch CUDA)
+
+### 11.1 先讲清楚边界
+
+MPPI **替换**的是参考量的生成:纯追踪的转角、距离 P 律加前馈的速度、
+以及 `limit_steer_for_clearance` 那个收舵覆盖。
+
+MPPI **不替换**:刹车包络、车体扫掠净空、AEB 硬急停、脱困状态机。
+这些仍然串在它下游,原样保留。
+
+这条边界不是保守,是必须的。MPPI 是**软约束**采样器:它给撞车的 rollout 加一个
+很大的代价,但最终输出是按 `exp(-S/λ)` 加权的平均控制,这个平均值**可能落在
+没有任何一条样本占据的区域**。代价权重调错一个数量级,碰撞惩罚就会被目标项
+淹没,而且不会报错 —— 车照跑,只是开始蹭东西。硬安全必须由一个独立的、
+确定性的层来保证。
+
+控制器自己也留了一道:算完加权平均之后,拿这条输出再做一次**确定性 rollout**,
+用精确矩形几何验净空;验不过就退到代价最低的那条真实样本;还不行就速度归零
+交回调用方。
+
+### 11.2 开启
+
+```bash
+# 先在没有底盘动作的情况下看它算什么
+python3 radar_system/person_follower.py --controller mppi --dry-run
+
+# 实车第一次,配合 safe-mode
+python3 radar_system/person_follower.py --controller mppi --safe-mode
+
+# 明确指定后端。实车上**一定要写 cuda**,见 11.6
+python3 radar_system/person_follower.py --controller mppi --mppi-device cuda --mppi-samples 2048
+```
+
+默认仍然是 `pure-pursuit`。实车验证通过之前不要改默认值 —— 切换是一个开关的事,
+没必要拿默认值去赌。
+
+### 11.3 参数
+
+```python
+samples            = 1024   # K。Orin CUDA 上 2048 也只是几毫秒
+horizon            = 40     # T 步
+dt_s               = 0.15   # T*dt = 6.0s,0.55m/s 下约 3.3m
+temperature        = 0.35   # λ
+sigma_v            = 0.12   # 速度采样噪声
+sigma_steer        = 0.10   # 转角采样噪声
+noise_correlation  = 0.85   # 噪声沿时间轴的相关系数
+nominal_shrink     = 0.02   # 每周期把名义序列往零拉几成
+```
+
+**前瞻长度不是随便选的。** 这台车满舵最小转弯半径 1.74m,一次"让开再切回来"的
+动作本身就要 3m 以上行程。前瞻比机动动作还短,规划器就只能等到贴脸才发现问题,
+而那时已经转不过来了。`T*dt*max_speed` 必须 ≥ 3m,这是硬约束。
+
+**`noise_correlation` 是能不能绕开障碍物的关键,不是调味料。** 逐步独立的高斯
+噪声只会产生零均值抖动,几乎采不出"连续打舵一秒半"这种样本 —— 而绕过正前方的
+东西恰恰需要先**远离**目标点再切回来,是个局部极小。调到 0 就退化成教科书写法,
+车会直挺挺地开到障碍物跟前才停。
+
+**`nominal_shrink` 的单位是"每周期往零拉几成",不是直接写 γ。** 实现时踩过这个坑:
+`γ=0.2、λ=0.35` 意味着每周期把名义序列拉掉 57%,和收敛正面打架,表现为转角来回摆。
+
+### 11.4 代价权重
+
+```python
+w_goal      = 6.0     # 到预测跟随点的距离
+w_terminal  = 18.0    # 终端额外权重
+w_obstacle  = 140.0   # 安全裕度被侵蚀 (软)
+w_collision = 4000.0  # 真撞上。要大到任何目标收益都换不来
+w_fov       = 30.0    # 人跑出相机视野 (铰链)
+w_heading   = 2.5     # 车头没对着人 (软,始终生效)
+w_steer     = 18.0    # 转角幅值
+w_dsteer    = 12.0    # 转角变化率
+w_dspeed    = 2.0     # 速度变化率
+w_speed     = 0.6     # 无谓的高速
+standoff_m  = 0.10    # 软代价希望额外留出的余量
+```
+
+症状对照:
+
+| 现象 | 调哪个 |
+|---|---|
+| 跟人时左右画龙 | 调大 `w_dsteer`;还不行调大 `temperature` |
+| **停稳后原地摆头、舵停在满位** | 调大 `w_steer`。只罚变化率是不够的 —— 到位之后任何恒定舵角代价都为零,随机游走会把舵打到限位,人一动车就横着窜出去 |
+| 蹭门框、贴墙太近 | 调大 `w_obstacle` 或 `standoff_m`。**不要**动 `w_collision` |
+| 拐弯时人被甩出画面 | 调大 `w_fov`,或调小 `fov_keep_rad` |
+| 跟得太肉、起步慢 | 调大 `w_goal` / `w_terminal`,或调小 `w_speed` |
+| 在障碍物前面早早就停 | 先看遥测的 `mppi.clearance_m`,再考虑加长 `horizon` |
+
+`standoff_m` 和 `safety_margin_m` 是两件事,**不要混**:后者已经算进车体圆半径里,
+前者只影响软代价。混为一谈会让安全余量被重复计入,车就再也过不了窄门。
+
+### 11.5 遥测
+
+`/follower/status` 新增:
+
+```json
+"controller": "mppi",
+"mppi": {"feasible": true, "reason": "ok", "cost": 812.4,
+         "clearance_m": 0.184, "solve_ms": 2.31, "obstacles": 412,
+         "over_budget": false, "failure_streak": 0, "fell_back": false}
+```
+
+- `solve_ms` **是上线前必须盯的数**。见 11.6
+- `reason` 为 `best_sample` 说明加权平均那条没验过,退到了最优单样本。
+  偶尔出现正常,持续出现说明 `temperature` 太大或 `sigma` 太小
+- `fell_back` 为 true 说明它已经整段退回纯追踪了,车还在跟,但 MPPI 已经不在环里
+
+### 11.6 上线前必须确认的两件事
+
+**一、确认真的跑在 CUDA 上。** 节点启动时会打印
+`>>> 参考量生成器: MPPI torch/cuda:0 K=2048 T=40 ...`。如果打出来是 `torch/cpu`
+或 `numpy/cpu`,**不要就这么跑跟随**:CPU 后端的求解耗时会把控制周期撑爆,
+而刹车包络 `control_latency_s` 是按周期算的 —— 车会以为自己刹得住。
+`--mppi-device cuda` 在 CUDA 不可用时会直接报错退出,不会悄悄降级,
+实车上请显式写这个参数。
+
+**二、把 `mppi_solve_budget_ms` 和实测耗时对上。** 默认 25ms(20Hz 周期的一半)。
+连续 `mppi_fallback_after` 次超时就整段回退到纯追踪并打 warn。
+这是唯一一个在实车上大概率会真触发的失效路径 —— 降频、K 调太大、torch 装错,
+都走这条。
+
+> 注意「不可行」几乎不会发生:停在原地永远是一条可行计划,而雷达自反射过滤
+> 保证了障碍点不会比车头再近 5cm。所以不要指望用 `feasible` 来监控健康度,
+> 要看 `solve_ms`。
+
+### 11.7 已知局限(写在前面,免得实车上误判成 bug)
+
+1. **它不做全局绕行。** 6 秒前瞻约 3.3m,只够一次局部机动。人站在一堵完整的墙
+   后面时,MPPI 的正确答案是**安全停住**,不是找路绕过去。要绕远路得上全局
+   规划器,用仓库里已有的 SLAM 栅格,那是另一件事。
+2. **栅格距离场是近似的。** 5cm 分辨率的最近邻查表误差最大是半个对角线 3.5cm,
+   而这台车过 80cm 门两边各只剩 3cm。所以分工是:距离场只负责给 K 条样本
+   **排序**,最终那条计划用精确矩形几何**复验**。别把 `clearance_m` 当成
+   距离场读数,它是精确值。
+3. **它不修感知。** 跟错人的话,MPPI 会把错的人跟得非常好。身份保持那一层
+   (第 10 节) 是独立的、也是更值钱的。
+4. **不负责倒车。** 采样下界钉死在 0。倒车脱困仍然由 `LocalRecovery` 在测到
+   停稳之后发起 —— 车尾是雷达物理盲区,那件事需要路径记忆,不是代价函数。
+
+

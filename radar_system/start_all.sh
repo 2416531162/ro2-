@@ -1,7 +1,15 @@
-#!/bin/bash
-set -e
-# Each component has its own process group, logs and restart policy.
-systemctl start rk3588-perception.target
-systemctl start rk3588-perception@{camera,rtk,lidar,ai,mapping,web,gui}.service
+#!/usr/bin/env bash
+set -euo pipefail
+PROFILE_NAME="${1:-follow}"
+case "$PROFILE_NAME" in
+  follow) COMPONENTS=(camera lidar ai web gui follower) ;;
+  headless) COMPONENTS=(camera lidar ai web follower) ;;
+  perception) COMPONENTS=(camera lidar ai web) ;;
+  *) echo 'Usage: start_all.sh [follow|headless|perception]' >&2; exit 2 ;;
+esac
+systemctl start rk3588-wheeltec.service rk3588-perception.target
+for component in "${COMPONENTS[@]}"; do
+  systemctl start "rk3588-perception@${component}.service"
+done
 systemctl --no-pager --plain list-units 'rk3588-perception@*.service'
-echo 'Web dashboard: http://192.168.2.173:8088/'
+echo 'Web: :8088; follower stays passive until explicitly selected.'
