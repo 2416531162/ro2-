@@ -65,6 +65,7 @@ class FollowerConfig:
     track_low_conf: float = 0.15        # 低分框:只能延续已确认的轨迹 (ByteTrack)
     confirm_frames: int = 3             # 相机命中 N 次才确认为人
     target_timeout_s: float = 0.30      # 目标超过这么久没有任何观测即视为丢失
+    lost_timeout_s: float = 1.5         # 目标丢失超时
     lost_grace_s: float = 0.40          # 短暂遮挡的宽限期,期间减速而非急停
     min_depth_ratio: float = 0.30       # 深度有效像素占比门限,低于此判无效
     max_camera_latency_s: float = 0.60  # 相机时间戳比现在早这么多以上视为不可信，真实模式丢弃

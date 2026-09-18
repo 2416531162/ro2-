@@ -140,6 +140,8 @@ class FollowerTelemetry:
             "speed_cap_mps": round(self.speed_cap, 3),
             "limit_reason": self.limit_reason,
             "target_locked": self.people.target_id is not None,
+            "signature_ready": bool(self.lock.signature_fresh(now)) if hasattr(self, 'lock') else False,
+            "appearance_rejects": getattr(self.lock, 'rejected_appearance', 0) if hasattr(self, 'lock') else 0,
             "target_id": self.people.target_id,
             "target_switches": self.people.switches,
             "target_reacquires": self.people.reacquires,

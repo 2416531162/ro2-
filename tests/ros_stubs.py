@@ -204,6 +204,12 @@ class Node:
         self.timers.append((period, cb))
         return types.SimpleNamespace(period=period)
 
+    def create_client(self, srv_type, name):
+        client = types.SimpleNamespace(name=name, calls=[])
+        client.service_is_ready = lambda: False
+        client.call_async = client.calls.append
+        return client
+
     def get_logger(self):
         return _Logger()
 
@@ -237,11 +243,25 @@ def install():
 
     sensor = types.ModuleType('sensor_msgs'); sensor_msg = types.ModuleType('sensor_msgs.msg')
     sensor_msg.PointCloud2, sensor_msg.PointField = PointCloud2, PointField
-    sensor_msg.Image, sensor_msg.LaserScan, sensor_msg.CameraInfo = Image, object, object
+    sensor_msg.Image = Image
+    sensor_msg.LaserScan = _simple('LaserScan')
+    sensor_msg.CameraInfo = _simple('CameraInfo')
     sensor.msg = sensor_msg
 
     std = types.ModuleType('std_msgs'); std_msg = types.ModuleType('std_msgs.msg')
-    std_msg.String = String; std.msg = std_msg
+    std_msg.String = String
+    for name in ('Float32', 'Float64', 'Bool', 'Int32'):
+        setattr(std_msg, name, _simple(name))
+    std.msg = std_msg
+
+    # 跟随节点要用 /wheeltec/arm (SetBool) 与 /wheeltec/stop (Trigger)
+    srv = types.ModuleType('std_srvs'); srv_msg = types.ModuleType('std_srvs.srv')
+    for name in ('SetBool', 'Trigger'):
+        service = _simple(name)
+        service.Request = _simple(name + '.Request')
+        service.Response = _simple(name + '.Response')
+        setattr(srv_msg, name, service)
+    srv.srv = srv_msg
 
     nav = types.ModuleType('nav_msgs'); nav_msg = types.ModuleType('nav_msgs.msg')
     nav_msg.OccupancyGrid = _simple('OccupancyGrid')
@@ -270,6 +290,7 @@ def install():
         'rclpy.time': time_mod, 'rclpy.duration': dur_mod,
         'sensor_msgs': sensor, 'sensor_msgs.msg': sensor_msg,
         'std_msgs': std, 'std_msgs.msg': std_msg, 'tf2_ros': tf2,
+        'std_srvs': srv, 'std_srvs.srv': srv_msg,
         'nav_msgs': nav, 'nav_msgs.msg': nav_msg,
         'geometry_msgs': geo, 'geometry_msgs.msg': geo_msg,
         'visualization_msgs': vis, 'visualization_msgs.msg': vis_msg,

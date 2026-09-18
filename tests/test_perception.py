@@ -322,7 +322,23 @@ class TestRobustDepth(unittest.TestCase):
         z, _ = _Depth.robust_depth(depth, 100, 100, 104, 104)
         self.assertIsNone(z)
 
+    def test_constants_match_detector(self):
+        """本测试里的常量必须与 ai_3d_detector.py 保持一致。"""
+        import re
+        with open(os.path.join(ROOT, "radar_system", "depth_measurement.py")) as fh:
+            src = fh.read()
+        # subTest:一次把所有漂移的常量都报出来。改造前这里在第一个不一致的
+        # 常量上就断言失败,后面的漂移被彻底遮住 —— 实际上当时有两个。
+        for name in ("DEPTH_MIN_MM", "DEPTH_MAX_MM", "DEPTH_INSET",
+                     "DEPTH_PERCENTILE", "DEPTH_MIN_VALID_RATIO",
+                     "DEPTH_MIN_PIXELS"):
+            with self.subTest(constant=name):
+                m = re.search(rf"^    {name} = ([0-9.]+)", src, re.M)
+                self.assertIsNotNone(m, f"{name} 未在检测器中找到")
+                self.assertAlmostEqual(float(m.group(1)), float(getattr(_Depth, name)),
+                                       places=6, msg=f"{name} 两边不一致")
 
 
 if __name__ == "__main__":
+
     unittest.main(verbosity=2)

@@ -72,10 +72,26 @@ def steer_from_yaw(speed_mps, yaw_radps, geometry):
     return math.copysign(clamp(steer, 0.0, geometry.max_steer_rad), sign)
 
 
+def pure_pursuit_steer(forward_m, left_m, geometry, min_lookahead_m=0.45, gain=1.0):
+    """纯追踪:由目标在车体系里的位置直接解出前轮转角。
+
+    曲率 kappa = 2*sin(alpha)/Ld = 2*left/Ld^2。
+    按底盘固件左前轮转角定义折算: TurnR = 1/kappa, tan(steer) = wheelbase / (TurnR - track/2)。
+    """
+    lookahead = math.hypot(forward_m, left_m)
+    if lookahead < min_lookahead_m:
+        lookahead = min_lookahead_m
+    if abs(left_m) < 1e-9 or lookahead < 1e-6:
+        return 0.0
+    curvature = gain * 2.0 * left_m / (lookahead * lookahead)
+    radius = 1.0 / abs(curvature)
+    denominator = radius - 0.5 * geometry.track_m
+    if denominator <= 1e-6:
+        return math.copysign(geometry.max_steer_rad, left_m)
+    steer = math.atan(geometry.wheelbase_m / denominator)
+    return math.copysign(clamp(steer, 0.0, geometry.max_steer_rad), left_m)
 def max_yaw_at_speed(speed_mps, geometry):
     """当前车速下物理上能达到的最大横摆角速度 (满舵)。"""
     if abs(speed_mps) < 1e-9:
         return 0.0
     return abs(speed_mps) / geometry.min_turn_radius_m
-
-

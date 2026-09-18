@@ -34,6 +34,9 @@ class FollowerEngine(FollowerPerception, FollowerController, FollowerTelemetry):
                                     reacquire_radius_m=config.lidar_reacquire_gate_m,
                                     prefer_distance_m=config.follow_distance_m)
         self.people.lidar_enabled = config.lidar_handoff
+        from motion_safety import TargetLock
+        self.lock = TargetLock(confirm_frames=config.confirm_frames,
+                               lost_timeout_s=config.lost_timeout_s)
         self.view = None               # 本周期目标视图(车体系)
         self.los_gap = None            # 相机视线上雷达测得的车头间距
         self.los_time = 0.0

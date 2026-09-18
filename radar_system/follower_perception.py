@@ -78,7 +78,7 @@ class FollowerPerception:
 
         now = self.now()
         front = self.cfg.footprint_front_m
-        scan_fresh = bool(self.scan_stamp and 0 <= now - self.scan_stamp < PROFILE['safety']['scan_timeout_s'])
+        scan_fresh = bool(self.scan_stamp is not None and 0 <= now - self.scan_stamp < PROFILE['safety']['scan_timeout_s'])
         detections = []
         stamp = None
         for item in items:
@@ -140,14 +140,22 @@ class FollowerPerception:
                 self.lidar_fallback_matches += 1
             detections.append({'x': px, 'y': py, 'conf': conf,
                                'label': item.get('label'), 'range_source': source,
-                               'depth_ratio': ratio, 'raw_z': z,
-                               'depth_sigma': depth_sigma})
+                               'depth_ratio': ratio, 'raw_z': z, 'raw_x': x,
+                               'depth_sigma': depth_sigma,
+                               'height_m': item.get('height_m'),
+                               'color': item.get('color')})
 
         t_meas = self._meas_time(stamp, now)
         if t_meas is None:
             return
         # 所有检测(含空帧)都交给跟踪器:空帧让轨迹按时老化
         self.people.add_camera(detections, t_meas, now, in_view=self._camera_sees)
+        cands = [{'x': d['raw_x'], 'z': d['raw_z'], 'conf': d['conf'],
+                  'height_m': d.get('height_m'), 'color': d.get('color')}
+                 for d in detections if d.get('raw_z') is not None]
+        if cands and hasattr(self, 'lock'):
+            self.lock.update(cands, now, self.cfg.follow_distance_m,
+                             ego=(self.chassis_speed, self.chassis_yaw_rate))
 
         # ---- 相机 / 雷达交叉校验(只看目标视线窄带) ----
         # 旧做法取目标方位 ±10° 扇形(分桶后可达 ±15°)里最近的任何东西,

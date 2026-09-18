@@ -225,7 +225,7 @@ class FollowerController:
             person_follow_cap = cap_follow
             self.latest_raw = None
 
-        scan_fresh = bool(self.scan_stamp and 0 <= now-self.scan_stamp < PROFILE['safety']['scan_timeout_s']
+        scan_fresh = bool(self.scan_stamp is not None and 0 <= now-self.scan_stamp < PROFILE['safety']['scan_timeout_s']
                           and self.scan_evidence is not None and self.scan_evidence.usable)
         low_battery = not math.isfinite(self.voltage) or self.voltage < cfg.battery_min_v
         healthy = (scan_fresh and feedback_fresh and (self.dry_run or self.driver_armed)
