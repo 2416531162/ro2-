@@ -17,10 +17,13 @@ class Request:
 class MotionAuthority:
     SOURCES = ('manual', 'follow', 'navigation')
 
-    def __init__(self, timeout_s=.35, settle_s=.30):
+    def __init__(self, timeout_s=.35, settle_s=.30, fault_grace_s=0.0):
         if not all(math.isfinite(v) and v > 0 for v in (timeout_s, settle_s)):
             raise ValueError('invalid authority timeout')
+        if not math.isfinite(fault_grace_s) or fault_grace_s < 0:
+            raise ValueError('invalid fault grace')
         self.timeout_s, self.settle_s = timeout_s, settle_s
+        self.fault_grace_s = fault_grace_s
         self.mode = 'IDLE'
         self.epoch = uuid.uuid4().hex
         self.reason = 'startup'
@@ -30,6 +33,7 @@ class MotionAuthority:
         self.request = Request()
         self.received = None
         self.last_stamp = {}
+        self.unhealthy_since = None
 
     def _transition(self, mode, reason):
         self.mode, self.reason = mode, reason
@@ -41,12 +45,23 @@ class MotionAuthority:
         self.wait_stationary = True
 
     def health(self, healthy, stationary, now):
-        self.healthy = bool(healthy)
         if not healthy:
-            if self.mode in ('MANUAL', 'FOLLOW', 'NAVIGATION'):
+            # Stop on the first unhealthy sample, but do not permanently latch a
+            # routine scheduler/USB hiccup. Clearing the request prevents an old
+            # speed from resuming when health returns; the selected source must
+            # submit a fresh command.
+            if self.unhealthy_since is None:
+                self.unhealthy_since = now
+                self.request = Request()
+                self.received = None
+            self.healthy = False
+            if (self.mode in ('MANUAL', 'FOLLOW', 'NAVIGATION')
+                    and now - self.unhealthy_since >= self.fault_grace_s):
                 self._transition('FAULT', 'sensor_or_driver_fault')
             self.stationary_since = None
             return
+        self.healthy = True
+        self.unhealthy_since = None
         if stationary:
             if self.stationary_since is None:
                 self.stationary_since = now
@@ -113,6 +128,10 @@ class MotionAuthority:
 
     def status(self, now):
         command = self.output(now)
+        unhealthy_for = None if self.unhealthy_since is None else max(0.0, now - self.unhealthy_since)
         return dict(mode=self.mode, epoch=self.epoch, reason=self.reason,
                     healthy=self.healthy, waiting_stationary=self.wait_stationary,
+                    fault_pending=bool(not self.healthy
+                                       and self.mode in ('MANUAL', 'FOLLOW', 'NAVIGATION')),
+                    unhealthy_for_s=(round(unhealthy_for, 3) if unhealthy_for is not None else None),
                     command=dict(vx=command.vx, wz=command.wz))

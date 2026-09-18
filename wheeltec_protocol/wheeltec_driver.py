@@ -404,8 +404,12 @@ class WheeltecDriver(Node):
         self.publish_tf = gp("publish_tf")
         # Commissioning-only compatibility is exclusive with the leased interface.
         self.legacy_commands = gp("legacy_commands")
-        self.authority = MotionAuthority(PROFILE['safety']['command_timeout_s'], PROFILE['safety']['stationary_s'])
+        self.authority = MotionAuthority(
+            PROFILE['safety']['command_timeout_s'],
+            PROFILE['safety']['stationary_s'],
+            self.config.feedback_grace_s)
         self.scan_health_at = None
+        self.motion_health_faults = ()
         self.lock = threading.RLock()
         self.policy = ControlPolicy(self.config, time.monotonic())
         if self.guard.cfg.enabled:
@@ -470,14 +474,31 @@ class WheeltecDriver(Node):
         p = self.policy
         telemetry = p.last_received or {}
         voltage = telemetry.get('voltage', float('nan'))
-        healthy = (p.connected and not p.holding and p.last_rx is not None
-                   and 0 <= now - p.last_rx <= self.config.feedback_timeout_s
-                   and self.scan_health_at is not None and 0 <= now - self.scan_health_at < PROFILE['safety']['scan_timeout_s']
-                   and math.isfinite(voltage) and voltage >= PROFILE['safety']['battery_min_v']
-                   and not self.config.receive_only and self.config.protocol_confirmed
-                   and self.config.protocol != 'unconfigured'
-                   and now - p.connect_at >= self.config.startup_stop_s)
-        self.authority.health(healthy, p.stationary_frames >= 5, now)
+        faults = []
+        if not p.connected:
+            faults.append('driver_disconnected')
+        if p.holding:
+            faults.append('driver_hold:' + (p.hold_reason or 'unknown'))
+        if p.last_rx is None:
+            faults.append('feedback_missing')
+        elif not 0 <= now - p.last_rx <= self.config.feedback_timeout_s:
+            faults.append('feedback_stale')
+        if self.scan_health_at is None:
+            faults.append('scan_unavailable')
+        elif not 0 <= now - self.scan_health_at < PROFILE['safety']['scan_timeout_s']:
+            faults.append('scan_stale')
+        if not math.isfinite(voltage):
+            faults.append('battery_invalid')
+        elif voltage < PROFILE['safety']['battery_min_v']:
+            faults.append('battery_low')
+        if self.config.receive_only:
+            faults.append('driver_receive_only')
+        if not self.config.protocol_confirmed or self.config.protocol == 'unconfigured':
+            faults.append('protocol_unconfirmed')
+        if now - p.connect_at < self.config.startup_stop_s:
+            faults.append('startup_stop')
+        self.motion_health_faults = tuple(faults)
+        self.authority.health(not faults, p.stationary_frames >= 5, now)
 
     def clear_motion_output(self):
         self.policy.latest = None
@@ -754,6 +775,7 @@ class WheeltecDriver(Node):
             motion = self.authority.status(now)
             motion['legacy_commands'] = self.legacy_commands
             motion['profile_hash'] = profile_hash(PROFILE)
+            motion['health_faults'] = list(self.motion_health_faults)
             data['motion'] = motion
         self.pub_status.publish(String(data=json.dumps(data, ensure_ascii=False)))
         self.pub_motion.publish(String(data=json.dumps(motion)))

@@ -108,6 +108,39 @@ def test_fault_requires_stationary_explicit_reset_and_new_task(fault):
     assert a.select('follow')
 
 
+def test_transient_health_drop_stops_without_latching_or_replaying_command():
+    a = MotionAuthority(fault_grace_s=1.0)
+    healthy(a)
+    assert a.select('follow')
+    healthy(a, 1.5)
+    assert submit(a)
+
+    a.health(False, False, 2.01)
+    assert a.mode == 'FOLLOW'
+    assert not a.healthy and a.status(2.02)['fault_pending']
+    assert a.output(2.02).vx == 0
+    assert not submit(a, t=2.03)
+
+    healthy(a, 2.10)
+    assert a.mode == 'FOLLOW'
+    assert a.output(2.42).vx == 0
+    assert submit(a, t=2.43)
+    assert a.output(2.43).vx == .3
+
+
+def test_persistent_health_drop_latches_after_grace():
+    a = MotionAuthority(fault_grace_s=1.0)
+    healthy(a)
+    assert a.select('follow')
+    healthy(a, 1.5)
+    assert submit(a)
+
+    a.health(False, False, 2.01)
+    a.health(False, False, 3.02)
+    assert a.mode == 'FAULT'
+    assert not a.status(3.02)['fault_pending']
+
+
 def test_releasing_old_follow_does_not_stop_manual():
     a = following()
     submit(a, 'manual', .2, t=2.1)
@@ -131,7 +164,7 @@ def driver():
                       max_speed_m_s=1., acceleration_m_s2=3.5)
     d.policy = ControlPolicy(d.config, 0.)
     d.policy.link(True, 0.)
-    d.authority = MotionAuthority()
+    d.authority = MotionAuthority(fault_grace_s=d.config.feedback_grace_s)
     d.lock = threading.RLock()
     d.guard = ScanGuard()
     d.scan_health_at = 4.
@@ -167,11 +200,29 @@ def test_driver_health_fault_clears_serial_output_and_does_not_auto_resume():
     d.apply_motion(4.8)
     d.policy.tick(4.8)
     assert d.policy.output == (0., 0.)
+    assert d.authority.mode == 'FOLLOW'
+    assert d.authority.status(4.8)['fault_pending']
+    d.apply_motion(5.81)
+    d.policy.tick(5.81)
     assert d.authority.mode == 'FAULT'
-    feedback(d, 5.)
-    d.apply_motion(5.)
+    feedback(d, 6.)
+    d.apply_motion(6.)
     assert d.authority.mode == 'FAULT'
     assert d.policy.latest is None
+
+
+def test_driver_transient_feedback_gap_recovers_but_needs_fresh_command():
+    d = driver()
+    activate(d)
+    d.apply_motion(4.8)
+    d.policy.tick(4.8)
+    assert d.authority.mode == 'FOLLOW'
+    assert d.policy.output == (0., 0.)
+
+    feedback(d, 4.9)
+    d.apply_motion(4.9)
+    assert d.authority.mode == 'FOLLOW'
+    assert d.authority.output(4.9).vx == 0.
 
 
 def test_driver_final_collision_filter_still_applies():
@@ -206,7 +257,7 @@ def test_legacy_entry_points_are_closed():
     assert d.policy.latest == old
 
 
-def test_stale_or_empty_scan_revokes_motion():
+def test_stale_or_empty_scan_stops_immediately_and_latches_after_grace():
     d = driver()
     activate(d)
     msg = NS(header=NS(stamp=NS(sec=1, nanosec=0)), angle_min=0.,
@@ -215,6 +266,10 @@ def test_stale_or_empty_scan_revokes_motion():
         d.on_scan(msg)
     assert d.scan_health_at is None
     d.apply_motion(4.4)
+    d.policy.tick(4.4)
+    assert d.policy.output == (0., 0.)
+    assert d.authority.mode == 'FOLLOW'
+    d.apply_motion(5.41)
     assert d.authority.mode == 'FAULT'
 
 
