@@ -78,7 +78,7 @@ def stage(source, destination):
 def units(base):
     # Fixed installation paths avoid systemd/shell quoting surprises.
     runner = str(base/'current/deployment/run_component.sh')
-    common = 'After=network.target\n\n[Service]\nType=simple\nEnvironment=ROS_DISTRO=jazzy\nEnvironmentFile=-/etc/rk3588/runtime.env\n'
+    common = 'After=network.target\n\n[Service]\nType=simple\nEnvironmentFile=-/etc/rk3588/runtime.env\n'
     common += 'User=root\nWorkingDirectory='+str(base/'current')+'\nLogsDirectory=rk3588\n'
     common += 'Environment=HOME=/root\nEnvironment=ROS_LOG_DIR=/var/log/rk3588\n'
     common += 'KillMode=control-group\nTimeoutStopSec=10\nRestart=on-failure\nRestartSec=2\n'

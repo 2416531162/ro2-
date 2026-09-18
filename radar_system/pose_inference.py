@@ -113,6 +113,8 @@ def draw_pose(bgr, keypoints, threshold=.5):
 
 
 class PoseRKNN:
+    backend_name = 'RKNN NPU'
+
     def __init__(self, model_path):
         if not os.path.isfile(model_path):
             raise FileNotFoundError(f'Pose RKNN missing: {model_path}; see docs/TRACKING.md')
@@ -142,3 +144,46 @@ class PoseRKNN:
 
     def close(self):
         self.runtime.release()
+
+
+class PoseONNX:
+    """Portable CPU backend used on Jetson when an RKNN runtime is unavailable.
+
+    The ONNX file keeps the Rockchip model-zoo four-output contract, so the
+    tested decoder and all downstream target messages remain unchanged.
+    """
+    backend_name = 'ONNX Runtime CPU'
+
+    def __init__(self, model_path):
+        if not os.path.isfile(model_path):
+            raise FileNotFoundError(f'Pose ONNX missing: {model_path}')
+        import onnxruntime as ort
+        options = ort.SessionOptions()
+        options.intra_op_num_threads = max(1, min(4, os.cpu_count() or 1))
+        options.inter_op_num_threads = 1
+        self.runtime = ort.InferenceSession(
+            model_path, sess_options=options, providers=['CPUExecutionProvider'])
+        inputs = self.runtime.get_inputs()
+        if len(inputs) != 1:
+            raise ValueError('Pose ONNX must have exactly one image input')
+        self.input_name = inputs[0].name
+        self.last_inference_ms = self.last_total_ms = 0.
+        self.infer(np.zeros((480, 640, 3), dtype=np.uint8))
+
+    def infer(self, bgr):
+        start = time.monotonic()
+        image, transform = letterbox(bgr)
+        tensor = np.ascontiguousarray(image.transpose(0, 3, 1, 2), dtype=np.float32) / 255.0
+        infer_start = time.monotonic()
+        raw = self.runtime.run(None, {self.input_name: tensor})
+        self.last_inference_ms = (time.monotonic() - infer_start) * 1000
+        heads = [out for out in raw if np.asarray(out).ndim == 4 and np.asarray(out).shape[1] == 65]
+        keypoints = [out for out in raw if np.asarray(out).shape in ((1, 17, 3, 8400), (1, 51, 8400))]
+        if len(heads) != 3 or len(keypoints) != 1:
+            raise ValueError('Pose ONNX output contract mismatch')
+        detections = postprocess(heads + keypoints, transform)
+        self.last_total_ms = (time.monotonic() - start) * 1000
+        return detections
+
+    def close(self):
+        self.runtime = None

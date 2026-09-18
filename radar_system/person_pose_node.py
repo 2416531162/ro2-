@@ -29,7 +29,7 @@ from std_msgs.msg import String
 DIR = os.path.dirname(os.path.abspath(__file__))
 MODELS_DIR = os.path.join(DIR, "models")
 
-from pose_inference import PoseRKNN, draw_pose, KEYPOINT_NAMES
+from pose_inference import PoseRKNN, PoseONNX, draw_pose, KEYPOINT_NAMES
 from depth_measurement import DepthMeasurement, decode_depth, decode_rgb
 
 
@@ -45,8 +45,9 @@ class PersonPoseNode(Node, DepthMeasurement):
         
         # 加载 AI 模型
         self.yolo_model = os.environ.get("RK3588_POSE_MODEL", os.path.join(MODELS_DIR, "yolov8n_pose_rk3588_fp16.rknn"))
-        self.yolo = PoseRKNN(self.yolo_model)
-        self.get_logger().info(">>> YOLOv8n-pose / RK3588 NPU / person + 17 keypoints ready")
+        self.yolo = PoseONNX(self.yolo_model) if self.yolo_model.lower().endswith('.onnx') else PoseRKNN(self.yolo_model)
+        self.backend_name = getattr(self.yolo, 'backend_name', 'RKNN NPU')
+        self.get_logger().info(f">>> YOLOv8n-pose / {self.backend_name} / person + 17 keypoints ready")
 
         self.latest_rgb = None
         self.latest_depth = None
@@ -227,7 +228,7 @@ class PersonPoseNode(Node, DepthMeasurement):
                     self._frame_intervals = self._frame_intervals[-30:]
                 self._previous_frame = now
                 fps = round(len(self._frame_intervals)/sum(self._frame_intervals), 1) if self._frame_intervals else 0.0
-                hud_text = f"YOLOv8n-pose / NPU | {fps} FPS | Targets: {len(detections)}"
+                hud_text = f"YOLOv8n-pose / {self.backend_name} | {fps} FPS | Targets: {len(detections)}"
                 cv2.putText(bgr, hud_text, (12, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 242, 254), 1, cv2.LINE_AA)
 
                 # 5. 发布带人体骨架与测距标注的图像
@@ -249,7 +250,7 @@ class PersonPoseNode(Node, DepthMeasurement):
                 json_msg.data = json.dumps(target_list)
                 self.pub_json.publish(json_msg)
                 status = String()
-                status.data = json.dumps(dict(model="YOLOv8n-pose", backend="RKNN NPU", classes=1,
+                status.data = json.dumps(dict(model="YOLOv8n-pose", backend=self.backend_name, classes=1,
                                               keypoint_names=KEYPOINT_NAMES,
                                               pipeline_ms=round(self.yolo.last_total_ms, 1),
                                               fps=fps, inference_ms=round(self.yolo.last_inference_ms, 1),

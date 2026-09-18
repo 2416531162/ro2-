@@ -1,13 +1,15 @@
 #!/bin/bash
 set -e
-source "/opt/ros/${ROS_DISTRO:-jazzy}/setup.bash"
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
+source ./ros_env.sh
 export ROS_AUTOMATIC_DISCOVERY_RANGE="${ROS_AUTOMATIC_DISCOVERY_RANGE:-LOCALHOST}"
 export N10P_PORT="${N10P_PORT:-/dev/serial/by-id/usb-WCH.CN_USB_Single_Serial_0001-if00}"
+PYTHON_BIN="${RK3588_PYTHON:-/usr/bin/python3}"
+if [ ! -x "$PYTHON_BIN" ]; then PYTHON_BIN=/usr/bin/python3; fi
 case "${1:-}" in
-  follower) exec /usr/bin/python3 -u person_follower.py --passive ;;
+  follower) exec "$PYTHON_BIN" -u person_follower.py --passive ;;
   camera) exec bash ./run_camera.sh ;;
-  lidar) exec /usr/bin/python3 -u real_lidar_node.py ;;
+  lidar) exec "$PYTHON_BIN" -u real_lidar_node.py ;;
   ai) exec bash ./run_ai.sh ;;
   web) exec bash ./run_web.sh ;;
   gui)
