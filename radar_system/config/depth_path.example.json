@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "profile_hash": "REPLACE_WITH_CURRENT_ROBOT_PROFILE_HASH",
+  "optical_frame": "camera_rgb_optical_frame",
+  "x_m": null,
+  "y_m": null,
+  "yaw_rad": null,
+  "pitch_rad": null,
+  "lidar_minus_camera_height_m": null,
+  "min_depth_m": 0.35,
+  "max_depth_m": 2.5
+}

@@ -1,24 +1,21 @@
 #!/usr/bin/env bash
 # =======================================================
-#  RK3588 「电子跟屁虫」—— 人体 3D 视觉 + 激光雷达跟随系统
+#  Jetson 「电子跟屁虫」—— 人体视觉 + 激光雷达跟随系统
 # =======================================================
-
+set -e
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$DIR/ros_env.sh"
 cd "$DIR" || exit 1
-
-# 加载 ROS 2 Jazzy 环境
-if [ -f /opt/ros/jazzy/setup.bash ]; then
-    source /opt/ros/jazzy/setup.bash
-fi
+export ROS_AUTOMATIC_DISCOVERY_RANGE="${ROS_AUTOMATIC_DISCOVERY_RANGE:-LOCALHOST}"
 
 echo -e "\033[1;36m=====================================================\033[0m"
-echo -e "\033[1;32m   🤖 RK3588 「电子跟屁虫」人体视觉+雷达智能跟随系统\033[0m"
+echo -e "\033[1;32m   Jetson 人体视觉+雷达跟随系统（默认 MPPI / CUDA）\033[0m"
 echo -e "\033[1;36m=====================================================\033[0m"
-echo -e "参数选项："
-echo -e "  \033[1;33m--dry-run\033[0m   仿真演练模式 (只看数据雷达与3D框，不动轮子，最安全)"
-echo -e "  \033[1;32m(无参数)\033[0m    真车跟随模式 (底盘使能解锁，舒适距离 0.4m，极速 0.15m/s)"
-echo -e "  \033[1;35m--target any\033[0m 追踪视野中任意识别目标 (如行李箱、背包等)"
-echo -e "  \033[1;31mCtrl + C\033[0m    随时安全急停退出"
+echo -e "参数选项 (完整列表: python3 person_follower.py --help)："
+echo -e "  \033[1;33m--dry-run\033[0m    仿真演练模式 (只算不发指令，不动轮子，最安全)"
+echo -e "  \033[1;32m(无参数)\033[0m     真车跟随模式 (默认保持 1.00m，极速 0.45m/s)"
+echo -e "  \033[1;32m--safe-mode\033[0m  首次实车保守参数 (保持 1.20m，极速 0.30m/s)"
+echo -e "  \033[1;31mCtrl + C\033[0m     随时安全急停退出"
 echo -e "\033[1;36m=====================================================\033[0m"
 
-exec python3 person_follower.py "$@"
+exec "$RK3588_PYTHON" -u person_follower.py "$@"

@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "geometry": {
+    "wheelbase_m": 0.52,
+    "track_m": 0.60,
+    "max_steer_rad": 0.35,
+    "front_m": 0.67,
+    "rear_m": 0.08,
+    "half_width_m": 0.335
+  },
+  "sensors": {
+    "lidar_x_m": 0.52,
+    "lidar_y_m": 0.0,
+    "lidar_yaw_rad": 0.0,
+    "camera_x_m": 0.54,
+    "camera_y_m": 0.0,
+    "camera_yaw_rad": 0.0,
+    "camera_pitch_rad": 0.2618,
+    "raw_lidar_yaw_deg": 0.0
+  },
+  "frames": {
+    "odom": "odom",
+    "base": "base_link",
+    "imu": "imu_link",
+    "lidar": "laser",
+    "camera": "camera_link"
+  },
+  "safety": {
+    "battery_min_v": 19.0,
+    "scan_timeout_s": 0.5,
+    "command_timeout_s": 0.35,
+    "stationary_s": 0.3,
+    "decel_mps2": 1.0,
+    "control_latency_s": 0.35,
+    "guard_latency_s": 0.2,
+    "min_scan_points": 10
+  },
+  "driver": {
+    "max_speed_m_s": 1.3,
+    "max_yaw_rate_rad_s": 1.0,
+    "acceleration_m_s2": 3.5,
+    "steering_rate_rad_s": 2.5,
+    "cmd_timeout_s": 0.5,
+    "feedback_timeout_s": 0.6,
+    "startup_stop_s": 3.0,
+    "tx_hz": 25.0
+  },
+  "localization": {
+    "topic": "/odom",
+    "timeout_s": 0.6,
+    "history_s": 3.0,
+    "max_extrapolation_s": 0.12,
+    "max_speed_m_s": 3.0,
+    "max_yaw_rate_rad_s": 3.0,
+    "driver_topic": "/odom"
+  },
+  "manual": {
+    "low_mps": 0.5,
+    "med_mps": 0.85,
+    "high_mps": 1.2,
+    "reverse_scale": 0.6
+  }
+}

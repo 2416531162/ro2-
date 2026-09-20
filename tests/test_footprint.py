@@ -21,12 +21,37 @@ from footprint import (  # noqa: E402
     corridor_clearance, arc_clearance, swept_path_clearance,
     widest_passable_steer, limit_steer_for_clearance, optical_to_vehicle,
     is_self_hit, drop_self_hits, in_blind_sector, _swept_radii,
+    lidar_target_gap,
 )
 from motion_safety import ChassisGeometry  # noqa: E402
 
 
 FP = VehicleFootprint(front_m=0.45, rear_m=0.25, half_width_m=0.30, margin_m=0.06)
 GEO = ChassisGeometry(wheelbase_m=0.25, track_m=0.17, max_steer_rad=0.35)
+
+
+class TestLidarTargetGap(unittest.TestCase):
+    """雷达兜底测距:横向偏移必须与相机路径同为「右为正」。"""
+
+    MOUNT = SensorMount(x_m=0.53, y_m=0.0, yaw_rad=0.0)
+
+    def test_person_on_left_gives_negative_lateral(self):
+        gap, lateral = lidar_target_gap(math.radians(20), 2.0, self.MOUNT, 0.67)
+        self.assertLess(lateral, 0.0, "人在左边,横向偏移应为负(右为正)")
+        self.assertAlmostEqual(lateral, -2.0 * math.sin(math.radians(20)), places=6)
+        self.assertAlmostEqual(gap, 0.53 + 2.0 * math.cos(math.radians(20)) - 0.67, places=6)
+
+    def test_control_bearing_points_back_to_the_person(self):
+        """跟随节点用 atan2(-x, z) 求视线角(左为正),必须还原成左侧。"""
+        gap, lateral = lidar_target_gap(math.radians(25), 1.5, self.MOUNT, 0.67)
+        self.assertGreater(math.atan2(-lateral, gap), 0.0)
+        gap, lateral = lidar_target_gap(math.radians(-25), 1.5, self.MOUNT, 0.67)
+        self.assertLess(math.atan2(-lateral, gap), 0.0)
+
+    def test_straight_ahead(self):
+        gap, lateral = lidar_target_gap(0.0, 1.0, self.MOUNT, 0.67)
+        self.assertAlmostEqual(gap, 0.86, places=6)
+        self.assertAlmostEqual(lateral, 0.0, places=9)
 
 
 class TestFootprintBasics(unittest.TestCase):
@@ -244,16 +269,15 @@ class TestWidestPassableSteer(unittest.TestCase):
 # 实车配置锁定 —— 防止有人改回错误的默认值
 # =============================================================================
 
-REAL = dict(width=0.67, front=0.67, rear=0.18, wheelbase=0.54, track=0.59,
-            lidar_x=0.53, lidar_y=0.0)
+REAL = dict(width=0.67, front=0.67, rear=0.08, wheelbase=0.52, track=0.60,
+            lidar_x=0.52, lidar_y=0.0)
 
 
 class TestRealVehicleConfig(unittest.TestCase):
-    """锁住 2026-09-16 实测的这台车的尺寸。
+    """锁住 2026-09-20 更新的纵向尺寸与保守的车身外沿。
 
-    改造前代码里写的是轴距 0.25 / 轮距 0.17,比实车小 2.2 倍和 3.5 倍,
-    导致最小转弯半径算成 0.77m(实际 1.77m),整套转向与扫掠计算全错。
-    这组测试就是防止再次跑偏。
+    雷达与前轴近似对齐。轮胎外沿尚未复测，因此仍保留旧的
+    0.335 m 防撞半宽，不按轮中心间距缩小。
     """
 
     def test_chassis_geometry_matches_measurements(self):
@@ -268,14 +292,14 @@ class TestRealVehicleConfig(unittest.TestCase):
         self.assertAlmostEqual(fp.rear_m, REAL['rear'], places=3)
 
     def test_min_turn_radius(self):
-        self.assertAlmostEqual(ChassisGeometry().min_turn_radius_m, 1.773, places=2)
+        self.assertAlmostEqual(ChassisGeometry().min_turn_radius_m, 1.724, places=2)
 
     def test_track_is_narrower_than_width(self):
         """轮距是轮中心距,必然小于含轮胎外沿的全宽。"""
         self.assertLess(ChassisGeometry().track_m, VehicleFootprint().width_m)
 
     def test_lidar_sits_near_the_front_axle(self):
-        """雷达在后轴前 0.53m,前轴在 0.54m —— 基本重合,与照片一致。"""
+        """雷达按与前轴同线估计；实车仍需复核相对位置。"""
         self.assertLess(abs(REAL['lidar_x'] - REAL['wheelbase']), 0.05)
 
     def test_doorway_reality_check(self):
@@ -357,10 +381,10 @@ class TestLimitSteerForClearance(unittest.TestCase):
 
 class TestDistanceSemantics(unittest.TestCase):
 
-    FRONT, CAMERA_X, LIDAR_X = 0.67, 0.54, 0.53
+    FRONT, CAMERA_X, LIDAR_X = 0.67, 0.54, 0.52
 
     def test_camera_and_lidar_offsets_are_close(self):
-        """相机 0.54 与雷达 0.53 只差 1cm,交叉证伪的零点差可忽略。"""
+        """相机旧位置 0.54 与新雷达位置 0.52 相差 2cm。"""
         self.assertLess(abs(self.CAMERA_X - self.LIDAR_X), 0.03)
 
     def test_camera_to_bumper(self):

@@ -1,4 +1,10 @@
 """Real Chromium UI test with EXPLICIT SYNTHETIC data, no ROS or chassis."""
+# Historical optional feature: keep tests, but do not fail collection after removal.
+from pathlib import Path as _FeaturePath
+import pytest as _feature_pytest
+if not (_FeaturePath(__file__).resolve().parents[1] / 'radar_system' / 'live_map_core.py').exists():
+    _feature_pytest.skip('retired feature: live_map_core.py is not shipped', allow_module_level=True)
+
 import base64
 import json
 import os

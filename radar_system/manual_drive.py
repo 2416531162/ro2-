@@ -19,6 +19,26 @@ class ManualDriveLatch:
         self._wz = 0.0
         self._last_command = 0.0
         self._zero_pending = False
+        self._last_seq = {}
+
+    def accept(self, client_id, seq, vx, wz):
+        """按 (页面会话, 序号) 过滤乱序到达的指令,返回是否应当执行。
+
+        - 没带序号的旧客户端一律放行,保持兼容。
+        - 刹车(零速)永远放行:宁可多停一下,下一次心跳会重新下发动作。
+        - 运动指令的序号不大于该会话已见过的最大序号时丢弃。
+        """
+        if client_id is None or seq is None:
+            return True
+        moving = abs(float(vx)) > 1e-4
+        with self._lock:
+            last = self._last_seq.get(client_id)
+            if last is not None and seq <= last:
+                return not moving
+            if len(self._last_seq) > 64 and client_id not in self._last_seq:
+                self._last_seq.clear()
+            self._last_seq[client_id] = seq
+            return True
 
     def set(self, vx, wz, now=None):
         vx, wz = float(vx), float(wz)

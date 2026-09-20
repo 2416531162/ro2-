@@ -1,7 +1,8 @@
 #!/bin/bash
 set -e
-source "/opt/ros/${ROS_DISTRO:-jazzy}/setup.bash"
-cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
+DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+source "$DIR/ros_env.sh"
+cd -- "$DIR"
 export ROS_AUTOMATIC_DISCOVERY_RANGE="${ROS_AUTOMATIC_DISCOVERY_RANGE:-LOCALHOST}"
 export DISPLAY="${DISPLAY:-:0}"
 export XAUTHORITY="${XAUTHORITY:-/run/user/1000/gdm/Xauthority}"
@@ -30,4 +31,4 @@ fi
     done
 ) &
 
-exec /usr/bin/python3 -u board_radar_gui.py "$@"
+exec "$RK3588_PYTHON" -u board_radar_gui.py "$@"

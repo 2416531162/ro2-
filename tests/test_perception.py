@@ -264,40 +264,7 @@ except ImportError:
     HAVE_NUMPY = False
 
 
-class _Depth:
-    """只取 ai_3d_detector 里的深度提取常量与算法,避免测试依赖 ROS/cv2。
-
-    这些常量与 Detector3D 类中的定义保持一致;如果改了那边,这里也要改,
-    test_constants_match_detector 会在两边失配时报警。
-    """
-    DEPTH_MIN_MM = 150.0
-    DEPTH_MAX_MM = 6000.0
-    DEPTH_INSET = 0.20
-    DEPTH_PERCENTILE = 20.0
-    DEPTH_MIN_VALID_RATIO = 0.30
-    DEPTH_MIN_PIXELS = 60
-
-    @classmethod
-    def robust_depth(cls, depth, x1, y1, x2, y2):
-        h, w = depth.shape[:2]
-        bw, bh = x2 - x1, y2 - y1
-        if bw <= 0 or bh <= 0:
-            return None, 0.0
-        ix1 = max(0, int(x1 + bw * cls.DEPTH_INSET))
-        ix2 = min(w, int(x2 - bw * cls.DEPTH_INSET))
-        iy1 = max(0, int(y1 + bh * cls.DEPTH_INSET))
-        iy2 = min(h, int(y2 - bh * cls.DEPTH_INSET))
-        if ix2 - ix1 < 2 or iy2 - iy1 < 2:
-            return None, 0.0
-        roi = depth[iy1:iy2, ix1:ix2]
-        if roi.size < cls.DEPTH_MIN_PIXELS:
-            return None, 0.0
-        mask = (roi > cls.DEPTH_MIN_MM) & (roi < cls.DEPTH_MAX_MM)
-        valid = roi[mask]
-        ratio = float(len(valid)) / float(roi.size)
-        if ratio < cls.DEPTH_MIN_VALID_RATIO or len(valid) < cls.DEPTH_MIN_PIXELS:
-            return None, ratio
-        return float(np.percentile(valid, cls.DEPTH_PERCENTILE)) / 1000.0, ratio
+from depth_measurement import DepthMeasurement as _Depth
 
 
 @unittest.skipUnless(HAVE_NUMPY, "需要 numpy")
@@ -358,16 +325,20 @@ class TestRobustDepth(unittest.TestCase):
     def test_constants_match_detector(self):
         """本测试里的常量必须与 ai_3d_detector.py 保持一致。"""
         import re
-        with open(os.path.join(ROOT, "radar_system", "ai_3d_detector.py")) as fh:
+        with open(os.path.join(ROOT, "radar_system", "depth_measurement.py")) as fh:
             src = fh.read()
+        # subTest:一次把所有漂移的常量都报出来。改造前这里在第一个不一致的
+        # 常量上就断言失败,后面的漂移被彻底遮住 —— 实际上当时有两个。
         for name in ("DEPTH_MIN_MM", "DEPTH_MAX_MM", "DEPTH_INSET",
                      "DEPTH_PERCENTILE", "DEPTH_MIN_VALID_RATIO",
                      "DEPTH_MIN_PIXELS"):
-            m = re.search(rf"^    {name} = ([0-9.]+)", src, re.M)
-            self.assertIsNotNone(m, f"{name} 未在检测器中找到")
-            self.assertAlmostEqual(float(m.group(1)), float(getattr(_Depth, name)),
-                                   places=6, msg=f"{name} 两边不一致")
+            with self.subTest(constant=name):
+                m = re.search(rf"^    {name} = ([0-9.]+)", src, re.M)
+                self.assertIsNotNone(m, f"{name} 未在检测器中找到")
+                self.assertAlmostEqual(float(m.group(1)), float(getattr(_Depth, name)),
+                                       places=6, msg=f"{name} 两边不一致")
 
 
 if __name__ == "__main__":
+
     unittest.main(verbosity=2)

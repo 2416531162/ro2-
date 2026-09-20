@@ -30,11 +30,13 @@ x 向前为正,y 向左为正。雷达装在别处,用 SensorMount 换算过来�
 
 import math
 from dataclasses import dataclass
+from runtime_config import PROFILE
 
 __all__ = ["VehicleFootprint", "SensorMount", "scan_to_vehicle_frame",
            "optical_to_vehicle", "is_self_hit", "drop_self_hits", "in_blind_sector",
            "swept_path_clearance", "corridor_clearance", "arc_clearance",
-           "widest_passable_steer", "limit_steer_for_clearance"]
+           "widest_passable_steer", "limit_steer_for_clearance",
+           "lidar_target_gap"]
 
 EPS = 1e-9
 
@@ -50,9 +52,9 @@ class VehicleFootprint:
     margin_m      侧向安全余量。建议至少 0.05m:雷达有角分辨率误差,
                   车也不会绝对笔直地走。
     """
-    front_m: float = 0.67          # 实测 2026-09-16
-    rear_m: float = 0.18
-    half_width_m: float = 0.335     # 全宽 0.67 的一半,按轮胎外沿
+    front_m: float = PROFILE["geometry"]["front_m"]
+    rear_m: float = PROFILE["geometry"]["rear_m"]
+    half_width_m: float = PROFILE["geometry"]["half_width_m"]    # 外沿待复测,当前沿用保守半宽
     margin_m: float = 0.06
 
     def __post_init__(self):
@@ -140,6 +142,21 @@ def scan_to_vehicle_frame(bearings_ranges, mount, max_range=8.0,
     return points
 
 
+def lidar_target_gap(bearing_rad, range_m, mount, front_m):
+    """雷达 (方位, 距离) -> (车头到目标的纵向间距, 横向偏移 **右为正**)。
+
+    雷达方位角是 ROS 约定(左为正),跟随节点里目标横向偏移沿用相机光学系(右为正)。
+    直接用 tan(bearing) * gap 会把符号弄反:人在左边,车往右打舵。
+    这里先按安装位置投影到车体系,再统一零点与符号。
+    """
+    pts = scan_to_vehicle_frame([(bearing_rad, range_m)], mount,
+                                   max_range=float("inf"))
+    if not pts:
+        return float("inf"), 0.0
+    px, py = pts[0]
+    return px - front_m, -py
+
+
 def is_self_hit(x, y, footprint, skin_m=0.05):
     """这个扫描点是不是雷达扫到了车自己。
 
@@ -153,7 +170,7 @@ def is_self_hit(x, y, footprint, skin_m=0.05):
     判据:点落在车体轮廓(外扩 skin_m)之内。skin_m 是给雷达测距噪声和
     安装位置测量误差留的余量。
 
-    >>> fp = VehicleFootprint(front_m=0.67, rear_m=0.18, half_width_m=0.335)
+    >>> fp = VehicleFootprint(front_m=0.67, rear_m=0.08, half_width_m=0.335)
     >>> is_self_hit(0.55, 0.20, fp)      # 车头里侧的支架
     True
     >>> is_self_hit(0.90, 0.0, fp)       # 车头前方 0.23m,真障碍物
@@ -203,8 +220,11 @@ def optical_to_vehicle(x_opt, y_opt, z_opt, mount, pitch_rad):
     x_v = z_opt * c - y_opt * s
     y_v = -x_opt
     z_v = -z_opt * s - y_opt * c
-    # 只做纵向/横向平移;相机高度不参与水平距离计算
-    return mount.x_m + x_v, mount.y_m + y_v, z_v
+    # 相机水平朝向(偏航)与车头不完全一致时按 yaw 旋转;
+    # 相机高度不参与水平距离计算
+    cy, sy = math.cos(mount.yaw_rad), math.sin(mount.yaw_rad)
+    return (mount.x_m + cy * x_v - sy * y_v,
+            mount.y_m + sy * x_v + cy * y_v, z_v)
 
 
 def corridor_clearance(points, footprint, max_range=8.0):

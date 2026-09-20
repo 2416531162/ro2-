@@ -32,6 +32,26 @@ class TestManualDriveLatch(unittest.TestCase):
         self.assertEqual(latch.sample(now=2.751), (0.0, 0.0, False, True))
         self.assertEqual(latch.sample(now=2.80), (0.0, 0.0, False, False))
 
+    def test_late_move_after_newer_command_is_dropped(self):
+        """网络乱序:seq=5 的前进晚于 seq=6 的刹车到达,不能再把车开起来。"""
+        latch = ManualDriveLatch(timeout_s=0.75)
+        self.assertTrue(latch.accept("page", 6, 0.0, 0.0))
+        self.assertFalse(latch.accept("page", 5, 0.85, 0.0))
+        self.assertFalse(latch.accept("page", 6, 0.85, 0.0))
+        self.assertTrue(latch.accept("page", 7, 0.85, 0.0))
+
+    def test_late_stop_is_still_applied(self):
+        """迟到的刹车宁可多停一下,也不丢弃。"""
+        latch = ManualDriveLatch(timeout_s=0.75)
+        self.assertTrue(latch.accept("page", 9, 0.85, 0.0))
+        self.assertTrue(latch.accept("page", 8, 0.0, 0.0))
+
+    def test_sessions_and_legacy_clients_are_independent(self):
+        latch = ManualDriveLatch(timeout_s=0.75)
+        self.assertTrue(latch.accept("phone", 100, 0.5, 0.0))
+        self.assertTrue(latch.accept("screen", 1, 0.5, 0.0))
+        self.assertTrue(latch.accept(None, None, 0.5, 0.0))
+
 
 if __name__ == "__main__":
     unittest.main()

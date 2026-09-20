@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="theme-color" content="#10151c">
-<title>RK3588 · 空间建模工作台</title>
+<title>RK3588 · 雷达与摄像头跟踪</title>
 <style>
 :root{color-scheme:dark;--bg:#10151c;--panel:#181f29;--canvas:#111923;--line:#303c4b;--muted:#a1afc0;--text:#ecf2f8;--mint:#69dec4;--amber:#f6c879;--red:#ff8c91;--radius:12px;font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-size:13px}button,input,select{font:inherit}button{cursor:pointer}button:disabled{opacity:.45;cursor:default}button,a,input,select{touch-action:manipulation}button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,canvas:focus-visible,summary:focus-visible{outline:2px solid var(--mint);outline-offset:3px}button{color:inherit}button:hover:not(:disabled){border-color:#65817f;background:#273740}button:active:not(:disabled){background:#31444b}a{color:var(--mint)}svg.icon{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.65;stroke-linecap:round;stroke-linejoin:round;flex-shrink:0}.svg-library{display:none}.mono,output,.value{font-family:"SFMono-Regular",Consolas,"Liberation Mono",monospace;font-variant-numeric:tabular-nums}.muted{color:var(--muted)}
@@ -21,6 +21,29 @@
 }
 @media(max-width:1100px){.workspace{padding:18px 16px 12px}.main-grid{grid-template-columns:minmax(0,1fr) 264px;gap:12px}.panel{padding:13px}.viewer-toolbar{padding:9px}.mode-btn{padding:7px 9px}.mode-btn svg{display:none}.app-header{padding:0 18px}.metric{padding:13px}.metric-symbol{display:none}.metric .value{font-size:23px}.metric-note{font-size:9px}.view-badge{display:none}}
 .follower-card-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;margin-bottom:8px}.follower-stat-cell{background:#111a23;border:1px solid #2b3846;border-radius:6px;padding:8px 5px;text-align:center}.follower-stat-cell span{display:block;font-size:10px;color:var(--muted);margin-bottom:4px}.follower-stat-cell strong{font-size:12px;font-weight:600}.follower-alert{padding:8px 10px;border-radius:6px;font-size:11px;font-weight:500;margin-top:8px;line-height:1.4}.follower-alert.danger{background:#402630;border:1px solid #9f525a;color:#ff8c91;animation:pulse 1s infinite}.follower-alert.warn{background:#362e21;border:1px solid #7b6341;color:#f6c879}.f-badge{padding:3px 8px;border-radius:4px;font-size:10px;font-weight:600;letter-spacing:.3px}.f-badge-running{background:#193830;color:#69dec4;border:1px solid #336a5c}.f-badge-tracking{background:#133a2f;color:#7cf6da;border:1px solid #3ca88d}.f-badge-aeb{background:#40232a;color:#ff8c91;border:1px solid #8e3e48;animation:pulse 1s infinite}.f-badge-lost{background:#383120;color:#f6c879;border:1px solid #78623b}.f-badge-idle{background:#18222d;color:#8fa0b3;border:1px solid #2d3e50}@keyframes pulse{0%{opacity:1}50%{opacity:.6}100%{opacity:1}}
+.f-now{background:#0f1820;border:1px solid #2b3846;border-left:3px solid #4b5d70;border-radius:6px;padding:8px 10px;margin:2px 0 8px}
+.f-now[data-tone=ok]{border-left-color:#69dec4}.f-now[data-tone=warn]{border-left-color:#f6c879}.f-now[data-tone=bad]{border-left-color:#ff8c91}
+.f-now-label{font-size:9px;color:var(--muted);letter-spacing:.5px;margin-bottom:3px}
+.f-now-text{font-size:13px;font-weight:600;color:#e3ebf3;line-height:1.45}
+.f-now-sub{font-size:10px;color:#9fb0c2;line-height:1.5;margin-top:3px}
+.motion-lock{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 12px;margin-bottom:12px;border-left:3px solid #ff8c91;background:#38242c;color:#ffb4b7}
+.motion-lock strong{display:block;font-size:13px}.motion-lock p{margin:4px 0 0;font-size:11px;line-height:1.5;color:#f4c9cb}
+.motion-lock .button{flex-shrink:0;border-color:#b86770;background:#46282e;color:#ffe2e2;font-weight:600;white-space:normal;text-align:center}
+@media(max-width:520px){.motion-lock{flex-direction:column;align-items:stretch}.motion-lock .button{width:100%}}
+.f-chips{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:8px}
+.f-chip{font-size:10px;padding:2px 7px;border-radius:10px;border:1px solid #2d3e50;background:#16202a;color:#8fa0b3;white-space:nowrap}
+.f-chip[data-tone=ok]{background:#133a2f;border-color:#3ca88d;color:#7cf6da}
+.f-chip[data-tone=warn]{background:#383120;border-color:#78623b;color:#f6c879}
+.f-chip[data-tone=bad]{background:#40232a;border-color:#8e3e48;color:#ff8c91}
+.f-more{border-top:1px solid #243140;padding-top:4px}
+.f-more summary{cursor:pointer;font-size:11px;color:#c0ccda;padding:6px 0;min-height:28px;list-style-position:inside}
+.f-kv{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px 10px;margin:2px 0 8px}
+.f-kv div{display:flex;justify-content:space-between;align-items:baseline;gap:6px;font-size:10px;border-bottom:1px dashed #223040;padding:3px 0;min-width:0}
+.f-kv span{color:var(--muted);white-space:nowrap}
+.f-kv b{font-weight:500;color:#dbe5ee;text-align:right;overflow-wrap:anywhere;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.f-kv b[data-tone=ok]{color:#7cf6da}.f-kv b[data-tone=warn]{color:#f6c879}.f-kv b[data-tone=bad]{color:#ff8c91}
+.f-kv .f-kv-head{grid-column:1/-1;border:0;color:#7f93a8;font-size:9px;letter-spacing:.5px;padding:6px 0 0}
+@media(max-width:380px){.f-kv{grid-template-columns:minmax(0,1fr)}}
 .dpad-container{display:flex;flex-direction:column;align-items:center;gap:9px;touch-action:none}.dpad-speed-bar{display:flex;gap:5px;width:100%;max-width:280px}.speed-btn,.steer-btn{flex:1;padding:5px 6px;font-size:11px;border-radius:6px;border:1px solid #303c4b;background:#18222d;color:var(--muted);touch-action:manipulation}.speed-btn.active,.steer-btn.active{background:#233d39;border-color:#69dec4;color:#69dec4;font-weight:600}.dpad-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;width:100%;max-width:280px;margin:0 auto;touch-action:none}.dpad-btn{min-height:50px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;padding:6px 2px;border-radius:8px;border:1px solid #364858;background:#1a2734;color:var(--text);font-size:12px;font-weight:600;touch-action:none!important;user-select:none!important;-webkit-user-select:none!important;-webkit-touch-callout:none!important;transition:transform .08s,background .1s,border-color .1s}.dpad-btn:active,.dpad-btn.pressed{transform:scale(.94);box-shadow:inset 0 2px 6px #0008}.dpad-btn.diagonal{background:#152731;border-color:#2a5057;color:#8be3d4}.dpad-btn.diagonal:active,.dpad-btn.diagonal.pressed{background:#1e464c;border-color:#69dec4;color:#fff}.dpad-btn.fwd{background:#193430;border-color:#2f685c;color:#7bf3d9}.dpad-btn.fwd:active,.dpad-btn.fwd.pressed{background:#255c51;border-color:#69dec4;color:#fff}.dpad-btn.stop{background:#421d23;border-color:#8a323f;color:#ff98a0}.dpad-btn.stop:active,.dpad-btn.stop.pressed{background:#672530;border-color:#ff8c91;color:#fff}.dpad-btn.rev{background:#262130;border-color:#4d3d5f;color:#cfb5ee}.dpad-btn.rev:active,.dpad-btn.rev.pressed{background:#3f3253;border-color:#b58bf8;color:#fff}.dpad-hint{font-size:10px;color:var(--muted);text-align:center;line-height:1.4;margin-top:2px}
 @media(max-width:820px){.app-header{height:68px}.device-tag{display:none}.workspace-heading h2{font-size:20px}.main-grid{grid-template-columns:minmax(0,1fr)}.canvas-stage{height:520px;min-height:420px}.sidebar{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));align-items:start;gap:12px}.follower-panel{grid-column:1/-1}.manual-panel{grid-column:1/-1}.layers-panel{grid-column:2;grid-row:auto}.pose-panel{grid-column:1}.metrics{gap:8px}.metric .value{font-size:21px}.metric-label{font-size:11px}.metric-label svg{display:none}.bottom-bar{flex-wrap:wrap}.brand h1{font-size:15px}.heading-actions{flex-wrap:wrap}.heading-actions .button{padding:8px 10px}.header-right{gap:10px}.render-info{gap:8px}}
 @media(max-width:520px){.workspace{padding:12px 10px 10px}.app-header{padding:0 12px;gap:8px}.brand{gap:8px}.brand-mark{width:32px;height:32px}.brand h1{font-size:13px}.brand p{font-size:9px;letter-spacing:0}.connection{font-size:10px;gap:6px}.workspace-heading{flex-direction:column;align-items:stretch;gap:10px;margin-bottom:12px}.eyebrow{font-size:9px}.workspace-heading h2{font-size:18px}.heading-actions{display:grid;grid-template-columns:repeat(2,1fr);gap:6px;width:100%}.heading-actions .button{padding:8px 4px;min-height:38px;font-size:11px;justify-content:center}.heading-actions .icon{display:none}#followerToggleBtn{grid-column:1/-1;font-size:13px;min-height:42px;font-weight:700}.metrics{grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin-bottom:12px}.metric{padding:10px;gap:5px}.metric-note{font-size:9px}.metric .value{font-size:21px}.viewer-toolbar{flex-wrap:wrap;gap:6px;padding:8px}.mode-selector{flex:1}.mode-btn{padding:7px 5px;flex:1;min-height:32px;font-size:11px}.viewer-tools{gap:4px}.viewer-tools .icon-button{width:32px;height:36px}.canvas-stage{height:420px;min-height:360px}.stage-meta{left:10px;top:12px}.stage-description{font-size:9px;max-width:180px}.stage-bottom{left:10px;bottom:14px}.viewer-footer{align-items:flex-start;flex-direction:column;gap:5px;font-size:9px;padding:8px 10px}.sidebar{grid-template-columns:minmax(0,1fr);gap:10px}.layers-panel,.pose-panel{grid-column:auto;grid-row:auto}.pose-grid{gap:6px}.pose-cell{padding:10px}.directional-grid{max-width:270px;margin:auto}.dir-badge{min-height:50px}.layer-row{min-height:38px}.panel{padding:13px}.bottom-bar{font-size:9px}.bottom-bar span:last-child{display:none}.zoom-tools .icon-button{width:32px;height:32px}.workspace.focus .canvas-stage{height:calc(100dvh - 270px)}.dpad-grid{max-width:100%;gap:8px}.dpad-btn{min-height:54px;font-size:13px}}
@@ -49,28 +72,28 @@
 </defs></svg>
 <header class="app-header">
  <div class="brand"><div class="brand-mark"><svg class="icon" aria-hidden="true"><use href="#i-cube"/></svg></div><div><h1>RK3588 <span class="muted">/</span> 空间感知</h1><p>ATK-DLRK3588 · ROS 2 JAZZY</p></div></div>
- <div class="header-right"><div class="follower-badge" id="followerBadge" style="padding:4px 10px;border-radius:6px;background:#182531;border:1px solid #334658;font-size:11px;display:none;align-items:center;gap:6px;"><span style="color:#69dec4;">🐕 跟屁虫:</span><strong id="followerStateVal" style="color:#f6c879;">待命</strong></div><span class="device-tag">SPATIAL MAPPING CONSOLE</span><div class="connection" id="connection" data-status="waiting" role="status"><span class="status-dot"></span><span id="connectionText">正在连接</span></div></div>
+ <div class="header-right"><div class="follower-badge" id="followerBadge" style="padding:4px 10px;border-radius:6px;background:#182531;border:1px solid #334658;font-size:11px;display:none;align-items:center;gap:6px;"><span style="color:#69dec4;">🐕 跟屁虫:</span><strong id="followerStateVal" style="color:#f6c879;">待命</strong></div><span class="device-tag">PERSON TRACKING CONSOLE</span><div class="connection" id="connection" data-status="waiting" role="status"><span class="status-dot"></span><span id="connectionText">正在连接</span></div></div>
 </header>
 <main class="workspace" id="workspace">
-  <div class="workspace-heading"><div><p class="eyebrow">LIVE LIDAR</p><h2>真实雷达点云</h2></div><div class="heading-actions"><a href="#" id="foxgloveBtn" target="_blank" class="button" style="border-color:#e05260;background:#2d171d;color:#ff8599;text-decoration:none;font-weight:700;"><span style="font-size:14px;">🦊</span><span>3D 现代工作台</span></a><button class="button" id="followerToggleBtn" style="border-color:#356e63;background:#183630;color:#69dec4;font-weight:700;"><span id="followerToggleIcon">🐕</span><span id="followerToggleText">启动跟屁虫</span></button><a href="#" id="screenMirrorBtn" target="_blank" class="button" style="border-color:#486581;background:#1b2d3d;color:#9ec8f7;text-decoration:none;"><svg class="icon" aria-hidden="true"><use href="#i-expand"/></svg><span>🖥️ 小车屏幕画面</span></a><button class="button" id="corsBtn" style="border-color:#3b635e;background:#1c3534;color:#69dec4;"><svg class="icon" aria-hidden="true"><use href="#i-signal"/></svg><span>CORS 差分账号</span></button><button class="button" id="pauseBtn" aria-pressed="false"><svg class="icon" aria-hidden="true"><use href="#i-pause" id="pauseIcon"/></svg><span id="pauseText">暂停画面</span></button><button class="button primary" id="exportBtn" disabled><svg class="icon" aria-hidden="true"><use href="#i-download"/></svg>导出数据</button></div></div>
- <section class="metrics" aria-label="实时建模指标">
+  <div class="workspace-heading"><div><p class="eyebrow">LIVE LIDAR</p><h2>真实雷达点云</h2></div><div class="heading-actions"><button class="button" id="followerToggleBtn" style="border-color:#356e63;background:#183630;color:#69dec4;font-weight:700;"><span id="followerToggleIcon">🐕</span><span id="followerToggleText">启动跟屁虫</span></button><a href="#" id="screenMirrorBtn" target="_blank" class="button" style="border-color:#486581;background:#1b2d3d;color:#9ec8f7;text-decoration:none;"><svg class="icon" aria-hidden="true"><use href="#i-expand"/></svg><span>🖥️ 小车屏幕画面</span></a><button class="button" id="pauseBtn" aria-pressed="false"><svg class="icon" aria-hidden="true"><use href="#i-pause" id="pauseIcon"/></svg><span id="pauseText">暂停画面</span></button><button class="button primary" id="exportBtn" disabled><svg class="icon" aria-hidden="true"><use href="#i-download"/></svg>导出数据</button></div></div>
+ <section class="metrics" aria-label="实时感知指标">
   <div class="metric"><span class="metric-label"><svg class="icon" aria-hidden="true"><use href="#i-signal"/></svg>扫描频率</span><div class="value"><span id="hzBadge">--</span><span class="unit">Hz</span></div><span class="metric-symbol"><svg class="icon" aria-hidden="true"><use href="#i-signal"/></svg></span><span class="metric-note">激光扫描 · /scan</span></div>
   <div class="metric"><span class="metric-label"><svg class="icon" aria-hidden="true"><use href="#i-points"/></svg>有效扫描点</span><div class="value"><span id="pointsVal">--</span><span class="unit">pts</span></div><span class="metric-symbol"><svg class="icon" aria-hidden="true"><use href="#i-points"/></svg></span><span class="metric-note" id="pointsNote">等待扫描数据</span></div>
-   <div class="metric"><span class="metric-label"><svg class="icon" aria-hidden="true"><use href="#i-target"/></svg>最近障碍</span><div class="value"><span id="mappedAreaVal">--</span><span class="unit">m</span></div><span class="metric-symbol"><svg class="icon" aria-hidden="true"><use href="#i-target"/></svg></span><span class="metric-note" id="progressVal">来自真实 /scan</span></div>
-  <div class="metric"><span class="metric-label"><svg class="icon" aria-hidden="true"><use href="#i-grid"/></svg>量程</span><div class="value"><span id="resolutionVal">16</span><span class="unit">m</span></div><span class="metric-symbol"><svg class="icon" aria-hidden="true"><use href="#i-grid"/></svg></span><span class="metric-note" id="mapSizeVal">CH343 · 460800</span></div>
+   <div class="metric"><span class="metric-label"><svg class="icon" aria-hidden="true"><use href="#i-target"/></svg>最近障碍</span><div class="value"><span id="nearestObstacleVal">--</span><span class="unit">m</span></div><span class="metric-symbol"><svg class="icon" aria-hidden="true"><use href="#i-target"/></svg></span><span class="metric-note" id="progressVal">来自真实 /scan</span></div>
+  <div class="metric"><span class="metric-label"><svg class="icon" aria-hidden="true"><use href="#i-grid"/></svg>量程</span><div class="value"><span id="resolutionVal">16</span><span class="unit">m</span></div><span class="metric-symbol"><svg class="icon" aria-hidden="true"><use href="#i-grid"/></svg></span><span class="metric-note" id="lidarPortVal">CH343 · 460800</span></div>
  </section>
  <div class="main-grid">
-  <section class="viewer" id="viewer" aria-label="空间建模视图">
+  <section class="viewer" id="viewer" aria-label="雷达扫描视图">
    <div class="viewer-toolbar"><div class="mode-selector" role="group" aria-label="显示模式">
     <button class="mode-btn active" id="btnModePolar" data-mode="polar" aria-pressed="true"><svg class="icon" aria-hidden="true"><use href="#i-radar"/></svg>真实点云</button>
    </div><div class="viewer-tools"><button class="icon-button" id="snapshotBtn" title="保存视图 PNG" aria-label="保存视图 PNG" disabled><svg class="icon" aria-hidden="true"><use href="#i-image"/></svg></button><button class="icon-button" id="focusBtn" title="专注视图" aria-label="专注视图" aria-pressed="false"><svg class="icon" aria-hidden="true"><use href="#i-panel"/></svg></button><button class="icon-button" id="fullscreenBtn" title="全屏视图" aria-label="全屏视图"><svg class="icon" aria-hidden="true"><use href="#i-expand"/></svg></button></div></div>
-   <div class="canvas-stage" id="canvasStage"><canvas id="mainCanvas" tabindex="0" aria-label="实时地图，可用方向键调整视角，加减键缩放，0 键复位">实时栅格地图与激光点云；对应数值可在侧栏查看。</canvas>
-    <div class="stage-meta"><div class="stage-title"><span class="live-label" id="liveLabel">WAIT</span><span id="viewModeTitle">空间立体示意</span></div><p class="stage-description" id="viewDescription">2D 栅格挤出 · 高度为显示参数，非实测</p></div><div class="battery-hud" id="batteryHud" title="6S 动力电池实时电量"><div class="battery-icon-wrap"><div class="battery-shell"><div class="battery-fill" id="batteryFill" style="width:0%;"></div></div><div class="battery-terminal"></div></div><div class="battery-info"><span class="battery-pct mono" id="batteryPctVal">--%</span><span class="battery-volt mono" id="batteryVoltVal">-- V</span></div></div><div class="view-badge mono" id="viewBadge">MAP FRAME / ISOMETRIC</div>
+   <div class="canvas-stage" id="canvasStage"><canvas id="mainCanvas" tabindex="0" aria-label="实时雷达扫描，加减键缩放，0 键复位">实时激光扫描；对应数值可在侧栏查看。</canvas>
+    <div class="stage-meta"><div class="stage-title"><span class="live-label" id="liveLabel">WAIT</span><span id="viewModeTitle">机体坐标雷达扫描</span></div><p class="stage-description" id="viewDescription">前方朝上 · 左侧朝左 · 距离以环线标尺为准</p></div><div class="battery-hud" id="batteryHud" title="6S 动力电池实时电量"><div class="battery-icon-wrap"><div class="battery-shell"><div class="battery-fill" id="batteryFill" style="width:0%;"></div></div><div class="battery-terminal"></div></div><div class="battery-info"><span class="battery-pct mono" id="batteryPctVal">--%</span><span class="battery-volt mono" id="batteryVoltVal">-- V</span></div></div><div class="view-badge mono" id="viewBadge">LASER FRAME / POLAR</div>
     <div class="stage-bottom"><div class="scale-line" id="scaleLine"></div><span class="scale-label mono" id="scaleLabel">1 m · 地面参考</span></div>
     <div class="zoom-tools"><button class="icon-button" id="zoomOutBtn" aria-label="缩小" title="缩小 (-)"><svg class="icon" aria-hidden="true"><use href="#i-minus"/></svg></button><output class="zoom-value" id="zoomVal" aria-label="缩放比例">100%</output><button class="icon-button" id="zoomInBtn" aria-label="放大" title="放大 (+)"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg></button><button class="icon-button" id="fitBtn" aria-label="视角复位" title="视角复位 (0)"><svg class="icon" aria-hidden="true"><use href="#i-target"/></svg></button></div>
     <div class="empty-state" id="emptyState"><svg class="icon" aria-hidden="true"><use href="#i-radar"/></svg><strong id="emptyTitle">正在接入空间数据</strong><span id="emptyHint">等待 /api/stream 首帧</span></div>
    </div>
-   <div class="viewer-footer"><span class="interaction-hint"><svg class="icon" aria-hidden="true"><use href="#i-mouse"/></svg><span id="interactionHint">拖动旋转 · Shift 拖动平移 · 滚轮缩放</span></span><div class="render-info mono"><span id="frameVal">-- FPS</span><span id="updateVal">等待数据</span></div></div>
+   <div class="viewer-footer"><span class="interaction-hint"><svg class="icon" aria-hidden="true"><use href="#i-mouse"/></svg><span id="interactionHint">滚轮或加减键缩放 · 0 复位</span></span><div class="render-info mono"><span id="frameVal">-- FPS</span><span id="updateVal">等待数据</span></div></div>
   </section>
   <aside class="sidebar" aria-label="测距与显示设置">
    <!-- 🐕 电子跟屁虫 · 实时状态看板 -->
@@ -78,6 +101,10 @@
     <div class="panel-heading" style="margin-bottom:10px;">
      <h3 style="display:flex;align-items:center;gap:6px;"><span style="font-size:15px;">🐕</span> 电子跟屁虫 · 实时反馈</h3>
      <span id="fStateBadge" class="f-badge f-badge-idle">未启动</span>
+    </div>
+    <div class="motion-lock" id="motionLock" role="status" aria-live="polite" hidden>
+     <div><strong id="motionLockTitle">停车已锁存 · 跟随不可启动</strong><p id="motionLockDetail">请现场检查车辆状态。</p></div>
+     <button class="button" id="motionResetBtn" type="button" disabled>确认复位停车锁存</button>
     </div>
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;font-size:11px;color:var(--muted);background:#111a23;padding:6px 9px;border-radius:6px;border:1px solid #283644;">
      <span>保持间距: <strong style="color:var(--mint);">1.00 米</strong> (车头到人)</span>
@@ -103,14 +130,35 @@
       <strong class="mono" id="fFrontLidarVal">--</strong>
      </div>
      <div class="follower-stat-cell">
-      <span>底盘车速 Vx</span>
+      <span>底盘实测车速</span>
       <strong class="mono" id="fSpeedVal">0.00 m/s</strong>
      </div>
      <div class="follower-stat-cell">
-      <span>转向角速 Wz</span>
-      <strong class="mono" id="fSteerVal">0.00 rad/s</strong>
+      <span>前轮转角</span>
+      <strong class="mono" id="fSteerVal">0.0°</strong>
      </div>
     </div>
+    <div class="f-target-direction" id="fTargetDirectionBox" style="background:#0e1721;border:1px solid #233748;border-radius:6px;padding:8px 10px;margin:2px 0 8px;display:flex;justify-content:space-between;align-items:center;">
+      <div style="display:flex;align-items:center;gap:8px;">
+        <span id="fTargetCompassIcon" style="font-size:18px;display:inline-block;transition:transform .2s;">🧭</span>
+        <div>
+          <div style="font-size:9px;color:var(--muted);letter-spacing:.5px;">人体相对车体方位</div>
+          <div id="fTargetDirectionText" style="font-size:13px;font-weight:700;color:#69dec4;">等待目标锁定</div>
+        </div>
+      </div>
+      <div id="fTargetSensorBadge" style="font-size:10px;padding:3px 7px;border-radius:4px;background:#182833;border:1px solid #2d4557;color:#9eb0c3;font-weight:600;">无目标</div>
+    </div>
+    <div class="f-now" id="fNow" data-tone="off" aria-live="polite">
+     <div class="f-now-label">正在执行</div>
+     <div class="f-now-text" id="fNowText">跟随程序未启动</div>
+     <div class="f-now-sub" id="fNowSub">点「一键启动」后这里会实时说明小车在做什么、为什么</div>
+    </div>
+    <div class="f-chips" id="fChips"></div>
+    <details class="f-more" id="fMore">
+     <summary>运行详情</summary>
+     <div class="f-kv" id="fKv"></div>
+     <button id="fCopyDiag" class="button" type="button" style="min-height:28px;padding:3px 10px;font-size:11px;width:100%;justify-content:center;">复制诊断信息（发给开发者排查）</button>
+    </details>
     <div id="fAebAlert" class="follower-alert danger" role="alert" style="display:none;">
      🛑 <strong>雷达 AEB 防撞触发：</strong>车宽走廊净空受限，底盘紧急硬刹停！
     </div>
@@ -175,141 +223,44 @@
       </button>
      </div>
       <div class="dpad-hint">
-       💡 提示：支持长按（手指按住持续行驶，松手立即刹停）；单点刹车键急停。按键介入将自动停用自动跟屁虫。
+       手动方向键优先接管跟随，绕过软件雷达防撞。请在现场目视行驶方向，随时准备使用物理急停；短按点动，长按持续行驶。
       </div>
     </div>
    </section>
 
    <section class="panel"><div class="panel-heading"><h3>四向测距</h3><span>机体坐标 · m</span></div>
-    <div class="directional-grid"><div class="dir-badge front unknown" id="frontBadge"><span class="dir-name">前 · 0°</span><span class="dir-val mono" id="frontVal">--</span></div><div class="dir-badge left unknown" id="leftBadge"><span class="dir-name">左 · 90°</span><span class="dir-val mono" id="leftVal">--</span></div><div class="dir-center"><svg class="icon" aria-hidden="true"><use href="#i-compass"/></svg></div><div class="dir-badge right unknown" id="rightBadge"><span class="dir-name">右 · 270°</span><span class="dir-val mono" id="rightVal">--</span></div><div class="dir-badge back unknown" id="backBadge"><span class="dir-name">后 · 180°</span><span class="dir-val mono" id="backVal">--</span></div></div>
+    <div class="directional-grid"><div class="dir-badge front unknown" id="frontBadge"><span class="dir-name">前 · ±15°</span><span class="dir-val mono" id="frontVal">--</span></div><div class="dir-badge left unknown" id="leftBadge"><span class="dir-name">左 · 90°</span><span class="dir-val mono" id="leftVal">--</span></div><div class="dir-center"><svg class="icon" aria-hidden="true"><use href="#i-compass"/></svg></div><div class="dir-badge right unknown" id="rightBadge"><span class="dir-name">右 · 270°</span><span class="dir-val mono" id="rightVal">--</span></div><div class="dir-badge back unknown" id="backBadge"><span class="dir-name">后 · 180°</span><span class="dir-val mono" id="backVal">--</span></div></div>
     <div class="distance-summary"><span>最近障碍物</span><strong class="mono" id="minDistVal">-- m</strong></div><div id="dangerBanner" class="danger-banner" role="status" hidden>近距提示：障碍物距离小于 0.6 m</div>
    </section>
-   <section class="panel rtk-panel" id="rtkPanel">
-    <div class="panel-heading"><h3>🛰️ C-RTK 2HP 双天线状态</h3><span id="rtkFixBadge" style="color:var(--mint);font-weight:600;">正在搜星...</span></div>
-    <div class="pose-grid">
-     <div class="pose-cell"><span>左天线 (主 ANT1)</span><strong class="mono" id="rtkAnt1Val">--</strong></div>
-     <div class="pose-cell"><span>右天线 (辅 ANT2)</span><strong class="mono" id="rtkAnt2Val">--</strong></div>
-     <div class="pose-cell"><span>空间左右分布</span><strong class="mono" id="rtkSkyVal" style="font-size:11px;">--</strong></div>
-    </div>
-    <div class="pose-grid" style="margin-top:6px;">
-     <div class="pose-cell"><span>双天线航向/共视</span><strong class="mono" id="rtkHeadingVal">--</strong></div>
-     <div class="pose-cell"><span>精度因子 HDOP</span><strong class="mono" id="rtkHdopVal">--</strong></div>
-     <div class="pose-cell"><span>定位解算模式</span><strong class="mono" id="rtkModeVal" style="font-size:11px;">--</strong></div>
-    </div>
-    <div class="distance-summary" style="margin-top:8px;"><span>经纬坐标</span><strong class="mono" id="rtkCoordsVal" style="font-size:11px;">--</strong></div>
-    <div class="distance-summary" style="margin-top:4px;border-top:1px dashed #303c4b;padding-top:6px;"><span>CORS 差分流</span><strong class="mono" id="rtkCorsStatVal" style="color:#f6c879;cursor:pointer;" title="点击配置CORS账号">未启用 (点击配置)</strong></div>
-   </section>
-   <!-- 🦊 Foxglove 3D 现代机器人工作台 -->
-   <section class="panel foxglove-panel" id="foxglovePanel" style="border: 1px solid #632a35; background: linear-gradient(180deg, #1f1217 0%, #151a24 100%);">
-    <div class="panel-heading" style="margin-bottom:8px;">
-     <h3 style="display:flex;align-items:center;gap:6px;"><span style="font-size:16px;">🦊</span> Foxglove 3D 现代工作台</h3>
-     <span style="background:#521c25;color:#ff98a0;font-size:10px;padding:2px 6px;border-radius:4px;font-weight:600;">RGB 彩色点云</span>
-    </div>
-    <p style="font-size:11px;color:var(--muted);margin:0 0 10px;line-height:1.4;">
-     基于专业机器人可视化平台，毫秒级呈现 Astra S 相机 30万点真彩色 3D 点云、LiDAR 激光、实况视频与底盘位姿。
-    </p>
-    <div style="display:flex;flex-direction:column;gap:8px;">
-     <a href="#" id="sideFoxgloveBtn" target="_blank" class="button" style="display:flex;justify-content:center;align-items:center;gap:6px;background:linear-gradient(90deg,#ff6b81,#ff8599);color:#1a0006;font-weight:700;border:none;border-radius:6px;padding:9px 12px;text-decoration:none;font-size:13px;box-shadow:0 3px 10px rgba(255,107,129,0.35);">
-      <span style="font-size:15px;">🦊</span><span>一键进入 3D 现代工作台</span>
-     </a>
-     <div style="display:flex;gap:6px;">
-      <a href="/static/foxglove_layout.json" download="rk3588_foxglove_layout.json" class="button" style="flex:1;font-size:11px;padding:5px 6px;text-align:center;text-decoration:none;border-color:#364858;color:var(--mint);background:#162430;" title="下载预设好的三维点云与视频布局文件">
-       📥 预设布局 JSON
-      </a>
-      <button class="button" id="copyWsBtn" style="font-size:11px;padding:5px 6px;border-color:#364858;color:#9ec8f7;background:#162430;" title="复制 WebSocket 地址">
-       📋 复制 WS 地址
-      </button>
-     </div>
-     <div style="font-size:10px;color:var(--muted);display:flex;justify-content:space-between;padding:0 2px;">
-      <span>桥接端口: <strong class="mono" style="color:#69dec4;">8765</strong></span>
-      <span id="wsHostDisplay" class="mono">ws://...</span>
-     </div>
-    </div>
-   </section>
+
 
    <section class="panel layers-panel"><div class="panel-heading"><h3>显示图层</h3><span>仅调整可视化</span></div><div class="layer-list">
-    <label class="layer-row" hidden><span class="layer-label"><span class="swatch"></span>障碍物边界</span><input id="layerObstacles" type="checkbox" aria-label="障碍物边界"></label>
-    <label class="layer-row" hidden><span class="layer-label"><span class="swatch free"></span>已知自由空间</span><input id="layerFree" type="checkbox" aria-label="已知自由空间"></label>
-    <label class="layer-row" hidden><span class="layer-label"><span class="swatch path"></span>运动轨迹</span><input id="layerPath" type="checkbox" aria-label="运动轨迹"></label>
     <label class="layer-row"><span class="layer-label"><span class="swatch scan"></span>实时扫描点</span><input id="layerScan" type="checkbox" checked aria-label="实时扫描点"></label>
     <label class="layer-row"><span class="layer-label"><span class="swatch beam"></span>扫描射线</span><input id="layerBeam" type="checkbox" aria-label="扫描射线"></label>
     <label class="layer-row"><span class="layer-label"><span class="swatch grid"></span>坐标网格</span><input id="layerGrid" type="checkbox" checked aria-label="坐标网格"></label>
-   </div><div class="height-control" id="heightControl" hidden><label for="wallHeight">挤出示意高度<output id="heightVal">0.8 m</output></label><input id="wallHeight" type="range" min="0.2" max="2" step="0.1" value="0.8"></div><details class="panel-details"><summary>数据与显示说明</summary><p>立体视图由 2D 占据栅格挤出，不代表实测三维结构。已知面积按当前每 2 格采样估算，并非精确测绘面积。暂停仅冻结画面，后台数据仍在接收。</p><p>JSON 导出包含当前显示帧的稀疏地图、扫描点、位姿和轨迹，不是 ROS 原始完整地图文件。</p><p>键盘：方向键旋转或平移，+ / − 缩放，0 复位。雷达视图以机体前方为上、左侧为左。</p></details></section>
+   </div><details class="panel-details"><summary>数据与显示说明</summary><p>显示当前雷达扫描、人体姿态与跟随状态。暂停仅冻结画面。JSON 导出包含当前扫描与跟踪遥测。</p><p>滚轮或 + / − 缩放，0 复位。前方朝上、左侧朝左。</p></details></section>
   </aside>
  </div>
  <footer class="bottom-bar"><span class="mono">RK3588 EDGE PLATFORM <span class="muted"> / </span> <span id="endpointVal">SSE · /api/stream</span></span><span>仅真实 /scan 点云</span></footer>
 </main><div class="toast" id="toast" role="status" hidden></div>
-<dialog id="corsModal" style="background:#181f29;border:1px solid #303c4b;border-radius:12px;color:#ecf2f8;padding:20px;max-width:440px;width:92%;box-shadow:0 20px 50px rgba(0,0,0,0.7);margin:auto;">
- <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
-  <h3 style="margin:0;font-size:15px;color:#69dec4;display:flex;align-items:center;gap:6px;">🛰️ CORS 厘米级差分设置</h3>
-  <button id="closeCorsModal" style="background:transparent;border:0;color:#a1afc0;font-size:22px;cursor:pointer;line-height:1;">&times;</button>
- </div>
- <p style="font-size:11px;color:#a1afc0;margin:0 0 14px;line-height:1.5;">注入 RTCM3 差分校正数据流，消除电离层延迟，令定位瞬间收敛为 <b>厘米级 RTK 固定解（误差 &lt; 2cm）</b>。</p>
- <div style="display:flex;flex-direction:column;gap:10px;">
-  <div>
-   <label style="font-size:11px;color:#a1afc0;display:block;margin-bottom:3px;">服务商预设</label>
-   <select id="corsPreset" style="width:100%;padding:7px;border-radius:6px;background:#111923;border:1px solid #303c4b;color:#ecf2f8;font-size:12px;">
-    <option value="qxwz">千寻位置 (rtk.ntrip.qxwz.com:8002 / AUTO)</option>
-    <option value="liufen">六分科技 (rtk.sixents.com:8002 / RTCM32_GGB)</option>
-    <option value="cmcc">中国移动高精度 (221.178.251.100:8002 / RTCM33_GRCEJ)</option>
-    <option value="custom">自定义私有 CORS / NTRIP 基准站</option>
-   </select>
-  </div>
-  <div style="display:grid;grid-template-columns:2fr 1fr;gap:8px;">
-   <div>
-    <label style="font-size:11px;color:#a1afc0;display:block;margin-bottom:3px;">服务器地址 (Host)</label>
-    <input id="corsHost" type="text" style="width:100%;padding:7px;border-radius:6px;background:#111923;border:1px solid #303c4b;color:#ecf2f8;font-size:12px;" placeholder="rtk.ntrip.qxwz.com">
-   </div>
-   <div>
-    <label style="font-size:11px;color:#a1afc0;display:block;margin-bottom:3px;">端口 (Port)</label>
-    <input id="corsPort" type="number" style="width:100%;padding:7px;border-radius:6px;background:#111923;border:1px solid #303c4b;color:#ecf2f8;font-size:12px;" placeholder="8002">
-   </div>
-  </div>
-  <div>
-   <label style="font-size:11px;color:#a1afc0;display:block;margin-bottom:3px;">挂载点 (MountPoint)</label>
-   <input id="corsMount" type="text" style="width:100%;padding:7px;border-radius:6px;background:#111923;border:1px solid #303c4b;color:#ecf2f8;font-size:12px;" placeholder="AUTO">
-  </div>
-  <div>
-   <label style="font-size:11px;color:#a1afc0;display:block;margin-bottom:3px;">差分账号 (Username)</label>
-   <input id="corsUser" type="text" style="width:100%;padding:7px;border-radius:6px;background:#111923;border:1px solid #303c4b;color:#ecf2f8;font-size:12px;" placeholder="输入CORS账号">
-  </div>
-  <div>
-   <label style="font-size:11px;color:#a1afc0;display:block;margin-bottom:3px;">差分密码 (Password)</label>
-   <input id="corsPwd" type="password" style="width:100%;padding:7px;border-radius:6px;background:#111923;border:1px solid #303c4b;color:#ecf2f8;font-size:12px;" placeholder="输入密码">
-  </div>
-  <div style="background:#111923;border:1px solid #283440;border-radius:6px;padding:9px 12px;font-size:11px;line-height:1.7;">
-   <div>运行状态: <strong id="corsModalStat" style="color:#f6c879;">未连接</strong></div>
-   <div>差分速率: <span id="corsModalRate" class="mono">0.0 KB/s</span> (累计 <span id="corsModalBytes" class="mono">0 KB</span>)</div>
-  </div>
-  <div style="display:flex;gap:8px;margin-top:4px;">
-   <button id="saveConnectCorsBtn" class="button primary" style="flex:1;justify-content:center;">保存并连接差分</button>
-   <button id="disconnectCorsBtn" class="button" style="justify-content:center;background:#38242c;border-color:#9f525a;color:#ff8c91;">断开差分</button>
-  </div>
- </div>
-</dialog>
+
 <script>
 'use strict';
 const $ = id => document.getElementById(id);
 const canvas = $('mainCanvas'), ctx = canvas.getContext('2d', {alpha:false});
-const mapCache = document.createElement('canvas'), mapCtx = mapCache.getContext('2d', {alpha:false});
 const number = (value, fallback=0) => typeof value === 'number' && Number.isFinite(value) ? value : fallback;
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const validPoints = list => Array.isArray(list) ? list.filter(p => Array.isArray(p) && Number.isFinite(p[0]) && Number.isFinite(p[1])) : [];
 const format = (v, digits=2) => typeof v === 'number' && Number.isFinite(v) ? v.toFixed(digits) : '--';
 let currentMode='polar', state=null, latestState=null, paused=false, lastReceived=0, lastDisplayed=0, streamStatus='waiting', stream=null;
-let viewW=1, viewH=1, dpr=1, dirty=true, cacheDirty=true, mapSignature='', frameCount=0, frameAt=0, lastRender=0;
+let viewW=1, viewH=1, dpr=1, dirty=true, frameCount=0, frameAt=0, lastRender=0;
 let camera={zoom:1, panX:0, panY:0, yaw:-Math.PI/5, pitch:0.55}, drag=null, toastTimer=0;
-const layers={obstacles:false, free:false, path:false, scan:true, beam:false, grid:true};
-let wallHeight=.8;
+let isFollowerRunning=false, motionResetBusy=false;
+const layers={scan:true, beam:false, grid:true};
 
 function normalizeState(d) {
  if (!d || typeof d !== 'object' || Array.isArray(d)) throw new Error('Invalid stream payload');
- return {...d, robot_x:number(d.robot_x),robot_y:number(d.robot_y),robot_yaw:number(d.robot_yaw),map_origin_x:number(d.map_origin_x,-4),map_origin_y:number(d.map_origin_y,-3.5),map_res:Math.max(.001,number(d.map_res,.05)),map_width:clamp(Math.floor(number(d.map_width)),0,100000),map_height:clamp(Math.floor(number(d.map_height)),0,100000),map_obstacles:validPoints(d.map_obstacles),map_frees:validPoints(d.map_frees),trajectory:validPoints(d.trajectory).slice(-2000),ranges:Array.isArray(d.ranges)?d.ranges.map(r=>number(r)):[],map_sample_step:clamp(Math.floor(number(d.map_sample_step,2)),1,16),rtk:d.rtk||null};
-}
-function mapStats(d) {
- const step=d.map_sample_step, samples=Math.ceil(d.map_width/step)*Math.ceil(d.map_height/step);
- const count=Math.min(samples,d.map_obstacles.length+d.map_frees.length);
- return {area:Math.min(d.map_width*d.map_height,count*step*step)*d.map_res*d.map_res,coverage:samples?count/samples*100:0};
+ return {...d,ranges:Array.isArray(d.ranges)?d.ranges.map(r=>number(r)):[]};
 }
 function updateBadge(valueId,badgeId,value) {
  const el=$(badgeId); if(!el)return;
@@ -324,19 +275,16 @@ function updateUI(d) {
   const valid=Array.isArray(d.ranges)?d.ranges.filter(r=>r>0).length:0;
   if ($('pointsVal')) $('pointsVal').textContent=valid.toLocaleString();
   if ($('pointsNote')) $('pointsNote').textContent=`本帧 ${d.ranges?d.ranges.length:0} 个采样 · 有效 ${d.ranges&&d.ranges.length?Math.round(valid/d.ranges.length*100):0}%`;
-  if ($('mappedAreaVal')) $('mappedAreaVal').textContent=format(d.min_dist,2);
+  if ($('nearestObstacleVal')) $('nearestObstacleVal').textContent=format(d.min_dist,2);
   if ($('progressVal')) $('progressVal').textContent='真实 /scan 最近障碍';
   if ($('resolutionVal')) $('resolutionVal').textContent='16';
-  if ($('mapSizeVal')) $('mapSizeVal').textContent='CH343 · 460800';
-  if ($('robotXVal')) $('robotXVal').textContent=format(d.robot_x);
-  if ($('robotYVal')) $('robotYVal').textContent=format(d.robot_y);
-  if ($('robotYawVal')) $('robotYawVal').textContent=format(d.robot_yaw*180/Math.PI,1);
+  if ($('lidarPortVal')) $('lidarPortVal').textContent='CH343 · 460800';
   if ($('minDistVal')) $('minDistVal').textContent=Number.isFinite(d.min_dist)&&d.min_dist>0&&d.min_dist<50?`${format(d.min_dist)} m`:'-- m';
   for(const dir of ['front','left','right','back'])updateBadge(dir+'Val',dir+'Badge',d[dir+'_dist']);
   if ($('dangerBanner')) $('dangerBanner').hidden=!(Number.isFinite(d.min_dist)&&d.min_dist>0&&d.min_dist<.6);
   if (d.voltage !== undefined && d.voltage > 0) {
     const v = Number(d.voltage);
-    const pct = d.battery_pct !== undefined ? d.battery_pct : Math.max(0, Math.min(100, Math.round((v - 21.0) / 4.2 * 100)));
+    const pct = d.battery_pct !== undefined ? d.battery_pct : Math.max(0, Math.min(100, Math.round((v - 19.0) / 6.2 * 100)));
     if ($('batteryPctVal')) $('batteryPctVal').textContent = `${pct}%`;
     if ($('batteryVoltVal')) $('batteryVoltVal').textContent = `${v.toFixed(2)} V`;
     if ($('batteryFill')) {
@@ -346,44 +294,9 @@ function updateUI(d) {
       if ($('batteryPctVal')) $('batteryPctVal').style.color = col;
     }
   }
+  lastWheeltec = d.wheeltec || null;
   updateFollowerUI(d.follower, Boolean(d.follower_running));
-  if(d.rtk && d.rtk.connected) {
-    const rtk = d.rtk;
-    const ant1_fix = rtk.ant1_fix || (rtk.fix_quality === 4 ? '固定' : (rtk.fix_quality === 5 ? '浮点' : (rtk.fix_quality > 0 ? '单点' : '搜星中')));
-    const ant2_fix = rtk.ant2_fix || (rtk.heading_type && rtk.heading_type.includes('INT') ? '固定' : (rtk.heading_type && rtk.heading_type.includes('FLOAT') ? '浮点' : ((rtk.ant2_used || 0) >= 4 ? '单点' : '搜星中')));
-    if($('rtkFixBadge')) {
-     $('rtkFixBadge').textContent = `左:${ant1_fix} · 右:${ant2_fix}`;
-     $('rtkFixBadge').style.color = (ant1_fix === '固定' && ant2_fix === '固定') ? '#10b981' : (ant1_fix === '浮点' || ant2_fix === '浮点') ? '#fbbf24' : '#38bdf8';
-    }
-    if($('rtkAnt1Val')) $('rtkAnt1Val').textContent = `${rtk.ant1_used || rtk.sats_used || 0}/${rtk.ant1_tracked || rtk.sats_tracked || 0} [${ant1_fix}]`;
-    if($('rtkAnt2Val')) $('rtkAnt2Val').textContent = `${rtk.ant2_used || rtk.sats_used || 0}/${rtk.ant2_tracked || rtk.sats_tracked || 0} [${ant2_fix}]`;
-    if($('rtkSkyVal')) $('rtkSkyVal').textContent = `◀左 ${rtk.sats_left || 0} | 右 ${rtk.sats_right || 0}▶`;
-    if($('rtkHeadingVal')) $('rtkHeadingVal').textContent = (rtk.heading !== null && rtk.heading !== undefined) ? `${Number(rtk.heading).toFixed(1)}° (${rtk.heading_sats_common || 0}星)` : '--';
-    if($('rtkHdopVal')) $('rtkHdopVal').textContent = rtk.hdop !== null && rtk.hdop !== undefined ? `${rtk.hdop}` : '--';
-    if($('rtkModeVal')) $('rtkModeVal').textContent = `左:${ant1_fix} · 右:${ant2_fix}`;
-    if($('rtkCoordsVal')) {
-     const lat = rtk.lat !== undefined ? rtk.lat : rtk.latitude;
-     const lon = rtk.lon !== undefined ? rtk.lon : rtk.longitude;
-     if(lat && lon) {
-      $('rtkCoordsVal').textContent = `${Number(lat).toFixed(5)}°N, ${Number(lon).toFixed(5)}°E`;
-     } else {
-      $('rtkCoordsVal').textContent = '--';
-     }
-    }
-    if(rtk.cors) {
-     const cors = rtk.cors;
-     if ($('rtkCorsStatVal')) {
-      $('rtkCorsStatVal').textContent = cors.status || (cors.connected ? '已连接' : '未启用');
-      $('rtkCorsStatVal').style.color = cors.connected ? 'var(--mint)' : cors.enabled ? 'var(--amber)' : 'var(--muted)';
-     }
-     if ($('corsModalStat')) {
-      $('corsModalStat').textContent = cors.status || (cors.connected ? '已连接' : '未启用');
-      $('corsModalStat').style.color = cors.connected ? '#69dec4' : '#f6c879';
-     }
-     if ($('corsModalRate')) $('corsModalRate').textContent = `${cors.rate_kbs || 0.0} KB/s`;
-     if ($('corsModalBytes')) $('corsModalBytes').textContent = `${Math.round((cors.bytes_received || 0) / 1024)} KB`;
-    }
-  }
+  updateMotionLockUI(d);
   if ($('exportBtn')) $('exportBtn').disabled=false;
   if ($('snapshotBtn')) $('snapshotBtn').disabled=false;
  } catch(err) {
@@ -391,17 +304,15 @@ function updateUI(d) {
  }
 }
 function applyState(d) {
- const signature=JSON.stringify([d.map_width,d.map_height,d.map_origin_x,d.map_origin_y,d.map_res,d.map_sample_step,d.map_obstacles,d.map_frees]);
- if(signature!==mapSignature){mapSignature=signature;cacheDirty=true;}
  state=d;lastDisplayed=lastReceived;dirty=true;
  if ($('emptyState')) {
-  $('emptyState').hidden=Boolean(d.map_width || (Array.isArray(d.ranges) && d.ranges.some(r=>r>0)));
-  if(!$('emptyState').hidden){$('emptyTitle').textContent='数据流已连接，等待地图与扫描';$('emptyHint').textContent='尚未收到有效的空间数据';}
+  $('emptyState').hidden=Boolean((Array.isArray(d.ranges) && d.ranges.some(r=>r>0)));
+  if(!$('emptyState').hidden){$('emptyTitle').textContent='数据流已连接，等待雷达扫描';$('emptyHint').textContent='尚未收到有效的空间数据';}
  }
  updateUI(d);
 }
 function receiveFrame(event) {
- try{latestState=normalizeState(JSON.parse(event.data));lastReceived=performance.now();streamStatus='live';if(!paused)applyState(latestState);updateConnection();}
+ try{latestState=normalizeState(JSON.parse(event.data));lastReceived=performance.now();streamStatus='live';confirmStopStatus(latestState);if(!paused)applyState(latestState);else updateMotionLockUI(latestState);updateConnection();}
  catch(error){streamStatus='invalid';updateConnection();}
 }
 function updateConnection() {
@@ -414,6 +325,7 @@ function updateConnection() {
  $('updateVal').textContent=lastDisplayed?paused?'画面已冻结':`${Math.max(0,(performance.now()-lastDisplayed)/1000).toFixed(1)}s 前更新`:'等待数据';
  if(!live&&age>=3000&&streamStatus==='live'){streamStatus='stale';$('connectionText').textContent='数据流超时 · 等待更新';}
  if(!state&&streamStatus!=='waiting'){ $('emptyTitle').textContent='等待数据连接恢复';$('emptyHint').textContent='保留当前视角，连接恢复后自动显示'; }
+ updateMotionLockUI(latestState);
 }
 let streamReconnectTimer=null;
 function connectStream(force=false){
@@ -437,64 +349,16 @@ function connectStream(force=false){
   };
  }catch(err){streamStatus='offline';updateConnection();}
 }
-function setMode(mode) {
- if(!['slam','3d','polar'].includes(mode))return;
- currentMode=mode;frameAt=performance.now();frameCount=0;document.querySelectorAll('.mode-btn').forEach(b=>{const active=b.dataset.mode===mode;b.classList.toggle('active',active);b.setAttribute('aria-pressed',String(active));});
- const titles={slam:['二维占据栅格','正交俯视 · 原始地图坐标与实时扫描','MAP FRAME / TOP VIEW','拖动平移 · 滚轮缩放 · 0 复位'], '3d':['空间立体示意','2D 栅格挤出 · 高度为显示参数，非实测','MAP FRAME / ISOMETRIC','拖动旋转 · Shift 拖动平移 · 滚轮缩放'],polar:['机体坐标点云','前方朝上 · 左侧朝左 · 距离以环线标尺为准','LASER FRAME / POLAR','滚轮缩放量程 · 0 复位 · 方向固定于机体']};
- const t=titles[mode];$('viewModeTitle').textContent=t[0];$('viewDescription').textContent=t[1];$('viewBadge').textContent=t[2];$('interactionHint').textContent=t[3];$('heightControl').hidden=mode!=='3d';
- for(const id of ['layerObstacles','layerFree','layerPath'])$(id).disabled=mode==='polar';
- resetView(false);
-}
 function notify(message){$('toast').textContent=message;$('toast').hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>{$('toast').hidden=true;},3200);}
-function resetView(message=true){camera={zoom:1,panX:0,panY:0,yaw:-Math.PI/5,pitch:.55};invalidate();if(message)notify('视角已复位，地图数据保持不变');}
-function invalidate(){dirty=true;cacheDirty=true;$('zoomVal').textContent=`${Math.round(camera.zoom*100)}%`;}
+function resetView(message=true){camera={zoom:1,panX:0,panY:0,yaw:-Math.PI/5,pitch:.55};invalidate();if(message)notify('雷达视角已复位');}
+function invalidate(){dirty=true;$('zoomVal').textContent=`${Math.round(camera.zoom*100)}%`;}
 function zoomBy(factor){camera.zoom=clamp(camera.zoom*factor,.35,5);invalidate();}
 function togglePause(){paused=!paused;frameAt=performance.now();frameCount=0;$('pauseBtn').setAttribute('aria-pressed',String(paused));$('pauseText').textContent=paused?'继续显示':'暂停画面';$('pauseIcon').setAttribute('href',paused?'#i-play':'#i-pause');if(!paused&&latestState)applyState(latestState);updateConnection();}
-function resizeCanvas(){const r=canvas.getBoundingClientRect();viewW=Math.max(1,r.width);viewH=Math.max(1,r.height);dpr=Math.min(window.devicePixelRatio||1,2);canvas.width=Math.round(viewW*dpr);canvas.height=Math.round(viewH*dpr);mapCache.width=canvas.width;mapCache.height=canvas.height;ctx.setTransform(dpr,0,0,dpr,0,0);mapCtx.setTransform(dpr,0,0,dpr,0,0);invalidate();}
+function resizeCanvas(){const r=canvas.getBoundingClientRect();viewW=Math.max(1,r.width);viewH=Math.max(1,r.height);dpr=Math.min(window.devicePixelRatio||1,2);canvas.width=Math.round(viewW*dpr);canvas.height=Math.round(viewH*dpr);ctx.setTransform(dpr,0,0,dpr,0,0);invalidate();}
 
-// World coordinates remain metric; CSS pixels and physical canvas pixels are separated.
-function getBounds(){if(!state||!state.map_width||!state.map_height)return{x:-4,y:-3.5,w:8,h:7};return{x:state.map_origin_x,y:state.map_origin_y,w:Math.max(.2,state.map_width*state.map_res),h:Math.max(.2,state.map_height*state.map_res)};}
-function projection(){
- const b=getBounds(),cx=b.x+b.w/2,cy=b.y+b.h/2,cos=Math.cos(camera.yaw),sin=Math.sin(camera.yaw),tilt=Math.sin(camera.pitch),up=Math.cos(camera.pitch);
- const raw=(x,y,z=0)=>{x-=cx;y-=cy;return[(x*cos-y*sin),(x*sin+y*cos)*tilt-z*up];};
- const corners=[];for(const x of [b.x,b.x+b.w])for(const y of [b.y,b.y+b.h])for(const z of [0,wallHeight])corners.push(raw(x,y,z));
- const x0=Math.min(...corners.map(p=>p[0])),x1=Math.max(...corners.map(p=>p[0])),y0=Math.min(...corners.map(p=>p[1])),y1=Math.max(...corners.map(p=>p[1]));
- const availableW=Math.max(80,viewW-76),availableH=Math.max(80,viewH-78);
- const scale=(currentMode==='3d'?Math.min(availableW/(x1-x0),availableH/(y1-y0)):Math.min(availableW/b.w,availableH/b.h))*camera.zoom;
- const point=(x,y,z=0)=>{if(currentMode==='3d'){const p=raw(x,y,z);return[viewW/2+camera.panX+(p[0]-(x0+x1)/2)*scale,viewH/2+12+camera.panY+(p[1]-(y0+y1)/2)*scale];}return[viewW/2+camera.panX+(x-cx)*scale,viewH/2+12+camera.panY-(y-cy)*scale];};
- return {b,scale,point,depth:(x,y)=>x*sin+y*cos};
-}
 function pathLine(c,points,color,width=1){if(points.length<2)return;c.beginPath();c.moveTo(...points[0]);for(let i=1;i<points.length;i++)c.lineTo(...points[i]);c.strokeStyle=color;c.lineWidth=width;c.stroke();}
 function polygon(c,points,color){if(points.length<3)return;c.beginPath();c.moveTo(...points[0]);for(let i=1;i<points.length;i++)c.lineTo(...points[i]);c.closePath();c.fillStyle=color;c.fill();}
-function drawGround(c,p){
- const b=p.b,P=p.point;
- polygon(c,[P(b.x,b.y),P(b.x+b.w,b.y),P(b.x+b.w,b.y+b.h),P(b.x,b.y+b.h)],'#15222d');
- if(layers.grid){let step=Math.max(1,Math.pow(10,Math.floor(Math.log10(Math.max(b.w,b.h)/20))));for(let x=Math.ceil(b.x/step)*step;x<=b.x+b.w;x+=step)pathLine(c,[P(x,b.y),P(x,b.y+b.h)],'#263642');for(let y=Math.ceil(b.y/step)*step;y<=b.y+b.h;y+=step)pathLine(c,[P(b.x,y),P(b.x+b.w,y)],'#263642');}
- pathLine(c,[P(b.x,b.y),P(b.x+b.w,b.y),P(b.x+b.w,b.y+b.h),P(b.x,b.y+b.h),P(b.x,b.y)],'#41515f');
-}
-function drawMapCache(p){
- const c=mapCtx,P=p.point;c.setTransform(dpr,0,0,dpr,0,0);c.fillStyle='#111923';c.fillRect(0,0,viewW,viewH);drawGround(c,p);
- if(!state){cacheDirty=false;return;}
- const size=state.map_res*state.map_sample_step,ox=state.map_origin_x,oy=state.map_origin_y;
- const cell=(pt,z=0)=>{const x=ox+pt[0]*state.map_res,y=oy+pt[1]*state.map_res;return [P(x,y,z),P(x+size,y,z),P(x+size,y+size,z),P(x,y+size,z)];};
- if(layers.free){if(currentMode==='slam'){c.fillStyle='#254446';for(const pt of state.map_frees){const a=P(ox+pt[0]*state.map_res,oy+pt[1]*state.map_res+size);c.fillRect(a[0],a[1],size*p.scale+.4,size*p.scale+.4);}}else{for(const pt of state.map_frees)polygon(c,cell(pt),'#254446');}}
- if(layers.obstacles){
-  if(currentMode==='slam'){c.fillStyle='#7be1ce';for(const pt of state.map_obstacles){const a=P(ox+pt[0]*state.map_res,oy+pt[1]*state.map_res+size);c.fillRect(a[0],a[1],Math.max(1.5,size*p.scale),Math.max(1.5,size*p.scale));}}
-  else{const cells=state.map_obstacles.slice().sort((a,b)=>p.depth(a[0],a[1])-p.depth(b[0],b[1]));for(const pt of cells){const base=cell(pt),top=cell(pt,wallHeight);const edges=[0,1,2,3].sort((a,b)=>((base[a][1]+base[(a+1)%4][1])-(base[b][1]+base[(b+1)%4][1])));for(const i of edges){const j=(i+1)%4;polygon(c,[base[i],base[j],top[j],top[i]],i%2?'#367d76':'#46988b');}polygon(c,top,'#8cddc6');}}
- }
- cacheDirty=false;
-}
-function scanPoints(){if(!state)return[];const inc=number(state.angle_increment,Math.PI*2/(state.ranges.length||360)),start=number(state.angle_min);return state.ranges.map((r,i)=>{const angle=start+i*inc;return r>0?{r,angle,x:state.robot_x+r*Math.cos(state.robot_yaw+angle),y:state.robot_y+r*Math.sin(state.robot_yaw+angle)}:null;}).filter(Boolean);}
-function drawDynamic(p){
- if(!state)return;const P=p.point;
- if(layers.path&&state.trajectory.length>1){const path=state.trajectory.map(pt=>P(pt[0],pt[1],.035));pathLine(ctx,path,'#1b241de6',4);pathLine(ctx,path,'#f6c879',1.65);}
- const robot=P(state.robot_x,state.robot_y,.07),scan=scanPoints();
- if(layers.beam){ctx.beginPath();for(let i=0;i<scan.length;i+=6){const pt=P(scan[i].x,scan[i].y,.045);ctx.moveTo(...robot);ctx.lineTo(...pt);}ctx.strokeStyle='#79e0d326';ctx.lineWidth=.8;ctx.stroke();}
- if(layers.scan){ctx.fillStyle='#ccfff4';ctx.beginPath();for(const hit of scan){const pt=P(hit.x,hit.y,.055);ctx.rect(pt[0]-1,pt[1]-1,2,2);}ctx.fill();}
- const heading=P(state.robot_x+Math.cos(state.robot_yaw)*.45,state.robot_y+Math.sin(state.robot_yaw)*.45,.07),angle=Math.atan2(heading[1]-robot[1],heading[0]-robot[0]);
- ctx.save();ctx.translate(...robot);ctx.rotate(angle);ctx.beginPath();ctx.arc(0,0,11,0,Math.PI*2);ctx.fillStyle='#142f2cee';ctx.fill();ctx.strokeStyle='#83e6ce';ctx.lineWidth=1.5;ctx.stroke();polygon(ctx,[[16,0],[-5,-6],[-2,0],[-5,6]],'#e1fff6');ctx.restore();
-}
-function drawAxes(p){const P=p.point,origin=P(p.b.x,p.b.y),x=P(p.b.x+.6,p.b.y),y=P(p.b.x,p.b.y+.6),z=P(p.b.x,p.b.y,.6);pathLine(ctx,[origin,x],'#eeac97',1.5);pathLine(ctx,[origin,y],'#8cd8ba',1.5);ctx.font='10px Consolas, monospace';ctx.fillStyle='#eeac97';ctx.fillText('X',x[0]+5,x[1]+3);ctx.fillStyle='#8cd8ba';ctx.fillText('Y',y[0]-9,y[1]+1);if(currentMode==='3d'){pathLine(ctx,[origin,z],'#9ec8f7',1.5);ctx.fillStyle='#9ec8f7';ctx.fillText('Z',z[0]-4,z[1]-6);}}
+function scanPoints(){if(!state)return[];const inc=number(state.angle_increment,Math.PI*2/(state.ranges.length||360)),start=number(state.angle_min);return state.ranges.map((r,i)=>({r,angle:start+i*inc})).filter(p=>p.r>0);}
 function drawPolar(){
  ctx.fillStyle='#111923';ctx.fillRect(0,0,viewW,viewH);
  const cx=viewW/2,cy=viewH/2+12,radius=Math.max(35,Math.min(viewW-88,viewH-150)/2),maxRange=8/camera.zoom;
@@ -504,44 +368,106 @@ function drawPolar(){
  if(layers.beam){ctx.beginPath();for(let i=0;i<hits.length;i+=6){const hit=hits[i];if(hit.r>maxRange)continue;ctx.moveTo(cx,cy);ctx.lineTo(cx-Math.sin(hit.angle)*hit.r/maxRange*radius,cy-Math.cos(hit.angle)*hit.r/maxRange*radius);}ctx.strokeStyle='#69dec429';ctx.lineWidth=1;ctx.stroke();}
  if(layers.scan)for(const hit of hits){if(hit.r>maxRange)continue;const x=cx-Math.sin(hit.angle)*hit.r/maxRange*radius,y=cy-Math.cos(hit.angle)*hit.r/maxRange*radius;ctx.fillStyle=hit.r<.6?'#ff8c91':hit.r<1.2?'#f6c879':'#a2eee0';ctx.fillRect(x-1.3,y-1.3,2.6,2.6);}
  polygon(ctx,[[cx,cy-10],[cx-5,cy+6],[cx,cy+3],[cx+5,cy+6]],'#d4fff2');
+
+  // 在 360° 极坐标雷达盘上实时绘制人体目标 (视觉与雷达全向接力)
+  const tgt = state && state.follower && state.follower.target;
+  if (tgt) {
+    let bRad = null;
+    let dist = null;
+    if (Number.isFinite(tgt.bearing_deg)) {
+      bRad = tgt.bearing_deg * Math.PI / 180.0;
+    } else if (Number.isFinite(tgt.bearing_rad)) {
+      bRad = tgt.bearing_rad;
+    }
+    if (Number.isFinite(tgt.distance)) {
+      dist = tgt.distance;
+    } else if (Number.isFinite(tgt.gap_used)) {
+      dist = tgt.gap_used;
+    }
+
+    // 若无角度，由 veh_x (前正后负) 与 veh_y (左正右负) 恢复
+    if (bRad === null || dist === null) {
+      const vx = Number.isFinite(tgt.veh_x) ? tgt.veh_x : (Number.isFinite(tgt.z) ? tgt.z : NaN);
+      const vy = Number.isFinite(tgt.veh_y) ? tgt.veh_y : (Number.isFinite(tgt.x) ? -tgt.x : NaN);
+      if (Number.isFinite(vx) && Number.isFinite(vy)) {
+        bRad = Math.atan2(vy, vx);
+        dist = Math.hypot(vx, vy);
+      }
+    }
+
+    if (bRad !== null && dist !== null && dist > 0 && dist <= maxRange * 1.5) {
+      // 极坐标投射与雷达点云公式 (line 358) 100% 严格一致:
+      // 前 0° (朝上), 左 90° (朝左), 右 -90° (朝右), 后 180° (朝下)
+      const tx = cx - Math.sin(bRad) * (dist / maxRange) * radius;
+      const ty = cy - Math.cos(bRad) * (dist / maxRange) * radius;
+      const isCam = tgt.tracking_source === 'camera';
+      const col = isCam ? '#69dec4' : '#f6c879';
+
+      ctx.beginPath();
+      ctx.setLineDash([3, 3]);
+      ctx.moveTo(cx, cy);
+      ctx.lineTo(tx, ty);
+      ctx.strokeStyle = isCam ? '#69dec477' : '#f6c87977';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      ctx.beginPath();
+      ctx.arc(tx, ty, 8, 0, Math.PI * 2);
+      ctx.strokeStyle = col;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(tx, ty, 3.5, 0, Math.PI * 2);
+      ctx.fillStyle = col;
+      ctx.fill();
+
+      ctx.font = 'bold 11px sans-serif';
+      ctx.fillStyle = col;
+      const distText = Number.isFinite(dist) ? `${dist.toFixed(2)}m` : '';
+      const tagText = isCam ? `👤 人体 ${distText}` : `👤 雷达接力 ${distText}`;
+      ctx.fillText(tagText, tx + 10, ty + 4);
+    }
+  }
+
  $('scaleLine').style.width='48px';$('scaleLabel').textContent=`量程 ${maxRange.toFixed(1)} m`;
 }
 function renderFrame(now){
  requestAnimationFrame(renderFrame);
  if(document.hidden||!dirty||now-lastRender<1000/30)return;lastRender=now;
  ctx.setTransform(dpr,0,0,dpr,0,0);
- if(currentMode==='polar')drawPolar();else{const p=projection();if(cacheDirty)drawMapCache(p);ctx.drawImage(mapCache,0,0,canvas.width,canvas.height,0,0,viewW,viewH);drawDynamic(p);if(layers.grid)drawAxes(p);const a=p.point(p.b.x,p.b.y),b=p.point(p.b.x+1,p.b.y);const unit=Math.hypot(b[0]-a[0],b[1]-a[1]);const meters=unit>100?.5:unit<25?2:1;$('scaleLine').style.width=`${Math.max(4,unit*meters)}px`;$('scaleLabel').textContent=`${meters} m${currentMode==='3d'?' · 地面 X 方向':''}`;}
+ drawPolar();
  dirty=false;frameCount++;
  if(now-frameAt>=1000){$('frameVal').textContent=`${Math.round(frameCount*1000/(now-frameAt))} FPS`;frameCount=0;frameAt=now;}
 }
-function mapExport(){if(!state)return null;return{format:'rk3588-sparse-map/v1',captured_at:new Date(Date.now()-(performance.now()-lastDisplayed)).toISOString(),source:'/api/stream',display_paused:paused,coordinate_frame:'map',map:{width:state.map_width,height:state.map_height,resolution:state.map_res,origin:[state.map_origin_x,state.map_origin_y],sample_step:state.map_sample_step,obstacles:state.map_obstacles,free:state.map_frees},robot:{x:state.robot_x,y:state.robot_y,yaw:state.robot_yaw},scan:{ranges:state.ranges,angle_min:number(state.angle_min),angle_increment:number(state.angle_increment,Math.PI*2/(state.ranges.length||360))},trajectory:state.trajectory,display:{mode:currentMode,extrusion_height:wallHeight,extrusion_is_measured:false}};}
+function scanExport(){if(!state)return null;return{format:'rk3588-tracking/v1',captured_at:new Date().toISOString(),scan:{ranges:state.ranges,angle_min:state.angle_min,angle_increment:state.angle_increment},targets:state.ai_targets,follower:state.follower};}
 function downloadBlob(blob,name){const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=name;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);}
-function exportMap(){const data=mapExport();if(!data)return;downloadBlob(new Blob([JSON.stringify(data,null,2)],{type:'application/json'}),`rk3588-map-${Date.now()}.json`);notify('已生成当前显示帧的 JSON 下载');}
+function exportScan(){const data=scanExport();if(!data)return;downloadBlob(new Blob([JSON.stringify(data,null,2)],{type:'application/json'}),`rk3588-scan-${Date.now()}.json`);notify('已生成当前显示帧的 JSON 下载');}
 function saveSnapshot(){if(!state)return;canvas.toBlob(blob=>{if(blob){downloadBlob(blob,`rk3588-${currentMode}-${Date.now()}.png`);notify('已生成当前视图的 PNG 下载');}else notify('视图导出失败，请重试');},'image/png');}
 
-document.querySelectorAll('[data-mode]').forEach(button=>button.addEventListener('click',()=>setMode(button.dataset.mode)));
-$('pauseBtn').addEventListener('click',togglePause);$('exportBtn').addEventListener('click',exportMap);$('snapshotBtn').addEventListener('click',saveSnapshot);
+$('pauseBtn').addEventListener('click',togglePause);$('exportBtn').addEventListener('click',exportScan);$('snapshotBtn').addEventListener('click',saveSnapshot);
 $('zoomInBtn').addEventListener('click',()=>zoomBy(1.2));$('zoomOutBtn').addEventListener('click',()=>zoomBy(1/1.2));$('fitBtn').addEventListener('click',()=>resetView());
 $('focusBtn').addEventListener('click',()=>{const focus=$('workspace').classList.toggle('focus');$('focusBtn').setAttribute('aria-pressed',String(focus));resizeCanvas();});
 $('fullscreenBtn').addEventListener('click',async()=>{try{if(document.fullscreenElement)await document.exitFullscreen();else await $('viewer').requestFullscreen();}catch(error){notify('全屏请求未完成，可使用专注视图');}});
 document.addEventListener('fullscreenchange',resizeCanvas);
-for(const [id,key]of Object.entries({layerObstacles:'obstacles',layerFree:'free',layerPath:'path',layerScan:'scan',layerBeam:'beam',layerGrid:'grid'}))$(id).addEventListener('change',e=>{layers[key]=e.target.checked;invalidate();});
-$('wallHeight').addEventListener('input',e=>{wallHeight=clamp(Number(e.target.value),.2,2);$('heightVal').textContent=wallHeight.toFixed(1)+' m';invalidate();});
+for(const [id,key]of Object.entries({layerScan:'scan',layerBeam:'beam',layerGrid:'grid'}))$(id).addEventListener('change',e=>{layers[key]=e.target.checked;invalidate();});
 canvas.addEventListener('wheel',e=>{e.preventDefault();zoomBy(Math.exp(-e.deltaY*.001));},{passive:false});
-canvas.addEventListener('pointerdown',e=>{if(e.button!==0||currentMode==='polar')return;drag={id:e.pointerId,x:e.clientX,y:e.clientY};canvas.setPointerCapture(e.pointerId);});
-canvas.addEventListener('pointermove',e=>{if(!drag||drag.id!==e.pointerId)return;const dx=e.clientX-drag.x,dy=e.clientY-drag.y;if(currentMode==='3d'&&!e.shiftKey){camera.yaw+=dx*.008;camera.pitch=clamp(camera.pitch+dy*.006,.25,1.3);}else{camera.panX+=dx;camera.panY+=dy;}drag.x=e.clientX;drag.y=e.clientY;invalidate();});
-function endDrag(e){if(drag&&drag.id===e.pointerId){if(canvas.hasPointerCapture(e.pointerId))canvas.releasePointerCapture(e.pointerId);drag=null;}}
-canvas.addEventListener('pointerup',endDrag);canvas.addEventListener('pointercancel',endDrag);canvas.addEventListener('lostpointercapture',()=>{drag=null;});
-canvas.addEventListener('keydown',e=>{if(['+','=','-','0','ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key)){e.preventDefault();if(e.key==='+'||e.key==='=')zoomBy(1.2);else if(e.key==='-')zoomBy(1/1.2);else if(e.key==='0')resetView();else if(currentMode!=='polar'){const dx=e.key==='ArrowLeft'?-1:e.key==='ArrowRight'?1:0,dy=e.key==='ArrowUp'?-1:e.key==='ArrowDown'?1:0;if(currentMode==='3d'&&!e.shiftKey){camera.yaw+=dx*.12;camera.pitch=clamp(camera.pitch+dy*.08,.25,1.3);}else{camera.panX+=dx*20;camera.panY+=dy*20;}invalidate();}}});
+canvas.addEventListener('keydown',e=>{if(['+','=','-','0'].includes(e.key)){e.preventDefault();if(e.key==='0')resetView();else zoomBy(e.key==='-'?1/1.2:1.2);}});
 document.addEventListener('visibilitychange',()=>{
- if(!document.hidden){
+ if(document.hidden){
+  if(typeof executeStop==='function'&&(isPressing||pulseActive||heartbeatTimer)){
+   executeStop();
+  }
+ }else{
   dirty=true;frameAt=performance.now();frameCount=0;
   if(!lastReceived||performance.now()-lastReceived>2500||!stream||stream.readyState!==EventSource.OPEN){
    connectStream(true);
   }
  }
 });
-window.addEventListener('beforeunload',()=>{if(stream)stream.close();});
+// 仅在页面真正切换到后台或锁屏时安全刹停（避免触屏时移动端 window.blur 虚假触发刹车）
+window.addEventListener('beforeunload',()=>{if(isPressing||pulseActive)executeStop();if(stream)stream.close();});
+window.addEventListener('pagehide',()=>{if(isPressing||pulseActive)executeStop();});
 new ResizeObserver(resizeCanvas).observe($('canvasStage'));
 setInterval(()=>{
  updateConnection();
@@ -551,109 +477,56 @@ setInterval(()=>{
   connectStream(true);
  }
 },1000);
-resizeCanvas();setMode('polar');connectStream();requestAnimationFrame(renderFrame);
+resizeCanvas();connectStream();requestAnimationFrame(renderFrame);
 if ($('screenMirrorBtn')) {
   $('screenMirrorBtn').href = `http://${window.location.hostname || '192.168.2.173'}:6080/vnc.html?autoconnect=true&resize=scale`;
 }
 
-// 🦊 Foxglove 3D 现代机器人工作台快速通道
-const currentHost = window.location.hostname || '192.168.2.173';
-const foxgloveWsUrl = `ws://${currentHost}:8765`;
-const foxgloveAppUrl = `https://app.foxglove.dev/~/view?ds=foxglove-websocket&ds.url=${encodeURIComponent(foxgloveWsUrl)}`;
-
-if ($('foxgloveBtn')) $('foxgloveBtn').href = foxgloveAppUrl;
-if ($('sideFoxgloveBtn')) $('sideFoxgloveBtn').href = foxgloveAppUrl;
-if ($('wsHostDisplay')) $('wsHostDisplay').textContent = foxgloveWsUrl;
-if ($('copyWsBtn')) {
-  $('copyWsBtn').addEventListener('click', async () => {
-    try {
-      await navigator.clipboard.writeText(foxgloveWsUrl);
-      notify('已复制 Foxglove WebSocket: ' + foxgloveWsUrl);
-    } catch(e) {
-      prompt('请复制 Foxglove WebSocket 地址:', foxgloveWsUrl);
-    }
-  });
-}
-
-// CORS NTRIP 设置与交互逻辑
-const corsModal = $('corsModal');
-const PRESETS = {
- qxwz: { server: 'rtk.ntrip.qxwz.com', port: 8002, mountpoint: 'AUTO' },
- liufen: { server: 'rtk.sixents.com', port: 8002, mountpoint: 'RTCM32_GGB' },
- cmcc: { server: '221.178.251.100', port: 8002, mountpoint: 'RTCM33_GRCEJ' },
- custom: { server: '', port: 8002, mountpoint: '' }
-};
-
-const openModalWithConfig = () => {
- corsModal.showModal();
- loadCorsConfig();
-};
-$('corsBtn').addEventListener('click', openModalWithConfig);
-if ($('rtkCorsStatVal')) $('rtkCorsStatVal').addEventListener('click', openModalWithConfig);
-$('closeCorsModal').addEventListener('click', () => corsModal.close());
-
-if (window.location.hash === '#cors' || window.location.search.includes('cors')) {
- openModalWithConfig();
-}
-
-$('corsPreset').addEventListener('change', (e) => {
- const p = PRESETS[e.target.value];
- if (p) {
-  if (p.server) $('corsHost').value = p.server;
-  if (p.port) $('corsPort').value = p.port;
-  if (p.mountpoint) $('corsMount').value = p.mountpoint;
- }
-});
-
-async function loadCorsConfig() {
- try {
-  const res = await fetch('/api/cors');
-  const data = await res.json();
-  if (data && data.config) {
-   const c = data.config;
-   if (c.preset) $('corsPreset').value = c.preset;
-   if (c.server) $('corsHost').value = c.server;
-   if (c.port) $('corsPort').value = c.port;
-   if (c.mountpoint) $('corsMount').value = c.mountpoint;
-   if (c.username) $('corsUser').value = c.username;
-   if (c.password) $('corsPwd').value = c.password;
-  }
- } catch(e) {}
-}
-
-async function saveCors(enabled) {
- const payload = {
-  enabled: Boolean(enabled),
-  preset: $('corsPreset').value,
-  server: $('corsHost').value.trim(),
-  port: parseInt($('corsPort').value) || 8002,
-  mountpoint: $('corsMount').value.trim(),
-  username: $('corsUser').value.trim(),
-  password: $('corsPwd').value.trim()
- };
- try {
-  const res = await fetch('/api/cors', {
-   method: 'POST',
-   headers: { 'Content-Type': 'application/json' },
-   body: JSON.stringify(payload)
-  });
-  const data = await res.json();
-  if (data.ok) {
-   notify(enabled ? 'CORS 差分服务已启动连接' : 'CORS 差分已断开');
-  } else {
-   notify('CORS 设置更新失败: ' + (data.error || '未知错误'));
-  }
- } catch(err) {
-  notify('网络请求异常: ' + err.message);
- }
-}
-
-$('saveConnectCorsBtn').addEventListener('click', () => saveCors(true));
-$('disconnectCorsBtn').addEventListener('click', () => saveCors(false));
-loadCorsConfig();
-
 // ==================== 🐕 电子跟屁虫与手动强行介入控制逻辑 ====================
-let isFollowerRunning = false;
+function motionResetStatus(d) {
+  const wheel = d && d.wheeltec;
+  const motion = (wheel && wheel.motion) || (d && d.motion) || {};
+  const stalled = motion.mode === 'FAULT' && ['motion_stall', 'reset_failed'].includes(motion.reason);
+  const locked = motion.mode === 'ESTOP' || motion.mode === 'FAULT';
+  const fresh = Boolean(wheel && wheel.motion && Number.isFinite(d.wheeltec_status_age_s) &&
+    d.wheeltec_status_age_s <= 1 && lastReceived && performance.now() - lastReceived < 2500);
+  const stopped = Boolean(wheel && wheel.stop_confirmed && wheel.motion.command &&
+    wheel.motion.command.vx === 0 && wheel.motion.command.wz === 0);
+  return { locked, stalled, ready: locked && fresh && stopped && motion.healthy === true &&
+    motion.waiting_stationary === false };
+}
+
+function updateMotionLockUI(d) {
+  const status = motionResetStatus(d);
+  const banner = $('motionLock');
+  if (!banner) return;
+  banner.hidden = !status.locked;
+  const mode = d && d.wheeltec && d.wheeltec.motion && d.wheeltec.motion.mode;
+  $('motionLockTitle').textContent = status.stalled ? '运动卡滞已锁存 · 禁止继续驱动'
+    : mode === 'ESTOP' ? '急停已锁存 · 跟随不可启动' : '底盘故障已锁存 · 跟随不可启动';
+  const startBlocked = status.locked && !isFollowerRunning;
+  $('followerToggleBtn').disabled = startBlocked;
+  $('fQuickToggleBtn').disabled = startBlocked;
+  document.querySelectorAll('.dpad-btn:not(.stop)').forEach(btn => { btn.disabled = status.locked; });
+  if (startBlocked) {
+    $('followerToggleText').textContent = '停车已锁存';
+    $('fQuickToggleBtn').textContent = '停车已锁存';
+  }
+  if (!status.locked) {
+    if (d && $('followerToggleText').textContent === '停车已锁存') {
+      updateFollowerUI(d.follower, Boolean(d.follower_running));
+    }
+    return;
+  }
+  const detail = $('motionLockDetail');
+  if (detail) detail.textContent = !d || !Number.isFinite(d.wheeltec_status_age_s) ||
+    d.wheeltec_status_age_s > 1 || performance.now() - lastReceived >= 2500
+    ? '底盘状态已过期，不能复位；请检查连接。'
+    : status.stalled ? '输出与底盘反馈不一致。请使用物理急停、检查碰撞和车轮；现场确认安全后才可单独复位。'
+    : !status.ready ? '等待底盘健康且确认停稳；请先现场检查停车原因。'
+    : '停车已确认。请现场检查周围安全，复位后仍需单独选择跟随。';
+  $('motionResetBtn').disabled = !status.ready || motionResetBusy;
+}
 
 function updateFollowerUI(f, isRunning) {
   isFollowerRunning = Boolean(isRunning);
@@ -664,6 +537,8 @@ function updateFollowerUI(f, isRunning) {
   const badge = $('followerBadge');
   const stEl = $('followerStateVal');
   const fBadge = $('fStateBadge');
+  const rawState = String((f && f.state) ? f.state : (isFollowerRunning ? 'STARTING' : 'OFFLINE'));
+  const pausedNode = rawState === 'PAUSED' && f && !f.stale;
 
   if (isFollowerRunning) {
     if (toggleBtn) {
@@ -685,17 +560,16 @@ function updateFollowerUI(f, isRunning) {
       toggleBtn.style.borderColor = '#356e63';
       toggleBtn.style.color = '#69dec4';
     }
-    if (toggleText) toggleText.textContent = '启动跟屁虫';
+    if (toggleText) toggleText.textContent = pausedNode ? '重新选择跟随' : '启动跟屁虫';
     if (toggleIcon) toggleIcon.textContent = '🐕';
     if (qBtn) {
-      qBtn.textContent = '一键启动';
+      qBtn.textContent = pausedNode ? '重新选择跟随' : '一键启动';
       qBtn.style.background = '#203b36';
       qBtn.style.borderColor = '#3d6e64';
       qBtn.style.color = '#69dec4';
     }
   }
 
-  const rawState = (f && f.state) ? f.state : (isFollowerRunning ? 'STARTING' : 'OFFLINE');
   if (badge) {
     badge.style.display = (rawState === 'OFFLINE' && !isFollowerRunning) ? 'none' : 'inline-flex';
     if (stEl) {
@@ -706,32 +580,55 @@ function updateFollowerUI(f, isRunning) {
 
   if (fBadge) {
     fBadge.className = 'f-badge';
+    // 雷达接力:人已出相机视野,正按雷达轨迹跟随
+    const relay = f && f.lidar_handoff ? ' · 雷达接力' : '';
+    // 车不动时把原因直接写出来,现场不用再去查 /follower/status
+    const REASONS = {
+      hold: '距离已到', person_close: '人太近', follow_envelope: '接近减速',
+      local_path: '绕行对准', no_observed_path: '路径尚未确认', insufficient_observation: '前方观测不足', depth_expired_during_control: '相机深度已过期', obstacle_path_blocked: '障碍物阻挡路径', no_target: '无目标',
+      scan_unavailable: '雷达数据中断', driver_unavailable: '底盘未就绪',
+      battery: '电量低', recovery_budget_used: '脱困次数已用完',
+      wait_stationary: '等待停稳', gear_change_dwell: '换向等待',
+      face_rear_target: '回旋掉头', k_turn_forward: '前进揉库', k_turn_reverse: '反打倒车',
+    };
+    const why = f && f.limit_reason && REASONS[f.limit_reason]
+      ? ` · ${f.limit_reason === 'driver_unavailable' ? chassisIssue(f) : REASONS[f.limit_reason]}` : '';
     if (!isFollowerRunning && (rawState === 'OFFLINE' || rawState === 'STANDBY')) {
       fBadge.classList.add('f-badge-idle');
       fBadge.textContent = '待命 / 未启动';
-    } else if (rawState.includes('TRACKING')) {
+    } else if (pausedNode) {
+      const motion = currentMotionStatus();
+      fBadge.classList.add(['FAULT', 'ESTOP'].includes(motion.mode) ? 'f-badge-aeb' : 'f-badge-lost');
+      fBadge.textContent = motion.mode === 'ESTOP' ? '急停已锁存' : motion.mode === 'FAULT' ? '跟随故障锁定' : '跟随暂停 · 程序仍在运行';
+    } else if (rawState.includes('TRACKING') || rawState === 'ALIGNING') {
       fBadge.classList.add('f-badge-tracking');
-      fBadge.textContent = '🎯 跟随中 (1.0m)';
+      fBadge.textContent = (rawState === 'ALIGNING' ? '🎯 绕行对准' : '🎯 跟随中') + relay;
     } else if (rawState.includes('AEB')) {
       fBadge.classList.add('f-badge-aeb');
       fBadge.textContent = '🛑 AEB硬刹停';
+    } else if (rawState === 'PATH_BLOCKED') {
+      fBadge.classList.add('f-badge-aeb');
+      fBadge.textContent = '⛔ 前方障碍受阻';   // 详细原因在「正在执行」里
     } else if (rawState.includes('SEARCH') || rawState.includes('LOST')) {
       fBadge.classList.add('f-badge-lost');
-      fBadge.textContent = '🔍 搜寻目标';
-    } else if (rawState.includes('WAITING')) {
+      fBadge.textContent = '🔍 搜寻目标' + why;
+    } else if (rawState === 'HOLDING' || rawState.includes('WAITING')) {
       fBadge.classList.add('f-badge-running');
-      fBadge.textContent = '✅ 距离保持 (1.0m)';
+      fBadge.textContent = '✅ 停车保持' + relay + why;
     } else {
-      fBadge.classList.add('f-badge-running');
-      fBadge.textContent = rawState;
+      fBadge.classList.add(rawState.startsWith('RECOVERY') || rawState.includes('SENSOR') || rawState.includes('BATTERY')
+                           ? 'f-badge-lost' : 'f-badge-running');
+      fBadge.textContent = ((typeof F_STATE_TEXT !== 'undefined' && F_STATE_TEXT[rawState]) || rawState) + why;
     }
   }
 
   const target = f ? f.target : null;
   if ($('fDistVal')) {
-    if (target && Number.isFinite(target.z)) {
-      $('fDistVal').textContent = `${target.z.toFixed(2)} m`;
-      $('fDistVal').style.color = Math.abs(target.z - 1.00) <= 0.15 ? '#69dec4' : '#f6c879';
+    // 显示跟随实际采用的距离(已换算到车头并与雷达校验),不是相机原始读数
+    const dist = target ? Number(target.distance ?? target.z) : NaN;
+    if (target && Number.isFinite(dist)) {
+      $('fDistVal').textContent = `${dist.toFixed(2)} m`;
+      $('fDistVal').style.color = Math.abs(dist - 1.00) <= 0.15 ? '#69dec4' : '#f6c879';
     } else {
       $('fDistVal').textContent = '--';
       $('fDistVal').style.color = 'var(--muted)';
@@ -750,8 +647,10 @@ function updateFollowerUI(f, isRunning) {
   }
 
   if ($('fConfVal')) {
-    if (target && Number.isFinite(target.confidence)) {
-      const pct = Math.round(target.confidence * 100);
+    // 跟随节点发布的字段名是 conf,旧页面读 confidence,所以一直显示 --
+    const conf = target ? Number(target.confidence ?? target.conf) : NaN;
+    if (target && Number.isFinite(conf)) {
+      const pct = Math.round(conf * 100);
       $('fConfVal').textContent = `${pct}%`;
       $('fConfVal').style.color = pct >= 80 ? '#69dec4' : '#f6c879';
     } else {
@@ -760,10 +659,50 @@ function updateFollowerUI(f, isRunning) {
     }
   }
 
+  const targetDirBox = $('fTargetDirectionText');
+  const targetDirBadge = $('fTargetSensorBadge');
+  const targetCompassIcon = $('fTargetCompassIcon');
+  if (targetDirBox) {
+    if (target && target.direction_name) {
+      const bDeg = target.bearing_deg;
+      targetDirBox.textContent = `${target.direction_name} ${bDeg > 0 ? '+' : ''}${bDeg}° (${target.clock_name || ''})`;
+      if (target.tracking_source === 'camera') {
+        targetDirBox.style.color = '#69dec4';
+        if (targetDirBadge) {
+          targetDirBadge.textContent = '视觉+雷达';
+          targetDirBadge.style.color = '#7cf6da';
+          targetDirBadge.style.borderColor = '#3ca88d';
+          targetDirBadge.style.background = '#133a2f';
+        }
+      } else {
+        targetDirBox.style.color = '#f6c879';
+        if (targetDirBadge) {
+          targetDirBadge.textContent = '雷达全向接力';
+          targetDirBadge.style.color = '#f6c879';
+          targetDirBadge.style.borderColor = '#78623b';
+          targetDirBadge.style.background = '#383120';
+        }
+      }
+      if (targetCompassIcon && Number.isFinite(bDeg)) {
+        targetCompassIcon.style.transform = `rotate(${bDeg}deg)`;
+      }
+    } else {
+      targetDirBox.textContent = isFollowerRunning ? '搜寻目标中...' : '跟随未启动';
+      targetDirBox.style.color = 'var(--muted)';
+      if (targetDirBadge) {
+        targetDirBadge.textContent = '无目标';
+        targetDirBadge.style.color = 'var(--muted)';
+        targetDirBadge.style.borderColor = '#2d4557';
+        targetDirBadge.style.background = '#182833';
+      }
+      if (targetCompassIcon) targetCompassIcon.style.transform = 'none';
+    }
+  }
+
   // 跟随节点陈旧时(被 Ctrl-C 或崩溃),它最后那一刻的读数不能再显示 ——
   // 否则界面会一直卡在"前方 0.55m、AEB 触发",而实时雷达其实看到 2 米开外,
   // 节点也早就不在了。后端 1.5 秒收不到状态就打 stale 标记。
-  const fLive = (f && !f.stale) ? f : null;
+  const fLive = (f && f.state && !Boolean(f.stale)) ? f : null;
 
   if ($('fFrontLidarVal')) {
     const minFront = (fLive && Number.isFinite(fLive.aeb_min_scan_m))
@@ -779,17 +718,18 @@ function updateFollowerUI(f, isRunning) {
   }
 
   if ($('fSpeedVal')) {
-    const vx = (fLive && Number.isFinite(fLive.cmd_vx)) ? fLive.cmd_vx : 0.0;
+    const vx = (fLive && Number.isFinite(fLive.chassis_speed)) ? fLive.chassis_speed : 0.0;
     $('fSpeedVal').textContent = `${vx.toFixed(2)} m/s`;
   }
   if ($('fSteerVal')) {
-    const wz = (fLive && Number.isFinite(fLive.cmd_wz)) ? fLive.cmd_wz : 0.0;
-    $('fSteerVal').textContent = `${wz.toFixed(2)} rad/s`;
+    const deg = (fLive && Number.isFinite(fLive.cmd_steer_deg)) ? fLive.cmd_steer_deg : 0.0;
+    $('fSteerVal').textContent = `${deg > 0 ? '+' : ''}${deg.toFixed(1)}°${deg > 0.5 ? ' 左' : deg < -0.5 ? ' 右' : ''}`;
   }
 
   const aebAlert = $('fAebAlert');
   if (aebAlert) {
-    const aeb = Boolean(fLive && (fLive.aeb_active || rawState.includes('AEB')));
+    // 只在急停真正拦住了运动时报警;静止保持距离时的锁存标志不代表正在硬刹
+    const aeb = Boolean(fLive && rawState.includes('AEB'));
     aebAlert.style.display = aeb ? 'block' : 'none';
   }
 
@@ -798,12 +738,356 @@ function updateFollowerUI(f, isRunning) {
     const lost = Boolean(isFollowerRunning && (rawState.includes('SEARCH') || rawState.includes('LOST')));
     lostAlert.style.display = lost ? 'block' : 'none';
   }
+  renderFollowerDetail(f, fLive, rawState);
+}
+
+// ==================== 跟随运行详情:在做什么、为什么、各环节是否正常 ====================
+const F_STATE_TEXT = {
+  TRACKING: '跟随中', ALIGNING: '绕行对准', REAR_ALIGNING: '倒车对准', TURNAROUND: '揉库掉头对准', HOLDING: '停车保持', OBSERVATION_WAIT: '前方观测不足', PATH_BLOCKED: '前方障碍受阻',
+  COLLISION_AEB: '防撞急停', AEB_EMERGENCY: 'AEB 硬急停', SEARCHING_LOST: '目标丢失', SEARCH_SCAN: '原地观察找人',
+  SEARCH_TURN: '转弯搜索', RECOVERY_REVERSE: '沿来路倒车脱困', RECOVERY_BRAKE: '停稳换向',
+  RECOVERY_WAIT: '等待条件满足', RECOVERY_EXHAUSTED: '脱困次数已用完', LOW_BATTERY: '电量低',
+  PAUSED: '跟随已暂停', SENSOR_CONFLICT: '传感器冲突', STARTING: '启动中', OFFLINE: '未运行', STANDBY: '待命',
+};
+const F_REASON_TEXT = {
+  mppi_timeout: '轨迹计算超时，本周期停车', mppi_error: '轨迹计算异常，已切换备用控制',
+  mppi_invalid: '轨迹结果无效，停车等待', mppi_infeasible: '没有通过净空复验的轨迹',
+  control_overrun: '本次控制计算超时，停车等待',
+  observations_expired_during_control: '计算期间传感器数据过期，停车等待新数据',
+  motion_authority: '当前未选择跟随模式，或控制链路不可用',
+  follow: '按目标距离正常跟随', local_path: '正前方不通,选了一条可行的弯道', hold: '已到保持距离',
+  target_behind: '目标在车后', face_rear_target: '前方开阔,大舵角前向回旋掉头面朝人体',
+  k_turn_forward: '掉头揉库中(前向大舵角回旋)', k_turn_reverse: '掉头揉库中(反打舵倒车调整)',
+  person_close: '人太近,停车', follow_envelope: '接近目标,提前减速', swept_path: '前方有障碍,减速',
+  no_observed_path: '尚无确认可通行的路径', insufficient_observation: '雷达与相机尚未确认通路', depth_expired_during_control: '计算期间相机深度过期，停车等待新帧', obstacle_path_blocked: '有效障碍回波阻挡候选路径', no_target: '没有识别到人', recovery_disabled: '脱困已关闭',
+  recovery_budget_used: '自动脱困次数用完,20 秒后重试', scan_unavailable: '雷达数据中断',
+  scan_stale: '雷达数据过期', driver_unavailable: '底盘未连接/未解锁/反馈中断',
+  loop_late: '控制周期严重超时(板子太忙)', battery: '电池电压过低', aeb_hard: '车体即将碰撞,硬刹停',
+  aeb_hard_stop: '接近障碍物急停',
+  range_conflict: '相机与雷达距离不一致', wait_stationary: '等车完全停稳', gear_change_dwell: '换挡前等待',
+  observe_before_turn: '人刚丢失,先停下观察', leg_complete_or_blocked: '本段机动完成或受阻',
+  observed_path: '沿已确认安全的路径搜索', recent_path_reverse: '沿刚走过的路短距离倒车',
+  bounded_search_complete: '搜索达到上限', sensor_or_driver_unavailable: '传感器或底盘异常',
+};
+const MOTION_REASON_TEXT = {
+  command_timeout: '跟随指令超时，运动模式已退出',
+  sensor_or_driver_fault: '传感器或底盘故障，运动模式已锁定',
+  operator_stop: '已手动停车', operator_select: '已选择跟随',
+  manual_takeover: '手动遥控接管', reset: '故障已复位，等待重新选择',
+  motion_stall: '输出与里程计反馈不一致，已锁存停车',
+  reset_failed: '复位时底盘未就绪，继续锁存停车',
+  startup: '底盘启动中',
+};
+const DRIVER_READY_TEXT = {
+  feedback_stale: '底盘串口反馈超时', feedback_missing: '等待底盘反馈',
+  disconnected: '底盘串口断开', waiting_for_stationary_feedback: '等待车辆停稳',
+  startup_stop: '底盘启动停车期', receive_only: '底盘只读模式',
+  firmware_profile_unconfirmed: '底盘协议未确认',
+  serial_write_timeout: '底盘串口写超时，已保持零速',
+  serial_output_backlog: '底盘串口发送拥堵，已保持零速',
+  motion_stall_latched: '运动卡滞已锁存，须现场检查后单独复位',
+};
+const F_SOURCE_TEXT = { camera_depth: '相机深度', lidar_fallback: '雷达兜底测距', lidar_track: '雷达接力跟踪', predicted: '短暂预测' };
+let lastFollowerPayload = null;
+var lastWheeltec = null;   // 底盘驱动状态(含独立防撞层);var:updateUI 可能先于此行执行
+const GUARD_TEXT = { guard_stop: '防撞停车', guard_slow: '防撞减速', guard_unknown: '扫掠区域未观测',
+                     guard_scan_stale: '雷达数据过期停车', guard_scan_unavailable: '雷达不可用停车',
+                     guard_disabled: '已关闭' };
+
+function fmtNum(v, digits, unit) {
+  return Number.isFinite(v) ? `${v.toFixed(digits)}${unit || ''}` : '--';
+}
+
+function currentMotionStatus() {
+  return (latestState && latestState.wheeltec && latestState.wheeltec.motion) ||
+    (latestState && latestState.motion) || {};
+}
+
+function chassisIssue(live) {
+  const wheel = lastWheeltec || {};
+  const diag = (live && live.diag) || {};
+  if (state && Number.isFinite(state.wheeltec_status_age_s) && state.wheeltec_status_age_s > 1) {
+    return '底盘状态消息中断';
+  }
+  if (wheel.holding) return DRIVER_READY_TEXT[wheel.hold_reason] || wheel.hold_reason || '底盘已保持零速';
+  if (wheel.ready && wheel.ready !== 'ready') return DRIVER_READY_TEXT[wheel.ready] || wheel.ready;
+  if (!diag.odometry_ok) return '底盘里程计未更新';
+  if (!diag.feedback_ok) return '跟随节点底盘反馈过期';
+  if (!diag.driver_armed) return '底盘未解锁';
+  return '底盘未就绪';
+}
+
+function motionPauseReason() {
+  if (state && Number.isFinite(state.wheeltec_status_age_s) && state.wheeltec_status_age_s > 1) {
+    return `底盘状态消息已中断 ${state.wheeltec_status_age_s.toFixed(1)} 秒，请检查驱动与串口`;
+  }
+  const motion = currentMotionStatus();
+  const wheel = lastWheeltec || {};
+  const faults = Array.isArray(motion.health_faults) ? motion.health_faults : [];
+  const parts = [MOTION_REASON_TEXT[motion.reason] || motion.reason || '运动模式未选择'];
+  if (motion.mode === 'FOLLOW') parts[0] = '跟随节点未收到新鲜的运动状态，已停车等待';
+  if (motion.mode === 'ESTOP') parts[0] = '急停已锁存；请现场检查后单独复位，复位不会自动跟随';
+  if (motion.reason === 'motion_stall') parts[0] = '运动卡滞已锁存；请使用物理急停并检查车轮、碰撞和里程计';
+  if (faults.length) parts.push(`当前故障: ${faults.join(', ')}`);
+  if (wheel.ready && wheel.ready !== 'ready') parts.push(DRIVER_READY_TEXT[wheel.ready] || wheel.ready);
+  if (Number.isFinite(wheel.write_timeout_age_s) && wheel.write_timeout_age_s < 15) {
+    parts.push(`最近发生串口写超时 (${wheel.write_timeout_age_s.toFixed(1)} 秒前)`);
+  }
+  return parts.join(' · ');
+}
+
+function describeFollower(f, live, rawState) {
+  // 返回 {tone, text, sub}
+  if (!isFollowerRunning && (!f || rawState === 'OFFLINE' || rawState === 'STANDBY')) {
+    return { tone: 'off', text: '跟随程序未启动', sub: '点「一键启动」开始;手动遥控随时可用' };
+  }
+  if (!live || !live.state) {
+    return {
+      tone: isFollowerRunning ? 'warn' : 'bad',
+      text: isFollowerRunning ? '跟随程序启动中...' : '收不到跟随程序的状态',
+      sub: isFollowerRunning ? '正在连接传感器与初始化节点...' : '程序可能正在启动,或已崩溃退出(超过 1.5 秒无消息)'
+    };
+  }
+  if (rawState === 'PAUSED') {
+    const mode = currentMotionStatus().mode;
+    return { tone: ['FAULT', 'ESTOP'].includes(mode) ? 'bad' : 'warn',
+             text: mode === 'ESTOP' ? '急停已锁存，跟随不能启动' : '跟随已停车，程序仍在运行', sub: motionPauseReason() };
+  }
+  if (live.limit_reason === 'driver_unavailable') {
+    return { tone: 'bad', text: '停车:底盘反馈不可用', sub: chassisIssue(live) };
+  }
+  const t = live.target;
+  const reason = F_REASON_TEXT[live.limit_reason] || live.limit_reason || '';
+  const vx = Number(live.cmd_vx) || 0;
+  const steer = Number(live.cmd_steer_deg) || 0;
+  const turn = Math.abs(steer) < 1 ? '直行' : (steer > 0 ? `左转 ${steer.toFixed(0)}°` : `右转 ${(-steer).toFixed(0)}°`);
+  const who = t ? `人在前方 ${fmtNum(t.distance, 2, 'm')}` +
+    (Math.abs(t.x) > 0.06 ? `、偏${t.x < 0 ? '左' : '右'} ${Math.abs(t.x).toFixed(2)}m` : '、正前方') : '';
+  const src = t ? `(${F_SOURCE_TEXT[t.range_source] || t.range_source || '相机'})` : '';
+  const st = String(live.state || '');
+  const b = live.blocked_by;
+  const CAUSE_TEXT = { none: '无回波', near: '近于量程下限', self: '打在车身上', masked: '屏蔽扇区', far: '超量程', ok: '正常', unsampled: '未采样' };
+  const causeText = b && b.ray_causes ? ' · 附近光束:' + Object.entries(b.ray_causes)
+    .map(([k, v]) => `${CAUSE_TEXT[k] || k}×${v}`).join('、') : '';
+  const blockText = b ? `${b.kind === 'obstacle' ? '障碍物' : b.kind === 'unknown' ? '未观测区域' : '无雷达数据'}:` +
+    `雷达方位 ${b.lidar_bearing_deg}°、待确认位置距雷达 ${b.lidar_range_m}m${causeText}` : '';
+  const depth = live.depth_path || {};
+  const depthHint = depth.reason === 'calibration_missing' ? '相机深度通路未标定，不能补足雷达盲区'
+    : depth.calibrated && !depth.ready ? '相机深度当前不能确认该处通路' : '';
+
+  if (vx > 0.005 && t) {
+    return { tone: 'ok', text: `${F_STATE_TEXT[st] || st}:${who} → 前进 ${vx.toFixed(2)} m/s,${turn}`,
+             sub: `${src} ${reason}${live.speed_cap_mps < 0.5 ? ` · 限速 ${live.speed_cap_mps.toFixed(2)} m/s` : ''}` };
+  }
+  if (vx > 0.005 || vx < -0.005) {
+    return { tone: 'warn', text: `${F_STATE_TEXT[st] || st}:${vx < 0 ? '倒车' : '前进'} ${Math.abs(vx).toFixed(2)} m/s,${turn}`,
+             sub: reason };
+  }
+  if (st === 'PATH_BLOCKED' || st.includes('AEB')) {
+    return { tone: 'bad', text: `停车:${F_STATE_TEXT[st] || st}${who ? `(${who})` : ''}`, sub: blockText || reason };
+  }
+  if (st === 'HOLDING') {
+    return { tone: 'ok', text: `停车保持:${who || '目标在保持距离内'}`, sub: `${src} ${reason}` };
+  }
+  if (st.startsWith('SEARCH') || st === 'SEARCHING_LOST') {
+    const age = Number.isFinite(live.target_seen_age_ms) ? `,已丢失 ${(live.target_seen_age_ms / 1000).toFixed(1)}s` : '';
+    return { tone: 'warn', text: `${F_STATE_TEXT[st] || st}${age}`, sub: reason };
+  }
+  return { tone: 'warn', text: `停车:${F_STATE_TEXT[st] || st}${who ? `(${who})` : ''}`,
+           sub: [reason, blockText, st === 'OBSERVATION_WAIT' ? depthHint : '',
+                 st === 'OBSERVATION_WAIT' ? '观测不足不是锁存，不能靠复位消除' : ''].filter(Boolean).join(' · ') };
+}
+
+function renderFollowerDetail(f, live, rawState) {
+  lastFollowerPayload = f || null;
+  const d = describeFollower(f, live, rawState);
+  const box = $('fNow');
+  if (box) {
+    box.dataset.tone = d.tone;
+    $('fNowText').textContent = d.text;
+    $('fNowSub').textContent = d.sub || '';
+  }
+
+  const responsive = Boolean(live && live.state !== 'OFFLINE' && f && !f.stale);
+  const running = isFollowerRunning && responsive;
+  const g = (live && live.diag) || {};
+  const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const chips = [];
+  const chip = (label, tone) => chips.push(`<span class="f-chip" data-tone="${esc(tone)}">${esc(label)}</span>`);
+  if (responsive && rawState === 'PAUSED') {
+    const wheel = lastWheeltec || {};
+    const ready = wheel.ready === 'ready';
+    chip('程序运行 · 跟随暂停', 'warn');
+    chip(ready ? '底盘已就绪' : (DRIVER_READY_TEXT[wheel.ready] || '等待底盘状态'), ready ? 'ok' : 'bad');
+  } else if (running) {
+    chip(g.scan_ok === false ? '雷达 ✕' : g.scan_ok ? '雷达 ✓' : '雷达 ?', g.scan_ok === false ? 'bad' : g.scan_ok ? 'ok' : 'off');
+    const chassisOk = g.feedback_ok && (g.driver_armed || live.dry_run);
+    chip(live.dry_run ? '底盘 演练模式' : chassisOk ? '底盘 ✓' : g.driver_ready === false ? '底盘 未就绪' : '底盘 ✕',
+         live.dry_run ? 'warn' : chassisOk ? 'ok' : 'bad');
+    const t = live.target;
+    chip(t ? `目标 ${F_SOURCE_TEXT[t.range_source] || '相机'}` : '目标 无', t ? (t.range_source === 'camera_depth' ? 'ok' : 'warn') : 'off');
+    chip(live.target_locked ? `已锁定 #${live.target_id ?? ''}` : '未锁定', live.target_locked ? 'ok' : 'off');
+    const people = (live.tracks || []).filter(tr => tr.confirmed).length;
+    if (people > 1) chip(`视野内 ${people} 人`, 'warn');
+    if (live.lidar_handoff) chip('雷达接力中', 'warn');
+    else if (t && t.range_source === 'camera_depth' && !live.lidar_track) chip('雷达未认领', 'warn');
+    if (g.loop_late) chip('控制周期超时', 'bad');
+    if (live.voltage_v && live.voltage_v < 21.5) chip(`电量低 ${live.voltage_v.toFixed(1)}V`, 'bad');
+  }
+  if ($('fChips')) $('fChips').innerHTML = chips.join('');
+
+  const kv = $('fKv');
+  if (!kv) return;
+  if (!responsive) {
+    kv.innerHTML = `<div><span>状态</span><b>${isFollowerRunning ? '等待跟随程序状态' : '未运行'}</b></div>`;
+    return;
+  }
+  const rows = [];
+  const head = title => rows.push(`<div class="f-kv-head">${esc(title)}</div>`);
+  const row = (k, v, tone) => rows.push(`<div><span>${esc(k)}</span><b${tone ? ` data-tone="${esc(tone)}"` : ''}>${esc(v)}</b></div>`);
+  if (rawState === 'PAUSED') {
+    const wheel = lastWheeltec || {};
+    const motion = currentMotionStatus();
+    head('跟随暂停');
+    row('运动模式', `${motion.mode || '--'} · ${motion.reason || '--'}`, motion.mode === 'FAULT' ? 'bad' : 'warn');
+    row('当前故障', (motion.health_faults || []).join(', ') || '无');
+    row('底盘状态', `${DRIVER_READY_TEXT[wheel.ready] || wheel.ready || '--'} · ${wheel.reason || '--'}`);
+    row('状态消息延迟', fmtNum(state && state.wheeltec_status_age_s, 2, ' s'),
+        state && state.wheeltec_status_age_s > 1 ? 'bad' : '');
+    row('底盘反馈延迟', fmtNum(wheel.age_ms, 0, ' ms'), wheel.age_ms > 600 ? 'bad' : '');
+    row('串口写超时', `${wheel.write_timeouts ?? '--'} 次 · 最近 ${fmtNum(wheel.write_timeout_age_s, 1, ' s 前')}`);
+    row('串口错误', wheel.last_error || '无');
+    kv.innerHTML = rows.join('');
+    return;
+  }
+  const t = live.target;
+  const lt = live.lidar_track;
+  head('决策');
+  row('控制器', live.controller === 'mppi' ? 'MPPI 预测控制' : '纯追踪',
+      live.controller_requested === 'mppi' && live.controller !== 'mppi' ? 'warn' : '');
+  if (live.controller_requested === 'mppi') {
+    row('计算后端', live.controller_backend || '--');
+    row('轨迹计算耗时', live.mppi ? fmtNum(live.mppi.solve_ms, 1, ' ms') : '等待目标',
+        live.mppi && live.mppi.over_budget ? 'bad' : '');
+    if (live.controller !== 'mppi') row('备用控制', '已切换纯追踪，重新选择跟随后重试 MPPI', 'warn');
+  }
+  row('状态', `${F_STATE_TEXT[live.state] || live.state}`);
+  row('原因', F_REASON_TEXT[live.limit_reason] || live.limit_reason || '--');
+  const depth = live.depth_path || {};
+  const depthReasons = {calibration_missing:'等待相机与雷达高度标定', calibration_invalid:'深度标定不匹配',
+    waiting_depth:'等待深度图', ready:'深度图就绪', depth_stale:'深度图过期', pose_missing:'缺少位姿',
+    intrinsics_mismatch:'深度内参与图像不匹配', intrinsics_invalid:'深度内参无效',
+    intrinsics_changed:'深度内参已变化，等待新图像', invalid_depth:'深度图无效',
+    depth_invalid:'没有有效深度', pose_reset:'位姿已重置，等待新图像'};
+  row('相机通路确认', depth.used ? '深度补充确认 · 限速 0.12 m/s' :
+    (depthReasons[depth.reason] || '等待深度数据'), depth.used ? 'ok' : '');
+  if (depth.intrinsics_error) row('深度内参诊断', depth.intrinsics_error, 'warn');
+
+  row('速度上限', fmtNum(live.speed_cap_mps, 2, ' m/s'));
+  row('指令速度', fmtNum(live.cmd_vx, 2, ' m/s'));
+  row('指令转角', fmtNum(live.cmd_steer_deg, 1, '°'));
+  row('收舵避让', live.steer_limited ? '是' : '否', live.steer_limited ? 'warn' : '');
+  head('目标');
+  row('距离(车头)', t ? fmtNum(t.distance, 2, ' m') : '--');
+  row('横向偏移', t ? `${fmtNum(t.x, 2, ' m')}${t.x < -0.06 ? ' 左' : t.x > 0.06 ? ' 右' : ''}` : '--');
+  row('测距来源', t ? (F_SOURCE_TEXT[t.range_source] || t.range_source) : '--', t && t.range_source !== 'camera_depth' ? 'warn' : '');
+  row('接近速度', t ? fmtNum(t.closing_rate, 2, ' m/s') : '--');
+  row('相机距离', t && Number.isFinite(t.z) ? fmtNum(t.z, 2, ' m') : '--');
+  row('视线上雷达', t && Number.isFinite(t.lidar_gap) ? fmtNum(t.lidar_gap, 2, ' m') : '--');
+  row('上次看到', Number.isFinite(live.target_seen_age_ms) ? `${(live.target_seen_age_ms / 1000).toFixed(1)} s 前` : '--');
+  // 相机看得到人、雷达却没认领到腿:人出画后无法接力,多半是相机/雷达外参没对上
+  const seedMissing = t && t.range_source === 'camera_depth' && !lt;
+  row('雷达轨迹', lt ? `${lt.valid ? '有效' : '无效'} · 相机确认 ${fmtNum(lt.since_camera_s, 1, 's')} 前`
+      : (seedMissing ? '未认领到腿(出画后无法接力)' : '无'), lt && lt.valid ? 'ok' : seedMissing ? 'warn' : '');
+  row('目标编号', live.target_id != null ? `#${live.target_id}(切换 ${live.target_switches ?? 0} 次)` : '无',
+      live.target_switches > 0 ? 'warn' : '');
+  row('位置不确定度', t && Number.isFinite(t.sigma_m) ? fmtNum(t.sigma_m * 100, 0, ' cm') : '--',
+      t && t.sigma_m > 0.25 ? 'warn' : '');
+  row('人的对地速度', t && Number.isFinite(t.ground_speed) ? fmtNum(t.ground_speed, 2, ' m/s') : '--');
+  row('跟踪中的人', (live.tracks || []).map(tr =>
+      `#${tr.id}${tr.target ? '★' : ''}${tr.confirmed ? '' : '?'}(${tr.x},${tr.y})`).join(' ') || '无');
+  row('预瞄点', Array.isArray(live.aim_point) ? `前 ${live.aim_point[0]} m · ${live.aim_point[1] >= 0 ? '左' : '右'} ${Math.abs(live.aim_point[1])} m` : '--');
+  head('路径');
+  row('路径净空', fmtNum(live.path_clearance_m, 2, ' m'), live.path_clearance_m < 0.15 ? 'bad' : live.path_clearance_m < 0.4 ? 'warn' : 'ok');
+  row('正前方雷达', fmtNum(live.aeb_min_scan_m, 2, ' m'));
+  row('挡路', live.blocked_by ? `${live.blocked_by.kind === 'obstacle' ? '障碍物' : '看不到'} ${live.blocked_by.lidar_bearing_deg}° ${live.blocked_by.lidar_range_m}m` : '无', live.blocked_by ? 'bad' : '');
+  row('AEB 锁存', live.aeb_active ? '是' : '否', live.aeb_active ? 'warn' : '');
+  row('车身自反射点', `${live.self_hits ?? '--'}`);
+  row('通过最窄宽度', fmtNum(live.min_gap_needed_m, 2, ' m'));
+  head('自动脱困');
+  row('阶段', live.recovery_enabled === false ? '已关闭' : (live.recovery_phase || '--'));
+  row('已用次数', `${live.recovery_legs ?? '--'} / 12`, live.recovery_exhausted ? 'bad' : '');
+  row('本次行驶', fmtNum(live.recovery_distance_m, 2, ' m'));
+  row('沿来路可倒', Number.isFinite(live.reverse_trail_m)
+      ? `来路 ${live.reverse_trail_m.toFixed(2)} m · 剩余额度 ${fmtNum(live.reverse_budget_m, 2, ' m')}`
+      : (live.blind_reverse_used ? '已用' : '未用'), live.reverse_trail_m < 0.1 ? 'warn' : '');
+  row('卡住时舵角', Number.isFinite(live.stall_steer_deg) ? `${live.stall_steer_deg}°(脱困时避开)` : '无');
+  head('系统');
+  row('雷达数据延迟', Number.isFinite(g.scan_age_ms) ? `${g.scan_age_ms} ms` : '--', g.scan_ok === false ? 'bad' : '');
+  row('底盘反馈延迟', Number.isFinite(g.feedback_age_ms) ? `${g.feedback_age_ms} ms` : '--', g.feedback_ok === false ? 'bad' : '');
+  row('底盘解锁', g.driver_armed ? '是' : '否', g.driver_armed || live.dry_run ? '' : 'bad');
+  row('控制周期', Number.isFinite(g.loop_interval_ms) ? `${g.loop_interval_ms} ms` : '--', g.loop_late ? 'bad' : g.loop_interval_ms > 80 ? 'warn' : '');
+  row('计算耗时', Number.isFinite(g.loop_compute_ms) ? `${g.loop_compute_ms} ms` : '--', g.loop_compute_ms > 50 ? 'warn' : '');
+  row('电池', fmtNum(live.voltage_v, 2, ' V'), live.voltage_v < 21.5 ? 'bad' : '');
+  const guard = lastWheeltec && lastWheeltec.guard;
+  row('底盘防撞层', guard ? `${guard.manual_override ? '手动接管，雷达防撞未参与' : GUARD_TEXT[guard.reason] || (guard.reason ? guard.reason : '正常')}`
+      + (Number.isFinite(guard.gap_m) ? ` · 路径 ${guard.gap_m} m` : '') + ` · 介入 ${guard.interventions} 次` : '--',
+      guard && guard.manual_override ? 'warn'
+      : guard && ['guard_stop','guard_unknown','guard_scan_stale','guard_scan_unavailable'].includes(guard.reason) ? 'bad'
+      : guard && guard.reason === 'guard_slow' ? 'warn' : '');
+  const block = guard && guard.block;
+  row('防撞关注点', block ? `${block.kind === 'unknown' ? '雷达未观测' : '障碍物'} · 后轴${block.x_m >= 0 ? '前' : '后'} ${fmtNum(Math.abs(block.x_m), 2, ' m')}`
+      + ` · ${block.y_m >= 0 ? '左' : '右'} ${fmtNum(Math.abs(block.y_m), 2, ' m')}`
+      + ` · 转角 ${fmtNum(block.steer_deg, 1, '°')}` : '--', block ? (guard.reason ? 'bad' : 'warn') : '');
+  row('驱动雷达数据', guard ? `${Number.isFinite(guard.scan_age_ms) ? guard.scan_age_ms + ' ms' : '无有效扫描'}`
+      + ` · ${guard.points ?? 0} 点` : '--', guard && !Number.isFinite(guard.scan_age_ms) ? 'bad' : '');
+  row('驱动所需净宽', guard ? fmtNum(guard.min_passage_width_m, 2, ' m') : '--');
+  row('底盘实测', `${fmtNum(live.chassis_speed, 2, ' m/s')}`);
+  row('底盘状态消息延迟', fmtNum(state && state.wheeltec_status_age_s, 2, ' s'),
+      state && state.wheeltec_status_age_s > 1 ? 'bad' : '');
+  row('串口写超时', `${lastWheeltec ? lastWheeltec.write_timeouts ?? '--' : '--'} 次`);
+  row('视觉帧/命中', `${live.target_messages ?? '--'} / ${live.visual_matches ?? '--'}`);
+  row('雷达接力帧', `${live.lidar_handoff_frames ?? 0}`);
+  row('雷达重捕获', `${live.target_reacquires ?? 0}`);
+  row('视线遮挡计数', `${live.range_conflicts ?? 0}`);
+  row('排除的非人轨迹', `${live.dropped_not_person ?? 0}`);
+  row('关联门控拒绝', `${live.outliers_rejected ?? 0}`);
+  row('相机时间戳异常', `${live.stamp_warnings ?? 0}`, live.stamp_warnings > 0 ? 'warn' : '');
+  kv.innerHTML = rows.join('');
+}
+
+if ($('fCopyDiag')) {
+  $('fCopyDiag').addEventListener('click', async () => {
+    const text = JSON.stringify(lastFollowerPayload || {}, null, 1);
+    try {
+      await navigator.clipboard.writeText(text);
+      notify('诊断信息已复制,可直接粘贴发送');
+    } catch (err) {
+      // 非 HTTPS 下部分手机浏览器禁用剪贴板:退回到可选中的文本框
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.cssText = 'position:fixed;left:8px;right:8px;bottom:8px;height:40vh;z-index:99999;font-size:11px';
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand('copy'); notify('诊断信息已复制'); } catch (e) { notify('请长按文本框手动复制'); }
+      ta.addEventListener('blur', () => ta.remove());
+    }
+  });
 }
 
 async function toggleFollower() {
+  if (motionResetStatus(latestState).locked && !isFollowerRunning) {
+    notify('停车已锁存。请先现场检查并单独复位，再重新选择跟随。');
+    return;
+  }
   try {
     const res = await fetch('/api/follower/toggle', { method: 'POST' });
     const data = await res.json();
+    if (!data.ok) throw new Error(data.message || '跟随模式切换失败');
+    if (typeof data.running !== 'boolean') {
+      notify('切换跟屁虫失败: 服务端响应异常');
+      return;
+    }
     if (data.running) {
       notify('🐕 跟屁虫已启动，正搜寻跟随人体...');
     } else {
@@ -815,8 +1099,31 @@ async function toggleFollower() {
   }
 }
 
+async function resetMotionLock() {
+  if (motionResetBusy || !motionResetStatus(latestState).ready) return;
+  if (!window.confirm('请确认你已在现场检查车辆和周围环境，车辆已停稳。复位可能重新使能底盘，但不会自动启动跟随。确认复位软件停车锁存？')) return;
+  if (!motionResetStatus(latestState).ready) {
+    notify('底盘状态已变化或过期，未发送复位请求。');
+    return;
+  }
+  motionResetBusy = true;
+  updateMotionLockUI(latestState);
+  try {
+    const res = await fetch('/api/motion/reset', {method: 'POST', cache: 'no-store'});
+    const data = await res.json();
+    if (!res.ok || !data.ok) throw new Error(data.message || '底盘拒绝复位');
+    notify('停车锁存已复位，车辆仍未选择跟随。请重新检查状态后手动启动。');
+  } catch (e) {
+    notify('停车复位失败: ' + e.message);
+  } finally {
+    motionResetBusy = false;
+    updateMotionLockUI(latestState);
+  }
+}
+
 if ($('followerToggleBtn')) $('followerToggleBtn').addEventListener('click', toggleFollower);
 if ($('fQuickToggleBtn')) $('fQuickToggleBtn').addEventListener('click', toggleFollower);
+if ($('motionResetBtn')) $('motionResetBtn').addEventListener('click', resetMotionLock);
 
 // ==================== 🕹️ 手动强行介入控制 (双模：点击微调点动 + 长按持续开动) ====================
 let currentSpeedTier = 'med';
@@ -850,26 +1157,109 @@ let pulseStopTimer = null;
 let pulseActive = false;
 let lastTouchTime = 0;
 
-async function sendManualDrive(action) {
+// 每个页面一个会话号 + 递增序号:后端据此丢弃迟到的旧「前进」,防止松手后车又动。
+const DRIVE_CLIENT_ID = (window.crypto && crypto.randomUUID)
+  ? crypto.randomUUID()
+  : `c${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`;
+const DRIVE_TIMEOUT_MS = 2500;
+const STOP_TIMEOUT_MS = 1200;
+let driveSeq = 0;
+let driveInFlight = 0;
+let lastCompletedDriveSeq = 0;
+const pendingMoves = new Set();
+let stopAwaitingStatus = false;
+let stopPriorEpoch = null;
+let stopConfirmationTimer = null;
+
+// heartbeat=true 的心跳请求在上一条还没回来时直接跳过,绝不在浏览器里排队堆积;
+// 首次按下和刹车永远立即发送。
+async function sendManualDrive(action, { heartbeat = false } = {}) {
+  if (heartbeat) {
+    if (document.hidden) {
+      if (typeof executeStop === 'function') executeStop();
+      return false;
+    }
+    if (driveInFlight > 1) return false;
+  }
+  if (action === 'stop') {
+    // Free browser connections occupied by superseded drive requests.
+    // The server's sequence gate still rejects any request already on the wire.
+    for (const pending of pendingMoves) pending.abort();
+  }
+  const seq = ++driveSeq;
+  const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  if (controller && action !== 'stop') pendingMoves.add(controller);
+  const timeout = action === 'stop' ? STOP_TIMEOUT_MS : DRIVE_TIMEOUT_MS;
+  const timer = controller ? setTimeout(() => controller.abort(), timeout) : null;
+  driveInFlight += 1;
   try {
     const response = await fetch('/api/manual_drive', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      cache: 'no-store',
+      keepalive: action === 'stop',
+      signal: controller ? controller.signal : undefined,
       body: JSON.stringify({
         direction: action,
         speed_tier: currentSpeedTier,
-        steer_tier: currentSteerTier
+        steer_tier: currentSteerTier,
+        client_id: DRIVE_CLIENT_ID,
+        seq
       })
     });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const result = await response.json();
-    if (!result.ok) throw new Error(result.error || '底盘拒绝指令');
+    if (!response.ok || !result.ok) throw new Error(result.error || `HTTP ${response.status}`);
+    if (seq < driveSeq || seq < lastCompletedDriveSeq) return true;
+    lastCompletedDriveSeq = seq;
+    if (action === 'stop') {
+      stopAwaitingStatus = true;
+      updateBadgeStatus('刹车命令已送达，等待底盘状态', '#f6c879');
+      confirmStopStatus(latestState);
+      if (stopAwaitingStatus) {
+        stopConfirmationTimer = setTimeout(() => {
+          if (stopAwaitingStatus) updateBadgeStatus('停车状态未确认，请使用物理急停', '#ff8c91');
+        }, 1800);
+      }
+      return true;
+    }
+    const badge = $('manualActiveBadge');
+    if (badge && badge.textContent.startsWith('控制链路异常')) {
+      updateBadgeStatus(currentAction ? '控制链路已恢复' : '已刹停 (点击微调 / 长按持续开)', 'var(--muted)');
+    }
     return true;
   } catch (error) {
+    if (seq < driveSeq || seq < lastCompletedDriveSeq) return false;
+    lastCompletedDriveSeq = seq;
+    const msg = error && error.name === 'AbortError' ? `响应超时 (>${timeout}ms)` : error.message;
     console.error('手动底盘指令失败:', error);
-    updateBadgeStatus(`控制链路异常: ${error.message}`, '#ff8c91');
+    updateBadgeStatus(action === 'stop' ? `刹车未确认: ${msg}；请使用物理急停` : `控制链路异常: ${msg}`, '#ff8c91');
     return false;
+  } finally {
+    if (timer) clearTimeout(timer);
+    if (controller) pendingMoves.delete(controller);
+    driveInFlight = Math.max(0, driveInFlight - 1);
   }
+}
+
+function confirmStopStatus(snapshot) {
+  if (!stopAwaitingStatus) return;
+  const motion = snapshot && snapshot.motion;
+  const command = motion && motion.command;
+  const driver = snapshot && snapshot.wheeltec;
+  if (motion && motion.reason === 'motion_stall' && driver && driver.stall_latched) {
+    stopAwaitingStatus = false;
+    clearTimeout(stopConfirmationTimer);
+    stopConfirmationTimer = null;
+    updateBadgeStatus('卡滞锁停：请使用物理急停并检查车辆', '#ff8c91');
+    return;
+  }
+  if (!motion || !command || motion.epoch === stopPriorEpoch ||
+      !['IDLE', 'ESTOP'].includes(motion.mode) || command.vx !== 0 || command.wz !== 0 ||
+      !driver || !driver.stop_confirmed || !driver.motion || driver.motion.epoch !== motion.epoch) return;
+  stopAwaitingStatus = false;
+  clearTimeout(stopConfirmationTimer);
+  stopConfirmationTimer = null;
+  updateBadgeStatus('底盘反馈已确认停稳', 'var(--muted)');
 }
 
 function updateBadgeStatus(text, color) {
@@ -898,17 +1288,29 @@ function executeStop() {
   }
   document.querySelectorAll('.dpad-btn').forEach(b => b.classList.remove('pressed'));
 
-  sendManualDrive('stop');
-  updateBadgeStatus('已刹停 (点击微调 / 长按持续开)', 'var(--muted)');
+  clearTimeout(stopConfirmationTimer);
+  stopAwaitingStatus = false;
+  stopPriorEpoch = latestState && latestState.motion && latestState.motion.epoch;
+  updateBadgeStatus('刹车请求发送中', '#f6c879');
+  return sendManualDrive('stop');
 }
 
 function handlePressStart(action, btnEl) {
   if (action === 'stop') {
     if (navigator.vibrate) navigator.vibrate([30, 30, 30]);
     executeStop();
-    notify('底盘已紧急刹停');
+    notify('刹车请求已发送，等待底盘确认');
     return;
   }
+  if (motionResetStatus(latestState).locked) {
+    updateBadgeStatus('停车已锁存，请现场检查后单独复位', '#ff8c91');
+    return;
+  }
+  if (document.hidden) return;
+
+  clearTimeout(stopConfirmationTimer);
+  stopConfirmationTimer = null;
+  stopAwaitingStatus = false;
 
   // 若已有正在运行的脉冲定时器或心跳，立即清除
   if (pulseStopTimer) {
@@ -933,20 +1335,42 @@ function handlePressStart(action, btnEl) {
   if (navigator.vibrate) navigator.vibrate(20);
 
   const actionText = ACTION_NAMES[action] || action;
-  updateBadgeStatus(`已接管: ${actionText} (按住开动)`, '#ff8c91');
+  updateBadgeStatus(`手动请求: ${actionText} (等待底盘反馈)`, '#f6c879');
 
   // 1. 立即下发初始推力
   sendManualDrive(action);
 
-  // 2. 开启 100ms 网络心跳（后端再以 50Hz 稳定维持平滑推力）
+  // 后端以 50Hz 维持推力；网络心跳仅刷新指令有效期。
   heartbeatTimer = setInterval(() => {
     if ((isPressing || pulseActive) && currentAction === action) {
-      sendManualDrive(action);
-      if (isPressing) {
-        updateBadgeStatus(`已接管: ${actionText} (持续推进中)`, '#ff8c91');
+      if (motionResetStatus(latestState).locked) {
+        executeStop();
+        updateBadgeStatus('停车已锁存，请使用物理急停并现场检查', '#ff8c91');
+        return;
+      }
+      sendManualDrive(action, { heartbeat: true });
+      if (isPressing || pulseActive) {
+        const wheel = latestState?.wheeltec || {};
+        const motion = wheel.motion || {};
+        const output = Number(wheel.output_speed_turn?.[0]);
+        const measured = Number(wheel.telemetry?.velocity?.[0]);
+        if (!Number.isFinite(latestState?.wheeltec_status_age_s) || latestState.wheeltec_status_age_s > 1) {
+          updateBadgeStatus('底盘状态过期；请使用物理急停', '#ff4d4f');
+        } else if (wheel.ready && wheel.ready !== 'ready') {
+          updateBadgeStatus(DRIVER_READY_TEXT[wheel.ready] || wheel.ready, '#ff4d4f');
+        } else if (motion.waiting_stationary) {
+          updateBadgeStatus('等待底盘确认静止后接管', '#f6c879');
+        } else if (motion.mode !== 'MANUAL') {
+          updateBadgeStatus(`手动请求: ${actionText} · 等待底盘接管`, '#f6c879');
+        } else if (Number.isFinite(output) && Math.abs(output) >= 0.1 &&
+                   Number.isFinite(measured) && Math.abs(measured) < 0.025) {
+          updateBadgeStatus(`输出 ${output.toFixed(2)}m/s · 反馈近零，疑似受阻`, '#ff4d4f');
+        } else {
+          updateBadgeStatus(`手动: ${actionText} · 实测 ${Number.isFinite(measured) ? measured.toFixed(2) : '--'}m/s`, '#ff8c91');
+        }
       }
     }
-  }, 100);
+  }, 180);
 }
 
 function handlePressEnd(action, btnEl) {
@@ -1011,7 +1435,7 @@ document.querySelectorAll('.dpad-btn').forEach(btn => {
   btn.addEventListener('touchcancel', (e) => {
     e.preventDefault();
     lastTouchTime = performance.now();
-    handlePressEnd(action, btn);
+    if (currentAction === action && isPressing) executeStop();
   }, { passive: false });
 
   // 3. 桌面端鼠标事件 (使用 lastTouchTime 过滤移动端模拟鼠标事件)
@@ -1036,15 +1460,19 @@ document.querySelectorAll('.dpad-btn').forEach(btn => {
     }
   });
 
-  // 4. Fallback click 事件兜底
+  // 4. click 事件仅阻止默认行为, 避免与 touchend/mouseup 产生双发竞态
   btn.addEventListener('click', (e) => {
     e.preventDefault();
-    if (performance.now() - lastTouchTime < 500) return;
-    if (!isPressing && currentAction !== action) {
-      handlePressStart(action, btn);
-      setTimeout(() => handlePressEnd(action, btn), 50);
-    }
   });
+});
+
+// 全局鼠标弹起兜底：防止鼠标按下后滑出按钮区域并在窗口外松手导致卡死
+window.addEventListener('mouseup', (e) => {
+  if (e.button !== 0) return;
+  if (performance.now() - lastTouchTime < 500) return;
+  if (isPressing && currentAction) {
+    handlePressEnd(currentAction, currentBtn);
+  }
 });
 
 // 速度挡位选择器
@@ -1089,7 +1517,7 @@ window.addEventListener('keydown', (e) => {
   e.preventDefault();
   if (action === 'stop') {
     executeStop();
-    notify('底盘急停');
+    notify('刹车请求已发送，等待底盘确认');
     return;
   }
   if (currentAction !== action) {

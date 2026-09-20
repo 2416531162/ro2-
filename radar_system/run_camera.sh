@@ -1,44 +1,42 @@
 #!/bin/bash
-# Camera driver + Depth-to-Pointcloud (XYZRGB) + Calibrated base_link -> camera_link TF
-set -euo pipefail
-ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-set +u
-source "/opt/ros/${ROS_DISTRO:-jazzy}/setup.bash"
-set -u
+# RGB-D frames are used only for person tracking; no point-cloud generation.
+DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+set -e
+source "$DIR/ros_env.sh"
 export ROS_AUTOMATIC_DISCOVERY_RANGE="${ROS_AUTOMATIC_DISCOVERY_RANGE:-LOCALHOST}"
 
-PIDS=()
-cleanup() {
-  trap - EXIT INT TERM
-  for pid in "${PIDS[@]}"; do kill -INT "$pid" 2>/dev/null || true; done
-  sleep 1
-  for pid in "${PIDS[@]}"; do kill -TERM "$pid" 2>/dev/null || true; done
-}
-trap cleanup EXIT INT TERM
+if [ "$(id -u)" -eq 0 ]; then
+    rm -f /dev/shm/sem.astra_device_sem 2>/dev/null || true
+    camera_env=(HOME=/home/wheeltec USER=wheeltec
+      RK3588_RUNTIME_RESOLVED=1 "ROBOT_RUNTIME_ENV=$ROBOT_RUNTIME_ENV"
+      "RK3588_RUNTIME_ENV_SOURCE=$RK3588_RUNTIME_ENV_SOURCE"
+      "RK3588_ROS_ROOT=$RK3588_ROS_ROOT" "ROS_DISTRO=$ROS_DISTRO"
+      "RK3588_PYTHON=$RK3588_PYTHON" "RK3588_POSE_MODEL=$RK3588_POSE_MODEL"
+      "RK3588_ROBOT_CONFIG=$RK3588_ROBOT_CONFIG" "RK3588_DEPTH_PATH_CONFIG=$RK3588_DEPTH_PATH_CONFIG"
+      "RK3588_CAMERA_WORKSPACE=${RK3588_CAMERA_WORKSPACE:-/home/wheeltec/install/setup.bash}"
+      "ROS_AUTOMATIC_DISCOVERY_RANGE=$ROS_AUTOMATIC_DISCOVERY_RANGE")
+    for key in ROS_DOMAIN_ID ROS_LOCALHOST_ONLY RMW_IMPLEMENTATION CYCLONEDDS_URI FASTRTPS_DEFAULT_PROFILES_FILE; do
+        if [ "${!key+x}" ]; then camera_env+=("$key=${!key}"); fi
+    done
+    exec sudo -u wheeltec env "${camera_env[@]}" bash "$DIR/run_camera.sh" "$@"
+fi
 
-# Publish calibrated camera extrinsic:
-# x=0.54m (forward), y=0m (center), z=0.35m (height above ground), pitch=15° (0.261799 rad downward)
-ros2 run tf2_ros static_transform_publisher \
-  --x 0.54 --y 0.0 --z 0.35 \
-  --yaw 0.0 --pitch 0.261799 --roll 0.0 \
-  --frame-id base_link --child-frame-id camera_link &
-PIDS+=("$!")
+cd "$DIR"
+rm -f /dev/shm/sem.astra_device_sem 2>/dev/null || true
 
-# 1. Launch Astra S camera driver
-ros2 launch openni2_camera camera_only.launch.py &
-PIDS+=("$!")
+CAMERA_WORKSPACE="${RK3588_CAMERA_WORKSPACE:-/home/wheeltec/install/setup.bash}"
+if [ -r "$CAMERA_WORKSPACE" ]; then
+    selected="$ROS_DISTRO"
+    source "$CAMERA_WORKSPACE"
+    if [ "$ROS_DISTRO" != "$selected" ]; then
+        echo "Camera workspace ROS conflict: selected $selected, $CAMERA_WORKSPACE set $ROS_DISTRO" >&2
+        exit 1
+    fi
+    echo "Camera workspace: $CAMERA_WORKSPACE (ROS_DISTRO=$ROS_DISTRO)" >&2
+fi
 
-# 2. Wait for camera driver to initialize device
-sleep 3
-
-# 3. Launch depth_image_proc XYZRGB node with approximate time sync (exact_sync:=false)
-ros2 run depth_image_proc point_cloud_xyzrgb_node --ros-args \
-  -p exact_sync:=false \
-  -p queue_size:=5 \
-  -r rgb/camera_info:=/camera/rgb/camera_info \
-  -r rgb/image_rect_color:=/camera/rgb/image_raw \
-  -r depth_registered/image_rect:=/camera/depth_raw/image \
-  -r points:=/camera/depth_registered/points &
-PIDS+=("$!")
-
-wait -n "${PIDS[@]}"
+if ros2 pkg prefix astra_camera >/dev/null 2>&1; then
+    exec ros2 launch astra_camera astra_mini.launch.py "$@"
+else
+    exec ros2 launch openni2_camera camera_only.launch.py "$@"
+fi

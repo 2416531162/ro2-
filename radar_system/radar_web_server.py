@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-RK3588 激光雷达与 2D/3D 空间 SLAM 实时建模 Web 控制大屏
+RK3588 雷达与摄像头人体跟踪控制台
 - 运行端口: 8088
-- 汇聚: /scan (雷达点云) + /map (占据栅格地图) + /robot_pose (机器人位姿与轨迹)
+- 汇聚: /scan、人体姿态检测、跟随状态与底盘遥测
 """
 
 import http.server
@@ -14,32 +14,25 @@ import math
 import time
 import threading
 import subprocess
-import signal
 import sys
 import rclpy
 from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 
-try:
-    import numpy as np
-except ImportError:
-    np = None
+import numpy as np
 from sensor_msgs.msg import LaserScan
-from nav_msgs.msg import OccupancyGrid
-from geometry_msgs.msg import PoseStamped, Twist
 from std_msgs.msg import String, Float32
 from std_srvs.srv import SetBool, Trigger
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from motion_safety import ChassisGeometry, yaw_from_steer, steer_from_yaw, clamp
-from grid_utils import clean_ranges, sector_min, downsample_step, extract_grid_points
+from scan_utils import clean_ranges, sector_min
+from runtime_config import PROFILE
+from motion_client import MotionClient
 from manual_drive import ManualDriveLatch
 
 PORT = 8088
-ENABLE_MAP = os.environ.get('ENABLE_MAP', '0').strip().lower() in ('1', 'true', 'yes', 'on')
-MAP_MIN_INTERVAL_S = 1.0
-MAP_MAX_POINTS = 12000
 MANUAL_PUBLISH_PERIOD_S = 0.02
 MANUAL_HEARTBEAT_TIMEOUT_S = 0.75
 
@@ -56,8 +49,8 @@ MANUAL_HEARTBEAT_TIMEOUT_S = 0.75
 CHASSIS = ChassisGeometry()
 
 # 与页面按钮的标称保持一致；高档仍低于驱动层 1.30m/s 硬上限。
-SPEED_TIERS_MPS = {'low': 0.50, 'med': 0.85, 'high': 1.20}
-REVERSE_SCALE = 0.6                      # 倒车是盲区方向,统一降速
+SPEED_TIERS_MPS = {tier: PROFILE['manual'][tier + '_mps'] for tier in ('low', 'med', 'high')}
+REVERSE_SCALE = PROFILE['manual']['reverse_scale']                      # 倒车是盲区方向,统一降速
 STEER_TIERS_DEG = {'gentle': 8.0, 'normal': 14.0, 'full': 20.0}
 
 # 每个方向键:(前进符号, 转角占该档的比例, 车速折扣)
@@ -103,22 +96,8 @@ state = {
     'right_dist': 2.0,
     'min_dist': 1.8,
     'ranges': [],
-    'robot_x': 0.0,
-    'robot_y': 0.0,
-    'robot_yaw': 0.0,
-    'trajectory': [],
-    # AI 3D 目标检测
     'ai_targets': [],
-    # 联合 3D 体素建图状态
-    'mapping_status': {},
-    # 地图数据
-    'map_width': 0,
-    'map_height': 0,
-    'map_res': 0.05,
-    'map_origin_x': -4.0,
-    'map_origin_y': -3.5,
-    'map_data': [], # 稀疏压缩后的地图
-    'rtk': {},
+    'ai_status': {},
     # 动力电池状态
     'voltage': 0.0,
     'battery_pct': 0,
@@ -131,7 +110,6 @@ state = {
 frame_count = 0
 last_hz_calc = time.time()
 
-CORS_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'cors_config.json')
 bridge_node = None
 follower_proc = None
 last_check_proc = 0.0
@@ -181,72 +159,71 @@ def check_follower_running_cached():
         cached_proc_running = is_follower_running()
     return cached_proc_running
 
+def is_follow_active():
+    return bool(bridge_node and bridge_node.motion.fresh()
+                and bridge_node.motion.state.get('mode') == 'FOLLOW')
+
+
 def start_follower():
     global follower_proc
-    if is_follower_running():
-        return True, "already_running"
-    script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'person_follower.py')
-    cmd = [sys.executable, "-u", script_path]
-    env = os.environ.copy()
-    try:
-        follower_proc = subprocess.Popen(
-            cmd,
-            cwd=os.path.dirname(os.path.abspath(__file__)),
-            env=env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            preexec_fn=os.setsid
-        )
-        return True, "started"
-    except Exception as e:
-        return False, str(e)
+    if bridge_node is None:
+        return False, 'motion bridge unavailable'
+    with bridge_node.control_lock:
+        ok, message = bridge_node.recover_latched_fault()
+        if not ok:
+            return False, message
+        if os.environ.get('RK3588_MANAGED_FOLLOWER') == '1':
+            try:
+                unit = 'rk3588-perception@follower.service'
+                active = subprocess.run(['systemctl', 'is-active', '--quiet', unit],
+                                        check=False, timeout=2, capture_output=True)
+                if active.returncode != 0:
+                    command = ['systemctl', 'start', unit]
+                    if os.geteuid() != 0:
+                        command = ['sudo', '-n', *command]
+                    subprocess.run(command, check=True, timeout=10,
+                                   capture_output=True, text=True)
+            except subprocess.CalledProcessError as exc:
+                return False, (exc.stderr or str(exc)).strip()
+            except Exception as exc:
+                return False, str(exc)
+        elif not is_follower_running():
+            script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'person_follower.py')
+            try:
+                # The web-selected mode, not the child, controls takeover.
+                follower_proc = subprocess.Popen(
+                    [sys.executable, '-u', script_path, '--passive'],
+                    cwd=os.path.dirname(script_path), start_new_session=True)
+            except Exception as exc:
+                return False, str(exc)
+        bridge_node.manual_drive.set(0.0, 0.0)
+        bridge_node.manual_drive.sample()  # discard the old manual zero
+        return bridge_node.select_follow(True)
+
 
 def stop_follower():
-    global follower_proc, cached_proc_running, last_check_proc
-    try:
-        subprocess.run(['pkill', '-9', '-f', 'person_follower.py'], check=False)
-    except Exception:
-        pass
-    if follower_proc is not None:
-        try:
-            os.killpg(os.getpgid(follower_proc.pid), signal.SIGKILL)
-        except Exception:
-            pass
-        follower_proc = None
-    cached_proc_running = False
-    last_check_proc = time.time()
-    if bridge_node:
-        bridge_node.send_manual_twist(0.0, 0.0)
-    with data_lock:
-        state['follower'] = {'state': 'OFFLINE', 'aeb_min_scan_m': state.get('front_dist', 99.0)}
-    return True, "stopped"
+    if bridge_node is None:
+        return False, 'motion bridge unavailable'
+    with bridge_node.control_lock:
+        return bridge_node.select_follow(False)
 
 
-class SLAMBridgeNode(Node):
+class TrackingBridgeNode(Node):
     def __init__(self):
-        super().__init__('radar_slam_web_bridge')
+        super().__init__('radar_tracking_web_bridge')
         self.sub_scan = self.create_subscription(LaserScan, '/scan', self.scan_cb, 10)
-        self.sub_map = self.sub_proj_map = None
-        if ENABLE_MAP:
-            self.sub_map = self.create_subscription(OccupancyGrid, '/map', self.map_cb, 5)
-            self.sub_proj_map = self.create_subscription(
-                OccupancyGrid, '/projected_map', self.map_cb, 5)
-        self.last_map_time = 0.0
-        self.sub_pose = self.create_subscription(PoseStamped, '/robot_pose', self.pose_cb, 10)
         self.sub_ai = self.create_subscription(String, '/camera/ai_detection/targets', self.ai_cb, 10)
-        self.sub_stat = self.create_subscription(String, '/joint_mapping/status', self.stat_cb, 10)
-        self.sub_rtk = self.create_subscription(String, '/rtk/status', self.rtk_cb, 10)
+        self.sub_ai_status = self.create_subscription(String, '/camera/ai_detection/status', self.ai_status_cb, 1)
         self.sub_voltage = self.create_subscription(Float32, '/voltage', self.voltage_cb, 10)
         self.sub_follower = self.create_subscription(String, '/follower/status', self.follower_cb, 10)
         self.sub_wheeltec = self.create_subscription(String, '/wheeltec/status', self.wheeltec_cb, 10)
-        self.pub_cors_cmd = self.create_publisher(String, '/rtk/cors_cmd', 10)
 
-        # 手动介入控制发布者与底盘解锁使能客户端
-        self.pub_cmd_vel = self.create_publisher(Twist, '/cmd_vel', 10)
-        self.cli_arm = self.create_client(SetBool, '/wheeltec/arm')
-        self.cli_stop = self.create_client(Trigger, '/wheeltec/stop')
+        self.motion = MotionClient(self, 'manual', timeout_s=1.0)
+        self.follow_selector = self.create_client(SetBool, '/motion/follow')
+        self.cli_reset = self.create_client(Trigger, '/motion/reset')
+        self.cli_stop = self.create_client(Trigger, '/motion/stop')
+        self.control_lock = threading.RLock()
         self.is_armed = False
-        self.last_arm_request = 0.0
 
         self.manual_drive = ManualDriveLatch(MANUAL_HEARTBEAT_TIMEOUT_S)
         # HTTP 工作线程只写入最新期望值，ROS executor 线程以 50Hz 稳定发布。
@@ -257,7 +234,7 @@ class SLAMBridgeNode(Node):
         self.manual_timer = self.create_timer(MANUAL_PUBLISH_PERIOD_S, self.manual_loop,
                                               callback_group=self.manual_group)
 
-        self.get_logger().info('>>> [SLAM Web Bridge] 已订阅 /scan, /voltage, /follower/status, /wheeltec/status, /map, /projected_map, /robot_pose, AI, 3D 建图与 RTK 话题 (含CORS与底盘手动控制)...')
+        self.get_logger().info('>>> 雷达、人体姿态、跟随与底盘遥测已连接')
 
     def wheeltec_cb(self, msg):
         global state
@@ -266,35 +243,67 @@ class SLAMBridgeNode(Node):
             armed = bool(d.get('armed', False))
             ready = (d.get('ready', '') == 'ready')
             self.is_armed = armed
+            d['_rx_monotonic'] = time.monotonic()
             with data_lock:
                 state['wheeltec'] = d
-            now = time.monotonic()
-            if not armed and ready and (now - self.last_arm_request > 1.5):
-                self.last_arm_request = now
-                self.arm_chassis(True)
         except Exception:
             pass
 
-    def arm_chassis(self, enable=True):
-        if self.cli_arm.service_is_ready():
-            req = SetBool.Request()
-            req.data = enable
-            self.last_arm_request = time.monotonic()
-            self.cli_arm.call_async(req)
+    @staticmethod
+    def call_motion_service(client, request):
+        if not client.service_is_ready():
+            return False, 'motion service unavailable; update and restart chassis driver'
+        future = client.call_async(request)
+        done = threading.Event()
+        future.add_done_callback(lambda _: done.set())
+        if not done.wait(2.0):
+            return False, 'motion service response timeout; inspect /motion/status'
+        try:
+            result = future.result()
+            return result.success, result.message
+        except Exception as exc:
+            return False, str(exc)
+
+    def select_follow(self, enable):
+        return self.call_motion_service(self.follow_selector, SetBool.Request(data=enable))
+
+    def recover_latched_fault(self):
+        """Reset a recovered, stationary FAULT before an explicit new command.
+
+        MotionAuthority deliberately latches FAULT after a transient sensor/driver
+        outage. Keeping that latch is important, but the web UI previously had no
+        recovery path: every later manual/follow request was rejected even after all
+        sensors were healthy again. A fresh user command is explicit intent to
+        continue, so let the driver's /motion/reset service perform its own health
+        and stationary checks, then retry the command.
+        """
+        with self.motion.lock:
+            current = dict(self.motion.state)
+            fresh = self.motion.fresh()
+
+        if current.get('mode') != 'FAULT':
+            if current.get('mode') == 'ESTOP':
+                return False, '急停已锁存，请现场检查并单独复位'
+            return True, ''
+        if current.get('reason') in ('motion_stall', 'reset_failed'):
+            return False, '运动卡滞已锁存：请使用物理急停并检查障碍、车轮与里程计，确认安全后单独复位'
+        if not fresh:
+            return False, '运动状态已过期，请检查底盘服务'
+        if not current.get('healthy', False):
+            faults = current.get('health_faults', [])
+            fault_desc = (', '.join(faults)) if faults else '待确认'
+            return False, f'传感器或底盘仍有故障 ({fault_desc})，拒绝复位'
+        if current.get('waiting_stationary', True):
+            return False, '等待车辆确认静止后才能复位'
+        return self.call_motion_service(self.cli_reset, Trigger.Request())
 
     def manual_loop(self):
-        now = time.monotonic()
-        vx, wz, active, publish_zero = self.manual_drive.sample(now)
-
-        if active:
-            if not self.is_armed and now - self.last_arm_request > 0.25:
-                self.arm_chassis(True)
-            cmd = Twist()
-            cmd.linear.x = float(vx)
-            cmd.angular.z = float(wz)
-            self.pub_cmd_vel.publish(cmd)
-        elif publish_zero:
-            self.pub_cmd_vel.publish(Twist())
+        with self.control_lock:
+            vx, wz, active, publish_zero = self.manual_drive.sample(time.monotonic())
+            if active or publish_zero:
+                self.motion.publish(vx if active else 0.0, wz if active else 0.0)
+        with data_lock:
+            state['motion'] = dict(self.motion.state)
 
     def send_manual_twist(self, vx, wz):
         self.manual_drive.set(vx, wz)
@@ -316,21 +325,13 @@ class SLAMBridgeNode(Node):
         global state
         try:
             v = float(msg.data)
-            pct = max(0, min(100, int(round((v - 21.0) / 4.2 * 100))))
+            pct = max(0, min(100, int(round((v - 19.0) / 6.2 * 100))))
             with data_lock:
                 state['voltage'] = round(v, 2)
                 state['battery_pct'] = pct
         except Exception:
             pass
 
-    def rtk_cb(self, msg):
-        global state
-        try:
-            r = json.loads(msg.data)
-            with data_lock:
-                state["rtk"] = r
-        except Exception:
-            pass
 
     def ai_cb(self, msg):
         global state
@@ -341,13 +342,12 @@ class SLAMBridgeNode(Node):
         except Exception:
             pass
 
-    def stat_cb(self, msg):
-        global state
+
+    def ai_status_cb(self, msg):
         try:
-            stat = json.loads(msg.data)
             with data_lock:
-                state['mapping_status'] = stat
-        except Exception:
+                state['ai_status'] = json.loads(msg.data)
+        except (TypeError, ValueError):
             pass
 
     def scan_cb(self, msg):
@@ -364,39 +364,21 @@ class SLAMBridgeNode(Node):
         n = len(msg.ranges)
         if n == 0: return
 
-        if np is not None:
-            # 一次转换、一个掩码,四个方位与整体最小值都从同一份数组上取,
-            # 避免原来每个方位各跑一遍 Python 循环、再多跑两遍全量遍历。
-            clean, ok = clean_ranges(msg.ranges, msg.range_min, msg.range_max)
-            # 必须把 angle_min 传进去。LaserScan 第 0 个光束指向 msg.angle_min
-            # 而不是 0°,N10P 发布 -π,不传的话「正前方测距」读的其实是车尾 ——
-            # 雷达扫到车自己的车身,会被当成正前方 0.17m 的障碍物。
-            amin_deg = math.degrees(msg.angle_min)
-            front_d = sector_min(clean, 345, 15, angle_min_deg=amin_deg)
-            left_d = sector_min(clean, 75, 105, angle_min_deg=amin_deg)
-            back_d = sector_min(clean, 165, 195, angle_min_deg=amin_deg)
-            right_d = sector_min(clean, 255, 285, angle_min_deg=amin_deg)
-            overall_min = float(np.nanmin(clean)) if bool(np.any(ok)) else 99.0
-            ranges_out = np.round(np.where(ok, clean, 0.0), 2).tolist()
-        else:
-            def get_min_range(start_deg, end_deg):
-                dists = []
-                for deg in range(start_deg, end_deg + 1):
-                    idx = int((deg % 360) / 360.0 * n)
-                    if 0 <= idx < n:
-                        r = msg.ranges[idx]
-                        if msg.range_min < r < msg.range_max:
-                            dists.append(r)
-                return min(dists) if dists else 99.0
-
-            front_d = min(get_min_range(345, 360), get_min_range(0, 15))
-            left_d = get_min_range(75, 105)
-            back_d = get_min_range(165, 195)
-            right_d = get_min_range(255, 285)
-            valid_ranges = [r for r in msg.ranges if msg.range_min < r < msg.range_max]
-            overall_min = min(valid_ranges) if valid_ranges else 99.0
-            ranges_out = [round(float(r), 2) if msg.range_min < r < msg.range_max else 0.0
-                          for r in msg.ranges]
+        # 一次转换、一个掩码,四个方位与整体最小值都从同一份数组上取,
+        # 避免原来每个方位各跑一遍 Python 循环、再多跑两遍全量遍历。
+        clean, ok = clean_ranges(msg.ranges, msg.range_min, msg.range_max)
+        # 必须把 angle_min 传进去。LaserScan 第 0 个光束指向 msg.angle_min
+        # 而不是 0°,N10P 发布 -π,不传的话「正前方测距」读的其实是车尾 ——
+        # 雷达扫到车自己的车身,会被当成正前方 0.17m 的障碍物。
+        amin_deg = math.degrees(msg.angle_min)
+        front_d = sector_min(clean, 345, 15, angle_min_deg=amin_deg)
+        left_d = sector_min(clean, 75, 105, angle_min_deg=amin_deg)
+        back_d = sector_min(clean, 165, 195, angle_min_deg=amin_deg)
+        right_d = sector_min(clean, 255, 285, angle_min_deg=amin_deg)
+        overall_min = float(np.nanmin(clean)) if bool(np.any(ok)) else 99.0
+        # Round after widening: float32.tolist() otherwise expands 2.15 into
+        # 2.1500000953674316 in every SSE frame sent to a phone.
+        ranges_out = np.round(np.where(ok, clean, 0.0).astype(np.float64), 2).tolist()
 
         with data_lock:
             state['hz'] = hz
@@ -407,54 +389,10 @@ class SLAMBridgeNode(Node):
             state['right_dist'] = round(right_d, 2)
             state['min_dist'] = round(overall_min, 2)
             state['ranges'] = ranges_out
+            state['angle_min'] = msg.angle_min
+            state['angle_increment'] = msg.angle_increment
 
-    def pose_cb(self, msg):
-        global state
-        x = msg.pose.position.x
-        y = msg.pose.position.y
-        # 从四元数计算 yaw
-        qz = msg.pose.orientation.z
-        qw = msg.pose.orientation.w
-        yaw = 2.0 * math.atan2(qz, qw)
 
-        with data_lock:
-            state['robot_x'] = round(x, 3)
-            state['robot_y'] = round(y, 3)
-            state['robot_yaw'] = round(yaw, 3)
-            state['trajectory'].append([round(x, 2), round(y, 2)])
-            if len(state['trajectory']) > 200:
-                state['trajectory'].pop(0)
-
-    def map_cb(self, msg):
-        """限流 + 自适应抽样地提取地图点集。
-
-        旧版固定 step=2 且每帧都算,40m 地图会吐出 12.8 万个点、耗时 35ms,
-        60m 地图 28.8 万点、180ms —— 全程持有 GIL。
-        现在:每秒最多算一次,并按地图尺寸自动放大步长把点数钳在 MAP_MAX_POINTS 内。
-        实测 40m 地图 34.7ms -> 1.8ms (20x),60m 地图 179.9ms -> 2.6ms (70x)。
-        """
-        global state
-        now = time.monotonic()
-        if now - self.last_map_time < MAP_MIN_INTERVAL_S:
-            return
-        self.last_map_time = now
-
-        w, h = msg.info.width, msg.info.height
-        if w <= 0 or h <= 0:
-            return
-
-        step = downsample_step(w, h, MAP_MAX_POINTS)
-        obstacles, frees = extract_grid_points(msg.data, w, h, step)
-
-        with data_lock:
-            state['map_width'] = w
-            state['map_height'] = h
-            state['map_res'] = msg.info.resolution
-            state['map_origin_x'] = msg.info.origin.position.x
-            state['map_origin_y'] = msg.info.origin.position.y
-            state['map_obstacles'] = obstacles
-            state['map_frees'] = frees
-            state['map_step'] = step
 
 def ros_worker():
     global bridge_node
@@ -462,7 +400,7 @@ def ros_worker():
         rclpy.init()
     except Exception:
         pass
-    node = SLAMBridgeNode()
+    node = TrackingBridgeNode()
     bridge_node = node
     executor = MultiThreadedExecutor(num_threads=2)
     executor.add_node(node)
@@ -483,78 +421,68 @@ def ros_worker():
             pass
 
 class RadarHTTPHandler(http.server.BaseHTTPRequestHandler):
+    # HTTP/1.1 长连接下,每个响应都必须带 Content-Length(或主动关连接),
+    # 否则浏览器不知道响应体在哪结束,fetch 会一直挂着占住连接。
+    # 手机浏览器对同一主机只有约 6 条连接,遥控心跳每 100ms 一条,几下就占满,
+    # 之后的指令(包括刹车)全部在浏览器里排队 —— 表现为"点了没反应,过一会车才动"。
     protocol_version = 'HTTP/1.1'
 
-    def do_OPTIONS(self):
-        self.send_response(200)
+    def _send_body(self, body, content_type, status=200, extra_headers=None):
+        self.send_response(status)
+        self.send_header('Content-Type', content_type)
+        self.send_header('Content-Length', str(len(body)))
         self.send_header('Access-Control-Allow-Origin', '*')
-        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
-        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+        for key, value in (extra_headers or {}).items():
+            self.send_header(key, value)
         self.end_headers()
+        if body:
+            self.wfile.write(body)
+
+    def do_OPTIONS(self):
+        self._send_body(b'', 'text/plain', status=204, extra_headers={
+            'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type',
+            'Access-Control-Max-Age': '600',
+        })
 
     def do_GET(self):
         if self.path == '/' or self.path.startswith('/index'):
-            self.send_response(200)
-            self.send_header('Content-type', 'text/html; charset=utf-8')
-            self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
-            self.send_header('Pragma', 'no-cache')
-            self.send_header('Expires', '0')
-            self.end_headers()
             with open(TEMPLATE_PATH, 'rb') as f:
-                self.wfile.write(f.read())
+                body = f.read()
+            self._send_body(body, 'text/html; charset=utf-8', extra_headers={
+                'Cache-Control': 'no-cache, no-store, must-revalidate',
+                'Pragma': 'no-cache', 'Expires': '0'})
 
         elif self.path.startswith('/static/'):
             clean_rel = self.path.lstrip('/').split('?')[0]
             static_file = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), clean_rel))
             static_root = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static'))
-            if static_file.startswith(static_root) and os.path.isfile(static_file):
-                self.send_response(200)
+            if static_file.startswith(static_root + os.sep) and os.path.isfile(static_file):
                 if static_file.endswith('.json'):
-                    self.send_header('Content-type', 'application/json; charset=utf-8')
+                    kind = 'application/json; charset=utf-8'
                 elif static_file.endswith('.js'):
-                    self.send_header('Content-type', 'application/javascript; charset=utf-8')
+                    kind = 'application/javascript; charset=utf-8'
                 elif static_file.endswith('.css'):
-                    self.send_header('Content-type', 'text/css; charset=utf-8')
+                    kind = 'text/css; charset=utf-8'
                 else:
-                    self.send_header('Content-type', 'application/octet-stream')
-                self.send_header('Access-Control-Allow-Origin', '*')
-                self.end_headers()
+                    kind = 'application/octet-stream'
                 with open(static_file, 'rb') as f:
-                    self.wfile.write(f.read())
+                    self._send_body(f.read(), kind)
                 return
             else:
                 self.send_error(404)
                 return
 
-        elif self.path == '/api/cors':
-            self.send_response(200)
-            self.send_header('Content-type', 'application/json; charset=utf-8')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.end_headers()
-            cfg = {}
-            if os.path.exists(CORS_CONFIG_PATH):
-                try:
-                    with open(CORS_CONFIG_PATH, 'r', encoding='utf-8') as f:
-                        cfg = json.load(f)
-                except Exception:
-                    pass
-            with data_lock:
-                rtk_status = state.get('rtk', {})
-                cors_stat = rtk_status.get('cors', {})
-            res = {
-                'config': cfg,
-                'status': cors_stat
-            }
-            self.wfile.write(json.dumps(res, ensure_ascii=False).encode('utf-8'))
-
         elif self.path == '/api/follower/status':
             with data_lock:
                 f_data = dict(state.get('follower', {}))
             f_data = mark_follower_staleness(f_data)
-            f_data['running'] = check_follower_running_cached()
+            f_data['running'] = is_follow_active()
             self._send_json(f_data)
 
         elif self.path == '/api/stream':
+            # 事件流没有长度,靠断开连接结束;明确声明,不让这条连接被当作可复用的长连接
+            self.close_connection = True
             self.send_response(200)
             self.send_header('Content-type', 'text/event-stream')
             self.send_header('Cache-Control', 'no-cache')
@@ -563,76 +491,89 @@ class RadarHTTPHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             try:
                 while True:
+                    # pgrep 是子进程调用,不能放在 data_lock 里,否则会卡住 ROS 回调和其他请求
+                    running = is_follow_active()
                     with data_lock:
-                        state['follower_running'] = check_follower_running_cached()
+                        state['follower_running'] = running
                         snapshot = dict(state)
                         snapshot['follower'] = mark_follower_staleness(
                             dict(snapshot.get('follower', {})))
+                        wheeltec_rx = snapshot.get('wheeltec', {}).get('_rx_monotonic')
+                        snapshot['wheeltec_status_age_s'] = (
+                            round(time.monotonic() - wheeltec_rx, 2) if wheeltec_rx else None)
                         payload = json.dumps(snapshot)
                     self.wfile.write(f"data: {payload}\n\n".encode('utf-8'))
                     self.wfile.flush()
-                    time.sleep(0.08) # ~12 FPS
+                    time.sleep(0.10) # LiDAR updates at ~10 Hz; avoid redundant mobile JSON work.
             except Exception:
                 pass
         else:
             self.send_error(404)
 
     def _send_json(self, data, status=200):
-        self.send_response(status)
-        self.send_header('Content-type', 'application/json; charset=utf-8')
-        self.send_header('Access-Control-Allow-Origin', '*')
-        self.end_headers()
-        self.wfile.write(json.dumps(data, ensure_ascii=False).encode('utf-8'))
+        body = json.dumps(data, ensure_ascii=False).encode('utf-8')
+        self._send_body(body, 'application/json; charset=utf-8', status=status,
+                        extra_headers={'Cache-Control': 'no-store'})
+
+    def _read_body(self, limit=65536):
+        size = int(self.headers.get('Content-Length', 0) or 0)
+        if not 0 <= size <= limit:
+            raise ValueError('请求体过大')
+        return self.rfile.read(size) if size else b''
 
     def do_POST(self):
         global bridge_node
-        if self.path == '/api/cors':
-            try:
-                content_length = int(self.headers.get('Content-Length', 0))
-                body = self.rfile.read(content_length)
-                new_cfg = json.loads(body.decode('utf-8'))
-                with open(CORS_CONFIG_PATH, 'w', encoding='utf-8') as f:
-                    json.dump(new_cfg, f, indent=2, ensure_ascii=False)
-
-                if bridge_node:
-                    msg = String()
-                    msg.data = "reload"
-                    bridge_node.pub_cors_cmd.publish(msg)
-
-                self._send_json({'ok': True, 'config': new_cfg})
-            except Exception as e:
-                self._send_json({'ok': False, 'error': str(e)}, status=500)
-
-        elif self.path == '/api/drive_profile':
+        if self.path == '/api/drive_profile':
             self._send_json({
                 'speed_tiers': SPEED_TIERS_MPS,
                 'steer_tiers': STEER_TIERS_DEG,
                 'reverse_scale': REVERSE_SCALE,
                 'min_turn_radius_m': round(CHASSIS.min_turn_radius_m, 3),
                 'max_steer_deg': round(math.degrees(CHASSIS.max_steer_rad), 1),
-                'map_enabled': ENABLE_MAP,
             })
 
         elif self.path == '/api/follower/start':
             ok, msg = start_follower()
-            self._send_json({'ok': ok, 'message': msg, 'running': is_follower_running()})
+            self._log_follow_request('start', ok, msg)
+            with data_lock:
+                f_data = mark_follower_staleness(dict(state.get('follower', {})))
+            self._send_json({'ok': ok, 'message': msg, 'running': (msg.startswith('FOLLOW:') if ok else is_follow_active()), 'follower': f_data})
 
         elif self.path == '/api/follower/stop':
             ok, msg = stop_follower()
-            self._send_json({'ok': ok, 'message': msg, 'running': is_follower_running()})
+            self._log_follow_request('stop', ok, msg)
+            with data_lock:
+                f_data = mark_follower_staleness(dict(state.get('follower', {})))
+            self._send_json({'ok': ok, 'message': msg, 'running': (msg.startswith('FOLLOW:') if ok else is_follow_active()), 'follower': f_data})
 
         elif self.path == '/api/follower/toggle':
-            if is_follower_running():
+            if is_follow_active():
+                action = 'toggle_stop'
                 ok, msg = stop_follower()
             else:
+                action = 'toggle_start'
                 ok, msg = start_follower()
-            self._send_json({'ok': ok, 'message': msg, 'running': is_follower_running()})
+            self._log_follow_request(action, ok, msg)
+            with data_lock:
+                f_data = mark_follower_staleness(dict(state.get('follower', {})))
+            self._send_json({'ok': ok, 'message': msg, 'running': (msg.startswith('FOLLOW:') if ok else is_follow_active()), 'follower': f_data})
+
+        elif self.path in ('/api/motion/stop', '/api/motion/reset'):
+            if bridge_node is None:
+                self._send_json({'ok': False, 'message': 'motion bridge unavailable'}, status=503)
+                return
+            with bridge_node.control_lock:
+                bridge_node.manual_drive.set(0.0, 0.0)
+                bridge_node.manual_drive.sample()
+                client = bridge_node.cli_stop if self.path.endswith('/stop') else bridge_node.cli_reset
+                ok, message = bridge_node.call_motion_service(client, Trigger.Request())
+            self._send_json({'ok': ok, 'message': message})
 
         elif self.path == '/api/manual_drive':
-            content_length = int(self.headers.get('Content-Length', 0))
-            body = self.rfile.read(content_length)
             try:
-                req = json.loads(body.decode('utf-8'))
+                req = json.loads(self._read_body(4096).decode('utf-8'))
+                if not isinstance(req, dict):
+                    raise ValueError('指令格式错误')
                 action = req.get('action', 'custom')
                 steer_deg = 0.0
 
@@ -646,22 +587,56 @@ class RadarHTTPHandler(http.server.BaseHTTPRequestHandler):
                 else:
                     # 旧接口保留兼容,但要把物理上做不到的角速度掐掉:
                     # 超过满舵能达到的 wz 只会让固件把舵机打死,反而丢失档位区分度
-                    vx = float(req.get('vx', 0.0))
-                    wz = float(req.get('wz', 0.0))
+                    vx, wz = float(req.get('vx', 0.0)), float(req.get('wz', 0.0))
+                    if not all(math.isfinite(v) for v in (vx, wz)):
+                        raise ValueError('速度必须是有限数值')
+                    vx = max(-0.6, min(1.0, vx))
+                    wz = max(-1.5, min(1.5, wz))
                     steer_rad = steer_from_yaw(vx, wz, CHASSIS)
                     wz = yaw_from_steer(vx, steer_rad, CHASSIS)
                     steer_deg = round(math.degrees(steer_rad), 1)
 
-                # 强行介入：若自动跟随正在运行，强行介入必须先停掉自动跟随！
-                if check_follower_running_cached():
-                    stop_follower()
+                if bridge_node is None:
+                    self._send_json({'ok': False, 'error': 'motion bridge unavailable'}, status=503)
+                    return
+                client_id = str(req.get('client_id', ''))[:64] or None
+                seq_raw = req.get('seq')
+                seq = int(seq_raw) if isinstance(seq_raw, (int, float)) and math.isfinite(seq_raw) else None
+                moving = abs(vx) > 1e-6 or abs(wz) > 1e-6
 
-                if bridge_node:
+                if moving:
+                    # A reset can wait for a ROS service. Keep the short command
+                    # lock free so a stop can preempt a request waiting here.
+                    ok, message = bridge_node.recover_latched_fault()
+                    if not ok:
+                        self._send_json({'ok': False, 'error': message}, status=409)
+                        return
+                else:
+                    # First zero goes out before any follow/reset service holding
+                    # control_lock can delay the HTTP request. The second zero
+                    # below wins over a command already in that critical section.
+                    bridge_node.manual_drive.accept(client_id, seq, 0.0, 0.0)
+                    bridge_node.send_manual_twist(0.0, 0.0)
+                    immediate_stop = bridge_node.motion.publish(0.0, 0.0)
+
+                with bridge_node.control_lock:
+                    # 按页面会话 + 序号丢弃迟到的旧指令:网络抖动时,先发的「前进」
+                    # 可能晚于「刹车」到达,不能让它在松手后又把车开起来。
+                    if moving and not bridge_node.manual_drive.accept(client_id, seq, vx, wz):
+                        self._send_json({'ok': True, 'stale': True, 'action': action})
+                        return
                     bridge_node.send_manual_twist(vx, wz)
+                    sent = bridge_node.motion.publish(vx, wz)
+                    if moving and not sent:
+                        bridge_node.send_manual_twist(0.0, 0.0)
+
+                if not sent and (moving or not immediate_stop):
+                    self._send_json({'ok': False, 'error': '底盘控制状态已过期，指令未能发送；请检查连接并使用物理急停'}, status=503)
+                    return
 
                 with data_lock:
                     state['manual_override'] = {
-                        'active': True,
+                        'active': moving,
                         'action': action,
                         'vx': vx,
                         'wz': wz,
@@ -671,10 +646,18 @@ class RadarHTTPHandler(http.server.BaseHTTPRequestHandler):
 
                 self._send_json({'ok': True, 'action': action, 'vx': vx,
                                  'wz': wz, 'steer_deg': steer_deg})
+            except (ValueError, TypeError, KeyError) as e:
+                self._send_json({'ok': False, 'error': str(e)}, status=400)
             except Exception as e:
                 self._send_json({'ok': False, 'error': str(e)}, status=500)
         else:
             self.send_error(404)
+
+    def _log_follow_request(self, action, ok, message):
+        event = {'peer': self.client_address[0], 'action': action,
+                 'ok': ok, 'message': message}
+        print('follow_request ' + json.dumps(event, ensure_ascii=False),
+              file=sys.stderr, flush=True)
 
     def log_message(self, format, *args):
         return
@@ -686,11 +669,7 @@ def main():
     t = threading.Thread(target=ros_worker, daemon=True)
     t.start()
     server = ThreadedHTTPServer(('0.0.0.0', PORT), RadarHTTPHandler)
-    map_state = "开启" if ENABLE_MAP else "关闭 (仅雷达实时显示)"
-    print(f"🚀 SLAM Web 服务已就绪: http://192.168.0.170:{PORT}")
-    print(f"   建图订阅: {map_state}   numpy 加速: {'可用' if np is not None else '缺失,走慢路径'}")
-    if not ENABLE_MAP:
-        print("   需要建图时用: ENABLE_MAP=1 python3 radar_web_server.py")
+    print(f"雷达 / 摄像头跟踪服务: http://0.0.0.0:{PORT}")
     server.serve_forever()
 
 if __name__ == '__main__':
