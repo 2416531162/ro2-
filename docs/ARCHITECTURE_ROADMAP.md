@@ -2,6 +2,8 @@
 
 更新：2026-09-18。本次完成当前跟随链路的架构重构；代码及发布包在本机验证，尚未部署或进行实车运动验收。需求是摄像头配合雷达，不使用超声波。GNSS/RTK 是后续功能，本次落实它需要的定位和控制接入边界。
 
+2026-09-20：Jetson 正式跟随入口默认启用 MPPI＋CUDA，部署名称保留兼容。当前启动配置、性能优化与验证范围见 [Jetson MPPI](MPPI_JETSON.md)。
+
 ## 模块和数据流
 
 ```mermaid
@@ -42,7 +44,9 @@ flowchart LR
 
 ## 唯一配置与统一位姿
 
-所有组件默认读取 `robot_core/robot.json`，也可通过 `RK3588_ROBOT_CONFIG=/etc/rk3588/robot.json` 指向同一外部配置。修改后重启整套服务。配置摘要随驱动状态和运动请求发送，摘要不一致的请求拒绝执行。底盘拒绝与共享物理配置冲突的 ROS 参数覆盖；跟随 CLI 同样拒绝单独修改物理标定。
+所有 ROS 入口经 `radar_system/ros_env.sh` 加载：默认使用 `/etc/rk3588/runtime.env`，也可在启动进程设置 `ROBOT_RUNTIME_ENV` 指向其他文件。优先级为进程变量 → 文件 → 默认值；默认文件不存在时继续，显式文件不存在、不可读或格式错误时退出。配置文件是 systemd `EnvironmentFile` 风格的赋值（可用引号，`$`/反引号不会展开），不能写 `source`、`export` 或命令。服务单元不再另行加载该文件。显式 `ROS_DISTRO` 只能为 `humble`/`jazzy` 且必须存在；未设置按 Humble → Jazzy 选。`RK3588_PYTHON` 默认 `/usr/bin/python3`，错误路径不会回退。服务日志给出最终选择。
+
+所有组件默认读取 `robot_core/robot.json`，也可在上述文件设置 `RK3588_ROBOT_CONFIG=/etc/rk3588/robot.json` 指向同一外部配置。相机深度标定由 `RK3588_DEPTH_PATH_CONFIG` 选择，默认 `/etc/rk3588/depth_path.json`；模型由 `RK3588_POSE_MODEL` 选择，默认随包提供的 `radar_system/models/yolo26s.pt`（Jetson CUDA FP16，人物检测）。建议在环境文件中用绝对路径；相对模型路径一律相对 `radar_system`，不随启动目录变化。修改后重启整套服务。配置摘要随驱动状态和运动请求发送，摘要不一致的请求拒绝执行。底盘拒绝与共享物理配置冲突的 ROS 参数覆盖；跟随 CLI 同样拒绝单独修改物理标定。
 
 雷达按标准协议发布方向：前方 0°、左侧 90°、后方 180°、右侧 270°。`sensors.raw_lidar_yaw_deg` 默认回到 0°；只有现场完成实测标定后才填写偏移，不能在跟随层重复叠加。旧 `radar_system/config/lidar_calib.json` 已迁移，不再读取。
 
@@ -79,7 +83,7 @@ flowchart LR
 
 ## 运行、部署和回滚
 
-需要开发板已有 ROS 2 Jazzy、OpenNI2 相机驱动、NPU runtime、Python NumPy/OpenCV/pyserial，以及 ROS 消息依赖。发布器打包项目代码和已有模型，不安装系统驱动或固件。
+Jetson 需要已有 ROS 2 Humble/Jazzy、Astra/OpenNI2 相机驱动、配套的 CUDA PyTorch/torchvision 和 Ultralytics 8.4+、Python NumPy/OpenCV/pyserial，以及 ROS 消息依赖。默认 `.pt` 权重已随包提供，无需预先构建引擎；如果显式选择 `.engine`，应在目标 Jetson 上用匹配的 TensorRT 导出，直接由 Ultralytics 加载，不依赖自定义包装库。RK3588 兼容部署须显式提供旧 RKNN 模型与 NPU runtime，并选择纯追踪；旧 ONNX CPU 路径也须显式提供对应四输出权重。这两种旧权重不再随当前 Jetson 包提供。不因缺少产物或运行库自动切换后端。发布器打包项目代码和已有模型，不安装系统驱动或固件。
 
 本机生成一个不可覆盖的完整发布目录：
 
@@ -105,7 +109,7 @@ sudo python3 /opt/rk3588/current/deployment/manage.py rollback
 
 安装后 `bash radar_system/start_all.sh headless` 可启动已有服务，`stop_all.sh` 停止。直接运行 `run_follower.sh` 会发起一次显式跟随选择；`--passive` 只等待选择，`--dry-run` 只计算不发运动请求。避免与服务重复启动跟随节点。
 
-可选现场配置：复制 release 的 `robot_core/robot.json` 到 `/etc/rk3588/robot.json`，在 `/etc/rk3588/runtime.env` 写入 `RK3588_ROBOT_CONFIG=/etc/rk3588/robot.json`。校准工具修改这份外部配置，保持发布目录不可变。外部现场标定文件不随代码回滚；更换硬件或配置结构时要单独核对。
+可选现场配置：复制 release 的 `robot_core/robot.json` 到 `/etc/rk3588/robot.json`，在 `/etc/rk3588/runtime.env` 写入 `RK3588_ROBOT_CONFIG=/etc/rk3588/robot.json`。使用共享入口 `bash radar_system/run_calib_check.sh` 和 `bash radar_system/calibrate_lidar.py` 进行标定；校准工具修改这份外部配置，保持发布目录不可变。外部现场标定文件不随代码回滚；更换硬件或配置结构时要单独核对。
 
 ```bash
 ros2 topic echo /motion/status
@@ -114,7 +118,7 @@ ros2 service call /motion/reset std_srvs/srv/Trigger '{}'
 ros2 service call /motion/follow std_srvs/srv/SetBool '{data: true}'
 ```
 
-网页提供 `POST /api/motion/stop`、`POST /api/motion/reset`。服务响应超时需检查状态，不能当作操作成功。CLI `control.py drive` 使用同一手动入口且检查配置一致性；结束会锁存停车，再次运动前需 reset。
+网页提供 `POST /api/motion/stop`、`POST /api/motion/reset`。服务响应超时需检查状态，不能当作操作成功。CLI `bash wheeltec_protocol/run_control.sh drive` 使用同一手动入口且检查配置一致性；结束会锁存停车，再次运动前需 reset。
 
 ## GNSS/RTK 接入边界
 

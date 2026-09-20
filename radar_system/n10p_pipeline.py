@@ -105,7 +105,10 @@ class SweepAssembler:
                 if self.started is not None:
                     duration = now - self.started
                     if 0.03 <= duration <= 0.3:
-                        ranges, intensities = [math.inf] * BINS, [0.0] * BINS
+                        # LaserScan ranges cannot distinguish an empty angular
+                        # bin from a sampled ray with no echo. Reserve -1 in
+                        # intensities for the former; N10P quality is 0..255.
+                        ranges, intensities = [math.inf] * BINS, [-1.0] * BINS
                         sampled = [False] * BINS
                         for key, (r, quality) in self.bins.items():
                             ranges[key], intensities[key] = r, float(quality)

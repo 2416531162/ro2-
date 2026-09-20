@@ -4,6 +4,10 @@ import math
 from runtime_config import PROFILE, profile_hash
 
 
+def finite_round(value, digits):
+    return round(value, digits) if math.isfinite(value) else None
+
+
 class FollowerTelemetry:
     def _remember_target(self, view, gap):
         meta = view['meta']
@@ -141,12 +145,16 @@ class FollowerTelemetry:
             "limit_reason": self.limit_reason,
             "controller": ('pure-pursuit' if getattr(self, 'mppi', None) is None or getattr(self, 'mppi_fallback', False)
                            else 'mppi'),
+            "controller_requested": self.cfg.controller,
+            "controller_backend": self.mppi.b.describe() if self.mppi is not None else 'cpu',
+            "mppi_cuda_graph": bool(self.mppi is not None and self.mppi._graph is not None),
+            "mppi_stop_reason": self.mppi_stop_reason,
             "mppi": (None if getattr(self, 'mppi_last', None) is None else {
                 "feasible": self.mppi_last.feasible,
                 "reason": self.mppi_last.reason,
-                "cost": round(self.mppi_last.cost, 1),
-                "clearance_m": round(self.mppi_last.min_clearance, 3),
-                "solve_ms": round(self.mppi_last.solve_ms, 2),
+                "cost": finite_round(self.mppi_last.cost, 1),
+                "clearance_m": finite_round(self.mppi_last.min_clearance, 3),
+                "solve_ms": finite_round(self.mppi_last.solve_ms, 2),
                 "obstacles": self.mppi_last.obstacles,
                 "over_budget": bool(self.mppi_last.solve_ms
                                     > self.cfg.mppi_solve_budget_ms),

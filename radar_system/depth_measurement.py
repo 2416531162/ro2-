@@ -53,8 +53,9 @@ def decode_depth(msg):
         raise ValueError('Unsupported depth encoding: '+msg.encoding)
     if msg.step < msg.width*dtype.itemsize or len(msg.data) < msg.step*msg.height:
         raise ValueError('Invalid depth image stride/buffer')
-    return np.ndarray((msg.height,msg.width),dtype=dtype,buffer=msg.data,
-                      strides=(msg.step,dtype.itemsize)).astype(np.float32)*scale
+    image = np.ndarray((msg.height,msg.width),dtype=dtype,buffer=msg.data,
+                       strides=(msg.step,dtype.itemsize))
+    return image if scale == 1. else image.astype(np.float32) * scale
 
 
 def decode_rgb(msg):
@@ -64,4 +65,4 @@ def decode_rgb(msg):
         raise ValueError('Invalid color image stride/buffer')
     image = np.ndarray((msg.height,msg.width,3),dtype=np.uint8,buffer=msg.data,
                        strides=(msg.step,3,1))
-    return (image[:,:,::-1] if msg.encoding.lower()=='bgr8' else image).copy()
+    return image[:,:,::-1] if msg.encoding.lower()=='bgr8' else image

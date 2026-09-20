@@ -33,8 +33,8 @@ class Cluster:
         return "Cluster(x=%.2f, y=%.2f, size=%.2f, n=%d)" % (self.x, self.y, self.size, self.count)
 
 
-def cluster_points(points, break_m=0.15, leg_pair_m=0.45, min_size_m=0.02,
-                   max_size_m=0.70, min_points=2, max_range_m=5.0, origin=(0.0, 0.0)):
+def cluster_points(points, break_m=0.10, leg_pair_m=0.55, min_size_m=0.02,
+                   max_size_m=0.75, min_points=2, max_range_m=5.0, origin=(0.0, 0.0)):
     """扫描点(按扫描角度顺序) -> 人体尺寸的候选点簇列表。
 
     >>> legs = [(2.0, 0.10), (2.0, 0.13), (2.02, 0.16), (2.0, -0.10), (2.0, -0.13)]

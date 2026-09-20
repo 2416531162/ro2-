@@ -101,7 +101,7 @@ class Config:
     acceleration_m_s2: float = 0.20
     steering_rate_rad_s: float = 0.50
     cmd_timeout_s: float = 0.30
-    feedback_timeout_s: float = 0.30
+    feedback_timeout_s: float = 0.60
     startup_stop_s: float = 3.0
     tx_hz: float = 50.0
     # Transient-fault handling. A recoverable fault holds output at zero while
@@ -112,6 +112,9 @@ class Config:
     # which is what made web driving feel "extremely slow" and jerky.
     feedback_grace_s: float = 1.00
     backlog_tolerance: int = 8
+    stall_timeout_s: float = 0.45
+    stall_min_command_m_s: float = 0.06
+    stall_min_progress_m: float = 0.01
 
     def __post_init__(self):
         if self.protocol not in ("unconfigured", "twist", "steering_angle"):
@@ -136,6 +139,12 @@ class Config:
             raise ValueError("invalid feedback grace")
         if not 0 <= self.backlog_tolerance <= 100:
             raise ValueError("invalid backlog tolerance")
+        if not 0.30 <= self.stall_timeout_s <= 1.0:
+            raise ValueError("invalid stall timeout")
+        if not 0.04 <= self.stall_min_command_m_s <= 0.15:
+            raise ValueError("invalid stall command threshold")
+        if not 0.005 <= self.stall_min_progress_m <= 0.05:
+            raise ValueError("invalid stall progress threshold")
 
 
 class ControlPolicy:
@@ -158,6 +167,23 @@ class ControlPolicy:
         # -> (限制后速度, 原因)。为 None 时行为与原来完全一致。
         self.speed_filter = None
         self.guard_reason = None
+        self.guard_eval_ms = 0.0
+        self.guard_eval_peak_ms = 0.0
+        self.guard_eval_overruns = 0
+        self.stall_since = None
+        self.stall_feedback_at = None
+        self.stall_feedback_frames = 0
+        self.stall_progress_m = 0.0
+        self.stall_direction = 0
+        self.stall_latched = False
+        self.stall_report = None
+
+    def clear_stall_observation(self):
+        self.stall_since = None
+        self.stall_feedback_at = None
+        self.stall_feedback_frames = 0
+        self.stall_progress_m = 0.0
+        self.stall_direction = 0
 
     def stop(self, reason):
         """Hard disarm. Recovery requires stationary telemetry, so reserve this
@@ -168,6 +194,7 @@ class ControlPolicy:
         self.reason = reason
         self.hold_reason = None
         self.hold_since = None
+        self.clear_stall_observation()
 
     def reject(self, reason):
         """Refuse one command without disarming. The chassis stays armed and
@@ -184,6 +211,7 @@ class ControlPolicy:
             self.hold_since = now
         self.hold_reason = reason
         self.output = (0.0, 0.0)
+        self.clear_stall_observation()
 
     def release_hold(self):
         self.hold_reason = None
@@ -206,8 +234,10 @@ class ControlPolicy:
         v = telemetry["velocity"]
         self.stationary_frames = self.stationary_frames + 1 if max(abs(x) for x in v) < 0.015 else 0
 
-    def ready(self, now):
+    def ready(self, now, *, ignore_stall=False):
         c = self.config
+        if self.stall_latched and not ignore_stall:
+            return "motion_stall_latched"
         if c.receive_only:
             return "receive_only"
         if not c.protocol_confirmed or c.protocol == "unconfigured":
@@ -222,11 +252,14 @@ class ControlPolicy:
             return "waiting_for_stationary_feedback"
         return "ready"
 
-    def arm(self, now):
-        reason = self.ready(now)
+    def arm(self, now, *, clear_stall=False):
+        reason = self.ready(now, ignore_stall=clear_stall)
         if reason != "ready":
             self.stop(reason)
             return False, reason
+        if clear_stall:
+            self.stall_latched = False
+            self.stall_report = None
         self.stop("armed_waiting_command")
         self.armed = True
         self.last_tick = now
@@ -304,18 +337,29 @@ class ControlPolicy:
             self.latest = None
             self.output = (0.0, 0.0)
             self.reason = "armed_waiting_command"
-        if not self.armed and self.reason not in ("operator_stop", "operator_disarmed") and self.ready(now) == "ready":
+            self.clear_stall_observation()
+        if (not self.armed and not self.stall_latched
+                and self.reason not in ("operator_stop", "operator_disarmed")
+                and self.ready(now) == "ready"):
             self.armed = True
             self.reason = "armed_waiting_command"
         if not self.connected or not self.armed or not self.latest or self.holding:
             self.output = (0.0, 0.0)
+            self.clear_stall_observation()
             return STOP_FRAME
         _, speed, turn = self.latest
         old_speed, old_turn = self.output
         self.guard_reason = None
         if self.speed_filter is not None:
             original_speed = speed
-            speed, self.guard_reason = self.speed_filter(speed, turn, now)
+            guard_started = time.perf_counter()
+            try:
+                speed, self.guard_reason = self.speed_filter(speed, turn, now)
+            finally:
+                self.guard_eval_ms = (time.perf_counter() - guard_started) * 1000
+                self.guard_eval_peak_ms = max(self.guard_eval_peak_ms, self.guard_eval_ms)
+                if self.guard_eval_ms > 1000 / c.tx_hz:
+                    self.guard_eval_overruns += 1
             if c.protocol == 'twist' and abs(original_speed) > 1e-9:
                 turn *= abs(speed / original_speed)
         # Brake immediately on zero or reversal; never continue accelerating an old direction.
@@ -331,6 +375,37 @@ class ControlPolicy:
             limit = max_yaw_at_speed(out_speed, ChassisGeometry(c.wheelbase_m, c.track_m, c.max_steering_rad))
             out_turn = max(-limit, min(limit, out_turn))
         self.output = (out_speed, out_turn)
+        # Check the FINAL transmitted speed, after the scan guard and ramp. A
+        # blocked/unknown scan commands zero and must not be mistaken for a
+        # mechanical stall. Count fresh chassis feedback, not repeated ticks.
+        direction = 1 if out_speed > 0 else -1
+        if abs(out_speed) < c.stall_min_command_m_s or self.last_rx is None:
+            self.clear_stall_observation()
+        elif self.stall_direction != direction:
+            self.clear_stall_observation()
+            self.stall_direction = direction
+            self.stall_feedback_at = self.last_rx
+            self.stall_since = now
+        elif self.stall_feedback_at != self.last_rx:
+            elapsed = max(0.0, self.last_rx - self.stall_feedback_at)
+            self.stall_feedback_at = self.last_rx
+            measured = self.last_received["velocity"][0]
+            if math.isfinite(measured):
+                self.stall_progress_m += max(0.0, measured * direction) * elapsed
+                self.stall_feedback_frames += 1
+                if self.stall_progress_m >= c.stall_min_progress_m:
+                    self.stall_since = now
+                    self.stall_progress_m = 0.0
+                    self.stall_feedback_frames = 0
+                elif now - self.stall_since >= c.stall_timeout_s and self.stall_feedback_frames >= 5:
+                    self.stall_report = {"command_m_s": round(out_speed, 3),
+                                         "feedback_m_s": round(measured, 3),
+                                         "progress_m": round(self.stall_progress_m, 3),
+                                         "duration_s": round(now - self.stall_since, 3),
+                                         "feedback_frames": self.stall_feedback_frames}
+                    self.stall_latched = True
+                    self.stop("motion_stall")
+                    return STOP_FRAME
         wire_turn = out_turn * c.steering_scale if c.protocol == "steering_angle" else out_turn
         return build_frame(out_speed, wire_turn, c.mode_byte)
 
@@ -396,6 +471,9 @@ class WheeltecDriver(Node):
                 'guard_front_m': PROFILE['geometry']['front_m'],
                 'guard_rear_m': PROFILE['geometry']['rear_m'],
                 'guard_half_width_m': PROFILE['geometry']['half_width_m'],
+                'guard_wheelbase_m': PROFILE['geometry']['wheelbase_m'],
+                'guard_track_m': PROFILE['geometry']['track_m'],
+                'guard_max_steer_rad': PROFILE['geometry']['max_steer_rad'],
                 'guard_lidar_x_m': PROFILE['sensors']['lidar_x_m'],
                 'guard_lidar_y_m': PROFILE['sensors']['lidar_y_m'],
                 'guard_lidar_yaw_rad': PROFILE['sensors']['lidar_yaw_rad']}.items():
@@ -413,9 +491,7 @@ class WheeltecDriver(Node):
         self.lock = threading.RLock()
         self.policy = ControlPolicy(self.config, time.monotonic())
         if self.guard.cfg.enabled:
-            # 阿克曼协议里 turn 是角速度(twist)或转角;非零即视为转弯
-            self.policy.speed_filter = lambda speed, turn, now: self.guard.limit(
-                speed, abs(turn) > 0.05, now)
+            self.policy.speed_filter = self.guard_speed_filter
         self.parser = FrameParser()
         self.ser = None
         self.running = True
@@ -423,6 +499,9 @@ class WheeltecDriver(Node):
         self.last_tx_hex = ""
         self.last_error = ""
         self.backlog_streak = 0
+        self.write_timeouts = 0
+        self.write_timeout_streak = 0
+        self.last_write_timeout_at = None
         self.started = time.monotonic()
         self.last_odom = None
         self.odometry_epoch = uuid.uuid4().hex
@@ -457,20 +536,46 @@ class WheeltecDriver(Node):
         self.worker = threading.Thread(target=self.io_loop, daemon=True)
         self.worker.start()
 
+    def guard_speed_filter(self, speed, turn, now):
+        # Manual drive is the operator's direct override of software collision
+        # monitoring. Keep the policy's driver, stall, speed and timeout checks.
+        if not self.legacy_commands and self.authority.mode == 'MANUAL':
+            self.guard.last_reason = 'guard_manual_override'
+            self.guard.last_gap = None
+            self.guard.last_block = None
+            return speed, None
+        old_speed, old_turn = self.policy.output
+        if self.config.protocol == 'steering_angle':
+            steer, old_steer = turn, old_turn
+        else:
+            geometry = ChassisGeometry(self.config.wheelbase_m, self.config.track_m,
+                                       self.config.max_steering_rad)
+            steer = steer_from_yaw(speed, turn, geometry)
+            old_steer = steer_from_yaw(old_speed, old_turn, geometry)
+        # The output may still be decelerating or slewing its steering. Check
+        # both the existing and requested arc before sending the next frame.
+        checked = math.copysign(max(abs(speed), abs(old_speed)), speed)
+        limited, reason = self.guard.limit(checked, steer, now, current_steer=old_steer)
+        return math.copysign(min(abs(speed), abs(limited)), speed), reason
+
     def on_scan(self, msg):
         points_ready = time.monotonic()
         with self.lock:
-            self.guard.update_scan(msg.ranges, msg.angle_min, msg.angle_increment,
-                                   msg.range_min, msg.range_max, points_ready)
             stamp = msg.header.stamp.sec + msg.header.stamp.nanosec / 1e9
             age = self.get_clock().now().nanoseconds / 1e9 - stamp
+            if stamp <= 0 or not 0 <= age < PROFILE['safety']['scan_timeout_s']:
+                self.guard.invalidate()
+                self.scan_health_at = None
+                return
+            self.guard.update_scan(msg.ranges, msg.angle_min, msg.angle_increment,
+                                   msg.range_min, msg.range_max, points_ready - age)
             valid = (math.isfinite(msg.angle_min) and math.isfinite(msg.angle_increment)
                      and msg.angle_increment != 0 and math.isfinite(msg.range_min)
                      and math.isfinite(msg.range_max) and 0 <= msg.range_min < msg.range_max
                      and len(self.guard.points) >= PROFILE['safety']['min_scan_points'])
-            self.scan_health_at = points_ready - age if valid and 0 <= age < PROFILE['safety']['scan_timeout_s'] else None
+            self.scan_health_at = points_ready - age if valid else None
 
-    def refresh_motion_health(self, now):
+    def refresh_motion_health(self, now, *, manual_request=False):
         p = self.policy
         telemetry = p.last_received or {}
         voltage = telemetry.get('voltage', float('nan'))
@@ -483,10 +588,13 @@ class WheeltecDriver(Node):
             faults.append('feedback_missing')
         elif not 0 <= now - p.last_rx <= self.config.feedback_timeout_s:
             faults.append('feedback_stale')
-        if self.scan_health_at is None:
-            faults.append('scan_unavailable')
-        elif not 0 <= now - self.scan_health_at < PROFILE['safety']['scan_timeout_s']:
-            faults.append('scan_stale')
+        manual = (not self.legacy_commands
+                  and (manual_request or self.authority.mode == 'MANUAL'))
+        if not manual:
+            if self.scan_health_at is None:
+                faults.append('scan_unavailable')
+            elif not 0 <= now - self.scan_health_at < PROFILE['safety']['scan_timeout_s']:
+                faults.append('scan_stale')
         if not math.isfinite(voltage):
             faults.append('battery_invalid')
         elif voltage < PROFILE['safety']['battery_min_v']:
@@ -513,23 +621,26 @@ class WheeltecDriver(Node):
             return
         with self.lock:
             now = time.monotonic()
-            self.refresh_motion_health(now)
+            self.refresh_motion_health(now, manual_request=source == 'manual')
             epoch = self.authority.epoch
             self.authority.submit(source, data, now, self.get_clock().now().nanoseconds / 1e9)
             if epoch != self.authority.epoch:
                 self.clear_motion_output()
+                self.publish_status()
 
     def select_motion(self, source, request, response):
         with self.lock:
-            self.refresh_motion_health(time.monotonic())
+            now = time.monotonic()
+            self.authority.output(now)
+            self.refresh_motion_health(now)
             if request.data:
                 response.success = self.authority.select(source)
             else:
                 self.authority.release(source)
                 response.success = True
             # Only the selected source may be released; a follower shutdown
-            # after manual takeover must not clear manual authority.
-            if request.data or self.authority.mode == 'IDLE':
+            # or a rejected selection must not interrupt active manual drive.
+            if (response.success and request.data) or self.authority.mode in ('IDLE', 'FAULT', 'ESTOP'):
                 self.clear_motion_output()
             response.message = self.authority.mode + ': ' + self.authority.reason
         return response
@@ -541,7 +652,9 @@ class WheeltecDriver(Node):
             response.success = self.authority.reset()
             if response.success:
                 self.clear_motion_output()
-                response.success, _ = self.policy.arm(now)
+                response.success, _ = self.policy.arm(now, clear_stall=True)
+                if not response.success:
+                    self.authority.fault('reset_failed', now=now)
             response.message = 'IDLE; select a new task' if response.success else 'wait for healthy sensors and stationary chassis'
         return response
 
@@ -563,7 +676,8 @@ class WheeltecDriver(Node):
                 if not self.legacy_commands and self.authority.mode in ('ESTOP', 'FAULT'):
                     response.success, response.message = False, 'use /motion/reset first'
                     return response
-                response.success, response.message = self.policy.arm(time.monotonic())
+                response.success, response.message = self.policy.arm(
+                    time.monotonic(), clear_stall=self.legacy_commands)
             else:
                 self.authority.stop(emergency=True)
                 self.policy.stop("operator_disarmed")
@@ -630,29 +744,51 @@ class WheeltecDriver(Node):
         # the main cause of the stuttering, near-motionless web driving: stop ->
         # disarm -> car coasts to rest -> 5 stationary frames -> re-arm -> repeat.
         # Tolerate isolated backlogs; only a sustained run means the link is sick.
-        if self.ser.out_waiting:
-            self.backlog_streak += 1
-            if self.backlog_streak > self.config.backlog_tolerance:
+        try:
+            if self.ser.out_waiting:
+                self.backlog_streak += 1
+                if self.backlog_streak > self.config.backlog_tolerance:
+                    self.ser.reset_output_buffer()
+                    self.policy.hold("serial_output_backlog", time.monotonic())
+                    frame = STOP_FRAME
+            else:
+                if not self.write_timeout_streak and self.policy.hold_reason in ("serial_output_backlog", "serial_write_timeout"):
+                    self.policy.release_hold()
+                self.backlog_streak = 0
+            n = self.ser.write(frame)
+            if n != len(frame):
+                raise IOError("partial serial write")
+            self.write_timeout_streak = 0
+            self.tx_packets += 1
+            self.tx_bytes += n
+            self.last_tx_hex = frame.hex(" ")
+        except serial.SerialTimeoutException:
+            self.write_timeouts += 1
+            self.write_timeout_streak += 1
+            self.last_write_timeout_at = time.monotonic()
+            self.last_error = f"Write timeout ({self.write_timeout_streak})"
+            # A timed-out write may contain a partial frame. Stop output until
+            # a fresh zero frame succeeds; never replay the old speed.
+            self.policy.hold("serial_write_timeout", self.last_write_timeout_at)
+            try:
                 self.ser.reset_output_buffer()
-                self.policy.hold("serial_output_backlog", time.monotonic())
-                frame = STOP_FRAME
-        else:
-            if self.backlog_streak and self.policy.hold_reason == "serial_output_backlog":
-                self.policy.release_hold()
-            self.backlog_streak = 0
-        n = self.ser.write(frame)
-        if n != len(frame):
-            raise IOError("partial serial write")
-        self.tx_packets += 1
-        self.tx_bytes += n
-        self.last_tx_hex = frame.hex(" ")
+            except Exception:
+                pass
+            # The CH343 occasionally times out for more than one write and
+            # recovers on the same fd. Keep output held at zero, but reconnect
+            # only after the established sustained-backlog tolerance.
+            if self.write_timeout_streak > self.config.backlog_tolerance:
+                raise
 
     def io_loop(self):
         next_tx = time.monotonic()
         while self.running:
             try:
                 if self.ser is None:
-                    self.ser = serial.Serial(self.port, 115200, timeout=0, write_timeout=0.20, exclusive=True)
+                    # The board's CH343 has exceeded shorter write deadlines
+                    # while parked. Keep the previously stable bounded wait;
+                    # the controller watchdog stops motion if feedback stalls.
+                    self.ser = serial.Serial(self.port, 115200, timeout=0, write_timeout=1.00, exclusive=True)
                     # Drop only data from a prior session. All serial access belongs to this worker.
                     self.ser.reset_input_buffer()
                     self.ser.reset_output_buffer()
@@ -661,6 +797,8 @@ class WheeltecDriver(Node):
                         self.last_odom = None
                         self.odometry_epoch = uuid.uuid4().hex
                         self.rx_times.clear()
+                        self.write_timeout_streak = 0
+                        self.backlog_streak = 0
                         self.policy.link(True, time.monotonic())
                     next_tx = time.monotonic()
                 data = self.ser.read(min(self.ser.in_waiting, 4096))
@@ -676,8 +814,16 @@ class WheeltecDriver(Node):
                         if not self.legacy_commands:
                             self.apply_motion(now)
                         frame = self.policy.tick(now)
+                        stall_detected = (self.policy.stall_latched
+                                          and self.authority.mode not in ('FAULT', 'ESTOP'))
+                        if stall_detected:
+                            self.authority.fault('motion_stall', now=now)
                         if not self.config.receive_only:
                             self.write_frame(frame)
+                        if stall_detected:
+                            self.get_logger().error(
+                                'Motion stall latched: output/feedback mismatch %s' % self.policy.stall_report)
+                            self.publish_status()
                         # Never replay missed ticks in a burst.
                         next_tx = now + 1 / self.config.tx_hz
                 time.sleep(0.002)
@@ -752,21 +898,48 @@ class WheeltecDriver(Node):
             p = self.policy
             hz = (len(self.rx_times) - 1) / (self.rx_times[-1] - self.rx_times[0]) if len(self.rx_times) > 1 and self.rx_times[-1] > self.rx_times[0] and p.last_rx and now - p.last_rx < self.config.feedback_timeout_s else 0.0
             age = now - p.last_rx if p.last_rx is not None else None
+            arm_ready = p.ready(now)
+            reported_ready = (p.hold_reason if p.holding else
+                              "ready" if p.armed and arm_ready == "waiting_for_stationary_feedback"
+                              else arm_ready)
             data = {"connected": p.connected, "armed": p.armed,
                     "reason": p.hold_reason or p.reason,
                     "holding": p.holding, "hold_reason": p.hold_reason,
                     "backlog_streak": self.backlog_streak,
-                    "ready": p.ready(now), "port": self.port, "device": os.path.realpath(self.port),
+                    "ready": reported_ready, "arm_ready": arm_ready,
+                    "port": self.port, "device": os.path.realpath(self.port),
                     "baud": 115200, "config": vars(self.config), "hz": round(hz, 2),
                     "frames_ok": self.parser.good, "frames_bad": self.parser.bad,
                     "bytes_in": self.rx_bytes, "age_ms": round(age * 1000, 1) if age is not None else None,
                     "telemetry": p.last_received, "output_speed_turn": p.output,
+                    "stall_latched": p.stall_latched, "stall_report": p.stall_report,
                     "tx_packets": self.tx_packets, "tx_bytes": self.tx_bytes, "last_tx_hex": self.last_tx_hex,
                     "io_errors": self.io_errors, "last_error": self.last_error,
+                    "write_timeouts": self.write_timeouts,
+                    "write_timeout_age_s": (round(now - self.last_write_timeout_at, 2)
+                                            if self.last_write_timeout_at is not None else None),
                     "guard": {"enabled": self.guard.cfg.enabled,
-                              "reason": p.guard_reason or self.guard.last_reason,
+                              "manual_override": (not self.legacy_commands
+                                                  and self.authority.mode == 'MANUAL'
+                                                  and p.armed and p.latest is not None
+                                                  and not p.holding),
+                              "reason": (p.guard_reason if p.armed and p.latest and not p.holding else None),
+                              "last_reason": self.guard.last_reason,
+                              "eval_ms": round(p.guard_eval_ms, 2),
+                              "peak_eval_ms": round(p.guard_eval_peak_ms, 2),
+                              "eval_overruns": p.guard_eval_overruns,
+                              "min_passage_width_m": round(2 * (self.guard.cfg.half_width_m +
+                                                                  self.guard.cfg.lateral_margin_m), 3),
                               "gap_m": (round(self.guard.last_gap, 3)
                                         if self.guard.last_gap not in (None, float("inf")) else None),
+                              "block": ({"kind": self.guard.last_block[0],
+                                         "x_m": round(self.guard.last_block[1], 3),
+                                         "y_m": round(self.guard.last_block[2], 3),
+                                         "steer_deg": round(math.degrees(self.guard.last_block[3]), 1)}
+                                        if self.guard.last_block is not None else None),
+                              "scan_age_ms": (round((now - self.guard.scan_time) * 1000)
+                                              if self.guard.scan_time is not None else None),
+                              "points": len(self.guard.points),
                               "interventions": self.guard.interventions},
                     "steering_feedback_available": False, "stop_confirmed": bool(age is not None and age < self.config.feedback_timeout_s and p.stationary_frames >= 5)}
             data['odometry_epoch'] = self.odometry_epoch

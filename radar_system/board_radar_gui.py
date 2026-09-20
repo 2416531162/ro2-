@@ -249,7 +249,7 @@ class ROSThread(QThread):
             self.latest_scan = payload
 
         def rgb_callback(msg):
-            if self.display_mode != 'rgb':
+            if self.display_mode not in ('rgb', 'ai'):
                 return
             try:
                 self.latest_rgb = (msg.width, msg.height, msg.step, bytes(msg.data), time.monotonic())
@@ -268,12 +268,8 @@ class ROSThread(QThread):
                 node.get_logger().warn('depth: ' + str(exc), throttle_duration_sec=5.0)
 
         def ai_callback(msg):
-            if self.display_mode != 'ai':
-                return
-            try:
-                self.latest_rgb = (msg.width, msg.height, msg.step, bytes(msg.data), time.monotonic())
-            except Exception:
-                pass
+            # 保持 30FPS 的 latest_rgb 相机原始流，不被低帧率 AI 输出降速
+            pass
 
         def targets_callback(msg):
             try:
@@ -290,9 +286,8 @@ class ROSThread(QThread):
 
         node.create_subscription(Float32, '/voltage', voltage_callback, 10)
         node.create_subscription(LaserScan, '/scan', scan_callback, QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT))
-        node.create_subscription(Image, '/camera/rgb/image_raw', rgb_callback, QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT))
-        node.create_subscription(Image, '/camera/depth_raw/image', depth_callback, QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT))
-        node.create_subscription(Image, '/camera/ai_detection/image', ai_callback, QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT))
+        node.create_subscription(Image, '/camera/rgb/image_raw', rgb_callback, QoSProfile(depth=2, reliability=ReliabilityPolicy.RELIABLE))
+        node.create_subscription(Image, '/camera/depth_raw/image', depth_callback, QoSProfile(depth=2, reliability=ReliabilityPolicy.RELIABLE))
         node.create_subscription(String, '/camera/ai_detection/targets', targets_callback, 10)
 
         try:
@@ -332,7 +327,7 @@ class RadarCanvas(QWidget):
     def set_voltage(self, v):
         try:
             self.voltage = float(v)
-            self.battery_pct = max(0, min(100, int(round((self.voltage - 21.0) / 4.2 * 100))))
+            self.battery_pct = max(0, min(100, int(round((self.voltage - 19.0) / 6.2 * 100))))
         except Exception:
             pass
         self.update()
@@ -429,7 +424,7 @@ class RadarCanvas(QWidget):
 
         if self.voltage is not None and self.voltage > 0:
             v = self.voltage
-            pct = self.battery_pct if self.battery_pct is not None else max(0, min(100, int(round((v - 21.0) / 4.2 * 100))))
+            pct = self.battery_pct if self.battery_pct is not None else max(0, min(100, int(round((v - 19.0) / 6.2 * 100))))
             if pct > 50:
                 theme_color = QColor('#4ADE80')
             elif pct > 20:
@@ -545,8 +540,9 @@ class BoardRadarMainWindow(QWidget):
 
         self._shown_rgb = None
         self._rgb_timer = QTimer(self)
+        self._rgb_timer.setTimerType(Qt.PreciseTimer)
         self._rgb_timer.timeout.connect(self.refresh_rgb)
-        self._rgb_timer.start(40)
+        self._rgb_timer.start(15)
 
         self._depth_shown = None
         self.depth_renderer = DepthDisplayWorker()
@@ -788,17 +784,22 @@ class BoardRadarMainWindow(QWidget):
     def on_voltage_data(self, voltage):
         self.canvas.set_voltage(voltage)
         if hasattr(self, 'battery_badge'):
-            pct = max(0, min(100, int(round((voltage - 21.0) / 4.2 * 100))))
+            pct = max(0, min(100, int(round((voltage - 19.0) / 6.2 * 100))))
             self.battery_badge.setText(f'电量 · {voltage:.1f}V ({pct}%)')
             style_type = 'good' if pct > 50 else 'warn' if pct > 20 else 'danger'
             self.battery_badge.setStyleSheet(chip_style(style_type))
 
     def _note_fps(self):
-        now = time.time()
+        now = time.monotonic()
         self._fps_times.append(now)
         self._fps_times = [t for t in self._fps_times if now - t < 1.0]
-        fps = len(self._fps_times)
-        self.cam_fps_badge.setText(f"{fps} FPS")
+        if len(self._fps_times) >= 2:
+            dt = self._fps_times[-1] - self._fps_times[0]
+            if dt > 0.05:
+                fps = round((len(self._fps_times) - 1) / dt)
+                self.cam_fps_badge.setText(f"{fps} FPS")
+        elif self._fps_times:
+            self.cam_fps_badge.setText(f"{len(self._fps_times)} FPS")
 
     def switch_cam_mode(self, mode):
         self.cam_mode = mode
@@ -944,6 +945,21 @@ class BoardRadarMainWindow(QWidget):
                 painter.drawRect(x1, y1, max(1, x2 - x1), max(1, y2 - y1))
                 painter.setFont(QFont("sans-serif", 10, QFont.Bold))
                 painter.drawText(x1 + 4, max(16, y1 - 6), text)
+
+                # 绘制 17 点人体骨架
+                kps = t.get('keypoints')
+                if kps and len(kps) == 17:
+                    painter.setPen(QPen(QColor(80, 230, 160), 2))
+                    for idx1, idx2 in ((15,13),(13,11),(16,14),(14,12),(11,12),(5,11),(6,12),
+                                       (5,6),(5,7),(6,8),(7,9),(8,10),(1,2),(0,1),(0,2),(1,3),(2,4)):
+                        p1, p2 = kps[idx1], kps[idx2]
+                        if len(p1) >= 3 and len(p2) >= 3 and p1[2] > 0.25 and p2[2] > 0.25:
+                            painter.drawLine(int(p1[0]), int(p1[1]), int(p2[0]), int(p2[1]))
+                    painter.setBrush(QBrush(QColor(255, 80, 80)))
+                    painter.setPen(Qt.NoPen)
+                    for kp in kps:
+                        if len(kp) >= 3 and kp[2] > 0.25:
+                            painter.drawEllipse(int(kp[0]) - 3, int(kp[1]) - 3, 6, 6)
             painter.end()
             qimage = img
         scaled_pix = self._scale_camera_pixmap(qimage)

@@ -36,8 +36,10 @@ MPPI 在这里真正买到的东西
 
 import math
 from dataclasses import dataclass, field
+import numpy as np
 
 from mppi_backend import get_backend, torch_available, cuda_available
+from runtime_config import PROFILE
 
 EPS = 1e-6
 
@@ -85,6 +87,7 @@ class DistanceField:
         self.field = b.full((self.ny * self.nx,), self.cfg.max_distance_m)
         self.obstacle_count = 0
         self.last_points = []
+        self.verification_points = np.empty((0, 2), dtype=np.float64)
 
     def _dedup(self, points):
         """按栅格去重并裁掉视野外的点,控制建场成本。"""
@@ -104,21 +107,28 @@ class DistanceField:
 
     def build(self, points):
         b = self.b
-        pts = self._dedup(points)
+        original = np.asarray(points, dtype=np.float64).reshape(-1, 2)
+        if not np.isfinite(original).all():
+            raise ValueError('MPPI obstacle points must be finite')
+        # Exact verification must retain thin obstacles removed by grid/cap sampling.
+        self.verification_points = original
+        pts = self._dedup(original)
         self.obstacle_count = len(pts)
         self.last_points = pts
         if not pts:
             # 一个障碍物都没有 != 前面一定是空的。上游必须先确认这一帧雷达
             # 本身可用 (ScanEvidence.usable),否则这里会把瞎眼当畅通。
-            self.field = b.full((self.ny * self.nx,), self.cfg.max_distance_m)
+            self.field[:] = self.cfg.max_distance_m
             return self
         px = b.array([p[0] for p in pts]).reshape(1, 1, -1)
         py = b.array([p[1] for p in pts]).reshape(1, 1, -1)
         gx = self._cx.reshape(1, -1, 1)          # (1, nx, 1)
         gy = self._cy.reshape(-1, 1, 1)          # (ny, 1, 1)
-        d = b.hypot(gx - px, gy - py)            # (ny, nx, N)
-        d = b.amin(d, axis=2).reshape(-1)
-        self.field = b.clip(d, 0.0, self.cfg.max_distance_m)
+        # Minimize squared distances first: one sqrt per cell, not per point/cell.
+        d2 = (gx - px) ** 2 + (gy - py) ** 2
+        d = b.sqrt(b.amin(d2, axis=2)).reshape(-1)
+        # Keep the allocation stable: the CUDA graph holds this table's address.
+        self.field[:] = b.clip(d, 0.0, self.cfg.max_distance_m)
         return self
 
     def lookup(self, x, y):
@@ -150,28 +160,23 @@ def rectangle_clearance(poses, points, front_m, rear_m, half_width_m):
     所以分工是:栅格距离场负责给 K 条样本**排序**(近似完全够用),最终选出来
     的那一条用这里的精确几何**复验**。单条 40 步 x 600 点 = 2.4 万次,不值一提。
     """
-    if not points or not poses:
+    points = np.asarray(points, dtype=np.float64).reshape(-1, 2)
+    poses = np.asarray(poses, dtype=np.float64).reshape(-1, 3)
+    if points.size == 0 or poses.size == 0:
         return 9.0
+    if not np.isfinite(points).all() or not np.isfinite(poses).all():
+        return -float('inf')
     cx = 0.5 * (front_m - rear_m)          # 矩形中心相对后轴中心
     hx = 0.5 * (front_m + rear_m)
     hy = half_width_m
-    best = 9.0
-    for px, py, pth in poses:
-        c, s = math.cos(-pth), math.sin(-pth)
-        for ox, oy in points:
-            dx, dy = ox - px, oy - py
-            bx = dx * c - dy * s - cx      # 转到该位姿的车体系,再挪到矩形中心
-            by = dx * s + dy * c
-            ex = abs(bx) - hx
-            ey = abs(by) - hy
-            outside = math.hypot(max(ex, 0.0), max(ey, 0.0))
-            inside = min(max(ex, ey), 0.0)
-            d = outside + inside
-            if d < best:
-                best = d
-                if best < -0.5:
-                    return best            # 已经深深压进去了,不必再找
-    return best
+    c, s = np.cos(poses[:, 2, None]), np.sin(poses[:, 2, None])
+    dx = points[None, :, 0] - poses[:, None, 0]
+    dy = points[None, :, 1] - poses[:, None, 1]
+    ex = np.abs(dx*c + dy*s - cx) - hx
+    ey = np.abs(-dx*s + dy*c) - hy
+    distance = np.hypot(np.maximum(ex, 0.0), np.maximum(ey, 0.0))
+    distance += np.minimum(np.maximum(ex, ey), 0.0)
+    return min(9.0, float(distance.min()))
 
 
 # =============================================================================
@@ -183,13 +188,13 @@ class MPPIConfig:
     """★ 标的需要实车确认。其余可以先照抄。"""
 
     # ---- 采样 ----
-    samples: int = 1024          # K。Orin CUDA 上 2048 也只是几毫秒
-    # 前瞻长度是这台车的硬约束,不是随便选的:满舵最小转弯半径 1.74m,
-    # 一次"让开再切回来"的动作本身就要 3m 以上行程。前瞻比机动动作还短,
-    # 规划器就只能等到贴脸了才发现问题,而那时已经转不过来了。
-    # T*dt = 6.0s,0.55m/s 下约 3.3m,刚好覆盖一次完整机动。
+    samples: int = 1024          # K；增加前在板端 benchmark_mppi.py 实测预算
+    # T*dt = 6.0s；跟随节点派生的 0.45m/s 上限下最多约 2.7m。
+    # 前瞻长度与转弯半径、现场净空和算力共同决定可规划的局部机动。
     horizon: int = 40            # T 步
     dt_s: float = 0.15           # 每步时长
+    control_dt_s: float | None = None  # 未指定时等于预测步；跟随节点传入实际 50 ms 周期
+    cuda_graph: bool = True     # 固定形状 rollout 在启动阶段捕获，周期内只 replay
     temperature: float = 0.35    # λ。调小 -> 更接近最优单条样本,也更抖
     sigma_v: float = 0.12        # 速度噪声 (m/s)
     sigma_steer: float = 0.10    # 转角噪声 (rad)
@@ -197,7 +202,7 @@ class MPPIConfig:
     # 逐步独立的高斯噪声只会产生零均值的抖动,几乎采不出"连续打舵一秒半"
     # 这种样本 —— 而绕过正前方的柱子恰恰需要先**远离**目标点再切回来,
     # 是个局部极小。相关噪声让样本敢于持续偏航,才探得到绕行解。
-    # 0.85 对应约 7 步 (0.7s) 的相关时间。调到 0 就退化成教科书写法,会卡住。
+    # 0.85 对应约 6 步 (0.9s) 的相关时间；0 表示逐步独立噪声。
     noise_correlation: float = 0.85
 
     # ---- 车辆与执行 ----
@@ -205,16 +210,16 @@ class MPPIConfig:
     min_speed_mps: float = 0.0   # 本轮 MPPI 不负责倒车,下界钉死在 0
     accel_limit_mps2: float = 0.90
     decel_limit_mps2: float = 2.50
-    max_steer_rad: float = 0.35
+    max_steer_rad: float = PROFILE['geometry']['max_steer_rad']
     steer_rate_radps: float = 1.20
-    wheelbase_m: float = 0.54
-    track_m: float = 0.59
+    wheelbase_m: float = PROFILE['geometry']['wheelbase_m']
+    track_m: float = PROFILE['geometry']['track_m']
     latency_s: float = 0.35      # ★ 死时间。不建模它,MPPI 会系统性打过头
 
     # ---- 车体 ----
-    footprint_front_m: float = 0.67
-    footprint_rear_m: float = 0.18
-    footprint_half_width_m: float = 0.335
+    footprint_front_m: float = PROFILE['geometry']['front_m']
+    footprint_rear_m: float = PROFILE['geometry']['rear_m']
+    footprint_half_width_m: float = PROFILE['geometry']['half_width_m']
     safety_margin_m: float = 0.035   # 已经算进车体圆半径里,不要再加一次
     # 圆覆盖必然比矩形鼓出来一点,鼓出量 = r - 半宽 = hypot(hw,seg) - hw。
     # 3 个圆时鼓出 2.6cm —— 而这台车过 80cm 门本来两边各只剩 3cm,
@@ -298,6 +303,9 @@ class MPPIConfig:
         out.safety_margin_m = cfg.footprint_margin_m
         out.follow_distance_m = cfg.follow_distance_m
         out.deadband_m = cfg.deadband_m
+        out.control_dt_s = 1.0 / cfg.control_hz
+        out.camera_hfov_rad = math.radians(cfg.camera_hfov_deg)
+        out.fov_keep_rad = min(out.fov_keep_rad, out.camera_hfov_rad * 0.45)
         return out
 
 
@@ -321,12 +329,38 @@ class MPPIController:
 
     def __init__(self, config=None, backend=None, prefer='auto'):
         self.cfg = config or MPPIConfig()
+        cfg = self.cfg
+        if cfg.control_dt_s is None:
+            cfg.control_dt_s = cfg.dt_s
+        if (not all(math.isfinite(value) for value in
+                    (cfg.dt_s, cfg.control_dt_s, cfg.latency_s, cfg.temperature))
+                or cfg.samples < 2 or cfg.horizon < 2 or cfg.dt_s <= 0
+                or cfg.control_dt_s <= 0 or cfg.latency_s < 0
+                or cfg.feasible_steps < 1 or cfg.temperature <= 0):
+            raise ValueError('Invalid MPPI sampling/timing configuration')
         self.b = backend or get_backend(prefer)
         self.field = DistanceField(self.b, self.cfg.field)
         T = self.cfg.horizon
         self._nominal = self.b.zeros((T, 2))     # [v_ref, steer_ref]
         self._tick = 0
         self.last = None
+        circles = self.cfg.body_offsets()
+        self._circle_offsets = self.b.array([c[0] for c in circles]).reshape(1, -1)
+        self._circle_radii = self.b.array([c[1] for c in circles]).reshape(1, -1)
+        self._graph = None
+        self._warmup_done = False
+        self._sigma = self.b.array([cfg.sigma_v, cfg.sigma_steer]).reshape(1, 1, 2)
+        self._inv_var = self.b.array([1/max(cfg.sigma_v**2, EPS),
+                                      1/max(cfg.sigma_steer**2, EPS)]).reshape(1, 1, 2)
+        beta = min(max(float(cfg.noise_correlation), 0.), .99)
+        # AR(1) as a fixed matrix: avoids two small GPU kernels per horizon step.
+        kernel = np.zeros((T, T), dtype=np.float32)
+        for row in range(T):
+            kernel[row, 0] = beta**row
+            for col in range(1, row+1):
+                kernel[row, col] = math.sqrt(1-beta*beta)*beta**(row-col)
+        self._noise_kernel = self.b.array(kernel)
+        self._shift_key = None
 
     # ------------------------------------------------------------------
     # 跟随点
@@ -370,7 +404,7 @@ class MPPIController:
 
         pts_x, pts_y, per_x, per_y = [], [], [], []
         for t in range(cfg.horizon):
-            tau = min((t + 1) * cfg.dt_s, cfg.person_predict_cap_s)
+            tau = min(cfg.latency_s + (t + 1) * cfg.dt_s, cfg.person_predict_cap_s)
             fx, fy = px + vx * tau, py + vy * tau
             per_x.append(fx)
             per_y.append(fy)
@@ -406,7 +440,6 @@ class MPPIController:
         确定性复验里用,批量采样时不要传,拷贝代价白给。
         """
         b, cfg = self.b, self.cfg
-        dt = cfg.dt_s
         K = controls.shape[0]
         steps = controls.shape[1]
         n_delay = steps - cfg.horizon
@@ -418,12 +451,12 @@ class MPPIController:
         y = b.zeros((K,))
         cost = b.zeros((K,))
         min_clear = b.full((K,), cfg.field.max_distance_m)
-        circles = self.cfg.body_offsets()
 
         prev_v = controls[:, 0, 0] * 0.0 + state0['speed']
         prev_d = controls[:, 0, 1] * 0.0 + state0['steer']
 
         for s in range(steps):
+            dt = cfg.latency_s / n_delay if s < n_delay else cfg.dt_s
             v_ref = controls[:, s, 0]
             d_ref = controls[:, s, 1]
             # 执行器限幅:MPPI 不准提出车做不到的动作
@@ -440,7 +473,7 @@ class MPPIController:
             y = y + v * b.sin(th_mid) * dt
             th = th + omega * dt
             if trace is not None:
-                trace.append((b.to_numpy(x), b.to_numpy(y), b.to_numpy(th)))
+                trace.append(b.stack([x, y, th], axis=1))
 
             if s < n_delay:
                 # 死时间段:这些指令已经在路上了,改不了,只推状态不计代价
@@ -450,17 +483,17 @@ class MPPIController:
             t = s - n_delay
             # --- 障碍 ---
             cos_t, sin_t = b.cos(th), b.sin(th)
-            for offset, radius in circles:
-                cx = x + offset * cos_t
-                cy = y + offset * sin_t
-                dist = self.field.lookup(cx, cy)
-                slack = b.relu(radius + cfg.standoff_m - dist)
-                cost = cost + cfg.w_obstacle * slack * slack
-                hit = dist - radius
-                cost = cost + cfg.w_collision * b.relu(-hit) / max(radius, EPS)
-                if collect_clearance and (clearance_steps is None
-                                          or t < clearance_steps):
-                    min_clear = b.amin(b.stack([min_clear, hit], axis=0), axis=0)
+            # Evaluate all body circles in one gather/reduction per time step.
+            cx = x.reshape(-1, 1) + self._circle_offsets * cos_t.reshape(-1, 1)
+            cy = y.reshape(-1, 1) + self._circle_offsets * sin_t.reshape(-1, 1)
+            dist = self.field.lookup(cx, cy)
+            slack = b.relu(self._circle_radii + cfg.standoff_m - dist)
+            hit = dist - self._circle_radii
+            obstacle_cost = cfg.w_obstacle * slack * slack
+            obstacle_cost += cfg.w_collision * b.relu(-hit) / self._circle_radii
+            cost = cost + b.sum(obstacle_cost, axis=1)
+            if collect_clearance and (clearance_steps is None or t < clearance_steps):
+                min_clear = b.amin(b.stack([min_clear, b.amin(hit, axis=1)], axis=0), axis=0)
 
             # --- 目标 ---
             gx, gy = goals[0][t], goals[1][t]
@@ -484,6 +517,53 @@ class MPPIController:
 
         return cost, min_clear
 
+    def warmup(self):
+        """Capture the GPU rollout before subscribing to motion commands.
+
+        Only fixed-shape arithmetic is captured; sensor uploads, RNG and exact
+        geometry verification stay outside the graph. Capture failures abort
+        startup instead of silently changing the backend or consuming a control tick.
+        """
+        if self._warmup_done:
+            return
+        if self.b.is_gpu and self.cfg.cuda_graph:
+            import torch
+            cfg, b = self.cfg, self.b
+            delay = int(math.ceil(cfg.latency_s / cfg.dt_s))
+            self._graph_controls = b.zeros((cfg.samples, cfg.horizon + delay, 2))
+            self._graph_targets = b.zeros((4, cfg.horizon))
+            self._graph_state = b.zeros((2,))
+
+            def evaluate():
+                return self._rollout(self._graph_controls,
+                    {'speed': self._graph_state[0], 'steer': self._graph_state[1]},
+                    (self._graph_targets[0], self._graph_targets[1]),
+                    (self._graph_targets[2], self._graph_targets[3]))[0]
+
+            with torch.cuda.device(b.device):
+                stream = torch.cuda.Stream(device=b.device)
+                stream.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(stream):
+                    for _ in range(3):
+                        self._correlated_noise(cfg.samples, cfg.horizon)
+                        evaluate()
+                torch.cuda.current_stream().wait_stream(stream)
+                torch.cuda.synchronize(b.device)
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    self._graph_cost = evaluate()
+                self._graph = graph
+        self._warmup_done = True
+
+    def _score(self, controls, state0, goals, persons):
+        if self._graph is None:
+            return self._rollout(controls, state0, goals, persons)[0]
+        self._graph_controls.copy_(controls)
+        self._graph_targets.copy_(self.b.stack([*goals, *persons]))
+        self._graph_state.copy_(self.b.array([state0['speed'], state0['steer']]))
+        self._graph.replay()
+        return self._graph_cost
+
     # ------------------------------------------------------------------
     # 求解
     # ------------------------------------------------------------------
@@ -502,25 +582,32 @@ class MPPIController:
         t0 = _time.perf_counter()
         b, cfg = self.b, self.cfg
 
+        if not all(math.isfinite(v) for v in (*person_xy, *person_vel, speed, steer)):
+            self.reset()
+            self.last = MPPISolution(0.0, 0.0, False, float('inf'), 0.0,
+                                     'invalid_state')
+            return self.last
         if not usable:
+            self.reset()
             self.last = MPPISolution(0.0, steer, False, float('inf'), 0.0,
                                      'scan_unusable')
             return self.last
 
+        if self.b.is_gpu and self.cfg.cuda_graph and not self._warmup_done:
+            raise RuntimeError('MPPI CUDA graph requires warmup() before control starts')
         self.field.build(obstacles)
         # 逐 tick 播种:采样式控制器如果不可复现,现场根本没法复盘一次异常
         self._tick += 1
         b.seed(self._tick)
 
-        n_delay = int(round(cfg.latency_s / cfg.dt_s))
+        n_delay = int(math.ceil(cfg.latency_s / cfg.dt_s))
         T, K = cfg.horizon, cfg.samples
         goals_x, goals_y, per_x, per_y = self.follow_points(person_xy, person_vel, speed)
         goals, persons = (goals_x, goals_y), (per_x, per_y)
         state0 = {'speed': speed, 'steer': steer}
 
         noise = self._correlated_noise(K, T)
-        sigma = b.array([cfg.sigma_v, cfg.sigma_steer]).reshape(1, 1, 2)
-        noise = noise * sigma
+        noise = noise * self._sigma
         nominal = self._nominal.reshape(1, T, 2)
         sampled = nominal + noise
         sampled = b.stack([
@@ -538,18 +625,18 @@ class MPPIController:
         else:
             controls = sampled
 
-        cost, _ = self._rollout(controls, state0, goals, persons)
+        cost = self._score(controls, state0, goals, persons)
         # 名义控制偏离项 (MPPI 标准的 gamma * u_nom^T Sigma^-1 eps),
         # 让解收敛回低噪声控制而不是在噪声里乱走。两个通道各按自己的方差归一。
-        inv_var = b.array([1.0 / max(cfg.sigma_v ** 2, EPS),
-                           1.0 / max(cfg.sigma_steer ** 2, EPS)]).reshape(1, 1, 2)
-        deviation = b.sum(b.sum(nominal * noise * inv_var, axis=2), axis=1)
+        deviation = b.sum(b.sum(nominal * noise * self._inv_var, axis=2), axis=1)
         cost = cost + (cfg.nominal_shrink * cfg.temperature) * deviation
 
         best = b.amin(cost)
         weights = b.exp(-(cost - best) / max(cfg.temperature, EPS))
         total = b.sum(weights)
         weights = weights / (total + EPS)
+        # Retain signed perturbations at the zero-speed boundary: averaging only
+        # clipped, nonnegative speeds creates a forward-creep bias when blocked.
         update = b.sum(noise * weights.reshape(K, 1, 1), axis=0)
         nominal_new = self._nominal + update
         nominal_new = b.stack([
@@ -560,10 +647,10 @@ class MPPIController:
         # --- 确定性复验 ---
         # 加权平均出来的控制可能落在没有任何样本占据的区域。不自己再跑一遍
         # 就发下去,等于把「代价很高」当成了「不会发生」。
-        obs_pts = self.field.last_points
-        plan, vcost, clearance = self._verify(nominal_new, state0, goals,
-                                              persons, speed, steer, n_delay,
-                                              obs_pts)
+        obs_pts = self.field.verification_points
+        plan = b.to_numpy(nominal_new)
+        clearance = self._verify(plan, speed, steer, n_delay, obs_pts)
+        vcost = b.item(best)  # Lowest sampled cost, including nominal regularization.
         feasible = clearance >= cfg.feasible_clearance_m
         reason = 'ok'
 
@@ -571,23 +658,25 @@ class MPPIController:
             # 退到代价最低的那条真实样本
             k = b.argmin(cost)
             cand = sampled[k]
-            cplan, ccost, cclear = self._verify(cand, state0, goals, persons,
-                                                speed, steer, n_delay, obs_pts)
+            cplan = b.to_numpy(cand)
+            cclear = self._verify(cplan, speed, steer, n_delay, obs_pts)
             if cclear >= cfg.feasible_clearance_m:
-                plan, vcost, clearance = cplan, ccost, cclear
+                plan, clearance = cplan, cclear
                 nominal_new = cand
                 feasible, reason = True, 'best_sample'
 
-        out_v = b.item(nominal_new[0, 0])
-        out_d = b.item(nominal_new[0, 1])
+        out_v, out_d = map(float, plan[0])
+        if not (np.isfinite(plan).all() and math.isfinite(vcost)):
+            feasible = False
         if not feasible:
             # 没有一条可行:输出停车,并把名义序列拉回零。不拉的话下个周期
             # 还会拿同一条撞墙的计划去复验,车就永久瘫在这儿了。
             out_v, reason = 0.0, 'mppi_infeasible'
-            nominal_new = nominal_new * 0.0
-        # 热启动:整体前移一步,末尾复制。下一周期从这里继续优化,
-        # 这也是 MPPI 在 20Hz 下能用小 K 就收敛的原因。
-        self._nominal = b.roll_forward(nominal_new)
+            out_d = steer
+            nominal_new = b.zeros((T, 2))
+        # 热启动按实际控制周期推进，末尾保持。
+        self._nominal = self._advance_nominal(nominal_new)
+        b.synchronize()  # solve_ms includes completion, not just queued GPU work.
 
         solution = MPPISolution(
             speed=out_v,
@@ -602,28 +691,48 @@ class MPPIController:
         self.last = solution
         return solution
 
-    def _verify(self, sequence, state0, goals, persons, speed, steer, n_delay,
-                obstacles):
-        """对一条确定的控制序列复验,返回 (序列, 代价, 近期最小净空)。
+    def _verification_poses(self, sequence, speed, steer, n_delay):
+        """Single CPU trace: one device transfer per plan, with the same actuator model.
 
-        净空用**精确矩形几何**算,不用栅格 —— 见 rectangle_clearance 的说明。
+        Include current pose and the command latency interval. Checking only after
+        the delay can miss an obstacle crossed before a new command takes effect.
         """
-        b, cfg = self.b, self.cfg
-        one = sequence.reshape(1, cfg.horizon, 2)
-        if n_delay > 0:
-            held = b.stack([b.full((1, n_delay), speed),
-                            b.full((1, n_delay), steer)], axis=2)
-            one = self._concat_time(held, one)
-        trace = []
-        c, _ = self._rollout(one, state0, goals, persons, trace=trace)
-        # 只看近期那一段:再往后规划器会重算十几次,现在为它停车是自己吓自己
-        keep = trace[n_delay:n_delay + cfg.feasible_steps]
-        poses = [(float(x.reshape(-1)[0]), float(y.reshape(-1)[0]),
-                  float(t.reshape(-1)[0])) for x, y, t in keep]
-        clear = rectangle_clearance(poses, obstacles, cfg.footprint_front_m,
-                                    cfg.footprint_rear_m,
-                                    cfg.footprint_half_width_m)
-        return sequence, b.item(c.reshape(-1)[0]), clear
+        cfg = self.cfg
+        x = y = theta = 0.0
+        v, d = speed, steer
+        poses = [(x, y, theta)]
+        for step in range(n_delay + min(cfg.feasible_steps, cfg.horizon)):
+            dt = cfg.latency_s / n_delay if step < n_delay else cfg.dt_s
+            vr, dr = (speed, steer) if step < n_delay else sequence[step-n_delay]
+            v += max(-cfg.decel_limit_mps2*dt, min(cfg.accel_limit_mps2*dt, float(vr)-v))
+            v = max(cfg.min_speed_mps, min(cfg.max_speed_mps, v))
+            d += max(-cfg.steer_rate_radps*dt, min(cfg.steer_rate_radps*dt, float(dr)-d))
+            d = max(-cfg.max_steer_rad, min(cfg.max_steer_rad, d))
+            omega = (v / (cfg.wheelbase_m/math.tan(abs(d)) + .5*cfg.track_m)
+                     * math.copysign(1.0, d)) if abs(d) >= 1e-4 else 0.0
+            mid = theta + .5*omega*dt
+            x, y, theta = x + v*math.cos(mid)*dt, y + v*math.sin(mid)*dt, theta + omega*dt
+            poses.append((x, y, theta))
+        return poses
+
+    def _verify(self, sequence, speed, steer, n_delay, obstacles):
+        cfg = self.cfg
+        if not np.isfinite(sequence).all():
+            return -float('inf')
+        return rectangle_clearance(self._verification_poses(sequence, speed, steer, n_delay),
+            obstacles, cfg.footprint_front_m, cfg.footprint_rear_m, cfg.footprint_half_width_m)
+
+    def _advance_nominal(self, sequence):
+        # At 20 Hz with a 150 ms prediction step, shift by 1/3 step, not 1 step.
+        key = (self.cfg.horizon, self.cfg.control_dt_s, self.cfg.dt_s)
+        if key != self._shift_key:
+            positions = np.minimum(np.arange(self.cfg.horizon, dtype=np.float32)
+                                   + self.cfg.control_dt_s/self.cfg.dt_s, self.cfg.horizon-1)
+            self._shift_lo = self.b.to_long(self.b.array(np.floor(positions)))
+            self._shift_hi = self.b.to_long(self.b.array(np.ceil(positions)))
+            self._shift_alpha = self.b.array(positions-np.floor(positions)).reshape(-1, 1)
+            self._shift_key = key
+        return sequence[self._shift_lo]*(1-self._shift_alpha) + sequence[self._shift_hi]*self._shift_alpha
 
     def _correlated_noise(self, K, T):
         """沿时间轴相关的单位方差噪声。
@@ -635,6 +744,8 @@ class MPPIController:
         raw = b.randn((K, T, 2))
         if beta <= 0.0:
             return raw
+        if b.kind == 'torch':
+            return (raw.transpose(1, 2) @ self._noise_kernel.T).transpose(1, 2)
         beta = min(beta, 0.99)
         scale = math.sqrt(1.0 - beta * beta)
         cols = []

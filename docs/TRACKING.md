@@ -5,8 +5,9 @@
 | 模块 | 职责 |
 |---|---|
 | `real_lidar_node.py` / `n10p_pipeline.py` | N10P 扫描解码与 `/scan` |
-| `person_pose_node.py` | RGB-D 最新帧缓冲、人体姿态与测距发布 |
-| `pose_inference.py` | RKNN NPU、NumPy DFL 解码、NMS、17 点骨架 |
+| `person_pose_node.py` | RGB-D 最新帧缓冲、人物框与测距发布（名称沿用现有入口） |
+| `person_detection.py` | Jetson CUDA FP16 / TensorRT 人物检测；只取 COCO person |
+| `pose_inference.py` | 显式选用旧 ONNX/RKNN 时的姿态适配 |
 | `depth_measurement.py` | 深度有效比例与近百分位测距，图像 stride/大小端处理 |
 | `robot_core` / `follower_config.py` | 共享物理配置、运动学和位姿历史；跟随行为参数 |
 | `motion_client.py` / `wheeltec_protocol/motion_authority.py` | 带时间戳、控制租约的运动请求与控制权仲裁 |
@@ -20,49 +21,52 @@
 车体矩形足迹、相机深度反投影和短期倒车历史用于安全控制，仍然保留。
 不自动启动跟随运动；通过主页按钮或 `run_follower.sh` 启动。
 
-## 姿态模型
+## 人物检测模型
 
-默认路径：`radar_system/models/yolov8n_pose_rk3588_fp16.rknn`。
-可用环境变量 `RK3588_POSE_MODEL` 指定同格式模型。旧的 `RK3588_YOLO_MODEL` 不再使用。
-不存在的权重或错误输出格式会在节点启动时明确报错，没有旧检测模型回退。
+Jetson 默认加载官方 [YOLO26s 检测模型](https://docs.ultralytics.com/models/yolo26/)
+`radar_system/models/yolo26s.pt`，只取 COCO `person` 类，不计算人体姿态。
+来源、体积和 SHA-256 见 `radar_system/models/detection_manifest.json`。
+推理输入设为 512，CUDA PyTorch 使用 FP16；只保留最新相机帧并以最多 30 FPS 处理，
+标注图最多发布 5 FPS，人物目标与状态逐个处理帧发布。FPS 上限不保证实际能达到 30；
+在 MPPI 同时占用 GPU 的板端需检查 `/camera/ai_detection/status` 中的 `fps`、
+`inference_ms`、`pipeline_ms` 和目标丢失情况，不能用官方 T4 延迟推断本机性能。
 
-采用 Rockchip model-zoo 的 **YOLOv8n-pose 原始输出导出**，输入固定 640×640 RGB uint8，
-转换配置在模型中完成 `/255` 归一化。输出为三个 `(1,65,H,W)` 检测头（H/W=80、40、20）
-与已解码的 `(1,17,3,8400)` 关键点；同时兼容 `(1,51,8400)` 的等价布局。
-普通 Ultralytics 单输出 ONNX、旧六头 YOLOv8 检测模型不能直接使用。
-已生成并随项目提供 RK3588 FP16 权重（约 8.2 MiB），不是旧权重改名。
-
-`models/yolov8n-pose.onnx` 来自 Rockchip 官方示例的下载地址；来源及校验和见同目录模型清单。
-FP16 转换不使用随意拼凑的 INT8 标定集。需要进一步做 INT8 时，应使用实车光照、距离、遮挡场景标定并复核精度。
-
-可重现的转换（Docker，Linux amd64；Apple Silicon 通过容器模拟运行）：
+保留历史配置键 `RK3588_POSE_MODEL`，可显式选择检测用 `.pt`（CUDA PyTorch）或在目标
+Jetson 用同一权重导出的 `.engine`（TensorRT）。两者都由 Ultralytics 加载，不需要
+`libtrt_engine_wrapper.so`；缺少 CUDA、Ultralytics、模型文件或运行库时明确报错，
+不自动换后端。相对模型路径以 `radar_system` 为基准，环境文件推荐绝对路径。
+Ultralytics 在 `.pt`/`.engine` 路径负责 RGB、归一化 NCHW 浮点输入与输出还原；
+旧 ONNX 姿态路径使用归一化 NCHW 浮点输入，旧 RKNN 姿态路径使用 NHWC RGB uint8。
+先安装与 JetPack 匹配的 CUDA PyTorch/torchvision；其余依赖已齐备后，用对应的
+`RK3588_PYTHON -m pip install --no-deps 'ultralytics>=8.4,<9'` 安装 Ultralytics，
+避免 pip 用普通 PyTorch wheel 覆盖 CUDA 构建。
+不要在未核对依赖前直接对板端执行 `pip install -r requirements-jetson.txt`。
+可选 TensorRT 引擎须在目标板上导出，输入尺寸保持一致：
 
 ```bash
-docker build --platform linux/amd64 -f radar_system/tools/Dockerfile.pose \
-  -t rk3588-pose-builder:2.3.2 radar_system/tools
-docker run --rm --platform linux/amd64 -v "$PWD/radar_system:/work" \
-  rk3588-pose-builder:2.3.2
+/path/to/board/python -c "from ultralytics import YOLO; YOLO('/opt/rk3588/current/radar_system/models/yolo26s.pt').export(format='engine', imgsz=512, quantize=16, device=0)"
 ```
 
-也可在安装相同依赖的 Linux 环境直接执行 `python radar_system/tools/convert_pose.py`。
-构建先验证 ONNX 维度与结构，成功导出后原子替换目标文件。工具链固定 ONNX 1.16.1，
-因为 toolkit2 2.3.2 使用了新版 ONNX 已移除的 `onnx.mapping`。
-ONNX CPU 示例图推理检测出 3 人，关键点显示通过检查；RKNN 构建成功。
-x86 模拟器在 Apple Silicon/QEMU 下停滞于 SessionPreparing，已停止，未宣称转换后推理通过。
-开发板 `rknn-toolkit-lite2`、`librknnrt` 与 NPU 驱动需配套；本地转换没有替代设备验证。
+成功导出后才将 `RK3588_POSE_MODEL` 指向板端 `yolo26s.engine`。默认 `.pt` 不需要这一步。
+如果现场 `/etc/rk3588/runtime.env` 已显式配置旧权重路径，须删除赋值或改为新 `.pt`；
+进程和文件显式值始终优先于默认值，不自动迁移。
+旧 `.onnx`（ONNX Runtime CPU）和 `.rknn`（RKNN Lite）仅为显式选择的历史兼容路径，
+要求 Rockchip 四输出姿态模型，权重已不随 Jetson 发布目录提供；它们不适用于普通检测 ONNX。
+`RK3588_YOLO_MODEL` 不再使用；RK3588 构建记录见 `wheeltec_protocol/交接文档.md`。
+将官方权重随发布包再分发前应核对 Ultralytics 的模型和代码许可要求。
 
 ## 跟踪话题兼容
 
 `/camera/ai_detection/targets` 仍是 JSON 数组，保留 `label=person`、`conf`、框坐标、
 `bearing_rad`、`stamp`、`depth_ratio`、`range_valid`，有效深度时提供 `x/y/z/distance`。
-新增 `keypoints`，按 COCO 17 点顺序输出原图像素坐标 `[x,y,confidence]`。
-越界或非有限关键点置为 `[0,0,0]`，低置信度关键点不绘制。
-跟随锁定仍使用位置和运动一致性，姿态关键点不作为身份识别或独立放宽避障的依据。
+普通检测不包含 `keypoints`，状态中的 `keypoint_names` 为空；仅显式选旧姿态模型时
+目标消息保留 17 个关键点。跟随锁定只使用位置和运动一致性，不依赖骨架。
 
 深度帧过期、RGB/深度尺寸不一致或深度空洞过多时，仅发布人体方位，交给原雷达测距兜底。
-`/camera/ai_detection/image` 输出人体框、骨架和测距图。
+`/camera/ai_detection/image` 最多以 5 FPS 输出人体框和测距图（仅有订阅者时）。
 `/camera/ai_detection/status` 提供模型名、FPS、`inference_ms`、预处理/推理/后处理的 `pipeline_ms`。
-后者不包含图像绘制、ROS 发布和等待时间。网页 `/api/stream` 包含这份 `ai_status`。
+后者不包含 ROS 图像解码、深度测距、图像绘制、ROS 发布和等待时间。
+网页 `/api/stream` 包含这份 `ai_status`。
 
 ## 路径性能与验证
 
@@ -73,7 +77,7 @@ x86 模拟器在 Apple Silicon/QEMU 下停滞于 SessionPreparing，已停止，
 
 本地新旧实现对照 1,200 组扫描/转角/前后档组合，净空与首次阻挡诊断一致。
 本机初次对比（非 RK3588，Python 3.12.13 / NumPy 2.5.3）：五条候选路径中位耗时 **17.731 → 1.804 ms**，约 **9.8×**；
-P95 为 18.164 → 4.386 ms。这是路径几何计算加速，不代表姿态 NPU 推理加速。
+P95 为 18.164 → 4.386 ms。这是路径几何计算加速，不代表 YOLO26s 推理加速。
 
 在目标开发板复测：
 
@@ -85,7 +89,7 @@ ros2 topic echo /camera/ai_detection/status
 ```
 
 当前完整测试入口为 `python3 -m pytest tests -q`，涵盖视觉、跟随、控制仲裁、共享定位和部署回滚。历史性能及显示验证记录不表示本次在设备上重新验收。
-真实传感器 QoS、板端 NPU 性能、相机外参与深度配准、运动延迟和实车避障仍需设备验收。
+真实传感器 QoS、Jetson GPU 上的 30 FPS 目标、相机外参与深度配准、运动延迟和实车避障仍需设备验收。
 
 ## 部署迁移
 

@@ -5,6 +5,7 @@ age uses ROS time; watchdogs and stationary dwell use injected monotonic time.
 """
 from dataclasses import dataclass
 import math
+import time
 import uuid
 
 
@@ -34,15 +35,28 @@ class MotionAuthority:
         self.received = None
         self.last_stamp = {}
         self.unhealthy_since = None
+        self.previous_epoch = None
+        self.previous_mode = None
+        self.epoch_transition_time = 0.0
 
-    def _transition(self, mode, reason):
+    def _transition(self, mode, reason, now=None):
+        self.previous_mode = self.mode
         self.mode, self.reason = mode, reason
+        self.previous_epoch = self.epoch
+        transition_now = time.monotonic() if now is None else now
+        self.epoch_transition_time = transition_now
         self.epoch = uuid.uuid4().hex
+        was_moving = abs(self.request.vx) > 1e-6
         self.request = Request()
         self.received = None
         self.last_stamp.clear()
-        self.stationary_since = None
-        self.wait_stationary = True
+        # Preserve measured stationary dwell when taking over a follower that
+        # is already stopped; a moving takeover still needs fresh dwell.
+        if mode == 'MANUAL' and self.stationary_since is not None and not was_moving:
+            self.wait_stationary = transition_now - self.stationary_since < self.settle_s
+        else:
+            self.stationary_since = None
+            self.wait_stationary = True
 
     def health(self, healthy, stationary, now):
         if not healthy:
@@ -57,7 +71,7 @@ class MotionAuthority:
             self.healthy = False
             if (self.mode in ('MANUAL', 'FOLLOW', 'NAVIGATION')
                     and now - self.unhealthy_since >= self.fault_grace_s):
-                self._transition('FAULT', 'sensor_or_driver_fault')
+                self._transition('FAULT', 'sensor_or_driver_fault', now=now)
             self.stationary_since = None
             return
         self.healthy = True
@@ -75,11 +89,17 @@ class MotionAuthority:
             raise ValueError('invalid autonomous source')
         if not self.healthy or self.mode in ('ESTOP', 'FAULT'):
             return False
+        if self.mode == 'MANUAL':
+            return False
         self._transition(source.upper(), 'operator_select')
         return True
 
     def stop(self, emergency=False):
         self._transition('ESTOP' if emergency else 'IDLE', 'operator_stop')
+
+    def fault(self, reason, now=None):
+        if self.mode not in ('FAULT', 'ESTOP'):
+            self._transition('FAULT', reason, now=now)
 
     def release(self, source):
         if self.mode == source.upper():
@@ -98,7 +118,17 @@ class MotionAuthority:
             vx, wz, stamp = (data[k] for k in ('vx', 'wz', 'stamp'))
             if not all(type(v) in (int, float) and math.isfinite(v) for v in (vx, wz, stamp)):
                 return False
-            if data['epoch'] != self.epoch or stamp <= 0 or not 0 <= ros_now - stamp <= self.timeout_s:
+            now_epoch = self.epoch
+            prev_epoch = getattr(self, 'previous_epoch', None)
+            prev_time = getattr(self, 'epoch_transition_time', 0.0)
+            epoch_valid = (data['epoch'] == now_epoch) or (
+                source == 'manual' and self.mode == 'MANUAL'
+                and self.reason == 'manual_takeover'
+                and self.previous_mode in ('IDLE', 'FOLLOW', 'NAVIGATION')
+                and prev_epoch is not None
+                and data['epoch'] == prev_epoch and now - prev_time < 0.60
+            )
+            if not epoch_valid or stamp <= 0 or not 0 <= ros_now - stamp <= self.timeout_s:
                 return False
             if stamp <= self.last_stamp.get(source, -math.inf):
                 return False
@@ -111,11 +141,11 @@ class MotionAuthority:
                 self.stop()
                 return True
             if self.mode != 'MANUAL':
-                self._transition('MANUAL', 'manual_takeover')
+                self._transition('MANUAL', 'manual_takeover', now=now)
         elif self.mode != source.upper():
             return False
         self.last_stamp[source] = stamp
-        self.request = Request(float(vx), float(wz) if abs(vx) >= 1e-6 else 0.0)
+        self.request = Request(float(vx), float(wz))
         self.received = now - (ros_now - stamp)
         return True
 

@@ -35,7 +35,9 @@ class PersonFollowerNode(Node):
             dry_run=dry_run, target_class=target_class, simulated_odometry=simulated_odometry)
         self.engine.depth_path.load_calibration(
             os.environ.get('RK3588_DEPTH_PATH_CONFIG', '/etc/rk3588/depth_path.json'), profile_hash(PROFILE))
-        self.motion = MotionClient(self, 'follow')
+        if self.engine.depth_path.calibration_error:
+            self.get_logger().warn('Depth path disabled: ' + self.engine.depth_path.calibration_error)
+        self.motion = MotionClient(self, 'follow', timeout_s=1.0)
         self._select_pending = not (dry_run or passive)
         self._motion_epoch = None
         sensor_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT)
@@ -88,8 +90,14 @@ class PersonFollowerNode(Node):
         header = getattr(msg, 'header', None)
         stamp = getattr(header, 'stamp', None)
         seconds = stamp.sec + stamp.nanosec / 1e9 if stamp else 0.
+        # The N10P publisher marks only bins it never sampled with intensity
+        # -1. Older publishers have no marker and retain the conservative rule.
+        intensities = getattr(msg, 'intensities', None) or ()
+        sampled = (tuple(q != -1.0 for q in intensities)
+                   if len(intensities) == len(msg.ranges) and any(q == -1.0 for q in intensities)
+                   else None)
         self.engine.observe_scan(ScanFrame(msg.ranges, msg.angle_min, msg.angle_increment,
-                                          msg.range_min, msg.range_max, seconds))
+                                          msg.range_min, msg.range_max, seconds, sampled))
 
     def on_depth_info(self, msg):
         sensor = self.engine.depth_path
@@ -107,8 +115,13 @@ class PersonFollowerNode(Node):
                     info.width, info.height, info.frame, info.fx, info.fy, info.cx, info.cy):
                 sensor.invalidate('intrinsics_changed')
             sensor.intrinsics = info
-        except (AttributeError, ValueError, TypeError):
+            sensor.intrinsics_error = None
+        except (AttributeError, ValueError, TypeError) as exc:
             sensor.intrinsics = None
+            detail = str(exc) or type(exc).__name__
+            if sensor.intrinsics_error != detail:
+                self.get_logger().warn('Depth camera info rejected: ' + detail)
+            sensor.intrinsics_error = detail
             sensor.invalidate('intrinsics_invalid')
 
     def on_depth_image(self, msg):
@@ -149,8 +162,10 @@ class PersonFollowerNode(Node):
                 if self.motion.select(True) is not None:
                     self._select_pending = False
             if not self.motion.active():
+                self._follower_was_active = False
                 core.pause()
                 return
+            self._follower_was_active = True
             epoch = self.motion.state.get('epoch')
             if epoch != self._motion_epoch:
                 self._motion_epoch = epoch
@@ -178,8 +193,8 @@ def strip_ros_args(argv):
     return argv[:argv.index('--ros-args')] if '--ros-args' in argv else argv
 
 
-def main():
-    p = argparse.ArgumentParser(description="RK3588 电子跟屁虫 - 人体跟随控制节点")
+def parse_args(argv=None):
+    p = argparse.ArgumentParser(description="Jetson 人体跟随控制节点")
     p.add_argument('--passive', action='store_true', help='等待 /motion/follow 显式选择跟随模式')
     p.add_argument('--no-recovery', action='store_true', help='关闭自动倒车脱困和丢人搜索')
     p.add_argument('--no-turnaround', action='store_true',
@@ -202,7 +217,7 @@ def main():
     p.add_argument('--aeb-clearance-m', type=float, default=None, dest='aeb_clearance_m')
     p.add_argument('--obstacle-standoff-m', type=float, default=None, dest='obstacle_standoff_m')
     p.add_argument('--max-steer-deg', type=float, default=None, dest='max_steer_deg',
-                   help='★ 实测满舵角度(度)。轴距 0.54 下它对转弯半径很敏感')
+                   help='★ 实测满舵角度(度)。转弯半径对共享配置中的轴距很敏感')
     p.add_argument('--lidar-yaw-deg', type=float, default=None, dest='lidar_yaw_deg',
                    help='雷达安装偏航角偏差(度,逆时针为正),用于雷达物理转动后的软件零点校准')
     p.add_argument('--margin-m', type=float, default=None, dest='footprint_margin_m',
@@ -214,17 +229,22 @@ def main():
     p.add_argument('--camera-pitch-deg', type=float, default=None, dest='camera_pitch_deg',
                    help='相机俯角(度,向下为正),默认 15')
     p.add_argument('--controller', choices=('pure-pursuit', 'mppi'),
-                   default=None,
-                   help='参考量生成器。默认 pure-pursuit;mppi 需要 Orin + Torch CUDA')
-    p.add_argument('--mppi-samples', type=int, default=None, dest='mppi_samples',
-                   help='MPPI 采样数 K,默认 1024。Orin CUDA 上 2048 也只是几毫秒')
-    p.add_argument('--mppi-device', type=str, default=None, dest='mppi_device',
+                   default=os.environ.get('ROBOT_FOLLOW_CONTROLLER', 'mppi'),
+                   help='参考量生成器，Jetson 默认 mppi；可设 ROBOT_FOLLOW_CONTROLLER')
+    p.add_argument('--mppi-samples', type=int,
+                   default=os.environ.get('ROBOT_MPPI_SAMPLES', '1024'), dest='mppi_samples',
+                   help='MPPI 采样数 K，默认 1024；可设 ROBOT_MPPI_SAMPLES')
+    p.add_argument('--mppi-device', type=str,
+                   default=os.environ.get('ROBOT_MPPI_DEVICE', 'cuda'), dest='mppi_device',
                    choices=('auto', 'cuda', 'cpu', 'numpy'),
                    help='MPPI 后端。实车上应当是 cuda;auto 会在没有 CUDA 时悄悄降级')
     p.add_argument('--pre-steer', action='store_true',
                    help='静止时用微速度触发预打舵 (PROTOCOL.md 8.3),需实车确认')
-    args = p.parse_args(strip_ros_args(sys.argv[1:]))
+    return p.parse_args(strip_ros_args(sys.argv[1:] if argv is None else argv))
 
+
+def main():
+    args = parse_args()
     cfg = build_config(args)
     try:
         # 由本节点自己处理 SIGINT,保证刹停帧在 ROS 上下文关闭之前发出去

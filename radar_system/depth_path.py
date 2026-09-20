@@ -53,8 +53,9 @@ class DepthIntrinsics:
 
     @classmethod
     def from_info(cls, *, width, height, frame, stamp, k, d, r, p, binning, roi):
-        # Only accept the undistorted, registered pinhole contract supported by
-        # the live OpenNI stream. Do not silently apply K to distorted pixels.
+        # This path consumes the raw depth image, so K maps its pixels. P is for
+        # rectified images and must not veto a valid undistorted raw stream.
+        # Do not silently apply K to distorted, cropped or binned pixels.
         if (not frame or not 3 <= width <= 1920 or not 3 <= height <= 1080
                 or len(k) != 9 or len(r) != 9 or len(p) != 12
                 or not all(math.isfinite(v) for v in [stamp, *k, *d, *r, *p])
@@ -65,9 +66,8 @@ class DepthIntrinsics:
                 or any(roi)):
             raise ValueError('unsupported depth intrinsics')
         if (not np.allclose(r, np.eye(3).ravel(), atol=1e-8)
-                or not np.allclose(k, [k[0], 0, k[2], 0, k[4], k[5], 0, 0, 1], atol=1e-8)
-                or not np.allclose(p, [k[0], 0, k[2], 0, 0, k[4], k[5], 0, 0, 0, 1, 0], atol=1e-6)):
-            raise ValueError('depth rectification/projection mismatch')
+                or not np.allclose(k, [k[0], 0, k[2], 0, k[4], k[5], 0, 0, 1], atol=1e-8)):
+            raise ValueError('depth raw intrinsics/rectification mismatch')
         return cls(width, height, frame.lstrip('/'), stamp, k[0], k[4], k[2], k[5])
 
 
@@ -168,21 +168,26 @@ class DepthPathSensor:
         self.intrinsics = None
         self.evidence = None
         self.reason = 'calibration_missing'
+        self.calibration_reason = 'calibration_missing'
         self.received = 0
         self.accepted = 0
         self.last_received = None
         self.calibration_error = None
+        self.intrinsics_error = None
 
     def load_calibration(self, path, profile_hash):
         self.evidence = None
         try:
             self.calibration = DepthCalibration.load(path, profile_hash)
             self.calibration_error = None
+            self.calibration_reason = None
             self.reason = 'waiting_depth'
         except (OSError, ValueError, TypeError, KeyError) as exc:
             self.calibration = None
             self.calibration_error = str(exc)
-            self.reason = 'calibration_missing' if isinstance(exc, FileNotFoundError) else 'calibration_invalid'
+            self.calibration_reason = ('calibration_missing' if isinstance(exc, FileNotFoundError)
+                                       else 'calibration_invalid')
+            self.reason = self.calibration_reason
 
     def invalidate(self, reason):
         self.evidence = None
@@ -224,7 +229,10 @@ class DepthPathSensor:
 
     def status(self, now):
         age = None if self.evidence is None else now-self.evidence.stamp
-        return dict(reason=('depth_stale' if age is not None and not 0 <= age <= self.MAX_AGE_S else self.reason),
+        reason = (self.calibration_reason if self.calibration is None else
+                  'depth_stale' if age is not None and not 0 <= age <= self.MAX_AGE_S else self.reason)
+        return dict(reason=reason, calibration_error=self.calibration_error,
+                    intrinsics_error=self.intrinsics_error,
                     calibrated=self.calibration is not None, received=self.received, accepted=self.accepted,
                     age_ms=round(age*1000) if age is not None else None,
                     valid_ratio=round(self.evidence.valid_ratio, 3) if self.evidence is not None else None)

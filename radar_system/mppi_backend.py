@@ -70,6 +70,8 @@ class Backend:
 
     def full(self, shape, value):
         if self.kind == 'torch':
+            if isinstance(value, torch.Tensor):
+                return torch.ones(shape, device=self.device, dtype=torch.float32) * value
             return torch.full(shape, float(value), device=self.device,
                               dtype=torch.float32)
         return np.full(shape, float(value), dtype=np.float32)
@@ -132,12 +134,12 @@ class Backend:
 
     def amin(self, x, axis=None):
         if self.kind == 'torch':
-            return torch.min(x) if axis is None else torch.min(x, dim=axis).values
+            return torch.amin(x) if axis is None else torch.amin(x, dim=axis)
         return np.min(x, axis=axis)
 
     def amax(self, x, axis=None):
         if self.kind == 'torch':
-            return torch.max(x) if axis is None else torch.max(x, dim=axis).values
+            return torch.amax(x) if axis is None else torch.amax(x, dim=axis)
         return np.max(x, axis=axis)
 
     def argmin(self, x):
@@ -172,6 +174,10 @@ class Backend:
         if self.kind == 'torch':
             return x.detach().cpu().numpy()
         return np.asarray(x)
+
+    def synchronize(self):
+        if self.is_gpu:
+            torch.cuda.synchronize(self.device)
 
 
 def torch_available():

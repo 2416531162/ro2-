@@ -8,8 +8,9 @@ from std_srvs.srv import SetBool
 
 
 class MotionClient:
-    def __init__(self, node, source):
+    def __init__(self, node, source, timeout_s=0.5):
         self.node, self.source = node, source
+        self.timeout_s = float(timeout_s)
         self.state, self.received = {}, None
         self.lock = threading.RLock()
         self.publisher = node.create_publisher(String, '/' + source + '/command', 1)
@@ -27,7 +28,7 @@ class MotionClient:
 
     def fresh(self):
         with self.lock:
-            return (self.received is not None and 0 <= time.monotonic() - self.received < .5
+            return (self.received is not None and 0 <= time.monotonic() - self.received < self.timeout_s
                     and self.state.get('profile_hash') == profile_hash(PROFILE)
                     and not self.state.get('legacy_commands', False))
 

@@ -405,8 +405,8 @@ class TargetLock:
     没有这两个字段时行为与改造前完全一致 —— 老的调用方和测试不用改。
     """
 
-    def __init__(self, assoc_radius_m=0.55, lost_timeout_s=1.5, confirm_frames=3,
-                 pending_grace_s=0.35, origin_offset_m=0.0,
+    def __init__(self, assoc_radius_m=0.55, lost_timeout_s=3.0, confirm_frames=1,
+                 pending_grace_s=1.50, origin_offset_m=0.0,
                  appearance_floor=0.45, appearance_weight_m=0.60,
                  height_tolerance_m=0.25, signature_ttl_s=20.0,
                  max_target_speed_mps=2.5):

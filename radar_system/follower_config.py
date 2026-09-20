@@ -28,16 +28,17 @@ class FollowerConfig:
     aeb_release_clearance_m: float = 0.14   # 急停解除回差 (14cm 恢复)
     scan_cone_deg: float = 30.0         # 前向检测扇区半角
     scan_min_valid_m: float = 0.15      # 雷达本体盲区
-    # 雷达装在车上,周围的相机支架、天线杆、传感器盒会被扫成距离恒定、
-    # 永不消失的"障碍物",导致 AEB 一直误触发。两道过滤:
-    #   1. 落在车体轮廓内的点一律丢弃(见 footprint.is_self_hit)
-    #   2. 明确知道哪些方位有车体结构时,用角度屏蔽更精准
-    # 用 radar_system/scan_doctor.py 在空旷处实测,它会直接给出这两个值。
-    self_hit_skin_m: float = 0.05       # 车体轮廓外扩多少算自反射 (5cm, 实车自反射点集中在 x<=0.39m, 0.05m 过滤完全且不吃门框)
+    # 仅丢弃已标定物理车身以内的回波。轮胎/支架若超出足迹应重新量车，
+    # 不能用外扩过滤吞掉紧贴车角的门框；遮挡方位也只能标为未知。
+    self_hit_skin_m: float = 0.0
     scan_blind_sectors_deg: tuple = (
         (155.0, -130.0),  # 车尾屏蔽扇区
-        (10.5, 17.5),     # 前向右侧相机支架/线束盲区 (scan_doctor 测得 11.5°~16.5°)
-        (30.0, 33.5),     # 前向右侧结构件盲区 (scan_doctor 测得 30.5°~33.0°)
+        (10.5, 17.5),     # 车头左方标记:现场核对支架/线束
+        (25.0, 34.0),     # 车头左方标记:现场核对结构件
+        (41.0, 50.0),     # 车头左方标记:现场核对立柱
+        (-63.0, -42.0),   # 车头右方标记:现场核对结构件
+        (-40.0, -20.0),   # 车头右方标记:现场核对支架/线束
+        (-72.0, -65.0),   # 车头右方标记:现场核对立柱
     )
 
     # ---- 速度 ----
@@ -61,31 +62,26 @@ class FollowerConfig:
     control_latency_s: float = PROFILE["safety"]["control_latency_s"]    # ★ 感知到轮子响应的总死时间
 
     # ---- 目标管理 (统一多人跟踪器,见 person_tracker.py) ----
-    track_high_conf: float = 0.45       # 高分框:可以新建轨迹
-    track_low_conf: float = 0.15        # 低分框:只能延续已确认的轨迹 (ByteTrack)
-    confirm_frames: int = 3             # 相机命中 N 次才确认为人
-    target_timeout_s: float = 0.30      # 目标超过这么久没有任何观测即视为丢失
-    lost_timeout_s: float = 1.5         # 目标丢失超时
-    lost_grace_s: float = 0.40          # 短暂遮挡的宽限期,期间减速而非急停
+    track_high_conf: float = 0.35       # 高分框:可以新建轨迹
+    track_low_conf: float = 0.12        # 低分框:只能延续已确认的轨迹 (ByteTrack)
+    confirm_frames: int = 1             # 相机命中 N 次即确认为人 (CPU 推理帧率适配)
+    target_timeout_s: float = 1.50      # 目标超时门限适配 (1.5FPS CPU 推理间隔约 0.6s)
+    lost_timeout_s: float = 3.0         # 目标丢失超时
+    lost_grace_s: float = 1.20          # 短暂遮挡的宽限期,期间减速而非急停
     min_depth_ratio: float = 0.30       # 深度有效像素占比门限,低于此判无效
-    max_camera_latency_s: float = 0.60  # 相机时间戳比现在早这么多以上视为不可信，真实模式丢弃
+    max_camera_latency_s: float = 1.50  # 相机与推理延迟容忍门限 (CPU ONNX 推理约 300ms)
     camera_hfov_deg: float = 58.0       # Astra S 水平视场,用于「在视野里却没看到」的反向证据
     min_target_range_m: float = 0.30    # 目标距车体中心有效滤波下限(小于此距离视为自反射/底盘噪声)
 
     # ---- 参考量生成器 ----
-    # 'pure-pursuit' 是默认值:几何解,确定性,无依赖。
-    # 'mppi' 把跟随、避障、视野保持放进同一个代价函数里做采样优化,需要
-    # Jetson Orin + PyTorch CUDA。实车验证通过之前不要改这里的默认值 ——
-    # 切换是一个命令行开关的事,没必要用默认值去赌。
+    # 纯算法配置默认无 GPU 依赖，供回放/测试使用。
+    # 正式节点入口默认选择 mppi + cuda，环境变量/CLI 可显式覆盖。
     controller: str = 'pure-pursuit'
     mppi_device: str = 'auto'
     mppi_samples: int = 1024
-    mppi_horizon: int = 40       # 前瞻步数。T*dt 必须覆盖一次完整的绕行机动
-    # 回退条件。注意「不可行」在这里几乎不会发生 —— 停在原地永远是一条可行
-    # 计划,而雷达自反射过滤保证了障碍点不会比车头再近 5cm。所以真正会在实车
-    # 上咬人的是**求解超时**:torch 没跑在 CUDA 上、Orin 降频、K 调太大,
-    # 都会让求解时间越过控制周期,而刹车包络是按周期算的,车会以为自己刹得住。
-    mppi_solve_budget_ms: float = 25.0   # 超过这个耗时算一次失败 (20Hz 周期的一半)
+    mppi_horizon: int = 40       # 40×150ms = 6s 局部预测
+    # 求解超时、不可行或无效结果当周期停车；连续失败后回退纯追踪。
+    mppi_solve_budget_ms: float = 25.0   # 求解预算为 20Hz 控制周期的一半
     mppi_fallback_after: int = 12        # 连续失败这么多次就整段回退到纯追踪
 
     # ---- 沿人走过的路跟随 (纯追踪) ----
@@ -99,10 +95,12 @@ class FollowerConfig:
     # ---- 车体足迹 (★ 全部必须实测,见 docs/TUNING.md) ----
     # 改造前避障只在前向锥形里取最近点,等于把车当成一个点:既不知道车有多宽,
     # 也不知道转弯时车体扫过的是一个比车身更宽的圆环。过门刮轮子就是这么来的。
-    # 实测值 (2026-09-16):全宽 0.67 前长 0.67 后长 0.18 轴距 0.54 轮距 0.59
+    # 2026-09-20:雷达到前/后边缘 0.15/0.60m,雷达与前轴近似同线,
+    # 前后轴距 0.52m;左右轮中心距按雷达到两侧各 0.30m 计算。
+    # 轮胎外沿尚未复测,防撞半宽沿用旧的保守值 0.335m。
     footprint_front_m: float = PROFILE["geometry"]["front_m"]    # 后轴中心 -> 车体最前端(含支架外伸)
     footprint_rear_m: float = PROFILE["geometry"]["rear_m"]    # 后轴中心 -> 车体最后端
-    footprint_half_width_m: float = PROFILE["geometry"]["half_width_m"]    # 中线 -> 轮胎外沿 (全宽 0.67 的一半)
+    footprint_half_width_m: float = PROFILE["geometry"]["half_width_m"]    # 中线 -> 轮胎外沿;未复测时保守沿用 0.335m
     footprint_margin_m: float = 0.025    # 侧向安全余量 (2.5cm, 全宽 0.67+0.05=0.72m 可顺畅穿过 80~85cm 窄门)
     aeb_margin_m: float = 0.015          # AEB 专属物理急停余量 (1.5cm, 只要车体不发生物理碰撞就不锁死)
     lidar_offset_x_m: float = PROFILE["sensors"]["lidar_x_m"]    # 后轴中心 -> 雷达,向前为正(基本在前轴线上)
@@ -125,7 +123,7 @@ class FollowerConfig:
     # ---- 雷达接力跟踪 (人走出相机视野后继续用雷达跟) ----
     lidar_handoff: bool = True
     lidar_handoff_after_s: float = 0.15  # 相机超过这么久没看到人,才改由雷达接力
-    lidar_handoff_max_s: float = 8.0     # 超过这么久没有相机或无歧义雷达确认,不再相信轨迹
+    lidar_handoff_max_s: float = 15.0    # 超过这么久没有相机或无歧义雷达确认,不再相信轨迹
     lidar_track_speed_cap: float = 0.45  # 已确认目标的雷达接力上限，仍受驱动和防撞限幅
     lidar_reacquire_gate_m: float = 0.60  # 兼容旧字段名：仅用于丢失后相机局部重捕；雷达不跨门跳接
 
@@ -176,6 +174,16 @@ class FollowerConfig:
                            yaw_rad=self.lidar_yaw_rad)
 
     def __post_init__(self):
+        if self.controller not in ('pure-pursuit', 'mppi'):
+            raise ValueError('Unknown follower controller')
+        if self.mppi_device not in ('auto', 'cuda', 'cpu', 'numpy'):
+            raise ValueError('Unknown MPPI backend')
+        if not 2 <= self.mppi_samples <= 8192 or not 2 <= self.mppi_horizon <= 100:
+            raise ValueError('MPPI samples/horizon outside supported bounds')
+        if not math.isfinite(self.mppi_solve_budget_ms) or self.mppi_solve_budget_ms < 0:
+            raise ValueError('Invalid MPPI solve budget')
+        if self.mppi_fallback_after < 1:
+            raise ValueError('Invalid MPPI fallback threshold')
         if self.lidar_yaw_deg is not None:
             self.lidar_yaw_rad = math.radians(self.lidar_yaw_deg)
         if self.follow_stop_m >= self.follow_distance_m:

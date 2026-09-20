@@ -1,8 +1,7 @@
-"""YOLOv8n-pose RKNN decoder, independent of ROS.
+"""Legacy Rockchip four-output pose adapters, independent of ROS.
 
-Contract: Rockchip model-zoo yolov8_pose export, three (1,65,H,W) heads
-(strides 8/16/32) and decoded keypoints (1,17,3,8400), input RGB uint8.
-Generic Ultralytics end-to-end exports and detection-only weights are rejected.
+The optional ONNX/RKNN backends use three (1,65,H,W) heads and decoded
+keypoints (1,17,3,8400). The Jetson default uses person_detection instead.
 """
 import os
 import time
@@ -118,7 +117,10 @@ class PoseRKNN:
     def __init__(self, model_path):
         if not os.path.isfile(model_path):
             raise FileNotFoundError(f'Pose RKNN missing: {model_path}; see docs/TRACKING.md')
-        from rknnlite.api import RKNNLite
+        try:
+            from rknnlite.api import RKNNLite
+        except (ImportError, OSError) as exc:
+            raise RuntimeError('Pose RKNN runtime missing: rknnlite.api / librknnrt') from exc
         self.runtime = RKNNLite(verbose=False)
         self.last_inference_ms = self.last_total_ms = 0.
         try:
@@ -147,7 +149,7 @@ class PoseRKNN:
 
 
 class PoseONNX:
-    """Portable CPU backend used on Jetson when an RKNN runtime is unavailable.
+    """Explicitly selected portable CPU backend.
 
     The ONNX file keeps the Rockchip model-zoo four-output contract, so the
     tested decoder and all downstream target messages remain unchanged.
@@ -157,10 +159,14 @@ class PoseONNX:
     def __init__(self, model_path):
         if not os.path.isfile(model_path):
             raise FileNotFoundError(f'Pose ONNX missing: {model_path}')
-        import onnxruntime as ort
+        try:
+            import onnxruntime as ort
+        except (ImportError, OSError) as exc:
+            raise RuntimeError('Pose ONNX runtime missing: onnxruntime') from exc
         options = ort.SessionOptions()
-        options.intra_op_num_threads = max(1, min(4, os.cpu_count() or 1))
+        options.intra_op_num_threads = 1
         options.inter_op_num_threads = 1
+        options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
         self.runtime = ort.InferenceSession(
             model_path, sess_options=options, providers=['CPUExecutionProvider'])
         inputs = self.runtime.get_inputs()

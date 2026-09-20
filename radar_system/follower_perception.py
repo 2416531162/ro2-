@@ -145,7 +145,11 @@ class FollowerPerception:
                                'height_m': item.get('height_m'),
                                'color': item.get('color')})
 
-        t_meas = self._meas_time(stamp, now)
+        if not items:
+            # 空检测帧：相机正在工作但当前视野内无人
+            t_meas = now
+        else:
+            t_meas = self._meas_time(stamp, now)
         if t_meas is None:
             return
         # 所有检测(含空帧)都交给跟踪器:空帧让轨迹按时老化
@@ -216,7 +220,7 @@ class FollowerPerception:
             msg.ranges, msg.angle_min, msg.angle_increment,
             max(msg.range_min, self.cfg.scan_min_valid_m), msg.range_max,
             self.lidar_mount, self.footprint, self.cfg.scan_blind_sectors_deg,
-            self_hit_skin_m=self.cfg.self_hit_skin_m)
+            self_hit_skin_m=self.cfg.self_hit_skin_m, sampled=msg.sampled)
         if (not math.isfinite(msg.angle_min) or not math.isfinite(msg.angle_increment)
                 or msg.angle_increment == 0.0):
             self.scan_stamp = 0.0
@@ -250,9 +254,8 @@ class FollowerPerception:
         # 换算到车体坐标系,供扫掠路径碰撞检查使用。
         # 锥形取最近点只知道"前面多远有东西",不知道那东西是否挡在车宽之内,
         # 也不知道转弯时车体会扫到哪里。
-        raw_points = scan_to_vehicle_frame(
-            bearings, self.lidar_mount,
-            blind_sectors_deg=self.cfg.scan_blind_sectors_deg)
+        # 角度盲区只影响可见空间的认证，不能删除该方位实际测到的外部障碍。
+        raw_points = scan_to_vehicle_frame(bearings, self.lidar_mount)
         # 关键:车自己的结构件必须丢弃,不能当成障碍物。
         # 否则它们落在车体轮廓内,corridor_clearance 直接返回 0,车永久停住。
         self.scan_points, dropped = drop_self_hits(
@@ -260,15 +263,8 @@ class FollowerPerception:
         self.self_hits = dropped
         received_at = self.now()
         self.scan_stamp = received_at - scan_age
-        # 雷达腿部点簇交给跟踪器: 无论是否配置车尾盲区, 人体跟踪在车尾均不主动屏蔽,
-        # 只要在车身几何轮廓之外, 均送入聚类更新, 保证人绕到车尾时跟踪不中断
-        tracking_sectors = tuple(s for s in self.cfg.scan_blind_sectors_deg if not (s[0] > 90 and s[1] < -90))
-        if tracking_sectors != self.cfg.scan_blind_sectors_deg:
-            trk_raw = scan_to_vehicle_frame(bearings, self.lidar_mount, blind_sectors_deg=tracking_sectors)
-            trk_clean, _ = drop_self_hits(trk_raw, self.footprint, self.cfg.self_hit_skin_m)
-        else:
-            trk_clean = self.scan_points
-        clusters = cluster_points(trk_clean, origin=(self.lidar_mount.x_m, self.lidar_mount.y_m))
+        # 聚类与避障共用全向外部点，避免盲区中检测到的人/门框只进入其中一条链路。
+        clusters = cluster_points(self.scan_points, origin=(self.lidar_mount.x_m, self.lidar_mount.y_m))
         self.latest_clusters = clusters
         self.people.add_lidar([(c.x, c.y) for c in clusters],
                               self.scan_stamp, received_at)
@@ -276,4 +272,3 @@ class FollowerPerception:
 
     def observe_voltage(self, value):
         self.voltage = float(value)
-

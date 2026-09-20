@@ -30,6 +30,9 @@ class FollowerEngine(FollowerPerception, FollowerController, FollowerTelemetry):
         self.people = PersonTracker(high_conf=config.track_high_conf,
                                     low_conf=config.track_low_conf,
                                     confirm_hits=config.confirm_frames,
+                                    tentative_timeout_s=2.0,
+                                    confirmed_timeout_s=config.lost_timeout_s,
+                                    unseen_in_view_max_s=3.0,
                                     lidar_only_max_s=config.lidar_handoff_max_s,
                                     reacquire_after_s=config.lidar_handoff_after_s,
                                     reacquire_radius_m=config.lidar_reacquire_gate_m,
@@ -37,7 +40,8 @@ class FollowerEngine(FollowerPerception, FollowerController, FollowerTelemetry):
         self.people.lidar_enabled = config.lidar_handoff
         from motion_safety import TargetLock
         self.lock = TargetLock(confirm_frames=config.confirm_frames,
-                               lost_timeout_s=config.lost_timeout_s)
+                               lost_timeout_s=config.lost_timeout_s,
+                               pending_grace_s=1.50)
         try:
             from mppi_controller import MPPIController, MPPIConfig
             mppi_err = None
@@ -48,6 +52,9 @@ class FollowerEngine(FollowerPerception, FollowerController, FollowerTelemetry):
         self.mppi_infeasible_streak = 0
         self.mppi_fallback = False
         self.mppi_last = None
+        self.mppi_stop_reason = None
+        self._mppi_target_id = None
+        self._mppi_last_at = None
         if config.controller == 'mppi':
             if MPPIController is None:
                 raise RuntimeError(f"要求 MPPI 但模块导入失败: {mppi_err}")
@@ -55,6 +62,7 @@ class FollowerEngine(FollowerPerception, FollowerController, FollowerTelemetry):
             mcfg.samples = config.mppi_samples
             mcfg.horizon = config.mppi_horizon
             self.mppi = MPPIController(mcfg, prefer=config.mppi_device)
+            self.mppi.warmup()
         self.view = None               # 本周期目标视图(车体系)
         self.los_gap = None            # 相机视线上雷达测得的车头间距
         self.los_time = 0.0
@@ -122,6 +130,13 @@ class FollowerEngine(FollowerPerception, FollowerController, FollowerTelemetry):
         self.last_print_time = 0.0
 
     def reset_tracking(self, keep_odom=True):
+        if self.mppi is not None:
+            self.mppi.reset()
+        self.mppi_infeasible_streak = 0
+        self.mppi_fallback = False
+        self.mppi_last = None
+        self.mppi_stop_reason = None
+        self._mppi_target_id = self._mppi_last_at = None
         if not keep_odom:
             self.depth_path.invalidate('pose_reset')
         self.people.reset(keep_odom=keep_odom)
@@ -152,6 +167,9 @@ class FollowerEngine(FollowerPerception, FollowerController, FollowerTelemetry):
         return accepted
 
     def pause(self):
+        if self.mppi is not None and self.state != 'PAUSED':
+            self.mppi.reset()
+            self._mppi_last_at = None
         self.cmd_vx = self.cmd_wz = 0.0
         self.speed_slew.reset(0.0)
         self.state, self.limit_reason = 'PAUSED', 'motion_authority'

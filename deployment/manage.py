@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -57,7 +58,10 @@ def stage(source, destination):
     files = {}
     for tree in TREES:
         for path in sorted((source/tree).rglob('*')):
-            if not path.is_file() or '__pycache__' in path.parts or path.suffix == '.pyc' or path.name == '.DS_Store':
+            archived = any(re.fullmatch(r'.*_[0-9]{8}', part)
+                           for part in path.relative_to(source).parts[:-1])
+            if (not path.is_file() or archived or '__pycache__' in path.parts
+                    or path.suffix == '.pyc' or path.name == '.DS_Store'):
                 continue
             if path.is_symlink():
                 raise ValueError('release files must not be symlinks: ' + str(path))
@@ -78,9 +82,9 @@ def stage(source, destination):
 def units(base):
     # Fixed installation paths avoid systemd/shell quoting surprises.
     runner = str(base/'current/deployment/run_component.sh')
-    common = 'After=network.target\n\n[Service]\nType=simple\nEnvironmentFile=-/etc/rk3588/runtime.env\n'
-    common += 'User=root\nWorkingDirectory='+str(base/'current')+'\nLogsDirectory=rk3588\n'
-    common += 'Environment=HOME=/root\nEnvironment=ROS_LOG_DIR=/var/log/rk3588\n'
+    common = 'After=network.target\n\n[Service]\nType=simple\n'
+    common += 'User=wheeltec\nGroup=wheeltec\nWorkingDirectory='+str(base/'current')+'\nLogsDirectory=rk3588\n'
+    common += 'Environment=HOME=/home/wheeltec\nEnvironment=USER=wheeltec\nEnvironment=ROS_LOG_DIR=/var/log/rk3588\n'
     common += 'KillMode=control-group\nTimeoutStopSec=10\nRestart=on-failure\nRestartSec=2\n'
     end = '\n[Install]\nWantedBy=multi-user.target\n'
     return {

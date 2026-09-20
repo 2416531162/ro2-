@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 """:"
-# Bash wrapper to ensure ROS 2 Jazzy environment is loaded
-if [ -f /opt/ros/jazzy/setup.bash ]; then
-    source /opt/ros/jazzy/setup.bash
-fi
-exec python3 -u "$0" "$@"
+# Bash entrypoint; Python imports below remain usable for offline tests.
+set -e
+dir="$(cd -- "$(dirname -- "$0")" && pwd)"
+source "$dir/ros_env.sh"
+export ROS_AUTOMATIC_DISCOVERY_RANGE="${ROS_AUTOMATIC_DISCOVERY_RANGE:-LOCALHOST}"
+exec "$RK3588_PYTHON" -u "$dir/calibrate_lidar.py" "$@"
 """
 # -*- coding: utf-8 -*-
 """激光雷达免移车/免拆装零点标定工具 (LiDAR Yaw Calibrator)

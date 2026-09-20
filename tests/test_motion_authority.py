@@ -161,7 +161,7 @@ def driver():
     # Node base can be object if ROS is absent. Never opens a serial port.
     d = WheeltecDriver.__new__(WheeltecDriver)
     d.config = Config(protocol='twist', protocol_confirmed=True, receive_only=False,
-                      max_speed_m_s=1., acceleration_m_s2=3.5)
+                      max_speed_m_s=1., acceleration_m_s2=3.5, feedback_timeout_s=0.30)
     d.policy = ControlPolicy(d.config, 0.)
     d.policy.link(True, 0.)
     d.authority = MotionAuthority(fault_grace_s=d.config.feedback_grace_s)
@@ -178,6 +178,9 @@ def feedback(d, now, speed=0., voltage=24.):
     for _ in range(6):
         d.policy.feedback(dict(velocity=[speed, 0., 0.], voltage=voltage), now)
     d.scan_health_at = now
+    if getattr(d.guard, 'scan_time', None) != now:
+        n = 360
+        d.guard.update_scan([10.0] * n, -math.pi, 2 * math.pi / n, 0.1, 12.0, now)
 
 
 def activate(d):

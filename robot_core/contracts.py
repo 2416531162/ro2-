@@ -1,6 +1,6 @@
 """Transport-independent perception and local-pose inputs."""
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Optional, Sequence
 
 
 @dataclass(frozen=True)
@@ -11,6 +11,7 @@ class ScanFrame:
     range_min: float
     range_max: float
     stamp: float = 0.0
+    sampled: Optional[Sequence[bool]] = None
 
 
 @dataclass(frozen=True)

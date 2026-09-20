@@ -9,6 +9,7 @@ class FollowerController:
     def step(self):
         now = self.now()
         cfg = self.cfg
+        self.mppi_stop_reason = None
         elapsed = self.dt if self.last_control_time is None else now-self.last_control_time
         self.last_control_time = now
         dt = max(0.0, min(elapsed, 0.10))
@@ -27,9 +28,9 @@ class FollowerController:
             now, self.people.odom.current() if feedback_fresh else None)
         self.people.prune_crumbs()
         view = self.people.target_view(now, lidar_after_s=cfg.lidar_handoff_after_s)
-        # 当目标由雷达接力跟踪或相机出现短暂丢帧时，允许更宽的超时门限 (0.80s)，防止离开相机画面瞬间掉锁
-        is_lidar_tracking = bool(view is not None and (view['source'] == 'lidar' or view.get('camera_age', 0.0) > 0.25))
-        timeout_limit = 0.80 if is_lidar_tracking else cfg.target_timeout_s
+        # 当目标由雷达接力跟踪或相机出现短暂丢帧时，允许更宽的超时门限，防止离开相机画面瞬间掉锁
+        is_lidar_tracking = bool(view is not None and (view['source'] == 'lidar' or view.get('camera_age', 0.0) > 0.60))
+        timeout_limit = max(cfg.lost_timeout_s, 2.5) if is_lidar_tracking else cfg.target_timeout_s
         have_target = bool(view is not None and view['update_age'] <= timeout_limit
                            and math.hypot(view['x'], view['y']) >= cfg.min_target_range_m)
         if have_target:
@@ -316,7 +317,8 @@ class FollowerController:
                 allow_history=(self.recovery.active and self.recovery.blind_leg) or (is_behind and direction < 0))
             # Recheck the ACTUAL rate-limited steer, not only the selected future arc.
             # Front AEB is not a rear veto; collision checks still include all corners.
-            hard = self.path_clearance < cfg.aeb_clearance_m
+            hard = (self.path_clearance < cfg.aeb_clearance_m and
+                    (self.recovery.last_block is None or self.recovery.last_block[0] == 'obstacle'))
             if self.motion_direction != direction:
                 self.aeb_latched = hard
             elif hard:
@@ -336,6 +338,10 @@ class FollowerController:
         profile = (BrakeProfile(cfg.decel_capability_mps2, cfg.control_latency_s, .035, .015)
                    if self.recovery.active else cfg.obstacle_profile)
         cap = min(cap, brake_envelope(self.path_clearance, profile))
+        if (healthy and cap == 0 and abs(desired_vx) > 0 and
+                self.recovery.last_block is not None and
+                self.recovery.last_block[0] in ('unknown', 'no_scan')):
+            self.state, self.limit_reason = 'OBSERVATION_WAIT', 'insufficient_observation'
         if self.aeb_latched:
             cap = 0.0
             if healthy and abs(desired_vx) > 0:
@@ -349,6 +355,18 @@ class FollowerController:
             if ev is None or not 0 <= self.now()-ev.stamp <= self.depth_path.MAX_AGE_S:
                 cap = 0.0
                 self.state, self.limit_reason = 'OBSERVATION_WAIT', 'depth_expired_during_control'
+        # Recheck at the end of computation: a slow solve must not publish a fresh
+        # timestamp on a command based on observations that expired during it.
+        end = self.now()
+        stale_during_control = scan_fresh and feedback_fresh and (
+            not 0 <= end-self.scan_stamp < PROFILE['safety']['scan_timeout_s']
+            or not 0 <= end-self.feedback_stamp <= PROFILE['driver']['feedback_timeout_s']
+            or (not self.simulated_odometry and self.people.odom.pose_at(end) is None))
+        if self.mppi_stop_reason or (self.mppi is not None and end-now > self.dt) or stale_during_control:
+            cap = 0.0
+            self.state = 'RECOVERY_WAIT'
+            self.limit_reason = (self.mppi_stop_reason or
+                ('observations_expired_during_control' if stale_during_control else 'control_overrun'))
         if cap == 0:
             self.speed_slew.reset(0.0)
             self.kick.apply(0.0, False, 0.0, now)
@@ -449,7 +467,11 @@ class FollowerController:
         else:
             person = (z + cfg.footprint_front_m, 0.0)
             velocity = (0.0, 0.0)
-        bearing = math.atan2(person[1], max(0.05, person[0]))
+        now = self.now()
+        if (self._mppi_target_id != self.people.target_id or self._mppi_last_at is None
+                or now-self._mppi_last_at > 2.5*self.dt):
+            self.mppi.reset()
+        self._mppi_target_id, self._mppi_last_at = self.people.target_id, now
         try:
             sol = self.mppi.solve(self.scan_points, person, velocity,
                                   self.chassis_speed, self.cmd_steer,
@@ -457,16 +479,22 @@ class FollowerController:
         except Exception:
             self.mppi_fallback = True
             self.mppi_last = None
-            return self.solve_pure_pursuit(z, bearing)
+            self.mppi_stop_reason = 'mppi_error'
+            self.mppi.reset()
+            return 0.0, self.cmd_steer
         self.mppi_last = sol
+        invalid = (not all(math.isfinite(value) for value in (sol.speed, sol.steer, sol.solve_ms))
+                   or (sol.feasible and not all(math.isfinite(value)
+                                               for value in (sol.cost, sol.min_clearance))))
         too_slow = sol.solve_ms > cfg.mppi_solve_budget_ms
-        if sol.feasible and not too_slow:
+        if sol.feasible and not too_slow and not invalid:
             self.mppi_infeasible_streak = 0
         else:
             self.mppi_infeasible_streak += 1
             if self.mppi_infeasible_streak >= cfg.mppi_fallback_after:
                 self.mppi_fallback = True
-                return self.solve_pure_pursuit(z, bearing)
-            if not sol.feasible:
-                self.limit_reason = sol.reason
+            self.mppi_stop_reason = ('mppi_invalid' if invalid else
+                                    'mppi_timeout' if too_slow else sol.reason)
+            self.mppi.reset()
+            return 0.0, self.cmd_steer
         return sol.speed, sol.steer

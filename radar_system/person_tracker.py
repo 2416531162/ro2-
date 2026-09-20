@@ -216,13 +216,13 @@ class Track:
 class PersonTracker:
     """观测接口:add_camera() / add_lidar();查询:target_view()。"""
 
-    def __init__(self, high_conf=0.45, low_conf=0.15, confirm_hits=3,
+    def __init__(self, high_conf=0.45, low_conf=0.15, confirm_hits=1,
                  accel_sigma=1.5, gate_d2=CHI2_2DOF_99, gate_max_m=1.2,
-                 tentative_timeout_s=0.5, confirmed_timeout_s=1.5,
+                 tentative_timeout_s=2.0, confirmed_timeout_s=3.0,
                  lidar_only_max_s=8.0, reacquire_after_s=1.0,
                  reacquire_radius_m=1.5, max_tracks=12,
                  crumb_spacing_m=0.10, crumb_max=80, prefer_distance_m=1.0,
-                 lidar_ambiguity_m=0.8, unseen_in_view_max_s=1.5):
+                 lidar_ambiguity_m=0.8, unseen_in_view_max_s=3.0):
         self.high_conf = high_conf
         self.low_conf = low_conf
         self.confirm_hits = confirm_hits
@@ -416,28 +416,39 @@ class PersonTracker:
         for tr, j in pairs:
             ox, oy, R = meas[j]
             ox, oy = self._shift(ox, oy, t_meas, tr)
-            # Check alternatives against the SAME pre-update prediction and
-            # timestamp used for association. A nearby return outside the gate
-            # cannot be this track; it must not expire a stationary rear target.
-            ambiguous = False
+            # 检查是否有另一条腿或竞争点簇落在关联门内
+            other_legs = []
+            competing_clutter = False
             for k, (mx, my, other_R) in enumerate(meas):
                 if k == j:
                     continue
                 mx, my = self._shift(mx, my, t_meas, tr)
-                if (mx - ox) ** 2 + (my - oy) ** 2 > amb2:
+                d_cand = math.hypot(mx - ox, my - oy)
+                if d_cand > self.lidar_ambiguity_m:
                     continue
                 _, _, _, d2 = tr.innovation(mx, my, other_R)
-                if (d2 <= self.gate_d2
-                        and math.hypot(mx - tr.pos[0], my - tr.pos[1]) <= self.gate_max_m):
-                    ambiguous = True
-                    break
-            if ambiguous:
-                # Do not update position/velocity with an arbitrary winner and
-                # then use that narrowed covariance to certify it next frame.
-                self.lidar_ambiguous_frames += 1
-                continue
+                if d2 <= self.gate_d2 and math.hypot(mx - tr.pos[0], my - tr.pos[1]) <= self.gate_max_m:
+                    if d_cand <= 0.60:
+                        # 0.60m 以内且同在门内：人体的另一条腿
+                        other_legs.append((mx, my))
+                    else:
+                        # 0.60m ~ 0.80m：竞争障碍物/干扰
+                        competing_clutter = True
+
+            if other_legs:
+                # 融合两条腿的质心，得到更精准的人体中心位置
+                all_x = [ox] + [p[0] for p in other_legs]
+                all_y = [oy] + [p[1] for p in other_legs]
+                ox = sum(all_x) / len(all_x)
+                oy = sum(all_y) / len(all_y)
+
+            # 无论是否有外部竞争点簇，绝不丢弃测量更新！
+            # 持续更新卡尔曼滤波，防止目标在空间冻结而丢失
             self._apply(tr, ox, oy, R, "lidar", t_now, None)
-            tr.last_confident = t_now
+            if not competing_clutter:
+                tr.last_confident = t_now
+            else:
+                self.lidar_ambiguous_frames += 1
         self._housekeeping(t_now)
 
     def _apply(self, tr, ox, oy, R, source, t_now, det):
@@ -478,8 +489,15 @@ class PersonTracker:
                 continue            # 纯靠雷达且一直有干扰,身份不可信
             if (tr.unseen_in_view_since is not None
                     and t_now - tr.unseen_in_view_since > self.unseen_in_view_max_s):
-                self.dropped_unseen += 1
-                continue            # 在相机视野里却一直看不到:不是人
+                if tr.last_source == 'lidar' and t_now - tr.last_update <= 0.8:
+                    pass
+                elif tr.id == self.target_id and t_now - tr.last_update <= self.confirmed_timeout_s:
+                    pass
+                elif math.hypot(tr.state[2], tr.state[3]) > 0.15:
+                    pass
+                else:
+                    self.dropped_unseen += 1
+                    continue            # 在相机视野里却一直看不到且无雷达活跃动态:不是人
             if tr.position_sigma() > 1.5:
                 continue
             keep.append(tr)
@@ -514,12 +532,17 @@ class PersonTracker:
                 if len(near) == 1:
                     self._switch(near[0], None)
                     self.reacquires += 1
-            return
+                    return
+            else:
+                self.target_id = None
+                self.target_lost_at = None
+                self.last_target_pos = None
+
         cand = self._best_front(t_now)
         if cand is not None:
             self._switch(cand, None)
 
-    def _camera_fresh(self, tr, t_now, max_age=0.3):
+    def _camera_fresh(self, tr, t_now, max_age=1.5):
         return tr.confirmed and tr.last_camera is not None and t_now - tr.last_camera <= max_age
 
     def _best_near(self, t_now, pos, radius, exclude=None):
@@ -574,7 +597,7 @@ class PersonTracker:
         upd_age = t_now - tr.last_update
         if cam_age <= lidar_after_s:
             source = "camera"
-        elif tr.last_source == "lidar" and upd_age <= 0.3:
+        elif tr.last_source == "lidar" and upd_age <= 0.80:
             source = "lidar"
         else:
             source = "predicted"

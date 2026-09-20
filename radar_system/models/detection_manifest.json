@@ -1,0 +1,13 @@
+{
+  "model": "YOLO26s",
+  "task": "COCO person detection (class 0)",
+  "source": "Ultralytics official pretrained weights",
+  "download_url": "https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo26s.pt",
+  "file": "yolo26s.pt",
+  "bytes": 20422725,
+  "sha256": "646f8bc3fe0a656803d95c294f7852321748cb29d13466a1af8862e2db384a1b",
+  "input_size": 512,
+  "backend": "Ultralytics PyTorch CUDA FP16; optional board-local TensorRT export",
+  "target_fps": 30,
+  "device_validation": "pending: no Jetson or real-car service accessed"
+}

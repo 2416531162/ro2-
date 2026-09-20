@@ -380,7 +380,7 @@ class TestMPPIIntegration(FollowerTestCase):
         h.settle(8, people=[person(3.0)])
         blocked = FakeScan()
         for d in range(-40, 41):
-            blocked.put(d, 0.22)          # 贴着车头 (0.53 + 0.22 = 0.75m, 车头 0.67m 外 8cm 处硬急停)
+            blocked.put(d, 0.22)          # 贴着车头 (0.52 + 0.22 = 0.74m, 车头 0.67m 外 7cm 处硬急停)
         s = h.settle(8, people=[person(3.0)], scan=blocked)
         self.assertEqual(s['cmd_vx'], 0.0)
         self.assertTrue(s['aeb_active'])

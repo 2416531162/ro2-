@@ -52,9 +52,9 @@ class VehicleFootprint:
     margin_m      侧向安全余量。建议至少 0.05m:雷达有角分辨率误差,
                   车也不会绝对笔直地走。
     """
-    front_m: float = PROFILE["geometry"]["front_m"]    # 实测 2026-09-16
+    front_m: float = PROFILE["geometry"]["front_m"]
     rear_m: float = PROFILE["geometry"]["rear_m"]
-    half_width_m: float = PROFILE["geometry"]["half_width_m"]    # 全宽 0.67 的一半,按轮胎外沿
+    half_width_m: float = PROFILE["geometry"]["half_width_m"]    # 外沿待复测,当前沿用保守半宽
     margin_m: float = 0.06
 
     def __post_init__(self):
@@ -170,7 +170,7 @@ def is_self_hit(x, y, footprint, skin_m=0.05):
     判据:点落在车体轮廓(外扩 skin_m)之内。skin_m 是给雷达测距噪声和
     安装位置测量误差留的余量。
 
-    >>> fp = VehicleFootprint(front_m=0.67, rear_m=0.18, half_width_m=0.335)
+    >>> fp = VehicleFootprint(front_m=0.67, rear_m=0.08, half_width_m=0.335)
     >>> is_self_hit(0.55, 0.20, fp)      # 车头里侧的支架
     True
     >>> is_self_hit(0.90, 0.0, fp)       # 车头前方 0.23m,真障碍物

@@ -169,17 +169,28 @@ def start_follower():
     if bridge_node is None:
         return False, 'motion bridge unavailable'
     with bridge_node.control_lock:
+        ok, message = bridge_node.recover_latched_fault()
+        if not ok:
+            return False, message
         if os.environ.get('RK3588_MANAGED_FOLLOWER') == '1':
             try:
-                subprocess.run(['systemctl', 'start', 'rk3588-perception@follower.service'],
-                               check=True, timeout=5, capture_output=True)
+                unit = 'rk3588-perception@follower.service'
+                active = subprocess.run(['systemctl', 'is-active', '--quiet', unit],
+                                        check=False, timeout=2, capture_output=True)
+                if active.returncode != 0:
+                    command = ['systemctl', 'start', unit]
+                    if os.geteuid() != 0:
+                        command = ['sudo', '-n', *command]
+                    subprocess.run(command, check=True, timeout=10,
+                                   capture_output=True, text=True)
+            except subprocess.CalledProcessError as exc:
+                return False, (exc.stderr or str(exc)).strip()
             except Exception as exc:
                 return False, str(exc)
         elif not is_follower_running():
             script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'person_follower.py')
             try:
-                # Web selects the mode after spawning. The child never requests a
-                # delayed takeover after a subsequent manual command.
+                # The web-selected mode, not the child, controls takeover.
                 follower_proc = subprocess.Popen(
                     [sys.executable, '-u', script_path, '--passive'],
                     cwd=os.path.dirname(script_path), start_new_session=True)
@@ -187,9 +198,6 @@ def start_follower():
                 return False, str(exc)
         bridge_node.manual_drive.set(0.0, 0.0)
         bridge_node.manual_drive.sample()  # discard the old manual zero
-        ok, message = bridge_node.recover_latched_fault()
-        if not ok:
-            return False, message
         return bridge_node.select_follow(True)
 
 
@@ -210,7 +218,7 @@ class TrackingBridgeNode(Node):
         self.sub_follower = self.create_subscription(String, '/follower/status', self.follower_cb, 10)
         self.sub_wheeltec = self.create_subscription(String, '/wheeltec/status', self.wheeltec_cb, 10)
 
-        self.motion = MotionClient(self, 'manual')
+        self.motion = MotionClient(self, 'manual', timeout_s=1.0)
         self.follow_selector = self.create_client(SetBool, '/motion/follow')
         self.cli_reset = self.create_client(Trigger, '/motion/reset')
         self.cli_stop = self.create_client(Trigger, '/motion/stop')
@@ -235,6 +243,7 @@ class TrackingBridgeNode(Node):
             armed = bool(d.get('armed', False))
             ready = (d.get('ready', '') == 'ready')
             self.is_armed = armed
+            d['_rx_monotonic'] = time.monotonic()
             with data_lock:
                 state['wheeltec'] = d
         except Exception:
@@ -273,11 +282,17 @@ class TrackingBridgeNode(Node):
             fresh = self.motion.fresh()
 
         if current.get('mode') != 'FAULT':
+            if current.get('mode') == 'ESTOP':
+                return False, '急停已锁存，请现场检查并单独复位'
             return True, ''
+        if current.get('reason') in ('motion_stall', 'reset_failed'):
+            return False, '运动卡滞已锁存：请使用物理急停并检查障碍、车轮与里程计，确认安全后单独复位'
         if not fresh:
             return False, '运动状态已过期，请检查底盘服务'
         if not current.get('healthy', False):
-            return False, '传感器或底盘仍有故障，拒绝复位'
+            faults = current.get('health_faults', [])
+            fault_desc = (', '.join(faults)) if faults else '待确认'
+            return False, f'传感器或底盘仍有故障 ({fault_desc})，拒绝复位'
         if current.get('waiting_stationary', True):
             return False, '等待车辆确认静止后才能复位'
         return self.call_motion_service(self.cli_reset, Trigger.Request())
@@ -310,7 +325,7 @@ class TrackingBridgeNode(Node):
         global state
         try:
             v = float(msg.data)
-            pct = max(0, min(100, int(round((v - 21.0) / 4.2 * 100))))
+            pct = max(0, min(100, int(round((v - 19.0) / 6.2 * 100))))
             with data_lock:
                 state['voltage'] = round(v, 2)
                 state['battery_pct'] = pct
@@ -361,7 +376,9 @@ class TrackingBridgeNode(Node):
         back_d = sector_min(clean, 165, 195, angle_min_deg=amin_deg)
         right_d = sector_min(clean, 255, 285, angle_min_deg=amin_deg)
         overall_min = float(np.nanmin(clean)) if bool(np.any(ok)) else 99.0
-        ranges_out = np.round(np.where(ok, clean, 0.0), 2).tolist()
+        # Round after widening: float32.tolist() otherwise expands 2.15 into
+        # 2.1500000953674316 in every SSE frame sent to a phone.
+        ranges_out = np.round(np.where(ok, clean, 0.0).astype(np.float64), 2).tolist()
 
         with data_lock:
             state['hz'] = hz
@@ -481,10 +498,13 @@ class RadarHTTPHandler(http.server.BaseHTTPRequestHandler):
                         snapshot = dict(state)
                         snapshot['follower'] = mark_follower_staleness(
                             dict(snapshot.get('follower', {})))
+                        wheeltec_rx = snapshot.get('wheeltec', {}).get('_rx_monotonic')
+                        snapshot['wheeltec_status_age_s'] = (
+                            round(time.monotonic() - wheeltec_rx, 2) if wheeltec_rx else None)
                         payload = json.dumps(snapshot)
                     self.wfile.write(f"data: {payload}\n\n".encode('utf-8'))
                     self.wfile.flush()
-                    time.sleep(0.08) # ~12 FPS
+                    time.sleep(0.10) # LiDAR updates at ~10 Hz; avoid redundant mobile JSON work.
             except Exception:
                 pass
         else:
@@ -514,21 +534,26 @@ class RadarHTTPHandler(http.server.BaseHTTPRequestHandler):
 
         elif self.path == '/api/follower/start':
             ok, msg = start_follower()
+            self._log_follow_request('start', ok, msg)
             with data_lock:
                 f_data = mark_follower_staleness(dict(state.get('follower', {})))
             self._send_json({'ok': ok, 'message': msg, 'running': (msg.startswith('FOLLOW:') if ok else is_follow_active()), 'follower': f_data})
 
         elif self.path == '/api/follower/stop':
             ok, msg = stop_follower()
+            self._log_follow_request('stop', ok, msg)
             with data_lock:
                 f_data = mark_follower_staleness(dict(state.get('follower', {})))
             self._send_json({'ok': ok, 'message': msg, 'running': (msg.startswith('FOLLOW:') if ok else is_follow_active()), 'follower': f_data})
 
         elif self.path == '/api/follower/toggle':
             if is_follow_active():
+                action = 'toggle_stop'
                 ok, msg = stop_follower()
             else:
+                action = 'toggle_start'
                 ok, msg = start_follower()
+            self._log_follow_request(action, ok, msg)
             with data_lock:
                 f_data = mark_follower_staleness(dict(state.get('follower', {})))
             self._send_json({'ok': ok, 'message': msg, 'running': (msg.startswith('FOLLOW:') if ok else is_follow_active()), 'follower': f_data})
@@ -547,6 +572,8 @@ class RadarHTTPHandler(http.server.BaseHTTPRequestHandler):
         elif self.path == '/api/manual_drive':
             try:
                 req = json.loads(self._read_body(4096).decode('utf-8'))
+                if not isinstance(req, dict):
+                    raise ValueError('指令格式错误')
                 action = req.get('action', 'custom')
                 steer_deg = 0.0
 
@@ -572,29 +599,44 @@ class RadarHTTPHandler(http.server.BaseHTTPRequestHandler):
                 if bridge_node is None:
                     self._send_json({'ok': False, 'error': 'motion bridge unavailable'}, status=503)
                     return
+                client_id = str(req.get('client_id', ''))[:64] or None
+                seq_raw = req.get('seq')
+                seq = int(seq_raw) if isinstance(seq_raw, (int, float)) and math.isfinite(seq_raw) else None
+                moving = abs(vx) > 1e-6 or abs(wz) > 1e-6
+
+                if moving:
+                    # A reset can wait for a ROS service. Keep the short command
+                    # lock free so a stop can preempt a request waiting here.
+                    ok, message = bridge_node.recover_latched_fault()
+                    if not ok:
+                        self._send_json({'ok': False, 'error': message}, status=409)
+                        return
+                else:
+                    # First zero goes out before any follow/reset service holding
+                    # control_lock can delay the HTTP request. The second zero
+                    # below wins over a command already in that critical section.
+                    bridge_node.manual_drive.accept(client_id, seq, 0.0, 0.0)
+                    bridge_node.send_manual_twist(0.0, 0.0)
+                    immediate_stop = bridge_node.motion.publish(0.0, 0.0)
+
                 with bridge_node.control_lock:
                     # 按页面会话 + 序号丢弃迟到的旧指令:网络抖动时,先发的「前进」
                     # 可能晚于「刹车」到达,不能让它在松手后又把车开起来。
-                    client_id = str(req.get('client_id', ''))[:64] or None
-                    seq = req.get('seq')
-                    seq = int(seq) if isinstance(seq, (int, float)) and math.isfinite(seq) else None
-                    if bridge_node and not bridge_node.manual_drive.accept(client_id, seq, vx, wz):
+                    if moving and not bridge_node.manual_drive.accept(client_id, seq, vx, wz):
                         self._send_json({'ok': True, 'stale': True, 'action': action})
                         return
+                    bridge_node.send_manual_twist(vx, wz)
+                    sent = bridge_node.motion.publish(vx, wz)
+                    if moving and not sent:
+                        bridge_node.send_manual_twist(0.0, 0.0)
 
-                    if bridge_node:
-                        # 停车指令始终可以直接下发；只有新的非零驾驶意图才尝试
-                        # 恢复“故障已消失但仍锁存”的 FAULT。
-                        if abs(vx) > 1e-6 or abs(wz) > 1e-6:
-                            ok, message = bridge_node.recover_latched_fault()
-                            if not ok:
-                                self._send_json({'ok': False, 'error': message}, status=409)
-                                return
-                        bridge_node.send_manual_twist(vx, wz)
+                if not sent and (moving or not immediate_stop):
+                    self._send_json({'ok': False, 'error': '底盘控制状态已过期，指令未能发送；请检查连接并使用物理急停'}, status=503)
+                    return
 
                 with data_lock:
                     state['manual_override'] = {
-                        'active': True,
+                        'active': moving,
                         'action': action,
                         'vx': vx,
                         'wz': wz,
@@ -604,10 +646,18 @@ class RadarHTTPHandler(http.server.BaseHTTPRequestHandler):
 
                 self._send_json({'ok': True, 'action': action, 'vx': vx,
                                  'wz': wz, 'steer_deg': steer_deg})
+            except (ValueError, TypeError, KeyError) as e:
+                self._send_json({'ok': False, 'error': str(e)}, status=400)
             except Exception as e:
                 self._send_json({'ok': False, 'error': str(e)}, status=500)
         else:
             self.send_error(404)
+
+    def _log_follow_request(self, action, ok, message):
+        event = {'peer': self.client_address[0], 'action': action,
+                 'ok': ok, 'message': message}
+        print('follow_request ' + json.dumps(event, ensure_ascii=False),
+              file=sys.stderr, flush=True)
 
     def log_message(self, format, *args):
         return

@@ -1,5 +1,13 @@
 # Install in a venv created with --system-site-packages so ROS 2 rclpy,
 # sensor messages, OpenCV and the board vendor packages remain available.
+# MPPI additionally requires a CUDA-enabled PyTorch build matching the board's
+# JetPack/CUDA version. Install NVIDIA's matching wheel/container separately;
+# a generic CPU-only torch wheel cannot satisfy the default --mppi-device cuda.
+# Verify with: python tools/benchmark_mppi.py --device cuda --require-budget
+# Install the JetPack-matched CUDA torch/torchvision first. Do not run a blind
+# pip install -r on the board: it may replace them with generic wheels.
+# For Ultralytics, use --no-deps only after its other dependencies are present.
 numpy>=1.24,<2
-onnxruntime>=1.18,<2
+ultralytics>=8.4,<9
 pyserial>=3.5,<4
+# Optional legacy four-output .onnx backend: onnxruntime>=1.18,<2

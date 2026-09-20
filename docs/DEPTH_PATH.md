@@ -9,6 +9,7 @@
 ## 启用条件
 
 配置文件为 `/etc/rk3588/depth_path.json`，可由 `RK3588_DEPTH_PATH_CONFIG` 指定其他路径。
+启动脚本从 `/etc/rk3588/runtime.env`（或 `ROBOT_RUNTIME_ENV`）读此键；进程环境覆盖文件值，建议用绝对路径。
 参考 `radar_system/config/depth_path.example.json`，模板中的 null 故意不能通过校验。
 没有文件、字段未填写、参数不合理或 `profile_hash` 不匹配时，保持雷达原有停车判断，
 网页明确显示“等待相机与雷达高度标定”或“深度标定不匹配”，不默认为同高。
@@ -29,7 +30,8 @@
 ## 决策约束
 
 1. 深度图、内参必须同坐标系、同分辨率，时间差不超过 80 ms。
-   当前接受无畸变、无裁剪、未缩放的已注册针孔图像；其他输入明确拒绝。
+   当前使用原始深度图及 CameraInfo 的 `K`，仅接受无畸变、无裁剪、未缩放的针孔图像；
+   `P` 属于矫正后的投影，不用它来否决原始图像的有效 `K`。其他输入明确拒绝。
 2. 图像年龄不超过 200 ms，使用采集时刻里程计补偿车身移动和转向。
    没有采集位姿、定位重置、过期、未来帧、错误图像或标定变化均不能继续使用旧证据。
 3. 待查位置必须在视野与有效测距范围内；3×3 像素邻域及扫描平面上下三个采样高度
@@ -44,7 +46,8 @@
 
 ## 诊断
 
-`/follower/status.depth_path` 包含 `reason`、`calibrated`、`received`、`accepted`、
+`/follower/status.depth_path` 包含 `reason`、`calibration_error`、`intrinsics_error`、
+`calibrated`、`received`、`accepted`、
 `age_ms`、`valid_ratio`、`used`。`ready` 只说明深度帧可供查询，不代表整条路径已确认。
 只有 `used=true` 才表示实际路径计算用到了相机补充；最终仍可能因另一处未知区域停车。
 网页“相机通路确认”一栏展示状态。

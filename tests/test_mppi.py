@@ -378,6 +378,7 @@ def simulate(waypoints, walk_speed=0.45, obstacles=(), ticks=200, dt=0.05,
     """
     c = controller or make()
     cfg = c.cfg
+    cfg.control_dt_s = dt  # The simulator runs at 20 Hz, independently of rollout dt.
     x = y = th = v = d = 0.0
     walker = Walker(waypoints, walk_speed)
     obstacles = list(obstacles)

@@ -1,7 +1,8 @@
 #!/bin/bash
 set -e
-cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
-source ./ros_env.sh
+DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+source "$DIR/ros_env.sh"
+cd -- "$DIR"
 export ROS_AUTOMATIC_DISCOVERY_RANGE="${ROS_AUTOMATIC_DISCOVERY_RANGE:-LOCALHOST}"
 export DISPLAY="${DISPLAY:-:0}"
 export XAUTHORITY="${XAUTHORITY:-/run/user/1000/gdm/Xauthority}"
@@ -30,6 +31,4 @@ fi
     done
 ) &
 
-PYTHON_BIN="${RK3588_PYTHON:-/usr/bin/python3}"
-if [ ! -x "$PYTHON_BIN" ]; then PYTHON_BIN=/usr/bin/python3; fi
-exec "$PYTHON_BIN" -u board_radar_gui.py "$@"
+exec "$RK3588_PYTHON" -u board_radar_gui.py "$@"

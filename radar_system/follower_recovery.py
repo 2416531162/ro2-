@@ -46,22 +46,23 @@ class Command:
 class ScanEvidence:
     """Finite laser returns certify only the space before the return.
 
-    Self reflections and masked/NaN/inf/missing rays remain unknown. All
-    external finite hits (including masked angles) remain collision obstacles.
+    Self reflections and masked/no-echo rays remain unknown. An unsampled
+    0.5-degree slot can use real returns on both sides within a narrow window;
+    a finite external hit remains a collision obstacle even in a masked angle.
     """
     def __init__(self, ranges, angle_min, increment, range_min, range_max,
-                 mount, footprint, blind_sectors=(), self_hit_skin_m=0.0):
-        # self_hit_skin_m MUST match the follower's own self-hit filter. With
-        # 0 here but 0.05 in the follower, one return 1-5 cm outside the body
-        # (wheel bulge, cable, bracket) was "self" for the follower but an
-        # obstacle INSIDE the padded footprint here, so clearance() returned 0
-        # for every steer forever: person visible, car never moves.
+                 mount, footprint, blind_sectors=(), self_hit_skin_m=0.0,
+                 sampled=None):
+        # Match the follower's self-hit filter. Anything outside the measured
+        # body, however close, remains an obstacle rather than being erased.
         self.ranges = tuple(ranges)
+        if sampled is not None and len(sampled) != len(self.ranges):
+            raise ValueError('scan sampling mask length mismatch')
         self.angle_min, self.increment = angle_min, increment
         self.mount = mount
         self.blind_sectors = tuple(blind_sectors or ())
         self.valid = []
-        # Why each ray is (in)valid: ok / none (+inf, NaN: no echo) /
+        # Why each ray is (in)valid: ok / unsampled / none (+inf, NaN: no echo) /
         # near (-inf or < range_min: echo closer than the lidar can range,
         # i.e. car structure) / self (return on the car body) / far / masked.
         self.causes = []
@@ -79,9 +80,15 @@ class ScanEvidence:
                 external = not is_self_hit(x, y, footprint, skin_m=self_hit_skin_m)
                 if external:
                     self.points.append((x, y))
-                masked = in_blind_sector(a, blind_sectors)
-                ok = external and not masked
-                cause = "ok" if ok else ("self" if not external else "masked")
+                # A blind-sector annotation does not invalidate an actual
+                # external return. The driver guard already uses this same
+                # measured ray; retaining it avoids inventing an unknown
+                # barrier across an otherwise visible doorway. Never extend
+                # coverage past the return or through invalid masked bins.
+                ok = external
+                cause = "ok" if external else "self"
+            elif r == math.inf and sampled is not None and not sampled[i]:
+                cause = "unsampled"  # no beam was fired into this angular slot
             elif in_blind_sector(a, blind_sectors):
                 cause = "masked"      # configured car structure, whatever the reading
             elif r != r or r == math.inf:
@@ -97,9 +104,6 @@ class ScanEvidence:
         self._full = bool(n) and abs(increment) * n >= 2 * math.pi - abs(increment) * 1.1
         self._reach = (max(1, int(self.NEIGHBOR_WINDOW_RAD / abs(increment) + 1e-9))
                        if self.usable else 1)
-        self._reach_struct = (max(self._reach,
-                                  int(self.STRUCTURE_WINDOW_RAD / abs(increment) + 1e-9))
-                              if self.usable else 1)
         self._mid = angle_min + (n - 1) * increment / 2 if n else 0.0
         # Nearest valid bin at/below and at/above every bin, precomputed once per
         # scan so each free-space query is O(1) (clearance() issues ~10^5/cycle).
@@ -147,32 +151,14 @@ class ScanEvidence:
 
     # How far (radians) a query may look for a neighbouring real return.
     #
-    # The N10P node bins each sweep into 720 slots (0.5 deg), but the sensor
-    # only delivers ~450 samples per revolution at 10 Hz, so roughly a third of
-    # the slots are empty (inf) in EVERY sweep. Requiring the two slots right
-    # next to a query to both hold returns therefore failed on practically
-    # every sweep: clearance() returned 0 ("no_observed_path"), AEB latched at
-    # start-up and recovery burned all its legs without moving.
-    #
-    # A query now uses the nearest real return on each side within this
-    # window. 1 deg spans the N10P sample spacing (~0.8 deg) with margin; at
-    # 1 m that is ~3.5 cm of interpolated free space. Actual returns are still
-    # all collision obstacles, and a wider run of missing rays stays unknown.
-    NEIGHBOR_WINDOW_RAD = math.radians(4.5)
-    # A narrow run of rays blocked by the car's OWN structure (echo closer
-    # than range_min, a return on the body, or a configured blind sector,
-    # which by definition marks car structure) says nothing about the space
-    # beyond; such a permanent sliver ahead made every path "unknown" at
-    # start-up (field report: blocked at lidar bearing 16.7 deg, 0.20 m).
-    # Runs of structural rays up to this width are bridged by the real returns
-    # on both sides; no-echo (+inf) rays keep the strict 1 deg window, since a
-    # dark object also produces them. Wider structural shadows stay unknown.
-    STRUCTURE_WINDOW_RAD = math.radians(9.0)
+    # Allow only the small empty bins introduced by resampling the laser into
+    # 0.5-degree slots. A sampled masked/self/near ray cannot certify what
+    # lies behind the structure, even if neighbouring returns are far away.
+    NEIGHBOR_WINDOW_RAD = math.radians(1.5)
 
     def _nearest_valid(self, start, step, reach, full):
         n = len(self.ranges)
-        loose = 0
-        for k in range((getattr(self, "_reach_struct", reach)) + 1):
+        for k in range(reach + 1):
             i = start + step * k
             if full:
                 i %= n
@@ -180,10 +166,8 @@ class ScanEvidence:
                 return None
             if self.valid[i]:
                 return i
-            if self.causes[i] not in ("near", "self", "masked"):
-                loose += 1
-                if loose > reach:
-                    return None
+            if self.causes[i] not in ("none", "unsampled"):
+                return None
         return None
 
     def explain(self, x, y, half_width_deg=3.0):
@@ -349,6 +333,10 @@ class LocalRecovery:
         """
         self.last_block = None
         self.last_depth_used = False
+        if direction > 0:
+            # A past free scan or the current car footprint cannot certify
+            # newly swept forward space behind a present blind/occluded ray.
+            allow_memory = allow_history = False
         if scan is None or not scan.usable:
             self.last_block = ("no_scan", 0.0, 0.0, 0.0)
             return 0.0
@@ -388,12 +376,6 @@ class LocalRecovery:
         qx = x[:end, None]+bx*c-by*s
         qy = y[:end, None]+bx*s+by*c
         known = self._inside_many(qx, qy)
-        if direction > 0 and scan.blind_sectors:
-            px = np.clip(bx, -f.rear_m, f.front_m)
-            py = np.clip(by, -f.half_width_m, f.half_width_m)
-            known |= (self._inside_many(x[:end, None]+px*c-py*s,
-                                        y[:end, None]+px*s+py*c)
-                      & scan.masked_many(qx, qy))
         covered, free = scan.query_many(qx, qy)
         known |= free
         missing = ~known & ~covered
@@ -415,7 +397,8 @@ class LocalRecovery:
         # Obstacles were checked before the perimeter at each sample.
         if len(unknown) and int(unknown[0, 0]) < collision_step:
             i, j = map(int, unknown[0])
-            kind = "obstacle" if covered[i, j] or depth_blocked[i, j] else "unknown"
+            is_obstacle = covered[i, j] or depth_blocked[i, j]
+            kind = "obstacle" if is_obstacle else "unknown"
             self.last_block = (kind, float(qx[i, j]), float(qy[i, j]), float(distances[i]))
             return max(0., float(distances[i])-step)
         if collision_point is not None:

@@ -21,9 +21,9 @@
 
 import sys
 import time
-import serial
 import math
 import subprocess
+from pathlib import Path
 from functools import reduce
 
 FRAME_HEADER = 0x7B
@@ -48,14 +48,38 @@ def main():
     if not math.isfinite(duration) or not 0 < duration <= 60:
         print("停车持续时间应在 0 到 60 秒之间")
         return 2
-    # A single process owns the serial port. Ask the live driver to latch STOP.
-    if subprocess.run(['systemctl', 'is-active', '--quiet', 'rk3588-wheeltec.service']).returncode == 0:
+    # Only a confirmed stopped driver permits direct serial access.
+    try:
+        status = subprocess.run(
+            ['systemctl', 'show', 'rk3588-wheeltec.service', '-p', 'ActiveState', '-p', 'MainPID'],
+            capture_output=True, text=True, check=True)
+    except (OSError, subprocess.CalledProcessError) as exc:
+        print(f'Cannot establish driver state; refusing serial access: {exc}', file=sys.stderr)
+        return 1
+    state = dict(line.split('=', 1) for line in status.stdout.splitlines() if '=' in line)
+    running = state.get('ActiveState') not in ('inactive', 'failed') or state.get('MainPID') != '0'
+    if not running:
+        try:
+            process = subprocess.run(['pgrep', '-f', '[w]heeltec_driver.py'], capture_output=True)
+        except OSError as exc:
+            print(f'Cannot check independent driver process; refusing serial access: {exc}', file=sys.stderr)
+            return 1
+        if process.returncode not in (0, 1):
+            print('Cannot check independent driver process; refusing serial access', file=sys.stderr)
+            return 1
+        running = process.returncode == 0
+    if running:
+        # This also covers activating/deactivating or an uncertain state. Never
+        # compete for the port when the service may still own it.
         return subprocess.run([
-            '/bin/bash', '-c',
-            'source /opt/ros/jazzy/setup.bash; export ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST; '
-            'exec python3 /root/wheeltec/control.py stop'
+            '/bin/bash', str(Path(__file__).with_name('run_control.sh')), 'stop'
         ]).returncode
 
+    try:
+        import serial
+    except ImportError as exc:
+        print(f'pyserial required for direct serial stop: {exc}', file=sys.stderr)
+        return 1
     frame = build_zero_frame()
     print(f"停车帧: {' '.join(f'{b:02x}' for b in frame)}")
     print(f"打开 {port} @ {BAUD}，持续发 {duration} 秒 ...")
