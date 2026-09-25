@@ -84,8 +84,9 @@ class LineMission:
                                           sol=m['sol'], sigma_n=m['sigma_n'], sigma_e=m['sigma_e'],
                                           sigma_u=m['sigma_u'], diff_age_s=inf(m['diff_age']), sats=m['sats']))
         elif kind == 'heading':
-            # rtk_node 按两天线固定解的实时距离核对过的测向才用；旧版 rtk_node 没有 valid 字段，交给融合自己判断
-            if m.get('valid') is False:
+            # 只用 rtk_node 判为有效的测向（整周固定，且两根天线固定解的平面实时距离 ≥0.10 m）。
+            # 融合不再按基线长度判断，所以没带 valid 字段的也不用
+            if m.get('valid') is not True:
                 return
             self.fusion.add_heading(s.DualHeading(t=m['t'], heading_deg=m['heading'], pitch_deg=m['pitch'],
                                                   length_m=m['length'], sol=m['sol'],

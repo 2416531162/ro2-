@@ -58,10 +58,7 @@ class GnssVelocity:
 class FusionConfig:
     antenna_xy: tuple = (0.345, 0.165)
     baseline_yaw_body_deg: float = -90.0
-    baseline_m: float = 0.33
-    baseline_tol_m: float = 0.03
-    # False：不按 baseline_m ± baseline_tol_m 检查测向长度（上游已按两天线固定解的实时距离核对过）
-    baseline_check: bool = True
+    # 不设基线长度：天线间距不写死、不实测，由 rtk_node 按两根天线固定解的平面实时距离核对测向
     mount_offset_deg: float = 0.0
     wheelbase_m: float = 0.52
     max_steer_rad: float = 0.35
@@ -104,17 +101,12 @@ class FusionConfig:
             if name == 'antenna_xy':
                 if len(value) != 2 or not all(math.isfinite(v) for v in value):
                     raise ValueError('antenna_xy 必须是两个有限数值')
-            elif name == 'baseline_check':
-                if not isinstance(value, bool):
-                    raise ValueError('baseline_check 必须是 true/false')
             elif not math.isfinite(value):
                 raise ValueError(name + ' 必须是有限数值')
             elif name not in ('baseline_yaw_body_deg', 'mount_offset_deg') and value <= 0:
                 raise ValueError(name + ' 必须为正')
         if not 0 < self.max_steer_rad < math.pi / 2:
             raise ValueError('max_steer_rad 必须在 (0, pi/2) 内')
-        if self.baseline_tol_m >= self.baseline_m:
-            raise ValueError('基线容差必须小于基线长度')
         if not isinstance(self.history_max_samples, int) or self.history_max_samples < 10:
             raise ValueError('history_max_samples 必须是至少 10 的整数')
 
@@ -519,7 +511,6 @@ class GnssFusion:
         valid = (sample.sol in _HEADING and sample.sats >= cfg.min_sats
                  and all(math.isfinite(v) for v in (sample.heading_deg, sample.pitch_deg,
                                                    sample.length_m, sample.sigma_heading_deg))
-                 and (not cfg.baseline_check or abs(sample.length_m - cfg.baseline_m) <= cfg.baseline_tol_m + 1e-12)
                  and sample.sigma_heading_deg >= 0)
         if not valid:
             s.heading_ok = False

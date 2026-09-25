@@ -140,14 +140,16 @@ class TestInputs(Base):
         self.m.on_gnss(dict(kind='fix', t=1.0, lat=30.0, lon=120.0, height=20.0, sol='NARROW_INT',
                             sigma_n=0.01, sigma_e=0.01, sigma_u=0.02, diff_age=None, sats=30))
         self.m.on_gnss(dict(kind='heading', t=1.0, heading=91.0, pitch=0.2, length=0.331, sol='L1_INT',
-                            sigma_heading=0.3, sats=30))
+                            sigma_heading=0.3, sats=30, valid=True))
         self.m.on_gnss(dict(kind='vel', t=1.0, speed=0.5, track=1.0, sol='DOPPLER_VELOCITY'))
         self.m.on_gnss(dict(kind='other'))
         self.m.on_imu(1.01, 0.002)
         self.m.on_wheel(1.02, 0.5, 0.001)
-        # rtk_node 判为无效（与两天线实时距离对不上）的测向不交给融合
+        # rtk_node 判为无效（两根天线没都固定）或没带 valid 的测向都不交给融合：融合不再按基线长度判断
         self.m.on_gnss(dict(kind='heading', t=1.005, heading=91.0, pitch=0.2, length=0.9, sol='L1_INT',
                             sigma_heading=0.3, sats=30, valid=False))
+        self.m.on_gnss(dict(kind='heading', t=1.006, heading=91.0, pitch=0.2, length=0.331, sol='L1_INT',
+                            sigma_heading=0.3, sats=30))
         names = [n for n, _ in self.fusion.inputs]
         self.assertEqual(names, ['add_fix', 'add_heading', 'add_velocity', 'add_imu', 'add_wheel'])
         fix = self.fusion.inputs[0][1]

@@ -164,6 +164,18 @@ class TestRtkNode(unittest.TestCase):
         self.assertEqual([rtk_node.navsat_status(s) for s in ('NARROW_INT', 'L1_FLOAT', 'PSRDIFF', 'SINGLE', 'NONE')],
                          [rtk_node.GBAS_FIX, rtk_node.GBAS_FIX, rtk_node.SBAS_FIX, rtk_node.FIX, rtk_node.NO_FIX])
 
+    def test_old_fusion_json_with_cancelled_baseline_keys_still_loads(self):
+        import gnss_fusion
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, 'fusion.json')
+            with open(path, 'w') as fh:
+                json.dump({'mount_offset_deg': 1.5, 'antenna_xy': [0.3, 0.1], 'baseline_m': 0.33,
+                           'baseline_tol_m': 0.03, 'baseline_check': True}, fh)
+            cfg = line_node.load_fusion_config(gnss_fusion, path)
+        self.assertEqual((cfg.mount_offset_deg, cfg.antenna_xy), (1.5, (0.3, 0.1)))
+        self.assertFalse(hasattr(cfg, 'baseline_m'))
+        self.assertEqual(line_node.load_fusion_config(gnss_fusion, '/nonexistent/fusion.json'), gnss_fusion.FusionConfig())
+
     def test_port_error_is_reported_and_retried(self):
         calls = []
 

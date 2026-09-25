@@ -27,6 +27,8 @@ from motion_client import MotionClient
 
 CONTROL_DT = 0.05
 SELECT_RETRY_S = 0.5
+# 已取消的固定基线参数（天线间距改由两根天线固定解的平面实时距离核对）；旧版 fusion.json 里可能还有，读取时丢掉
+OBSOLETE_FUSION_KEYS = ('baseline_m', 'baseline_tol_m', 'baseline_check')
 MAX_STAMP_AGE_S = 0.5       # 消息头时间戳比现在早超过这么多（或在未来），就不信它，改用收到时刻
 
 
@@ -112,19 +114,22 @@ class LineNode(Node):
         self.motion.select(False)
 
 
+def load_fusion_config(gnss_fusion, path):
+    """标定结果（安装偏差等）写在 path（~/rtk/fusion.json），键名同 FusionConfig 字段；没有文件就用默认值。
+    已取消的固定基线参数（OBSOLETE_FUSION_KEYS）丢掉不用。"""
+    overrides = {}
+    if os.path.exists(path):
+        with open(path, encoding='utf-8') as fh:
+            overrides = {k: tuple(v) if isinstance(v, list) else v for k, v in json.load(fh).items()}
+    for key in OBSOLETE_FUSION_KEYS:
+        overrides.pop(key, None)
+    return gnss_fusion.FusionConfig(**overrides)
+
+
 def main():
     import gnss_fusion   # 融合模块（协作开发，接口见 docs/GNSS_FUSION.md）
     home = os.path.expanduser('~')
-    # 标定结果（安装偏差等）写在 ~/rtk/fusion.json，键名同 FusionConfig 字段；没有就用默认值
-    cfg_path = os.path.join(home, 'rtk', 'fusion.json')
-    overrides = {}
-    if os.path.exists(cfg_path):
-        with open(cfg_path, encoding='utf-8') as fh:
-            overrides = {k: tuple(v) if isinstance(v, list) else v for k, v in json.load(fh).items()}
-    # 测向由 rtk_node 按两天线固定解的平面实时距离核对（/gnss/raw 里的 valid）。用户要求取消按安装基线长度
-    # 判断：融合里的固定基线检查一律关掉，fusion.json 里写了也不打开
-    overrides['baseline_check'] = False
-    fusion = gnss_fusion.GnssFusion(gnss_fusion.FusionConfig(**overrides))
+    fusion = gnss_fusion.GnssFusion(load_fusion_config(gnss_fusion, os.path.join(home, 'rtk', 'fusion.json')))
     mission = LineMission(fusion, gnss_fusion,
                           state_path=os.path.join(home, 'rtk', 'line_state.json'),
                           log_dir=os.path.join(home, 'rtk', 'runs'),

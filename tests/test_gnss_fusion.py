@@ -333,7 +333,7 @@ def test_arbitrary_baseline_and_mount_are_not_hardcoded():
     assert math.degrees(f.pose(0.).yaw) == pytest.approx(-177.)
 
 
-@pytest.mark.parametrize('changes', [dict(sol='NARROW_FLOAT'), dict(length_m=0.), dict(length_m=.299), dict(length_m=.361), dict(sigma_heading_deg=float('nan'))])
+@pytest.mark.parametrize('changes', [dict(sol='NARROW_FLOAT'), dict(length_m=float('nan')), dict(sigma_heading_deg=float('nan'))])
 def test_invalid_heading_is_never_used(changes):
     f = known_fusion()
     f.add_heading(heading_at(f, 0., **changes))
@@ -344,19 +344,23 @@ def test_invalid_heading_is_never_used(changes):
     assert 'heading_uninitialized' in p.reasons
 
 
-def test_baseline_check_off_accepts_any_fixed_length():
-    # 车上 line_node 关掉固定长度检查（上游已按两天线实时距离核对）：0.28 m 的固定测向要能初始化航向
-    f = known_fusion(FusionConfig(baseline_check=False))
-    f.add_heading(heading_at(f, 0., length_m=.28))
-    f.add_fix(fixed_at(f, 0.))
-    assert 'heading_uninitialized' not in f.pose(0.).reasons
+def test_fusion_does_not_judge_heading_length():
+    # 天线间距不写死、不实测：测向是否可用由 rtk_node 按两根天线固定解的平面实时距离核对（valid），
+    # 融合不再按基线长度卡——整周固定的测向不论测得多长都能初始化航向
+    for length in (.28, .33, .9):
+        f = known_fusion()
+        f.add_heading(heading_at(f, 0., length_m=length))
+        f.add_fix(fixed_at(f, 0.))
+        assert 'heading_uninitialized' not in f.pose(0.).reasons
     # 浮点测向照样不用
-    g = known_fusion(FusionConfig(baseline_check=False))
+    g = known_fusion()
     g.add_heading(heading_at(g, 0., length_m=.28, sol='NARROW_FLOAT'))
     g.add_fix(fixed_at(g, 0.))
     assert 'heading_uninitialized' in g.pose(0.).reasons
-    with pytest.raises(ValueError):
-        FusionConfig(baseline_check=1)
+    # 固定基线参数已取消
+    for key in ('baseline_m', 'baseline_tol_m', 'baseline_check'):
+        with pytest.raises(TypeError):
+            FusionConfig(**{key: .33})
 
 
 def test_heading_floor_and_outlier_gate():
