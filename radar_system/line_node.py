@@ -121,8 +121,9 @@ def main():
     if os.path.exists(cfg_path):
         with open(cfg_path, encoding='utf-8') as fh:
             overrides = {k: tuple(v) if isinstance(v, list) else v for k, v in json.load(fh).items()}
-    # 测向长度由 rtk_node 按两天线固定解的实时距离核对（/gnss/raw 里的 valid），融合不再按固定基线长度卡
-    overrides.setdefault('baseline_check', False)
+    # 测向由 rtk_node 按两天线固定解的平面实时距离核对（/gnss/raw 里的 valid）。用户要求取消按安装基线长度
+    # 判断：融合里的固定基线检查一律关掉，fusion.json 里写了也不打开
+    overrides['baseline_check'] = False
     fusion = gnss_fusion.GnssFusion(gnss_fusion.FusionConfig(**overrides))
     mission = LineMission(fusion, gnss_fusion,
                           state_path=os.path.join(home, 'rtk', 'line_state.json'),

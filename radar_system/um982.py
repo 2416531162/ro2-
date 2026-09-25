@@ -26,10 +26,10 @@ RTK_FIXED = frozenset({'NARROW_INT'})
 RTK_FLOAT = frozenset({'NARROW_FLOAT', 'L1_FLOAT', 'IONOFREE_FLOAT', 'WIDE_INT', 'L1_INT'})
 # 双天线航向：整周模糊度固定才可信
 HEADING_FIXED = frozenset({'L1_INT', 'NARROW_INT', 'WIDE_INT'})
-# 双天线基线不写死长度：两根天线都是 RTK 固定解时，按同一测量时刻两者位置的实时距离作参考
-# （最近 BASELINE_REF_WINDOW_S 秒的中位数，至少 BASELINE_REF_MIN_SAMPLES 组）。用户要求：两根天线都固定
-# 就信——测向是整周固定解、且有这个实时参考（两根都固定）就算有效，不再比较测向长度。参考距离小于
-# MIN_BASELINE_M 说明两根天线收到的是同一个信号（室内转发器），不算。
+# 双天线间距不写死、也不用实测：两根天线都是 RTK 固定解时，按同一测量时刻两者平面坐标（东、北，
+# 不算高差）的实时距离作参考（最近 BASELINE_REF_WINDOW_S 秒的中位数，至少 BASELINE_REF_MIN_SAMPLES 组）。
+# 用户要求：两根天线都固定就信——测向是整周固定解、且有这个实时参考（两根都固定）就算有效，
+# 不再比较测向长度。参考距离小于 MIN_BASELINE_M 说明两根天线收到的是同一个信号（室内转发器），不算。
 BASELINE_REF_WINDOW_S = 3.0
 BASELINE_REF_MIN_SAMPLES = 5
 MIN_BASELINE_M = 0.10
@@ -563,7 +563,8 @@ class Um982Stream:
         return d if d >= MIN_BASELINE_M else None
 
     def _antenna_offset(self):
-        """副天线最新定位与同一测量时刻（±30 ms）主天线定位之间的空间距离（米）；配不上返回 None。"""
+        """副天线最新定位与同一测量时刻（±30 ms）主天线定位之间的平面距离（米，只算东、北，不算高差）；
+        配不上返回 None。"""
         b = self.last.get('fix2')
         a = min(self.recent_fix, key=lambda f: abs(f['t'] - b['t']), default=None) if b else None
         # 两边都是 RTK 固定解才比：单点、浮点本身就有分米到米级误差，比出来的距离说明不了副天线对不对
@@ -573,7 +574,7 @@ class Um982Stream:
         w = 1.0 - _WGS84_E2 * math.sin(phi) ** 2
         dn = math.radians(b['lat'] - a['lat']) * _WGS84_A * (1.0 - _WGS84_E2) / w ** 1.5
         de = math.radians(b['lon'] - a['lon']) * _WGS84_A / math.sqrt(w) * math.cos(phi)
-        return math.sqrt(dn * dn + de * de + (b['height'] - a['height']) ** 2)
+        return math.hypot(dn, de)
 
 
 def heading_grade(sol):

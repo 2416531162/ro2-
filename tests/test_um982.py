@@ -219,16 +219,27 @@ class TestStream(unittest.TestCase):
         self.assertFalse(hd[0]['valid'])
 
     def test_fixed_heading_is_trusted_when_both_antennas_fixed_float_is_not(self):
-        # 两根天线都固定就信：测向 0.29 m 与实时 0.345 m 不同也用（外场实测）；测向浮点不用
+        # 两根天线都固定就信：测向 0.29 m 与实时 0.34 m 不同也用（外场实测）；测向浮点不用
         s = um982.Um982Stream()
         out = self.feed_epochs(s, 0.342, 0.29, up_m=0.048)
         self.assertTrue([m for m in out if m['kind'] == 'heading'][-1]['valid'])
         a2 = s.status(10.3)['antennas']['ant2']
-        self.assertAlmostEqual(a2['offset_m'], 0.345, places=2)      # 实时距离照实报
+        self.assertAlmostEqual(a2['offset_m'], 0.342, places=2)      # 平面实时距离照实报
         self.assertIsNone(a2['consistent'])                           # 不再判"不可信"
         s = um982.Um982Stream()
         out = self.feed_epochs(s, 1.4, 2.6, up_m=2.3, sol='NARROW_FLOAT')
         self.assertFalse([m for m in out if m['kind'] == 'heading'][-1]['valid'])
+
+    def test_antenna_spacing_uses_plane_coordinates_only(self):
+        # 天线间距不写死、不实测：取两根天线固定解的东、北平面距离；副天线高 0.20 m 不算进去（三维会是 0.36 m）
+        s = um982.Um982Stream()
+        out = self.feed_epochs(s, 0.30, 0.36, up_m=0.20)
+        hd = [m for m in out if m['kind'] == 'heading']
+        self.assertTrue(hd[-1]['valid'])
+        self.assertAlmostEqual(hd[-1]['baseline_ref'], 0.30, delta=0.005)
+        st = s.status(10.3)
+        self.assertAlmostEqual(st['heading']['ref_m'], 0.30, delta=0.005)
+        self.assertAlmostEqual(st['antennas']['ant2']['offset_m'], 0.30, delta=0.005)
 
     def test_repeater_like_zero_baseline_is_not_valid(self):
         # 室内转发器：两根天线收到同一路信号，距离和测向都只有几毫米
