@@ -15,7 +15,8 @@
 
 import math
 
-__all__ = ["Cluster", "cluster_points", "line_of_sight_gap"]
+__all__ = ["Cluster", "segment_points", "cluster_points", "line_of_sight_gap",
+           "StaticClutter"]
 
 
 class Cluster:
@@ -33,17 +34,8 @@ class Cluster:
         return "Cluster(x=%.2f, y=%.2f, size=%.2f, n=%d)" % (self.x, self.y, self.size, self.count)
 
 
-def cluster_points(points, break_m=0.10, leg_pair_m=0.55, min_size_m=0.02,
-                   max_size_m=0.75, min_points=2, max_range_m=5.0, origin=(0.0, 0.0)):
-    """扫描点(按扫描角度顺序) -> 人体尺寸的候选点簇列表。
-
-    >>> legs = [(2.0, 0.10), (2.0, 0.13), (2.02, 0.16), (2.0, -0.10), (2.0, -0.13)]
-    >>> [round(c.x, 2) for c in cluster_points(legs)]
-    [2.0]
-    >>> wall = [(3.0, -1.0 + i * 0.05) for i in range(41)]
-    >>> cluster_points(wall)
-    []
-    """
+def segment_points(points, break_m=0.10):
+    """扫描点(按扫描角度顺序)按相邻点间距切段;360° 首尾相接。"""
     segments, current = [], []
     for p in points:
         if current and math.hypot(p[0] - current[-1][0], p[1] - current[-1][1]) > break_m:
@@ -52,11 +44,29 @@ def cluster_points(points, break_m=0.10, leg_pair_m=0.55, min_size_m=0.02,
         current.append(p)
     if current:
         segments.append(current)
-    # 360° 扫描首尾相接
     if len(segments) > 1:
         a, b = segments[0][0], segments[-1][-1]
         if math.hypot(a[0] - b[0], a[1] - b[1]) <= break_m:
             segments[0] = segments.pop() + segments[0]
+    return segments
+
+
+def cluster_points(points, break_m=0.10, leg_pair_m=0.55, min_size_m=0.02,
+                   max_size_m=0.75, min_points=2, max_range_m=5.0, origin=(0.0, 0.0),
+                   segments=None):
+    """扫描点(按扫描角度顺序) -> 人体尺寸的候选点簇列表。
+
+    segments 可传入已切好(并已剔除静止杂物)的段,此时忽略 points。
+
+    >>> legs = [(2.0, 0.10), (2.0, 0.13), (2.02, 0.16), (2.0, -0.10), (2.0, -0.13)]
+    >>> [round(c.x, 2) for c in cluster_points(legs)]
+    [2.0]
+    >>> wall = [(3.0, -1.0 + i * 0.05) for i in range(41)]
+    >>> cluster_points(wall)
+    []
+    """
+    if segments is None:
+        segments = segment_points(points, break_m)
 
     # 过大的连续结构(墙、柜子)整体丢弃,不参与腿部配对
     small = []
@@ -87,6 +97,84 @@ def cluster_points(points, break_m=0.10, leg_pair_m=0.55, min_size_m=0.02,
     return [c for c in merged
             if c.count >= min_points and c.size >= min_size_m
             and math.hypot(c.x - ox, c.y - oy) <= max_range_m]
+
+
+class StaticClutter:
+    """里程计系里「一直待在原地」的小点簇:椅子腿、桌腿、立柱。
+
+    人走出相机视野后只能靠雷达腿部点簇延续轨迹。室内到处是和腿一样粗的
+    椅子腿,两根相距 0.45m 的椅子腿还会被配成「一个人」;人贴着椅子走时,
+    腿和椅子腿配成一簇,轨迹被吸到椅子上,而且编号不变,上层看不出来。
+
+    区分依据是运动:走路的腿每步都换地方,椅子腿一直在原处。每个小段按
+    质心在里程计系里登记,在 radius 内持续出现 confirm_s 以上且命中足够多次
+    即判为静止杂物;它仍是避障障碍物,只是不再参与人体点簇和轨迹关联。
+
+    还没判为静止时就出现在已确认的人身边(near_person)的条目永久豁免 ——
+    人站着不动时自己的腿不能变成「椅子」,即使轨迹一时偏开也一样。人走近之前
+    就已判为静止的椅子腿不受影响,所以人从椅子旁边经过时轨迹不会跳过去。
+
+    >>> sc = StaticClutter()
+    >>> [sc.update([(1.0, 1.0, 0.05)], t / 10.0) for t in range(15)][-1]
+    [True]
+    >>> sc = StaticClutter()   # 人一出现就站在这里:永久豁免
+    >>> [sc.update([(1.0, 1.0, 0.05)], t / 10.0, near_person=lambda x, y: t < 3) for t in range(20)][-1]
+    [False]
+    >>> sc = StaticClutter()   # 先判为静止的椅子腿,人走过来也不豁免
+    >>> [sc.update([(1.0, 1.0, 0.05)], t / 10.0, near_person=lambda x, y: t > 14) for t in range(20)][-1]
+    [True]
+    >>> sc = StaticClutter()   # 每 0.3s 挪 0.3m 的腿不会被判静止
+    >>> [sc.update([(1.0 + 0.3 * (t // 3), 1.0, 0.05)], t / 10.0) for t in range(15)][-1]
+    [False]
+    """
+
+    X, Y, FIRST, LAST, HITS, EXEMPT, STATIC = range(7)
+
+    def __init__(self, radius_m=0.10, confirm_s=1.2, forget_s=0.8, min_hits=6,
+                 max_size_m=0.30):
+        self.radius = radius_m
+        self.confirm_s = confirm_s
+        self.forget_s = forget_s
+        self.min_hits = min_hits
+        self.max_size = max_size_m
+        self.entries = []
+
+    def reset(self):
+        self.entries = []
+
+    def update(self, segments, t, near_person=None):
+        """segments: [(x, y, size)] 里程计系;返回每段是否为静止杂物。"""
+        self.entries = [e for e in self.entries if t - e[self.LAST] <= self.forget_s]
+        r2 = self.radius * self.radius
+        flags = []
+        for x, y, size in segments:
+            if size > self.max_size:
+                flags.append(False)
+                continue
+            best, best_d2 = None, r2
+            for e in self.entries:
+                d2 = (e[0] - x) ** 2 + (e[1] - y) ** 2
+                if d2 <= best_d2:
+                    best, best_d2 = e, d2
+            if best is None:
+                best = [x, y, t, t, 0, False, False]
+                self.entries.append(best)
+            if best[self.LAST] != t or best[self.HITS] == 0:
+                best[self.HITS] += 1
+            best[self.LAST] = t
+            # 慢速平均:静止物体的位置不会被噪声带跑,移动的腿会超出半径另起一条
+            best[0] += 0.2 * (x - best[0])
+            best[1] += 0.2 * (y - best[1])
+            if not best[self.STATIC] and near_person is not None and near_person(best[0], best[1]):
+                best[self.EXEMPT] = True
+            if (not best[self.EXEMPT] and t - best[self.FIRST] >= self.confirm_s
+                    and best[self.HITS] >= self.min_hits):
+                best[self.STATIC] = True
+            flags.append(best[self.STATIC])
+        return flags
+
+    def points(self):
+        return [(e[0], e[1]) for e in self.entries if e[self.STATIC]]
 
 
 def line_of_sight_gap(points, origin, target, front_m, half_width_m=0.25,

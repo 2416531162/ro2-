@@ -13,7 +13,8 @@
 规则
 ----
 - 沿指令转角和当前转角检查车辆四角的实际扫掠，不把侧面障碍当成前方空地。
-- 新扫过的区域需要新鲜、可证实的激光回波；盲区和车身遮挡不可当作空地。
+- 新扫过的区域需要新鲜扫描；已采样但无回波的 +inf 按量程上限处理并限速，
+  未采样格、太近回波和车身遮挡仍不能当作空地。
 - 允许车速 v 满足:延迟距离 + 刹车距离 + 停车余量 <= 到第一个障碍/未知区域的距离。
 - 无效、缺失或过期扫描一律停车；正常租约入口另外锁存传感器故障。
 纯 Python,不依赖 ROS。坐标:原点后轴中心,x 前 y 左。
@@ -73,22 +74,25 @@ class ScanGuard:
         self.last_block = None
         self.interventions = 0
         self._rays = ()
+        self._no_echo = ()
         self._blocked_rays = ()
         self._lower = self._upper = ()
         self._path_cache = {}
         self._angle_min = self._increment = self._mid = 0.0
         self._full = False
+        self.last_no_echo_used = False
         self._perimeter = self._body_perimeter()
 
     def invalidate(self):
         self.points = []
         self.scan_time = None
-        self._rays = self._blocked_rays = ()
+        self._rays = self._blocked_rays = self._no_echo = ()
         self._lower = self._upper = ()
         self._path_cache.clear()
         self.last_gap = None
         self.last_block = None
         self.last_reason = "guard_scan_unavailable"
+        self.last_no_echo_used = False
 
     def _body_perimeter(self):
         c = self.cfg
@@ -101,9 +105,11 @@ class ScanGuard:
                 for i in range(ny + 1) for x in (-c.rear_m, c.front_m)]
         return sides + ends
 
-    def update_scan(self, ranges, angle_min, angle_increment, range_min, range_max, now):
+    def update_scan(self, ranges, angle_min, angle_increment, range_min, range_max, now,
+                    sampled=None):
         c = self.cfg
-        if (not ranges or not all(math.isfinite(v) for v in (angle_min, angle_increment,
+        if (not ranges or (sampled is not None and len(sampled) != len(ranges))
+                or not all(math.isfinite(v) for v in (angle_min, angle_increment,
                                                             range_min, range_max, now))
                 or not 0 < abs(angle_increment) <= math.radians(2)
                 or not 0 <= range_min < range_max):
@@ -113,15 +119,22 @@ class ScanGuard:
         cy, sy = math.cos(c.lidar_yaw_rad), math.sin(c.lidar_yaw_rad)
         pts = []
         rays = [None] * len(ranges)
+        no_echo = [False] * len(ranges)
         blocked = [False] * len(ranges)
         for i, r in enumerate(ranges):
             if not math.isfinite(r):
-                blocked[i] = r == -math.inf
+                a = angle_min + i * angle_increment + c.lidar_yaw_rad
+                forward = abs(math.atan2(math.sin(a), math.cos(a))) < math.pi / 2
+                if r == math.inf and sampled is not None and sampled[i] and forward:
+                    rays[i], no_echo[i] = range_max, True
+                else:
+                    blocked[i] = r != math.inf or (r == math.inf and sampled is not None and sampled[i])
                 continue
             if r < lo:
                 blocked[i] = True
                 continue
             if r > range_max:
+                blocked[i] = True
                 continue
             a = angle_min + i * angle_increment
             lx, ly = r * math.cos(a), r * math.sin(a)
@@ -134,9 +147,12 @@ class ScanGuard:
                 continue
             rays[i] = r
             pts.append((x, y))
+        if any(no_echo) and len(pts) < PROFILE['safety']['min_scan_points']:
+            self.invalidate()
+            return
         self.points = pts
         self.scan_time = now
-        self._rays, self._blocked_rays = rays, blocked
+        self._rays, self._blocked_rays, self._no_echo = rays, blocked, no_echo
         self._angle_min, self._increment = angle_min, angle_increment
         self._mid = angle_min + (len(ranges) - 1) * angle_increment / 2
         self._full = abs(angle_increment) * len(ranges) >= 2 * math.pi - 1.1 * abs(angle_increment)
@@ -156,7 +172,7 @@ class ScanGuard:
             if self._blocked_rays[i]:
                 return None
             if self._rays[i] is not None:
-                return self._rays[i]
+                return i
         return None
 
     def _observed_free(self, x, y):
@@ -164,7 +180,7 @@ class ScanGuard:
         dx, dy = x - c.lidar_x_m, y - c.lidar_y_m
         distance = math.hypot(dx, dy)
         if distance <= c.range_min_m:
-            return False
+            return False, False
         a = math.atan2(dy, dx) - c.lidar_yaw_rad
         a += round((self._mid - a) / (2 * math.pi)) * 2 * math.pi
         index = (a - self._angle_min) / self._increment
@@ -173,10 +189,12 @@ class ScanGuard:
         if self._full:
             lo, hi = lo % n, hi % n
         elif lo < 0 or hi >= n:
-            return False
+            return False, False
         lower, upper = self._lower[lo], self._upper[hi]
         needed = distance + 0.015 + distance * abs(self._increment) / 2
-        return lower is not None and upper is not None and needed < min(lower, upper)
+        free = (lower is not None and upper is not None
+                and needed < min(self._rays[lower], self._rays[upper]))
+        return free, free and (self._no_echo[lower] or self._no_echo[upper])
 
     def _path_gap(self, direction, steer, horizon):
         c = self.cfg
@@ -188,6 +206,7 @@ class ScanGuard:
         nearby = [(x, y, max(-c.rear_m - x, x - c.front_m, abs(y) - half))
                   for x, y in self.points if x*x + y*y <= (horizon + body_r)**2]
         count = math.ceil(horizon / self.STEP_M)
+        no_echo_used = False
         for i in range(1, count + 1):
             travel = min(horizon, i * self.STEP_M)
             yaw = 0.0 if math.isinf(radius) else direction * math.copysign(travel / radius, steer)
@@ -199,7 +218,7 @@ class ScanGuard:
                 lx, ly = dx * co + dy * si, -dx * si + dy * co
                 gap = max(-c.rear_m - lx, lx - c.front_m, abs(ly) - half)
                 if gap <= 0 and gap < min(0.0, initial_gap) - 1e-7:
-                    return travel, "obstacle", ox, oy, steer
+                    return travel, "obstacle", ox, oy, steer, no_echo_used
             for bx, by in self._perimeter:
                 qx, qy = px + bx * co - by * si, py + bx * si + by * co
                 # The translated perimeter may land a few ulps outside the
@@ -207,9 +226,11 @@ class ScanGuard:
                 if (-c.rear_m - 1e-9 <= qx <= c.front_m + 1e-9
                         and abs(qy) <= half + 1e-9):
                     continue
-                if not self._observed_free(qx, qy):
-                    return travel, "unknown", qx, qy, steer
-        return math.inf, None, None, None, steer
+                free, far = self._observed_free(qx, qy)
+                no_echo_used |= far
+                if not free:
+                    return travel, "unknown", qx, qy, steer, no_echo_used
+        return math.inf, None, None, None, steer, no_echo_used
 
     def gap(self, direction, turning, horizon=2.0):
         """到首次扫掠障碍或未知空间的路径距离；布尔转弯取两侧最坏情况。"""
@@ -232,6 +253,7 @@ class ScanGuard:
     def limit(self, speed, turning, now, *, current_steer=None):
         """返回 (限制后的速度, 原因)。原因为 None 表示没有干预。"""
         c = self.cfg
+        self.last_no_echo_used = False
         if not c.enabled:
             self.last_reason = "guard_disabled"
             self.last_block = None
@@ -279,10 +301,13 @@ class ScanGuard:
                     self._path_cache.clear()
                 self._path_cache[key] = result
             results.append(result)
-        g, kind, x, y, blocked_steer = min(results, key=lambda item: item[0])
+        g, kind, x, y, blocked_steer, _ = min(results, key=lambda item: item[0])
+        self.last_no_echo_used = any(result[5] for result in results)
         self.last_gap = g
         self.last_block = (kind, x, y, blocked_steer) if kind is not None else None
         v_max = self.allowed_speed(g)
+        if self.last_no_echo_used:
+            v_max = min(v_max, 0.12)
         if v_max >= abs(speed):
             self.last_reason = None
             return speed, None
@@ -290,5 +315,6 @@ class ScanGuard:
         if v_max < c.min_speed_m_s:
             self.last_reason = "guard_unknown" if kind == "unknown" else "guard_stop"
             return 0.0, self.last_reason
-        self.last_reason = "guard_unknown" if kind == "unknown" else "guard_slow"
+        self.last_reason = ("guard_unknown" if kind == "unknown" else
+                            "guard_no_echo" if self.last_no_echo_used and kind is None else "guard_slow")
         return math.copysign(v_max, speed), self.last_reason

@@ -149,6 +149,97 @@ class TestScanEvidenceWithSparseBins(unittest.TestCase):
         self.assertFalse(ev.covered(1.2, 0.0), "大片缺失仍然是未知")
 
 
+class TestSampledNoEcho(unittest.TestCase):
+    @staticmethod
+    def scan(marker=True, fill=math.inf):
+        msg = n10p_scan(450, half_size=5.)
+        sampled = [math.isfinite(r) for r in msg.ranges]
+        for i in list(range(0, 140)) + list(range(BINS - 139, BINS)):
+            if sampled[i]:
+                msg.ranges[i] = fill
+        if marker:
+            msg.intensities = [0. if was_sampled else -1. for was_sampled in sampled]
+        return msg, sampled
+
+    def test_forward_sampled_no_echo_is_bounded_free_space(self):
+        cfg = pf.FollowerConfig()
+        msg, sampled = self.scan()
+        ev = ScanEvidence(msg.ranges, msg.angle_min, msg.angle_increment,
+                          msg.range_min, msg.range_max, cfg.lidar_mount,
+                          cfg.footprint, sampled=sampled)
+        self.assertTrue(ev.usable)
+        self.assertEqual(ev.causes[0], 'no_echo_far')
+        self.assertTrue(ev.free(1.2, 0.))
+        self.assertFalse(ev.free(13., 0.))
+        self.assertFalse(ScanEvidence(msg.ranges, msg.angle_min, msg.angle_increment,
+                                      msg.range_min, msg.range_max, cfg.lidar_mount,
+                                      cfg.footprint).free(1.2, 0.))
+
+    def test_front_annotation_does_not_veto_no_echo_but_rear_stays_unknown(self):
+        cfg = pf.FollowerConfig()
+        msg, sampled = self.scan()
+        ev = ScanEvidence(msg.ranges, msg.angle_min, msg.angle_increment,
+                          msg.range_min, msg.range_max, cfg.lidar_mount,
+                          cfg.footprint, blind_sectors=((-10., 10.),), sampled=sampled)
+        self.assertEqual(ev.causes[0], 'no_echo_far')
+        self.assertTrue(ev.free(1.2, 0.))
+        # A rearward no-echo may be the chassis hiding the world behind it.
+        msg.ranges[BINS // 2] = math.inf
+        sampled[BINS // 2] = True
+        ev = ScanEvidence(msg.ranges, msg.angle_min, msg.angle_increment,
+                          msg.range_min, msg.range_max, cfg.lidar_mount,
+                          cfg.footprint, sampled=sampled)
+        self.assertEqual(ev.causes[BINS // 2], 'rear_no_echo')
+        self.assertFalse(ev.free(-.4, 0.))
+
+    def test_near_nan_and_unsampled_do_not_become_far(self):
+        cfg = pf.FollowerConfig()
+        for fill in (-math.inf, math.nan, .17):
+            with self.subTest(fill=fill):
+                msg, sampled = self.scan(fill=fill)
+                ev = ScanEvidence(msg.ranges, msg.angle_min, msg.angle_increment,
+                                  msg.range_min, msg.range_max, cfg.lidar_mount,
+                                  cfg.footprint, sampled=sampled)
+                self.assertFalse(ev.free(1.2, 0.))
+        msg, sampled = self.scan()
+        for i in list(range(0, 140)) + list(range(BINS - 139, BINS)):
+            sampled[i] = False
+        ev = ScanEvidence(msg.ranges, msg.angle_min, msg.angle_increment,
+                          msg.range_min, msg.range_max, cfg.lidar_mount,
+                          cfg.footprint, sampled=sampled)
+        self.assertFalse(ev.free(1.2, 0.))
+
+    def test_finite_obstacle_and_self_reflection_override_far_assumption(self):
+        cfg = pf.FollowerConfig()
+        msg, sampled = self.scan()
+        msg.ranges[0] = .3
+        msg.ranges[BINS // 2] = .2
+        sampled[BINS // 2] = True
+        ev = ScanEvidence(msg.ranges, msg.angle_min, msg.angle_increment,
+                          msg.range_min, msg.range_max, cfg.lidar_mount,
+                          cfg.footprint, sampled=sampled)
+        self.assertFalse(ev.free(1.2, 0.))
+        self.assertEqual(ev.causes[BINS // 2], 'self')
+        self.assertFalse(ev.free(-.4, 0.))
+        self.assertFalse(ScanEvidence([math.inf] * BINS, msg.angle_min,
+                                      msg.angle_increment, msg.range_min,
+                                      msg.range_max, cfg.lidar_mount, cfg.footprint,
+                                      sampled=[True] * BINS).usable)
+
+    def test_follower_caps_actual_output_and_stops_on_stale_scan(self):
+        h = FollowerHarness(scan_blind_sectors_deg=())
+        msg, _ = self.scan()
+        for _ in range(20):
+            h.tick(msg, camera_person(2.8, 0.))
+        s = h.status()
+        self.assertTrue(s['no_echo_path_used'], s)
+        self.assertGreater(s['cmd_vx'], 0., s)
+        self.assertLessEqual(s['cmd_vx'], .12, s)
+        h.node.scan_stamp -= 1.
+        h.node.control_loop()
+        self.assertEqual(h.node.cmd_vx, 0.)
+
+
 class TestTurningWithRearBlindSector(unittest.TestCase):
     """默认屏蔽扇区 (155°, -130°) 下,静止起步也必须能左右打舵。"""
 
@@ -254,13 +345,20 @@ class TestCrossCheckAndHandoff(unittest.TestCase):
         for _ in range(30):
             h.tick(n10p_scan(extra=world, half_size=5.0), camera_person(2.9, 0.0))
         s = h.status()
-        self.assertEqual(s['state'], 'TRACKING', s)
+        # 椅子腿在中线左 0.33m,车体半宽 0.335+0.035 余量,擦着车身过去,
+        # 所以选路收一点舵绕开它(ALIGNING)是对的;关键是人的距离没被
+        # 当成 1.3m,车也没有因此停下。
+        self.assertIn(s['state'], ('TRACKING', 'ALIGNING'), s)
         self.assertAlmostEqual(s['target']['gap_used'], 2.23, delta=0.1)
         self.assertGreater(s['cmd_vx'], 0.2, s)
         self.assertEqual(s['range_conflicts'], 0)
 
     def test_object_on_line_of_sight_is_respected(self):
-        """人和车之间正好有东西挡着:按更近的距离算,不往前冲,但不丢目标。"""
+        """雷达没能确认人的位置(腿被挡住)时,按更近的距离算,不往前冲。
+
+        这一帧雷达只看到 1.60m 处的东西,3.2m 处的腿完全在它的阴影里:
+        无法区分「中间有障碍物」和「相机深度读错」,保持保守停车。
+        """
         h = FollowerHarness()
         world = combine(person_legs(3.2, 0.0), disc(1.60, 0.0, 0.05))
         for _ in range(30):
@@ -580,7 +678,17 @@ class WorldSim:
         dx, dy = wx - x, wy - y
         return c * dx + s * dy, -s * dx + c * dy
 
-    def step(self, person_world, dt=0.05, camera_fov_deg=58.0):
+    def obstacle_clearance(self, world_obstacles):
+        """车体(含侧向余量)到世界系圆柱障碍物的最小间隙,负数代表已经撞上。"""
+        worst = 9.0
+        for ox, oy, radius in world_obstacles:
+            lx, ly = self.person_in_vehicle(ox, oy)
+            gap = math.hypot(max(-0.18 - lx, lx - 0.67, 0.0),
+                             max(abs(ly) - 0.335, 0.0)) - radius
+            worst = min(worst, gap)
+        return worst
+
+    def step(self, person_world, dt=0.05, camera_fov_deg=58.0, obstacles=()):
         node = self.h.node
         self.clock.t += dt
         v = node.cmd_vx
@@ -591,8 +699,11 @@ class WorldSim:
         self.trace.append(tuple(self.car))
         px, py = self.person_in_vehicle(*person_world)
         visible = abs(math.atan2(py, px - 0.54)) < math.radians(camera_fov_deg / 2)
+        world = combine(person_legs(px, py),
+                        *[disc(*self.person_in_vehicle(ox, oy), r)
+                          for ox, oy, r in obstacles])
         self.h.driver_ok(v, wz)
-        node.on_scan(n10p_scan(extra=person_legs(px, py), half_size=8.0))
+        node.on_scan(n10p_scan(extra=world, half_size=8.0))
         node.on_targets(String(data=json.dumps(camera_person(px, py) if visible and px > 0.8 else [])))
         node.last_control_time = None
         node.control_loop()
@@ -643,6 +754,124 @@ class TestBreadcrumbFollowing(unittest.TestCase):
         self.assertLess(node._pursuit_steer(1.0, -0.3), 0.0)
         self.assertAlmostEqual(node._pursuit_steer(0.2, 1.0), node.cfg.max_steer_rad)
         self.assertEqual(node._pursuit_steer(2.0, 0.0), 0.0)
+
+
+class TestObstacleBetweenCarAndPerson(unittest.TestCase):
+    """人和车之间有障碍物:绕过去继续跟,而不是停在它前面等。
+
+    现场问题:柱子/椅子挡在视线上时,车把它当成「人」停在 1m 外,
+    随后判定无路可走开始倒车脱困,人走远后丢锁。
+    """
+
+    def test_pillar_on_line_of_sight_is_avoided_not_followed(self):
+        """雷达同时看到人的腿 -> 视线上更近的回波是障碍物,绕开它继续跟。"""
+        h = FollowerHarness(scan_blind_sectors_deg=())
+        world = combine(person_legs(3.0, -0.5), disc(1.70, -0.15, 0.05))
+        for _ in range(30):
+            h.tick(n10p_scan(extra=world, half_size=5.0), camera_person(3.0, -0.5))
+        s = h.status()
+        self.assertAlmostEqual(s['target']['gap_used'], 2.34, delta=0.15)  # 人,不是柱子
+        self.assertIsNotNone(s['target']['los_obstacle_gap'], s)
+        self.assertIsNone(s['target']['lidar_gap'], s)
+        self.assertGreater(s['cmd_vx'], 0.2, s)                 # 没有停下
+        self.assertGreater(s['cmd_steer_deg'], 5.0, s)          # 往柱子左边绕
+
+    def test_unconfirmed_closer_return_still_stops(self):
+        """雷达没在相机给出的位置上看到人:保持保守,按更近的距离停车。"""
+        h = FollowerHarness()
+        for _ in range(30):                      # 只有 1.6m 处一个回波,没有腿
+            h.tick(n10p_scan(extra=disc(1.60, 0.0, 0.05), half_size=5.0),
+                   camera_person(3.2, 0.0))
+        s = h.status()
+        self.assertIsNone(s['target']['los_obstacle_gap'], s)
+        self.assertLess(s['target']['gap_used'], 1.0, s)
+        self.assertLessEqual(s['cmd_vx'], 0.05, s)
+
+    def test_old_lidar_association_does_not_confirm_occluded_person(self):
+        """刚才见过腿不表示当前扫描仍可越过遮挡物。"""
+        h = FollowerHarness(scan_blind_sectors_deg=())
+        person = camera_person(3.0, -0.5)
+        for _ in range(8):
+            h.tick(n10p_scan(extra=person_legs(3.0, -0.5), half_size=5.0), person)
+        self.assertLess(h.node.people.target_view(h.node.now())['lidar_age'], .5)
+        h.tick(n10p_scan(extra=disc(1.70, -0.15, 0.05), half_size=5.0), person)
+        s = h.status()
+        self.assertIsNone(s['target']['los_obstacle_gap'], s)
+        self.assertIsNotNone(s['target']['lidar_gap'], s)
+        self.assertLess(s['target']['gap_used'], 1.1, s)
+        self.assertLessEqual(s['cmd_vx'], .05, s)
+
+    def test_mppi_reference_uses_the_same_obstacle_avoidance(self):
+        """Jetson 的 MPPI 参考量也要经过视线分类和局部扫掠选路。"""
+        from mppi_controller import MPPISolution
+        h = FollowerHarness(scan_blind_sectors_deg=(), controller='mppi',
+                            mppi_device='numpy', mppi_samples=32, mppi_horizon=12,
+                            mppi_solve_budget_ms=10000.)
+        h.node.mppi.solve = lambda *a, **kw: MPPISolution(
+            .45, 0., True, 1., 2., 'ok', solve_ms=1.)
+        world = combine(person_legs(3.0, -0.5), disc(1.70, -0.15, 0.05))
+        for _ in range(12):
+            h.tick(n10p_scan(extra=world, half_size=5.0), camera_person(3.0, -0.5))
+        s = h.status()
+        self.assertEqual(s['controller'], 'mppi', s)
+        self.assertEqual(s['state'], 'ALIGNING', s)
+        self.assertIsNotNone(s['target']['los_obstacle_gap'], s)
+        self.assertGreater(s['cmd_vx'], .2, s)
+
+    def follow_past(self, person_fn, obstacles, steps=460, **overrides):
+        """完整可观测扫描下的闭环仿真;板端遮挡扇区需另行验证。"""
+        overrides.setdefault('scan_blind_sectors_deg', ())
+        sim = WorldSim(**overrides)
+        worst, states = 9.0, set()
+        try:
+            for k in range(steps):
+                sim.step(person_fn(k * 0.05), obstacles=obstacles)
+                worst = min(worst, sim.obstacle_clearance(obstacles))
+                states.add(sim.h.status()['state'])
+            return tuple(sim.car), worst, states
+        finally:
+            sim.close()
+
+    def assert_clean_follow(self, car, worst, states, min_x, person_x):
+        self.assertGreater(worst, 0.0, f'车体撞上障碍物 (间隙 {worst:.2f}m)')
+        self.assertGreater(car[0], min_x, f'车没有绕过障碍物: {car}')
+        self.assertLess(person_x - (car[0] + 0.67), 1.30, f'没跟到人身边: {car}')
+        self.assertFalse({'RECOVERY_REVERSE', 'RECOVERY_EXHAUSTED', 'PATH_BLOCKED',
+                          'AEB_EMERGENCY'} & states, states)
+
+    def test_person_walks_around_a_pillar(self):
+        """人从柱子左边绕过去,车跟着绕过去,不倒车不丢人。"""
+        def walk(t):
+            s = min(2.6 + 0.6 * max(0.0, t - 1.5), 7.5)
+            offset = 0.7 * math.sin(math.pi * (s - 2.4) / 1.8) if 2.4 < s < 4.2 else 0.0
+            return (s, offset)
+        car, worst, states = self.follow_past(walk, [(3.4, 0.0, 0.15)])
+        self.assert_clean_follow(car, worst, states, min_x=4.5, person_x=7.5)
+
+    def test_standing_person_behind_a_pillar(self):
+        """人站着不动,柱子挡在中间:绕过柱子走到人跟前停住。"""
+        car, worst, states = self.follow_past(lambda t: (3.6, 0.0),
+                                             [(2.1, -0.10, 0.15)], steps=400)
+        self.assert_clean_follow(car, worst, states, min_x=1.6, person_x=3.6)
+        self.assertIn('ALIGNING', states, states)
+
+    def test_pillar_beside_the_path_keeps_a_berth(self):
+        """柱子贴着路线:提前偏一点让开,不擦着过去,也不停车。"""
+        car, worst, states = self.follow_past(
+            lambda t: (min(2.6 + 0.6 * max(0.0, t - 1.5), 7.5), 0.0),
+            [(3.8, -0.45, 0.12)])
+        self.assert_clean_follow(car, worst, states, min_x=4.8, person_x=7.5)
+        # 让开的余量是软代价(avoid_side_comfort_m),与跟车远近/速度耦合:0.45m/s 限速时
+        # 约 0.12m;取消固定低速上限后按间距跟得更紧,实测约 0.065m。硬约束是足迹余量
+        # 0.025m,由扫掠检查保证;这里只防止退化到贴着擦过去。
+        self.assertGreater(worst, 0.05, f'离柱子太近 ({worst:.2f}m)')
+
+    def test_open_ground_following_never_reverses(self):
+        """空地上人走走停停:不应该出现倒车脱困(堵转误判回归)。"""
+        car, worst, states = self.follow_past(
+            lambda t: (min(2.6 + 0.6 * max(0.0, t - 1.5), 7.5), 0.0), [])
+        self.assertFalse({'RECOVERY_REVERSE', 'RECOVERY_BRAKE', 'SEARCH_TURN'} & states, states)
+        self.assertGreater(car[0], 5.0, car)
 
 
 class TestUnifiedTracking(unittest.TestCase):
@@ -814,19 +1043,25 @@ class TestRearTargetFollowing(unittest.TestCase):
         self.assertGreater(h.node.cmd_vx, 0.20)
         self.assertEqual(h.node.state, 'TURNAROUND')
 
-    def test_open_rear_turnaround_keeps_forward_arc_instead_of_flipping(self):
-        """前方持续开阔时，掉头应连续回旋，不应按时间反复换向。"""
+    def test_open_rear_turnaround_commits_to_one_stroke(self):
+        """开阔地里人在左后方:选定一段满舵行程连续执行,不按时间反复换向。
+
+        选前进还是倒车由规划器按用时决定;无论哪种,车头都要往人那边转
+        (前进左打、倒车右打)。闭环转过来的用时见 tests/test_follow_response.py。
+        """
         h = FollowerHarness(enable_rear_turnaround=True, scan_blind_sectors_deg=())
         h.tick(n10p_scan(half_size=8.0))
         self._set_target_at(h, -2.0, 0.6)
         phases = []
-        for _ in range(80):
+        for _ in range(40):
             h.tick(n10p_scan(half_size=8.0))
             phases.append(h.node.turnaround_phase)
-        self.assertEqual(phases[0], 'FORWARD')
-        self.assertNotIn('REVERSE', phases)
-        self.assertGreater(h.node.cmd_vx, 0.35)
-        self.assertGreater(abs(h.node.cmd_steer), 0.30)
+        self.assertEqual(len(set(phases)), 1, phases)
+        self.assertIn(phases[0], ('FORWARD', 'REVERSE'))
+        direction = 1 if phases[0] == 'FORWARD' else -1
+        self.assertGreater(direction * h.node.cmd_vx, 0.35)
+        self.assertGreater(direction * h.node.cmd_steer, 0.30)
+        self.assertGreater(h.node.cmd_wz, 0.0, '车头应逆时针转向左后方的人')
 
     def test_target_behind_turnaround_blocked_falls_back_to_reverse(self):
         """当开启 enable_rear_turnaround 但前方受阻时，安全执行反打舵倒车揉库。"""

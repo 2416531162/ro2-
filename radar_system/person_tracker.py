@@ -120,6 +120,9 @@ class Track:
         self.created = t
         self.last_update = t
         self.last_camera = t if source == "camera" else None
+        # 雷达最近一次在这条轨迹的位置上关联到腿部点簇的时刻。
+        # 用来区分「视线上更近的回波是挡在中间的障碍物」还是「相机测距读错」。
+        self.last_lidar = t if source != "camera" else None
         # 最近一次「身份可信」的时刻:相机命中,或周围没有其他候选的雷达命中
         self.last_confident = t
         # 在相机视野内却连续没被相机看到的起始时刻(反向证据)
@@ -468,6 +471,7 @@ class PersonTracker:
                 tr.confirmed = True
         else:
             tr.lidar_hits += 1
+            tr.last_lidar = t_now
         if tr.id == self.target_id:
             tr.add_crumb(self.crumb_spacing_m, self.crumb_max)
 
@@ -542,6 +546,14 @@ class PersonTracker:
         if cand is not None:
             self._switch(cand, None)
 
+    def select(self, track_id):
+        """操作员指定跟随某条已确认轨迹;成功返回 True。"""
+        tr = self._get(track_id)
+        if tr is None or not tr.confirmed:
+            return False
+        self._switch(tr, None)
+        return True
+
     def _camera_fresh(self, tr, t_now, max_age=1.5):
         return tr.confirmed and tr.last_camera is not None and t_now - tr.last_camera <= max_age
 
@@ -594,6 +606,7 @@ class PersonTracker:
         v_fwd = c * vx + s * vy          # 人的对地速度在车头方向上的分量
         v_lat = -s * vx + c * vy
         cam_age = t_now - tr.last_camera if tr.last_camera is not None else 1e9
+        lidar_age = t_now - tr.last_lidar if tr.last_lidar is not None else 1e9
         upd_age = t_now - tr.last_update
         if cam_age <= lidar_after_s:
             source = "camera"
@@ -605,6 +618,7 @@ class PersonTracker:
         return {
             "id": tr.id, "x": px, "y": py, "v_fwd": v_fwd, "v_lat": v_lat,
             "source": source, "camera_age": cam_age, "update_age": upd_age,
+            "lidar_age": lidar_age,
             "sigma": tr.position_sigma(), "conf": tr.conf, "label": tr.label,
             "confident_age": t_now - tr.last_confident,
             "meta": dict(tr.meta), "lidar_hits": tr.lidar_hits,

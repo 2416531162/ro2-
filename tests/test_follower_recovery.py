@@ -127,6 +127,15 @@ class TestRegression(FollowerHarness):
         self.assertEqual(self.node.cmd_vx, 0., 'invalid laser treated as free space')
 
 
+class TestMotionMismatchRecovery(unittest.TestCase):
+    def test_fresh_zero_speed_feedback_enters_bounded_recovery(self):
+        recovery = planner()
+        states = [update(recovery, i * .05, speed=0., executed_speed=.12).state
+                  for i in range(2, 45)]
+        self.assertIn('RECOVERY_BRAKE', states)
+        self.assertIn('RECOVERY_REVERSE', states)
+
+
 class TestNodeGuards(FollowerHarness):
     def test_delayed_scan_receipt_is_not_fresh_evidence(self):
         self.tick()
@@ -315,6 +324,59 @@ class TestGeometry(unittest.TestCase):
         p.history = [(100., -.25, 0., 0., 0.)]
         update(p, 100.05, healthy=False)
         self.assertEqual(p.history, [])
+
+
+class TestEarlyAvoidance(unittest.TestCase):
+    """障碍物还在一米多外就开始偏,而不是贴近了才发现走不通。
+
+    阿克曼车最小转弯半径约 1.8m,横向让开 0.5m 需要约 1.3m 的前进距离。
+    旧版打分把净空在 0.65m 处截断,更远的障碍物对选路毫无影响。
+    """
+
+    def wall_of_points(self, x, ys):
+        return scan_message(points=[(x, y) for y in ys])
+
+    def test_obstacle_inside_target_room_is_avoided(self):
+        p = planner()
+        scan = evidence(self.wall_of_points(1.85, (-.10, -.05, 0., .05, .10)))
+        r = update(p, 100., scan=scan, requested_steer=0., bearing=0., gap=3.,
+                   follow_cap=.45, requested_speed=.45, target_room=2.2)
+        self.assertNotEqual(r.steer, 0.0, '前方 1.2m 有障碍物却不偏舵')
+        self.assertEqual(r.state, 'ALIGNING')
+        self.assertGreaterEqual(r.speed, .08, '偏舵之后还要能走')
+
+    def test_same_obstacle_without_room_keeps_old_behaviour(self):
+        """不给「到人的剩余距离」时退回旧的 0.65m 截断,不改变既有用法。"""
+        p = planner()
+        scan = evidence(self.wall_of_points(1.85, (-.10, -.05, 0., .05, .10)))
+        r = update(p, 100., scan=scan, requested_steer=0., bearing=0., gap=3.,
+                   follow_cap=.45, requested_speed=.45)
+        self.assertEqual(r.steer, 0.0)
+        self.assertEqual(r.state, 'TRACKING')
+
+    def test_avoid_side_does_not_flip_every_cycle(self):
+        """绕障期间不来回换边:换边会把速度限到 0,车卡在障碍物旁边。"""
+        p = planner()
+        scan = evidence(self.wall_of_points(1.85, (-.10, -.05, 0., .05, .10)))
+        sides = []
+        for i in range(12):
+            r = update(p, 100.+i*.05, scan=scan, requested_steer=0., bearing=0.,
+                       gap=3., follow_cap=.45, requested_speed=.45, target_room=2.2,
+                       current_steer=p.avoid_steer or 0.)
+            sides.append(math.copysign(1.0, r.steer) if r.steer else 0.0)
+        self.assertEqual(len(set(sides)), 1, f'绕行方向反复切换: {sides}')
+
+    def test_clear_direct_line_returns_to_the_person(self):
+        """障碍物过去之后立刻回到朝人的舵角,不带着偏角一直走。"""
+        p = planner()
+        blocked = evidence(self.wall_of_points(1.85, (-.10, -.05, 0., .05, .10)))
+        update(p, 100., scan=blocked, requested_steer=0., bearing=0., gap=3.,
+               follow_cap=.45, requested_speed=.45, target_room=2.2)
+        self.assertIsNotNone(p.avoid_steer)
+        r = update(p, 100.05, scan=evidence(), requested_steer=0., bearing=0.,
+                   gap=3., follow_cap=.45, requested_speed=.45, target_room=2.2)
+        self.assertEqual(r.steer, 0.0)
+        self.assertIsNone(p.avoid_steer)
 
 
 class TestStateMachine(unittest.TestCase):

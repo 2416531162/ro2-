@@ -13,6 +13,8 @@ from follower_perception import FollowerPerception
 from follower_controller import FollowerController
 from follower_telemetry import FollowerTelemetry
 from depth_path import DepthPathSensor
+from turnaround import TurnaroundPlanner
+from lidar_track import StaticClutter
 
 
 class FollowerEngine(FollowerPerception, FollowerController, FollowerTelemetry):
@@ -30,6 +32,7 @@ class FollowerEngine(FollowerPerception, FollowerController, FollowerTelemetry):
         self.people = PersonTracker(high_conf=config.track_high_conf,
                                     low_conf=config.track_low_conf,
                                     confirm_hits=config.confirm_frames,
+                                    accel_sigma=config.track_accel_sigma,
                                     tentative_timeout_s=2.0,
                                     confirmed_timeout_s=config.lost_timeout_s,
                                     unseen_in_view_max_s=3.0,
@@ -66,6 +69,7 @@ class FollowerEngine(FollowerPerception, FollowerController, FollowerTelemetry):
         self.view = None               # 本周期目标视图(车体系)
         self.los_gap = None            # 相机视线上雷达测得的车头间距
         self.los_time = 0.0
+        self.los_obstacle = None       # 视线上判定为障碍物(非人)的雷达回波
         self.aim_point = None          # 纯追踪预瞄点(车体系)
         self.stamp_warnings = 0
         self.sectors = ScanSectors(half_fov_deg=60.0, bin_deg=5.0)
@@ -99,6 +103,8 @@ class FollowerEngine(FollowerPerception, FollowerController, FollowerTelemetry):
         self.lidar_handoff_active = False
         self.lidar_handoff_frames = 0
         self.latest_clusters = []
+        self.static_clutter = StaticClutter()
+        self.static_segments = 0
 
         # ---- 执行状态 ----
         self.state = "STANDBY"
@@ -106,6 +112,14 @@ class FollowerEngine(FollowerPerception, FollowerController, FollowerTelemetry):
         self.turnaround_phase = 'IDLE'     # 'IDLE', 'FORWARD', 'REVERSE'
         self.turnaround_dir = 1            # +1 (左转 CCW), -1 (右转 CW)
         self.turnaround_phase_start = 0.0
+        self.turn_plan = None
+        self.turn_planner = TurnaroundPlanner(
+            config.geometry, self.footprint,
+            goal_rad=math.radians(config.turnaround_goal_deg),
+            speed_mps=config.rear_turn_speed_mps,
+            accel_mps2=config.rear_turn_accel_limit_mps2,
+            decel_mps2=config.decel_capability_mps2,
+            view_x_m=config.camera_offset_x_m)
         self.aeb_latched = False
         self.speed_slew = SlewLimiter(config.accel_limit_mps2, config.decel_limit_mps2)
         self.kick = BreakawayKick(config.kick_mps, config.kick_duration_s,
@@ -137,13 +151,17 @@ class FollowerEngine(FollowerPerception, FollowerController, FollowerTelemetry):
         self.mppi_last = None
         self.mppi_stop_reason = None
         self._mppi_target_id = self._mppi_last_at = None
+        self.los_gap = self.los_obstacle = None
+        self.los_time = 0.0
         if not keep_odom:
             self.depth_path.invalidate('pose_reset')
         self.people.reset(keep_odom=keep_odom)
+        self.static_clutter.reset()
         self.recovery = LocalRecovery(self.footprint, self.cfg.geometry,
                                       self.cfg.obstacle_profile, self.cfg.recovery)
         self.turnaround_phase = 'IDLE'
         self.turnaround_phase_start = self.last_target_seen = 0.0
+        self.turn_plan = None
         self.cmd_vx = self.cmd_wz = self.cmd_steer = 0.0
         self.aeb_latched = False
         self.speed_slew.reset(0.0)
@@ -165,6 +183,31 @@ class FollowerEngine(FollowerPerception, FollowerController, FollowerTelemetry):
             self.depth_path.invalidate('pose_reset')
             self.reset_tracking(keep_odom=True)
         return accepted
+
+    def select_target(self, bearing_rad, tolerance_rad=math.radians(8.0), max_camera_age_s=0.5):
+        """操作员在画面上点了一个人:按相机水平方位(左正)换成最接近的已确认轨迹。
+
+        只认相机刚看到过的轨迹 —— 点选依据的是画面,不能落到雷达独自维持的轨迹上。
+        返回选中的轨迹编号,找不到返回 None(保持原目标)。
+        """
+        now = self.now()
+        pose = self.people.odom.current()
+        mount = self.camera_mount
+        best, best_err = None, tolerance_rad
+        for tr in self.people.tracks:
+            if not tr.confirmed or tr.last_camera is None or now - tr.last_camera > max_camera_age_s:
+                continue
+            vx, vy = self.people.odom.odom_to_vehicle(pose, *tr.pos)
+            rel = math.atan2(vy - mount.y_m, vx - mount.x_m) - mount.yaw_rad
+            err = abs(math.atan2(math.sin(rel - bearing_rad), math.cos(rel - bearing_rad)))
+            if err <= best_err:
+                best, best_err = tr, err
+        if best is None or not self.people.select(best.id):
+            return None
+        if self.mppi is not None:
+            self.mppi.reset()
+        self.turnaround_phase, self.turn_plan = 'IDLE', None
+        return best.id
 
     def pause(self):
         if self.mppi is not None and self.state != 'PAUSED':

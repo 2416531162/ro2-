@@ -11,6 +11,7 @@ def finite_round(value, digits):
 class FollowerTelemetry:
     def _remember_target(self, view, gap):
         meta = view['meta']
+        los_fresh = view['source'] == 'camera' and 0 <= self.now() - self.los_time <= 0.30
         source = {'camera': meta.get('range_source', 'camera_depth'),
                   'lidar': 'lidar_track'}.get(view['source'], 'predicted')
         raw_z = meta.get('raw_z')
@@ -22,7 +23,9 @@ class FollowerTelemetry:
                            'range_source': source,
                            'depth_ratio': meta.get('depth_ratio'),
                            'lidar_gap': (round(self.los_gap, 3)
-                                         if self.los_gap is not None else None),
+                                         if los_fresh and self.los_gap is not None else None),
+                           'los_obstacle_gap': (round(self.los_obstacle[0], 3)
+                                                if los_fresh and self.los_obstacle else None),
                            'track_id': view['id']}
 
 
@@ -182,11 +185,22 @@ class FollowerTelemetry:
             "diag": self.diag,
             "depth_path": dict(self.depth_path.status(now),
                                used=self.recovery.last_depth_used),
+            "no_echo_path_used": self.recovery.last_no_echo_used,
             "lidar_handoff": self.lidar_handoff_active,
+            "static_clutter_segments": self.static_segments,
             "lidar_handoff_frames": self.lidar_handoff_frames,
             "lidar_track": self._lidar_track_status(now),
             "voltage_v": round(self.voltage, 2),
             "turnaround_phase": self.turnaround_phase,
+            "turnaround_plan": (None if self.turn_plan is None else {
+                "direction": self.turn_plan.direction,
+                "turn_dir": self.turn_plan.turn_dir,
+                "stroke_m": round(self.turn_plan.stroke_m, 2),
+                "eta_s": finite_round(self.turn_plan.eta_s, 2),
+                "reached": self.turn_plan.reached,
+                "final_bearing_deg": round(math.degrees(self.turn_plan.final_bearing), 1),
+                "segments": [[d, round(length, 2)] for d, _, length in self.turn_plan.segments],
+            }),
             "cmd_vx": round(self.cmd_vx, 3),
             "cmd_wz": round(self.cmd_wz, 3),
             "cmd_steer_deg": round(math.degrees(self.cmd_steer), 1),

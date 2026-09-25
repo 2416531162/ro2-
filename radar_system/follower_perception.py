@@ -1,7 +1,8 @@
 """Perception ingestion policy for FollowerEngine; no ROS imports."""
 import math
 from follower_recovery import ScanEvidence
-from lidar_track import cluster_points, line_of_sight_gap
+from lidar_track import Cluster, cluster_points, line_of_sight_gap, segment_points
+from person_tracker import OdomBuffer
 from footprint import scan_to_vehicle_frame, optical_to_vehicle, drop_self_hits
 from runtime_config import PROFILE
 
@@ -171,7 +172,22 @@ class FollowerPerception:
                 and view['meta'].get('range_source') == 'camera_depth' and scan_fresh):
             gap = view['x'] - front
             hit = self._line_of_sight(gap=gap, lateral=-view['y'])
-            self.los_gap = hit[0] if hit else None
+            # 历史关联只能辅助确认身份；本次扫描还必须在本次相机测得的
+            # 人体位置附近看到腿。人被挡住后保留的旧关联不可用于忽略障碍。
+            camera_match = min(
+                (d for d in detections if d['range_source'] == 'camera_depth'),
+                key=lambda d: math.hypot(d['x'] - view['x'], d['y'] - view['y']),
+                default=None)
+            person_confirmed = (
+                view.get('lidar_age', 1e9) <= self.cfg.los_person_confirm_s
+                and camera_match is not None
+                and math.hypot(camera_match['x'] - view['x'], camera_match['y'] - view['y']) <= 0.60
+                and any(math.hypot(c.x - camera_match['x'], c.y - camera_match['y'])
+                        <= self.cfg.los_person_cluster_radius_m for c in self.latest_clusters))
+            obstacle = (hit is not None and person_confirmed
+                        and gap - hit[0] > self.cfg.los_obstacle_margin_m)
+            self.los_obstacle = hit if obstacle else None
+            self.los_gap = None if obstacle else (hit[0] if hit else None)
             self.los_time = now
             if hit is not None and gap - hit[0] > self.cfg.range_conflict_m:
                 self.range_conflicts += 1   # 仅作遥测:视线上有明显更近的东西
@@ -264,10 +280,34 @@ class FollowerPerception:
         received_at = self.now()
         self.scan_stamp = received_at - scan_age
         # 聚类与避障共用全向外部点，避免盲区中检测到的人/门框只进入其中一条链路。
-        clusters = cluster_points(self.scan_points, origin=(self.lidar_mount.x_m, self.lidar_mount.y_m))
+        # 椅子腿/桌腿等静止小段只从人体点簇里剔除，避障仍用全部 scan_points。
+        segments = self._drop_static_segments(segment_points(self.scan_points))
+        clusters = cluster_points(None, origin=(self.lidar_mount.x_m, self.lidar_mount.y_m),
+                                  segments=segments)
         self.latest_clusters = clusters
         self.people.add_lidar([(c.x, c.y) for c in clusters],
                               self.scan_stamp, received_at)
+
+
+    def _drop_static_segments(self, segments):
+        """按里程计系持续位置剔除静止杂物段,见 lidar_track.StaticClutter。"""
+        pose = self.people.odom.pose_at(self.scan_stamp)
+        if pose is None:
+            self.static_segments = 0
+            return segments
+        people = [tr.pos for tr in self.people.tracks if tr.confirmed]
+
+        def near(x, y):
+            return any((x - px) ** 2 + (y - py) ** 2 <= 0.45 ** 2 for px, py in people)
+
+        centroids = []
+        for seg in segments:
+            c = Cluster(seg)
+            ox, oy = OdomBuffer.vehicle_to_odom(pose, c.x, c.y)
+            centroids.append((ox, oy, c.size))
+        flags = self.static_clutter.update(centroids, self.scan_stamp, near)
+        self.static_segments = sum(flags)
+        return [seg for seg, static in zip(segments, flags) if not static]
 
 
     def observe_voltage(self, value):

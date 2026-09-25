@@ -15,6 +15,8 @@
 | `follower_engine.py` / `follower_perception.py` / `follower_controller.py` | 纯跟随引擎，感知关联与控制策略 |
 | `person_tracker.py` / `lidar_track.py` | 使用共享本地位姿的人体轨迹、相机/雷达关联及接力 |
 | `follower_recovery.py` / `footprint.py` / `motion_safety.py` | 局部扫掠路径、脱困和速度约束 |
+| `turnaround.py` | 人在车后/侧后时的多段前进/倒车掉头搜索（纯几何） |
+| `tools/follow_sim.py` | 跟随闭环仿真：真实引擎 + 按实车时序合成的相机/雷达/底盘 |
 | `radar_web_server.py` / `board_radar_gui.py` | 网页遥测/手动接管、板载相机与雷达画面 |
 
 移除 SLAM、地图保存、AMCL、三维重建、点云累积、RTK/CORS、Foxglove/RViz 入口、通用物体及人脸模型。
@@ -131,6 +133,73 @@ ros2 topic echo /camera/ai_detection/status
 现场记录、离线对比与部署备份位于 `artifacts/rear-association-20260918/`。
 合成测试与暂停期间回放不等于实车跟随验收；密集人群、遮挡后出现的相似物体，
 当前平面点簇仍无法提供可靠的身份识别。
+
+## 室内灵敏跟随（2026-09-24）
+
+目标：室内摄像头＋二维雷达配合跟人——离近减速、离远加速；人走出相机后由雷达实时接力；
+人绕到车后能尽快算出掉头动作。以下结论来自 `tools/follow_sim.py` 闭环仿真，**尚未实车验证**。
+
+### 仿真工具
+
+真实 `FollowerEngine` 加按实车时序合成的输入：相机 30 FPS、发布延迟 70 ms、58° 视场；
+N10P 10 Hz、每圈约 450 个采样；行人两条腿随步态摆动；`/odom` 50 Hz；控制 20 Hz；
+指令约 60 ms 后生效，底盘按驱动斜坡加速、1.5 m/s² 刹车、舵机 3 rad/s。
+
+```bash
+python3 radar_system/tools/follow_sim.py                     # 全部场景指标
+python3 radar_system/tools/follow_sim.py walk_behind_left --trace
+python3 radar_system/tools/follow_sim.py --set controller='"mppi"' --set mppi_device='"numpy"' \
+    --set mppi_samples=512 --set mppi_solve_budget_ms=1e6       # 本机无 CUDA 时比较 MPPI
+```
+
+指标：`tracked` 有目标的比例、`lost_events` 丢失次数、`same_id` 是否始终同一轨迹、
+`max_track_err` 轨迹估计与真实人位置的最大偏差、`max_cam_blind_s` 相机连续看不到人的最长时间、
+`max_gap`/`end_gap` 车头到人的间距、`min_person_clear` 车身离人最近距离、`steer_rate_rms` 画龙程度。
+验收门限在 `tests/test_follow_response.py`。仿真只能比较算法改动，替代不了实车验收。
+
+### 改动与效果（纯追踪，5 个随机种子最差值）
+
+| 场景 | 改动前 | 改动后 |
+|---|---|---|
+| 人以 1.3 m/s 走开 | 0.45 m/s 限速追不上，间距拉到 5.5 m 后丢失 | 不丢，最大间距 3.25 m，站定后 1.26 m |
+| 人突然站住 | — | 车身离人最近 0.99 m |
+| 人横着走出视野 | 相机看不到 3.35 s | 2.15 s |
+| 人绕到车后站住 | 满舵一直前进绕圈，10 s 后仍偏 59°，离墙 0.11 m | 3.65 s 内重新进入相机视野 |
+| 人绕到车后继续走远 | 丢失 | 不丢，掉头后跟上，站定 1.18 m |
+| 视野外贴着椅子腿走并拐弯 | 轨迹被吸到椅子上，偏 1.9–2.9 m（编号不变） | 偏差 ≤ 0.30 m |
+
+1. **速度按间距决定**：`max_speed_mps` 取底盘上限 1.3 m/s，雷达接力不再另设 0.45 m/s。
+   实际速度由 `brake_envelope(间距, decel_mps2, control_latency_s)` 限制——
+   按当前 1.0 m/s²、0.35 s，离人车头 1.65 m 时才允许 1.0 m/s。这两个值**必须实车测**（见 TUNING.md）：
+   测得减速度更大、延迟更小，跟得更紧；测得更差则必须改小，否则刹不住。
+   加速斜坡保持 0.9 m/s²：仿真中调到 1.5 对跟上步速没有改善（瓶颈在刹车包络），却让绕柱子的余量变小。
+2. **掉头规划**（`turnaround.py`）：人在车后，或从相机看偏出 60° 时进入。每周期从当前位姿搜索
+   最多三段满舵弧线（前进向人一侧打舵、倒车反打舵，两者都让车头朝人转），代价是相机重新看到人
+   （相机位置量 ±20°）的预计用时，换向计停稳与舵机摆动时间。第一段不超过雷达认证净空，所有段
+   与障碍点、与人（0.45 m）保持余量；已经比余量更近的点只禁止再靠近。每段按剩余行程收油，
+   最高 1.0 m/s；扫掠净空、刹车包络、AEB 仍逐周期复核。人贴在车侧时倒车反打舵一段即可转正
+   （前进满舵反而让人越来越偏后）；正后方 2 m 需约 6 s（1.72 m 转弯半径下的物理下限附近）。
+   进入角 75°/60°/50° 的仿真对比：60° 最均衡，50° 在人横着走出视野时会多余地倒车。
+3. **雷达接力关联**：行人卡尔曼加速度噪声 `track_accel_sigma` 1.5 → 3.0 m/s²。
+   人拐直角时 1.5 的预测跟不上，关联门收得太紧，轨迹沿旧方向滑走或被旁边点簇吸走。
+4. **静止杂物剔除**（`lidar_track.StaticClutter`）：椅子腿、桌腿与腿一样粗，两根还会被配成「一个人」。
+   小点簇在里程计系原地持续出现 1.2 s 以上即判为静止，只从人体点簇里剔除，避障仍用全部点。
+   判为静止之前就出现在已确认的人身边的条目永久豁免，所以站着不动的人不会被当成椅子。
+   `/follower/status.static_clutter_segments` 为本帧剔除的段数。
+5. **MPPI**：`w_heading` 2.5 → 10。人走出视野后相机重新看到人的时间由 4.0 s/9.0 s 降到 1.3 s/1.5 s。
+   MPPI 在直线跟随时仍有明显转角抖动（`steer_rate_rms` 约 0.8，纯追踪为 0），站定后常斜 10° 左右；
+   仿真中纯追踪在大多数指标上不差于 MPPI，MPPI 的优势是绕障。室内以跟人为主时，可在
+   `/etc/rk3588/runtime.env` 设 `ROBOT_FOLLOW_CONTROLLER=pure-pursuit` 对比实车效果。
+
+`/follower/status.turnaround_plan` 给出当前掉头方案：方向、本段行程、预计用时、各段长度。
+
+### 实车验证建议
+
+1. 先按 TUNING.md 测 `decel_mps2`、`control_latency_s` 并写入 `/etc/rk3588/robot.json`；
+   第一次用 `--safe-mode`，确认刹车距离后再放开。
+2. 空旷处依次试：人走开再站住、人横着走出视野、人绕到车后站住、人绕到车后继续走；
+   录包（`record_follow_bag.sh`）并对照 `turnaround_plan`、`lidar_track`、`static_clutter_segments`。
+3. 在椅子、桌子多的地方重复第 2 步，观察雷达接力是否贴在人身上。
 
 ## 相机补充通路确认
 

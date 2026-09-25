@@ -72,8 +72,8 @@ class N10PDecoder:
                     else:
                         # REP-117: -inf = 有回波但近于量程下限(几乎总是车身自己的
                         # 结构件,雷达在这个方向上被挡住),+inf = 完全没有回波。
-                        # 两者合并成 +inf 时,下游无法区分「被车身挡住」和
-                        # 「前方可能有吸光物体」,只能都按未知处理。
+                        # 不将近距自反射并入 +inf；下游按用户选择将已采样
+                        # 的 +inf 假设为远距，仍须保留有限回波健康门槛与限速。
                         near = 0 < first < RANGE_MIN or 0 < second < RANGE_MIN
                         distance, intensity = (-math.inf if near else math.inf), 0
                 points.append(((start + span * i / 15) % 360, distance, intensity))

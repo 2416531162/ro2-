@@ -2,7 +2,6 @@
 import math
 from runtime_config import PROFILE
 from motion_safety import BrakeProfile, brake_envelope, yaw_from_steer, clamp
-from footprint import in_blind_sector, swept_path_clearance
 
 
 class FollowerController:
@@ -63,104 +62,50 @@ class FollowerController:
             person_error = z_person - cfg.follow_distance_m
 
             turnaround_reason = 'face_rear_target'
-            # 掉头完成判定：如果已经在掉头过程中，检查是否已调转车头（目标位于前方且偏角进入车头前方视野 ±35°）
+            # 掉头完成判定：人已回到车头前方、进入相机视野（留几度余量）
+            cam_bearing = math.atan2(view['y'] - cfg.camera_offset_y_m,
+                                     view['x'] - cfg.camera_offset_x_m)
             turnaround_complete = (
                 self.turnaround_phase != 'IDLE' and
-                view['x'] > 0.25 and
-                abs(bearing) <= math.radians(35.0)
+                view['x'] - cfg.camera_offset_x_m > 0.25 and
+                abs(cam_bearing) <= math.radians(cfg.turnaround_exit_deg)
             )
             if turnaround_complete:
                 self.turnaround_phase = 'IDLE'
                 self.turnaround_phase_start = 0.0
+                self.turn_plan = None
 
-            # 目标位置分类：在车后（x < 0 或超过 rear_target_bearing_deg）
+            # 目标位置分类：在车后,或从相机看已偏出 rear_target_bearing_deg
+            # (近处的人从相机看偏得更多,也更需要先转车头再跟)
             is_behind = (self.turnaround_phase != 'IDLE') or (
-                view['x'] < 0.0 or abs(bearing) > math.radians(cfg.rear_target_bearing_deg))
+                view['x'] < 0.0 or view['x'] - cfg.camera_offset_x_m < 0.10
+                or abs(cam_bearing) > math.radians(cfg.rear_target_bearing_deg))
             if is_behind:
                 if cfg.enable_rear_turnaround:
-                    # ---- 阿克曼狭窄空间揉库掉头 (K-turn) 状态机 ----
-                    # 刚进入掉头：锁定转向回旋方向(+1: 左转逆时针, -1: 右转顺时针)
-                    if self.turnaround_phase == 'IDLE':
-                        self.turnaround_dir = 1 if bearing >= 0 else -1
-
-                    fwd_turn_steer = self.turnaround_dir * cfg.max_steer_rad
-                    fwd_arc_clear = swept_path_clearance(self.scan_points, self.footprint, self.cfg.geometry, fwd_turn_steer)
-                    front_dist = self.min_front_scan
-
-                    # 阿克曼倒车揉库特性：前轮必须向反方向打舵(-turnaround_dir)，使车尾向相反方向摆动，车头保持同向旋转！
-                    rev_turn_steer = -self.turnaround_dir * cfg.max_steer_rad
-                    rev_clear = (self.recovery.clearance(self.scan_evidence, rev_turn_steer, -1,
-                                                          current_steer=rev_turn_steer,
-                                                          allow_history=True)
-                                  if self.scan_evidence is not None else 0.0)
-
-                    # 初始阶段决策：优先前向回旋，若前向受阻则倒车调整
-                    if self.turnaround_phase == 'IDLE':
-                        if fwd_arc_clear >= 0.70 and front_dist >= 0.55:
-                            self.turnaround_phase = 'FORWARD'
-                        elif rev_clear >= 0.45:
-                            self.turnaround_phase = 'REVERSE'
-                        elif fwd_arc_clear >= rev_clear and fwd_arc_clear > cfg.aeb_clearance_m:
-                            self.turnaround_phase = 'FORWARD'
-                        elif rev_clear > cfg.aeb_clearance_m:
-                            self.turnaround_phase = 'REVERSE'
-                        else:
-                            self.turnaround_phase = 'FORWARD'
-                        self.turnaround_phase_start = now
-
-                    phase_elapsed = now - self.turnaround_phase_start
-
-                    # 阶段换向与滞后防抖：
-                    # 单阶段保留一个短的最小冲程，避免在雷达噪声下抖动换向。
-                    if self.turnaround_phase == 'FORWARD':
-                        fwd_blocked = (fwd_arc_clear < 0.45 or front_dist < 0.45)
-                        fwd_urgent = (fwd_arc_clear < 0.32 or front_dist < 0.32)
-                        rear_safe = (rev_clear >= 0.40)
-                        # Open space is enough for a continuous forward arc.
-                        # A time based flip made the old controller alternate
-                        # forward/reverse forever even when no obstacle existed.
-                        if ((phase_elapsed >= cfg.rear_turn_phase_min_s and fwd_blocked)
-                                or fwd_urgent) and rear_safe:
-                            self.turnaround_phase = 'REVERSE'
-                            self.turnaround_phase_start = now
-                            phase_elapsed = 0.0
-
-                    elif self.turnaround_phase == 'REVERSE':
-                        rev_blocked = (rev_clear < 0.45)
-                        rev_urgent = (rev_clear < 0.32)
-                        fwd_safe = (fwd_arc_clear >= 0.55 and front_dist >= 0.50)
-                        if ((phase_elapsed >= cfg.rear_turn_phase_min_s and rev_blocked)
-                                or rev_urgent) and fwd_safe:
-                            self.turnaround_phase = 'FORWARD'
-                            self.turnaround_phase_start = now
-                            phase_elapsed = 0.0
-
+                    # ---- 多段前进/倒车掉头:每周期从当前位姿重新搜索 ----
                     is_turnaround = True
-                    if self.turnaround_phase == 'FORWARD':
-                        desired_steer = fwd_turn_steer
-                        turn_speed = min(cfg.rear_turn_speed_mps, cfg.max_speed_mps)
-                        if fwd_arc_clear > cfg.aeb_clearance_m and front_dist > cfg.aeb_clearance_m:
-                            desired_vx = turn_speed
-                        else:
-                            desired_vx = 0.0
-                        person_requested_vx = desired_vx
-                        turnaround_reason = 'k_turn_forward'
-                    elif self.turnaround_phase == 'REVERSE':
-                        desired_steer = rev_turn_steer
-                        rear_is_blind = in_blind_sector(bearing, cfg.scan_blind_sectors_deg)
-                        rev_speed = (min(cfg.rear_reverse_speed_mps,
-                                         cfg.recovery.blind_speed_mps)
-                                     if rear_is_blind else cfg.rear_reverse_speed_mps)
-                        if rev_clear > cfg.aeb_clearance_m:
-                            desired_vx = -rev_speed
-                        else:
-                            desired_vx = 0.0
-                        person_requested_vx = desired_vx
-                        turnaround_reason = 'k_turn_reverse'
+                    plan = self._plan_turnaround(view, now)
+                    if plan.direction == 0:
+                        desired_vx, desired_steer = 0.0, self.cmd_steer
+                        self.turnaround_phase = 'BLOCKED'
+                        turnaround_reason = 'turnaround_blocked'
                     else:
-                        desired_steer = fwd_turn_steer
-                        desired_vx = 0.0
-                        person_requested_vx = 0.0
+                        phase = 'FORWARD' if plan.direction > 0 else 'REVERSE'
+                        if phase != self.turnaround_phase:
+                            self.turnaround_phase, self.turnaround_phase_start = phase, now
+                        self.turnaround_dir = plan.turn_dir
+                        desired_steer = plan.steer
+                        # 本段按剩余行程收油:到了换向点刚好停住。最后一段向前
+                        # 转正后直接交给跟随,不必停下。
+                        stroke = plan.stroke_m
+                        if plan.reached and plan.direction > 0 and len(plan.segments) == 1:
+                            stroke += 0.5
+                        desired_vx = plan.direction * min(
+                            cfg.rear_turn_speed_mps,
+                            brake_envelope(stroke, BrakeProfile(cfg.decel_capability_mps2,
+                                                                cfg.control_latency_s, 0.0, 0.0)))
+                        turnaround_reason = 'k_turn_forward' if plan.direction > 0 else 'k_turn_reverse'
+                    person_requested_vx = desired_vx
                 else:
                     # 纯倒车对准模式（兼容旧配置与基础单元测试）
                     rear_clear = (self.recovery.clearance(self.scan_evidence, self.cmd_steer, -1,
@@ -189,8 +134,9 @@ class FollowerController:
                 else:
                     desired_vx, desired_steer = self.solve_pure_pursuit(person_gap, bearing)
                     person_requested_vx = desired_vx
-
-                    # 视线上有更近的障碍物：根据障碍物距离平滑减速，贴近 obstacle_standoff_m 时直接归零
+                    # 视线上雷达测得的距离更近(通常是人自己的腿,比相机读数更准;
+                    # 或雷达没能确认人时的保守处理):按这个距离平滑减速。
+                    # 已确认是「挡在中间的障碍物」的回波不在这里,交给选路绕行。
                     if gap < person_gap:
                         z_obs = max(gap + v_rel * cfg.control_latency_s * 0.5, .05)
                         obs_error = z_obs - cfg.follow_distance_m
@@ -198,6 +144,13 @@ class FollowerController:
                             desired_vx = 0.0
                         else:
                             desired_vx = min(desired_vx, cfg.kp_distance * obs_error)
+                    # 交给选路/脱困的是「为了走到人身边想要的速度」。
+                    # 视线上的回波就是人自己的腿(比相机读数略近)时,减速后的
+                    # 值才是真实请求 —— 否则停稳后状态会一直显示「跟随中」。
+                    # 明显更近的未确认回波(墙、玻璃后面)不能这样算:那种情况
+                    # 车该判定无路可走去脱困绕路,而不是贴着墙当成已经到位。
+                    if person_gap - gap <= cfg.los_obstacle_margin_m:
+                        person_requested_vx = desired_vx
 
                     # 侧向对准：若人在侧方（偏角 > 20°），以蠕行小速度带动阿克曼车头转正对准人
                     if (cfg.enable_pre_steer and abs(bearing) > math.radians(20.0)
@@ -215,7 +168,11 @@ class FollowerController:
             if self.lidar_handoff_active:
                 person_follow_cap = min(person_follow_cap, cfg.lidar_track_speed_cap)
             requested_vx = person_requested_vx
-            if desired_vx >= 0:
+            if is_turnaround:
+                # 掉头各段已按剩余行程收油;人不在行进方向上,不按跟随间距限速。
+                # 扫掠净空、刹车包络和 AEB 仍在下方对实际舵角逐周期复核。
+                pass
+            elif desired_vx >= 0:
                 desired_vx = min(desired_vx, cap_follow)
             else:
                 desired_vx = max(desired_vx, -cfg.recovery.speed_mps)
@@ -223,6 +180,7 @@ class FollowerController:
         else:
             self.turnaround_phase = 'IDLE'
             self.turnaround_phase_start = 0.0
+            self.turn_plan = None
             requested_vx = desired_vx
             person_follow_cap = cap_follow
             self.latest_raw = None
@@ -252,9 +210,14 @@ class FollowerController:
             target=have_target, gap=person_gap if have_target else gap, bearing=bearing,
             requested_speed=requested_vx, requested_steer=desired_steer,
             current_steer=self.cmd_steer, follow_cap=person_follow_cap if have_target else cap_follow, lost_age=age,
-            odom_ok=feedback_fresh, local_pose=local_pose)
+            odom_ok=feedback_fresh, local_pose=local_pose,
+            executed_speed=self.cmd_vx,
+            target_room=(person_gap - cfg.follow_stop_m) if have_target else None)
+        # 预打舵只用于「停着等」(HOLDING)。ALIGNING 是选路为了绕开障碍物
+        # 主动偏离人方向的舵角,用预打舵把它改回朝人,等于把车重新指向
+        # 障碍物:仿真里车贴着柱子停住、蠕行 0.08m/s 撞净空,然后倒车脱困。
         pre_steer = (cfg.enable_pre_steer and healthy and have_target and not is_behind
-                     and result.state in ('HOLDING', 'ALIGNING') and cap_follow > 0
+                     and result.state == 'HOLDING' and cap_follow > 0
                      and abs(desired_steer) > cfg.steer_deadband_rad)
         if pre_steer:
             result.speed = min(cfg.pre_steer_creep_mps, cap_follow)
@@ -291,13 +254,9 @@ class FollowerController:
         if not self.recovery.active and healthy:
             if is_behind:
                 if is_turnaround:
-                    if desired_vx >= 0:
-                        desired_vx = min(cfg.rear_turn_speed_mps, cfg.max_speed_mps)
-                    else:
-                        rear_is_blind = in_blind_sector(bearing, cfg.scan_blind_sectors_deg)
-                        reverse_cap = (cfg.recovery.blind_speed_mps if rear_is_blind
-                                       else cfg.rear_reverse_speed_mps)
-                        desired_vx = max(-min(reverse_cap, cfg.max_speed_mps), desired_vx)
+                    # 倒车段能否看见由规划器的首段净空与下方扫掠复核决定
+                    # (遮挡/未知区域不算空地),不看人落在哪个方位扇区。
+                    pass
                 elif person_requested_vx < 0:
                     desired_vx = max(-min(cfg.rear_reverse_speed_mps, cfg.recovery.blind_speed_mps), person_requested_vx)
                 else:
@@ -332,8 +291,8 @@ class FollowerController:
             self.path_clearance = 0.0
         self.motion_direction = direction
         cap = abs(desired_vx)
-        if self.recovery.last_depth_used:
-            # Camera corroboration is initially limited to creeping speed.
+        if self.recovery.last_depth_used or self.recovery.last_no_echo_used:
+            # Inferred clearance (camera or sampled no echo) is creep-only.
             cap = min(cap, .12)
         profile = (BrakeProfile(cfg.decel_capability_mps2, cfg.control_latency_s, .035, .015)
                    if self.recovery.active else cfg.obstacle_profile)
@@ -387,6 +346,25 @@ class FollowerController:
         self.cmd_wz = yaw_from_steer(self.cmd_vx, self.cmd_steer, cfg.geometry)
         self.last_loop_ms = round((self.now() - now) * 1000, 1)
         self.publish_status(now, have_target, age)
+
+
+    def _plan_turnaround(self, view, now):
+        """人在车后/侧后:搜索前进/倒车满舵段,返回 TurnPlan(见 turnaround.py)。"""
+        cfg = self.cfg
+        horizon = self.turn_planner.lengths[-1] + self.turn_planner.first_buffer + 0.05
+
+        def first_clear(direction, steer):
+            return self.recovery.clearance(self.scan_evidence, steer, direction,
+                                           current_steer=self.cmd_steer,
+                                           allow_history=direction < 0, horizon=horizon)
+
+        plan = self.turn_planner.plan(
+            (view['x'], view['y']), self.scan_points,
+            first_clearance=first_clear if self.scan_evidence is not None else (lambda d, a: 0.0),
+            current_speed=self.chassis_speed,
+            prefer_turn=self.turnaround_dir if self.turnaround_phase != 'IDLE' else None)
+        self.turn_plan = plan
+        return plan
 
 
     def _aim(self, view):

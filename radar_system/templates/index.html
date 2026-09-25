@@ -486,13 +486,12 @@ if ($('screenMirrorBtn')) {
 function motionResetStatus(d) {
   const wheel = d && d.wheeltec;
   const motion = (wheel && wheel.motion) || (d && d.motion) || {};
-  const stalled = motion.mode === 'FAULT' && ['motion_stall', 'reset_failed'].includes(motion.reason);
   const locked = motion.mode === 'ESTOP' || motion.mode === 'FAULT';
   const fresh = Boolean(wheel && wheel.motion && Number.isFinite(d.wheeltec_status_age_s) &&
     d.wheeltec_status_age_s <= 1 && lastReceived && performance.now() - lastReceived < 2500);
   const stopped = Boolean(wheel && wheel.stop_confirmed && wheel.motion.command &&
     wheel.motion.command.vx === 0 && wheel.motion.command.wz === 0);
-  return { locked, stalled, ready: locked && fresh && stopped && motion.healthy === true &&
+  return { locked, ready: locked && fresh && stopped && motion.healthy === true &&
     motion.waiting_stationary === false };
 }
 
@@ -502,8 +501,8 @@ function updateMotionLockUI(d) {
   if (!banner) return;
   banner.hidden = !status.locked;
   const mode = d && d.wheeltec && d.wheeltec.motion && d.wheeltec.motion.mode;
-  $('motionLockTitle').textContent = status.stalled ? '运动卡滞已锁存 · 禁止继续驱动'
-    : mode === 'ESTOP' ? '急停已锁存 · 跟随不可启动' : '底盘故障已锁存 · 跟随不可启动';
+  $('motionLockTitle').textContent = mode === 'ESTOP' ? '急停已锁存 · 跟随不可启动'
+    : '底盘故障已锁存 · 跟随不可启动';
   const startBlocked = status.locked && !isFollowerRunning;
   $('followerToggleBtn').disabled = startBlocked;
   $('fQuickToggleBtn').disabled = startBlocked;
@@ -522,7 +521,6 @@ function updateMotionLockUI(d) {
   if (detail) detail.textContent = !d || !Number.isFinite(d.wheeltec_status_age_s) ||
     d.wheeltec_status_age_s > 1 || performance.now() - lastReceived >= 2500
     ? '底盘状态已过期，不能复位；请检查连接。'
-    : status.stalled ? '输出与底盘反馈不一致。请使用物理急停、检查碰撞和车轮；现场确认安全后才可单独复位。'
     : !status.ready ? '等待底盘健康且确认停稳；请先现场检查停车原因。'
     : '停车已确认。请现场检查周围安全，复位后仍需单独选择跟随。';
   $('motionResetBtn').disabled = !status.ready || motionResetBusy;
@@ -774,7 +772,6 @@ const MOTION_REASON_TEXT = {
   sensor_or_driver_fault: '传感器或底盘故障，运动模式已锁定',
   operator_stop: '已手动停车', operator_select: '已选择跟随',
   manual_takeover: '手动遥控接管', reset: '故障已复位，等待重新选择',
-  motion_stall: '输出与里程计反馈不一致，已锁存停车',
   reset_failed: '复位时底盘未就绪，继续锁存停车',
   startup: '底盘启动中',
 };
@@ -785,12 +782,11 @@ const DRIVER_READY_TEXT = {
   firmware_profile_unconfirmed: '底盘协议未确认',
   serial_write_timeout: '底盘串口写超时，已保持零速',
   serial_output_backlog: '底盘串口发送拥堵，已保持零速',
-  motion_stall_latched: '运动卡滞已锁存，须现场检查后单独复位',
 };
 const F_SOURCE_TEXT = { camera_depth: '相机深度', lidar_fallback: '雷达兜底测距', lidar_track: '雷达接力跟踪', predicted: '短暂预测' };
 let lastFollowerPayload = null;
 var lastWheeltec = null;   // 底盘驱动状态(含独立防撞层);var:updateUI 可能先于此行执行
-const GUARD_TEXT = { guard_stop: '防撞停车', guard_slow: '防撞减速', guard_unknown: '扫掠区域未观测',
+const GUARD_TEXT = { guard_stop: '防撞停车', guard_slow: '防撞减速', guard_no_echo: '无回波远距假设 · 限速 0.12 m/s', guard_unknown: '扫掠区域未观测',
                      guard_scan_stale: '雷达数据过期停车', guard_scan_unavailable: '雷达不可用停车',
                      guard_disabled: '已关闭' };
 
@@ -827,7 +823,6 @@ function motionPauseReason() {
   const parts = [MOTION_REASON_TEXT[motion.reason] || motion.reason || '运动模式未选择'];
   if (motion.mode === 'FOLLOW') parts[0] = '跟随节点未收到新鲜的运动状态，已停车等待';
   if (motion.mode === 'ESTOP') parts[0] = '急停已锁存；请现场检查后单独复位，复位不会自动跟随';
-  if (motion.reason === 'motion_stall') parts[0] = '运动卡滞已锁存；请使用物理急停并检查车轮、碰撞和里程计';
   if (faults.length) parts.push(`当前故障: ${faults.join(', ')}`);
   if (wheel.ready && wheel.ready !== 'ready') parts.push(DRIVER_READY_TEXT[wheel.ready] || wheel.ready);
   if (Number.isFinite(wheel.write_timeout_age_s) && wheel.write_timeout_age_s < 15) {
@@ -981,6 +976,7 @@ function renderFollowerDetail(f, live, rawState) {
     depth_invalid:'没有有效深度', pose_reset:'位姿已重置，等待新图像'};
   row('相机通路确认', depth.used ? '深度补充确认 · 限速 0.12 m/s' :
     (depthReasons[depth.reason] || '等待深度数据'), depth.used ? 'ok' : '');
+  if (live.no_echo_path_used) row('雷达无回波', '按远距离估计 · 限速 0.12 m/s', 'warn');
   if (depth.intrinsics_error) row('深度内参诊断', depth.intrinsics_error, 'warn');
 
   row('速度上限', fmtNum(live.speed_cap_mps, 2, ' m/s'));
@@ -994,6 +990,11 @@ function renderFollowerDetail(f, live, rawState) {
   row('接近速度', t ? fmtNum(t.closing_rate, 2, ' m/s') : '--');
   row('相机距离', t && Number.isFinite(t.z) ? fmtNum(t.z, 2, ' m') : '--');
   row('视线上雷达', t && Number.isFinite(t.lidar_gap) ? fmtNum(t.lidar_gap, 2, ' m') : '--');
+  // 雷达已确认人在相机给出的位置,视线上更近的回波就是挡在中间的障碍物:
+  // 不按它停车,交给选路绕行(状态显示「绕行对准」)。
+  row('视线上障碍', t && Number.isFinite(t.los_obstacle_gap)
+      ? `${fmtNum(t.los_obstacle_gap, 2, ' m')} · 绕行` : '--',
+      t && Number.isFinite(t.los_obstacle_gap) ? 'warn' : '');
   row('上次看到', Number.isFinite(live.target_seen_age_ms) ? `${(live.target_seen_age_ms / 1000).toFixed(1)} s 前` : '--');
   // 相机看得到人、雷达却没认领到腿:人出画后无法接力,多半是相机/雷达外参没对上
   const seedMissing = t && t.range_source === 'camera_depth' && !lt;
@@ -1034,7 +1035,7 @@ function renderFollowerDetail(f, live, rawState) {
       + (Number.isFinite(guard.gap_m) ? ` · 路径 ${guard.gap_m} m` : '') + ` · 介入 ${guard.interventions} 次` : '--',
       guard && guard.manual_override ? 'warn'
       : guard && ['guard_stop','guard_unknown','guard_scan_stale','guard_scan_unavailable'].includes(guard.reason) ? 'bad'
-      : guard && guard.reason === 'guard_slow' ? 'warn' : '');
+      : guard && ['guard_slow', 'guard_no_echo'].includes(guard.reason) ? 'warn' : '');
   const block = guard && guard.block;
   row('防撞关注点', block ? `${block.kind === 'unknown' ? '雷达未观测' : '障碍物'} · 后轴${block.x_m >= 0 ? '前' : '后'} ${fmtNum(Math.abs(block.x_m), 2, ' m')}`
       + ` · ${block.y_m >= 0 ? '左' : '右'} ${fmtNum(Math.abs(block.y_m), 2, ' m')}`
@@ -1246,13 +1247,6 @@ function confirmStopStatus(snapshot) {
   const motion = snapshot && snapshot.motion;
   const command = motion && motion.command;
   const driver = snapshot && snapshot.wheeltec;
-  if (motion && motion.reason === 'motion_stall' && driver && driver.stall_latched) {
-    stopAwaitingStatus = false;
-    clearTimeout(stopConfirmationTimer);
-    stopConfirmationTimer = null;
-    updateBadgeStatus('卡滞锁停：请使用物理急停并检查车辆', '#ff8c91');
-    return;
-  }
   if (!motion || !command || motion.epoch === stopPriorEpoch ||
       !['IDLE', 'ESTOP'].includes(motion.mode) || command.vx !== 0 || command.wz !== 0 ||
       !driver || !driver.stop_confirmed || !driver.motion || driver.motion.epoch !== motion.epoch) return;

@@ -42,13 +42,15 @@ class FollowerConfig:
     )
 
     # ---- 速度 ----
-    max_speed_mps: float = 0.45         # ★ 安全巡航速度上限
+    # 不设固定低速上限:离人远就快、近就慢,由刹车包络(实测减速度+延迟)按
+    # 间距决定;这里只取底盘驱动的最高速度作为物理上限。
+    max_speed_mps: float = PROFILE["driver"]["max_speed_m_s"]
     creep_floor_mps: float = 0.08       # 低于此速度直接停,避免电机嗡嗡不转
     kick_mps: float = 0.22              # 静摩擦破除脉冲幅值
     kick_duration_s: float = 0.25       # 脉冲时长
     kp_distance: float = 0.60           # 距离误差 P 增益
     kd_feedforward: float = 0.90        # 目标速度前馈系数,1.0 = 完全跟速
-    accel_limit_mps2: float = 0.90      # 加速斜坡
+    accel_limit_mps2: float = 0.90      # 加速斜坡(仿真中调到 1.5 对跟上步速无改善,瓶颈在刹车包络)
     decel_limit_mps2: float = 2.50      # 减速斜坡,刹车永远比加速陡
 
     # ---- 转向 ----
@@ -62,6 +64,9 @@ class FollowerConfig:
     control_latency_s: float = PROFILE["safety"]["control_latency_s"]    # ★ 感知到轮子响应的总死时间
 
     # ---- 目标管理 (统一多人跟踪器,见 person_tracker.py) ----
+    # 行人卡尔曼的加速度噪声 (m/s²)。人拐直角、起步、急停时的加速度可达 3m/s² 以上,
+    # 取小了预测跟不上拐弯,雷达接力时关联门收得过紧,轨迹会沿旧方向滑走。
+    track_accel_sigma: float = 3.0
     track_high_conf: float = 0.35       # 高分框:可以新建轨迹
     track_low_conf: float = 0.12        # 低分框:只能延续已确认的轨迹 (ByteTrack)
     confirm_frames: int = 1             # 相机命中 N 次即确认为人 (CPU 推理帧率适配)
@@ -118,25 +123,35 @@ class FollowerConfig:
     # ---- 传感器交叉校验 ----
     range_conflict_m: float = 1.00      # 相机比雷达远这么多即判为冲突
     coasting_speed_cap: float = 0.15    # 滤波器靠外推滑行时的速度上限
+    # 视线上雷达回波比人近这么多,且雷达在相机给出的位置上确实看到了人的腿
+    # (los_person_confirm_s 内关联过),才判为「挡在中间的障碍物」交给选路绕行;
+    # 否则仍按更近的距离停车(可能是相机测距读错)。
+    los_obstacle_margin_m: float = 0.35
+    los_person_confirm_s: float = 0.50
+    los_person_cluster_radius_m: float = 0.30
     los_half_width_m: float = 0.25      # 交叉校验只看「车->人」视线两侧这么宽的窄带
 
     # ---- 雷达接力跟踪 (人走出相机视野后继续用雷达跟) ----
     lidar_handoff: bool = True
     lidar_handoff_after_s: float = 0.15  # 相机超过这么久没看到人,才改由雷达接力
     lidar_handoff_max_s: float = 15.0    # 超过这么久没有相机或无歧义雷达确认,不再相信轨迹
-    lidar_track_speed_cap: float = 0.45  # 已确认目标的雷达接力上限，仍受驱动和防撞限幅
+    # 雷达接力时距离同样可靠(腿部点簇),与相机跟随一样按间距限速,不另设低速档。
+    lidar_track_speed_cap: float = PROFILE["driver"]["max_speed_m_s"]
     lidar_reacquire_gate_m: float = 0.60  # 兼容旧字段名：仅用于丢失后相机局部重捕；雷达不跨门跳接
 
-    # ---- 车后雷达接力后的快速掉头 ----
-    # 阿克曼底盘不能原地旋转；在前方扫掠净空合格时，以较高的受限弧线速度转向。
-    # 这些值不是绕过防撞，而是 K-turn 的请求上限，最终仍经过共享位姿、ScanGuard 和驱动限幅。
-    rear_target_bearing_deg: float = 75.0
-    rear_turn_speed_mps: float = 0.45
-    rear_reverse_speed_mps: float = 0.20
-    rear_turn_phase_min_s: float = 0.35
+    # ---- 车后/侧后目标掉头 (turnaround.py) ----
+    # 阿克曼底盘不能原地旋转；规划器搜索满舵前进/反打舵倒车的多段组合。
+    # 这些值不是绕过防撞，而是掉头的请求上限，最终仍经过扫掠净空、ScanGuard 和驱动限幅。
+    # 从相机看人偏出此角(或已在车后)即进入掉头规划;见 docs/TRACKING.md 仿真对比
+    rear_target_bearing_deg: float = 60.0
+    # 满舵(R≈1.72m)时 1.0m/s 的侧向加速度约 0.58m/s²;每段仍按剩余行程与净空收油。
+    rear_turn_speed_mps: float = 1.00
+    rear_reverse_speed_mps: float = 0.20  # 仅 --no-turnaround 的纯倒车对准模式使用
     # 已确认车后目标的响应斜坡；仍受净空、目标时效和驱动器限幅约束。
     rear_turn_accel_limit_mps2: float = 1.80
     rear_turn_steer_rate_radps: float = PROFILE["driver"]["steering_rate_rad_s"]
+    turnaround_goal_deg: float = 20.0   # 规划目标:人进入车头 ±20°(相机半视场 29°)
+    turnaround_exit_deg: float = 25.0   # 执行中人进入 ±25° 即交还正常跟随
 
     # ---- 其他 ----
     battery_min_v: float = PROFILE["safety"]["battery_min_v"]
@@ -197,12 +212,12 @@ class FollowerConfig:
             raise ValueError("rear_target_bearing_deg 必须在 0~90 度之间")
         if not 0 < self.rear_reverse_speed_mps <= self.rear_turn_speed_mps <= self.max_speed_mps:
             raise ValueError("车后掉头速度必须位于跟随速度上限内")
-        if not 0.1 <= self.rear_turn_phase_min_s <= 1.5:
-            raise ValueError("rear_turn_phase_min_s 超出安全范围")
         if not 0 < self.rear_turn_accel_limit_mps2 <= 4.0:
             raise ValueError("rear_turn_accel_limit_mps2 超出安全范围")
         if not 0 < self.rear_turn_steer_rate_radps <= 6.0:
             raise ValueError("rear_turn_steer_rate_radps 超出安全范围")
+        if not 5.0 <= self.turnaround_goal_deg < self.turnaround_exit_deg <= 45.0:
+            raise ValueError("掉头目标角须小于退出角,且在 5~45 度之间")
         if not 0.2 <= self.lidar_reacquire_gate_m <= 0.6:
             raise ValueError("lidar_reacquire_gate_m 超出安全范围")
         if not -0.6 < self.camera_pitch_rad < 0.6:

@@ -10,6 +10,7 @@ from dataclasses import dataclass
 
 from footprint import in_blind_sector, is_self_hit
 from motion_safety import BrakeProfile, brake_envelope, yaw_from_steer
+from runtime_config import PROFILE
 
 
 @dataclass
@@ -33,6 +34,11 @@ class RecoveryConfig:
     timeout_s: float = 75.0
     max_legs: int = 12
     exhausted_cooldown_s: float = 20.0
+    avoid_lookahead_m: float = 1.40
+    avoid_min_need_m: float = 0.65
+    avoid_hysteresis: float = 0.10
+    avoid_steer_fractions: tuple = (-1.0, -0.5, -0.25, 0.25, 0.5, 1.0)
+    avoid_side_comfort_m: float = 0.12
 
 
 @dataclass
@@ -44,11 +50,10 @@ class Command:
 
 
 class ScanEvidence:
-    """Finite laser returns certify only the space before the return.
+    """Measured returns and sampled no-echo rays bound free-space queries.
 
-    Self reflections and masked/no-echo rays remain unknown. An unsampled
-    0.5-degree slot can use real returns on both sides within a narrow window;
-    a finite external hit remains a collision obstacle even in a masked angle.
+    A sampled +inf ray is assumed clear to range_max. Unsampled, near, NaN and
+    self-hit rays remain unknown; real external hits remain obstacles.
     """
     def __init__(self, ranges, angle_min, increment, range_min, range_max,
                  mount, footprint, blind_sectors=(), self_hit_skin_m=0.0,
@@ -62,6 +67,8 @@ class ScanEvidence:
         self.mount = mount
         self.blind_sectors = tuple(blind_sectors or ())
         self.valid = []
+        self.no_echo = []
+        finite_returns = 0
         # Why each ray is (in)valid: ok / unsampled / none (+inf, NaN: no echo) /
         # near (-inf or < range_min: echo closer than the lidar can range,
         # i.e. car structure) / self (return on the car body) / far / masked.
@@ -80,6 +87,7 @@ class ScanEvidence:
                 external = not is_self_hit(x, y, footprint, skin_m=self_hit_skin_m)
                 if external:
                     self.points.append((x, y))
+                    finite_returns += 1
                 # A blind-sector annotation does not invalidate an actual
                 # external return. The driver guard already uses this same
                 # measured ray; retaining it avoids inventing an unknown
@@ -89,6 +97,13 @@ class ScanEvidence:
                 cause = "ok" if external else "self"
             elif r == math.inf and sampled is not None and not sampled[i]:
                 cause = "unsampled"  # no beam was fired into this angular slot
+            elif (r == math.inf and sampled is not None and sampled[i] and self.usable
+                  and abs(math.atan2(math.sin(a + mount.yaw_rad),
+                                     math.cos(a + mount.yaw_rad))) < math.pi / 2):
+                ok = True
+                cause = "no_echo_far"
+            elif r == math.inf and sampled is not None and sampled[i]:
+                cause = "rear_no_echo"  # car structure can occlude rearward beams
             elif in_blind_sector(a, blind_sectors):
                 cause = "masked"      # configured car structure, whatever the reading
             elif r != r or r == math.inf:
@@ -98,8 +113,13 @@ class ScanEvidence:
             else:
                 cause = "far"
             self.valid.append(ok)
+            self.no_echo.append(cause == "no_echo_far")
             self.causes.append(cause)
-        self.usable = self.usable and any(self.valid)
+        # A silent/disconnected sensor must not become usable just because it
+        # emitted a whole sweep of +inf values. Require the driver's normal
+        # finite-return health floor before using any far/no-echo assumption.
+        self.usable = self.usable and finite_returns >= (
+            PROFILE['safety']['min_scan_points'] if any(self.no_echo) else 1)
         n = len(self.ranges)
         self._full = bool(n) and abs(increment) * n >= 2 * math.pi - abs(increment) * 1.1
         self._reach = (max(1, int(self.NEIGHBOR_WINDOW_RAD / abs(increment) + 1e-9))
@@ -110,17 +130,20 @@ class ScanEvidence:
         self._lower = [self._nearest_valid(i, -1, self._reach, self._full) for i in range(n)]
         self._upper = [self._nearest_valid(i, +1, self._reach, self._full) for i in range(n)]
 
-        self._ranges_np = np.asarray(self.ranges, dtype=np.float64)
+        self._ranges_np = np.asarray([range_max if far else r
+                                      for r, far in zip(self.ranges, self.no_echo)], dtype=np.float64)
+        self._no_echo_np = np.asarray(self.no_echo, dtype=bool)
+        self._has_no_echo = any(self.no_echo)
         self._lower_np = np.array([-1 if i is None else i for i in self._lower])
         self._upper_np = np.array([-1 if i is None else i for i in self._upper])
         self.points_np = np.asarray(self.points, dtype=np.float64).reshape(-1, 2)
 
-    def query_many(self, x, y):
-        """Return (covered, free) arrays with the same strict ray rules as free()."""
+    def query_many(self, x, y, *, with_no_echo=False):
+        """Return coverage and free space, optionally identifying no-echo evidence."""
         x, y = np.broadcast_arrays(x, y)
         if not self.usable:
             empty = np.zeros(x.shape, dtype=bool)
-            return empty, empty.copy()
+            return (empty, empty.copy(), empty.copy()) if with_no_echo else (empty, empty.copy())
         dx, dy = x-self.mount.x_m, y-self.mount.y_m
         a = np.arctan2(dy, dx)-self.mount.yaw_rad
         a += np.rint((self._mid-a)/(2*math.pi))*(2*math.pi)
@@ -136,6 +159,10 @@ class ScanEvidence:
         distance = np.hypot(dx, dy)
         needed = distance + .015 + distance*abs(self.increment)/2
         free = covered & (needed < self._ranges_np[lower]) & (needed < self._ranges_np[upper])
+        if with_no_echo:
+            used = (free & (self._no_echo_np[np.maximum(lower, 0)]
+                            | self._no_echo_np[np.maximum(upper, 0)])) if self._has_no_echo else np.zeros_like(free)
+            return covered, free, used
         return covered, free
 
     def masked_many(self, x, y):
@@ -238,7 +265,7 @@ class ScanEvidence:
         for i in indices:
             # Account for angular spacing and range noise, rather than extend a
             # thin ray into an arbitrarily wide free wedge.
-            if distance + 0.015 + distance * abs(self.increment) / 2 >= self.ranges[i]:
+            if distance + 0.015 + distance * abs(self.increment) / 2 >= self._ranges_np[i]:
                 return False
         return True
 
@@ -275,8 +302,11 @@ class LocalRecovery:
         self.previous_speed = 0.0
         self._edge = np.asarray(self._perimeter(), dtype=np.float64)
         self.last_block = None
+        self.last_side_gap = math.inf
+        self.avoid_steer = None
         self.depth_evidence = None
         self.last_depth_used = False
+        self.last_no_echo_used = False
         self.exhausted_at = None
 
     @property
@@ -325,7 +355,8 @@ class LocalRecovery:
                 & (np.abs(y) <= f.effective_half_width+1e-8))
 
     def clearance(self, scan, steer, direction=1, current_steer=0.0,
-                  allow_history=False, horizon=1.60, allow_memory=True):
+                  allow_history=False, horizon=1.60, allow_memory=True,
+                  side_until=None):
         """Batch all sampled poses × obstacles/perimeter points in NumPy.
 
         Retains the 2 cm samples, transition steering, collision pad, strict
@@ -333,6 +364,8 @@ class LocalRecovery:
         """
         self.last_block = None
         self.last_depth_used = False
+        self.last_no_echo_used = False
+        self.last_side_gap = math.inf
         if direction > 0:
             # A past free scan or the current car footprint cannot certify
             # newly swept forward space behind a present blind/occluded ray.
@@ -369,6 +402,11 @@ class LocalRecovery:
             if len(indices):
                 collision_step, j = map(int, indices[0])
                 collision_point = pts[j]
+            if side_until is not None:
+                rows = min(collision_step, int(np.searchsorted(distances, side_until, 'right')))
+                near = dx[:rows]*dx[:rows]+dy[:rows]*dy[:rows] <= body_r*body_r+.25
+                if rows and np.any(near):
+                    self.last_side_gap = float(np.min(np.where(near, gap[:rows], np.inf)))
         # No unknown-space check is needed after the first collision.
         end = min(len(distances), collision_step+1)
         c, s = c[:end], s[:end]
@@ -376,7 +414,8 @@ class LocalRecovery:
         qx = x[:end, None]+bx*c-by*s
         qy = y[:end, None]+bx*s+by*c
         known = self._inside_many(qx, qy)
-        covered, free = scan.query_many(qx, qy)
+        covered, free, no_echo = scan.query_many(qx, qy, with_no_echo=True)
+        self.last_no_echo_used = bool(np.any(~known & no_echo))
         known |= free
         missing = ~known & ~covered
         depth_blocked = np.zeros(qx.shape, dtype=bool)
@@ -464,6 +503,7 @@ class LocalRecovery:
         self.phase = "IDLE"
         self.blocked_since = None
         self.previous_speed = 0.0
+        self.avoid_steer = None
         # Trail and scan memory stay: the car's own recent path is exactly
         # what a later reverse needs, and cancelling does not break odometry.
 
@@ -475,7 +515,8 @@ class LocalRecovery:
 
     def update(self, *, now, scan, healthy, speed, yaw_rate, target, gap,
                bearing, requested_speed, requested_steer, current_steer,
-               follow_cap, lost_age, odom_ok=None, local_pose=None):
+               follow_cap, lost_age, odom_ok=None, local_pose=None,
+               target_room=None, executed_speed=None):
         dt = self._observe(now, speed, yaw_rate, healthy, odom_ok, local_pose)
         if not healthy:
             self.cancel()
@@ -497,38 +538,65 @@ class LocalRecovery:
             self.cancel()
             return Command(state="HOLDING", reason="person_close")
 
-        direct = self.clearance(scan, requested_steer, current_steer=current_steer)
-        direct_block = self.last_block
+        cfg = self.cfg
+        need = cfg.avoid_min_need_m
+        if target_room is not None and math.isfinite(target_room):
+            need = min(max(target_room, need), max(cfg.avoid_lookahead_m, need))
+        direct = self.clearance(scan, requested_steer, current_steer=current_steer,
+                                side_until=need)
+        direct_block, direct_side = self.last_block, self.last_side_gap
         path_blocks = [direct_block]
         normal = None
         if target and requested_speed > 0:
             # Search BOTH steering directions, not just reduce the target steer.
-            angles = [requested_steer, 0.0] + [self.geo.max_steer_rad*f for f in (-1, -.5, .5, 1)]
+            angles = [requested_steer, 0.0] + [self.geo.max_steer_rad*f
+                                               for f in cfg.avoid_steer_fractions]
+            previous = self.avoid_steer
+            if previous is not None:
+                angles.append(previous)
             choices = []
             best = -math.inf
+            sticky = previous is not None and direct < need
+
+            def bonus(steer):
+                return (cfg.avoid_hysteresis
+                        if sticky and abs(steer-previous) < 1e-6 else 0.0)
             # Cheapest-penalty first; an angle whose best possible score
-            # (.65 - penalty) is already below the best found cannot win, so
-            # its full sweep is skipped. The chosen command is unchanged.
+            # (need + bonus + side comfort - penalty) is below the best found
+            # cannot win, so its full sweep can be skipped.
             for steer in sorted(dict.fromkeys(angles), key=lambda a: abs(a-requested_steer)):
-                if .65 - 0.45*abs(steer-requested_steer) < best:
+                if (need + bonus(steer) + cfg.avoid_side_comfort_m
+                        - 0.45*abs(steer-requested_steer)) < best:
                     continue
-                clear = direct if steer == requested_steer else self.clearance(
-                    scan, steer, current_steer=current_steer)
-                path_blocks.append(direct_block if steer == requested_steer else self.last_block)
+                if steer == requested_steer:
+                    clear, block, side = direct, direct_block, direct_side
+                else:
+                    clear = self.clearance(scan, steer, current_steer=current_steer,
+                                           side_until=need)
+                    block, side = self.last_block, self.last_side_gap
+                path_blocks.append(block)
                 cap = min(requested_speed, follow_cap, brake_envelope(clear, self.brake))
                 if cap >= 0.08:
                     # Prefer alignment with the person once there is adequate room.
-                    score = min(clear, .65) - 0.45*abs(steer-requested_steer)
+                    score = (min(clear, need) - 0.45*abs(steer-requested_steer)
+                             + bonus(steer) + min(side, cfg.avoid_side_comfort_m))
                     choices.append((score, cap, steer))
                     best = max(best, score)
-                    if steer == requested_steer and score >= .65:
-                        # Maximum possible score; every other angle is penalised
-                        # for deviating, so it cannot win. Skip ~5 full sweeps.
+                    if (steer == requested_steer and not sticky and clear >= need
+                            and side >= cfg.avoid_side_comfort_m):
+                        # Direct path attains the maximum score without a sticky
+                        # alternative; other angles can only add a penalty.
                         break
             if choices:
                 _, cap, steer = max(choices)
-                normal = Command(cap, steer, "TRACKING" if steer == requested_steer else "ALIGNING",
-                                 "follow" if steer == requested_steer else "local_path")
+                aligned = steer == requested_steer
+                self.avoid_steer = None if aligned else steer
+                normal = Command(cap, steer, "TRACKING" if aligned else "ALIGNING",
+                                 "follow" if aligned else "local_path")
+            else:
+                self.avoid_steer = None
+        else:
+            self.avoid_steer = None
 
         if (target and requested_speed >= .08 and normal is None
                 and all(b is not None and b[0] in ("unknown", "no_scan") for b in path_blocks)):
@@ -562,7 +630,8 @@ class LocalRecovery:
                 self.blocked_since = None
 
         if not self.active:
-            stalled = requested_speed >= .08 and abs(speed) < .02 and self.previous_speed >= .08
+            executed = self.previous_speed if executed_speed is None else executed_speed
+            stalled = requested_speed >= .08 and abs(speed) < .02 and executed >= .08
             blocked = target and requested_speed >= .08 and (normal is None or stalled)
             if blocked:
                 if self.blocked_since is None:

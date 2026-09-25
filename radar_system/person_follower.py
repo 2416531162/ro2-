@@ -48,6 +48,7 @@ class PersonFollowerNode(Node):
         self.create_subscription(Odometry, PROFILE['localization']['topic'], self.on_odom, sensor_qos)
         self.create_subscription(CameraInfo, '/camera/depth_raw/camera_info', self.on_depth_info, sensor_qos)
         self.create_subscription(Image, '/camera/depth_raw/image', self.on_depth_image, sensor_qos)
+        self.create_subscription(String, '/follower/select_target', self.on_select_target, 1)
         self.timer = self.create_timer(self.engine.dt, self.control_loop)
         if self.engine.mppi is not None:
             self.get_logger().info(f">>> 参考量生成器: {self.engine.mppi.describe()}")
@@ -79,6 +80,16 @@ class PersonFollowerNode(Node):
             self.engine.observe_targets(json.loads(msg.data))
         except (TypeError, ValueError, OverflowError):
             self.engine.stamp_warnings += 1
+
+    def on_select_target(self, msg):
+        """app 上点选画面里的人:{"bearing_rad": 相机水平方位,左正}。"""
+        try:
+            bearing = float(json.loads(msg.data)['bearing_rad'])
+        except (TypeError, ValueError, KeyError):
+            return
+        if math.isfinite(bearing):
+            chosen = self.engine.select_target(bearing)
+            self.get_logger().info(f'Operator target selection {bearing:+.3f} rad -> {chosen}')
 
     def on_driver_status(self, msg):
         try:
