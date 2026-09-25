@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
-PROFILE_NAME="${1:-follow}"
+# 与 deployment/manage.py 的 PROFILES 一致。默认 rtk：只有 RTK 自动驾驶和手动开车，不起相机、雷达、人体识别、跟随。
+# 底盘要不要雷达是激活时按配置写进服务单元的；换配置请用 manage.py activate，不要只用这里多起几个服务。
+PROFILE_NAME="${1:-rtk}"
 case "$PROFILE_NAME" in
-  follow) COMPONENTS=(camera lidar ai web gui follower) ;;
-  headless) COMPONENTS=(camera lidar ai web follower) ;;
+  rtk) COMPONENTS=(web rtk line) ;;
+  follow) COMPONENTS=(camera lidar ai web gui follower rtk line) ;;
+  headless) COMPONENTS=(camera lidar web follower rtk line) ;;
   perception) COMPONENTS=(camera lidar ai web) ;;
-  *) echo 'Usage: start_all.sh [follow|headless|perception]' >&2; exit 2 ;;
+  *) echo 'Usage: start_all.sh [rtk|follow|headless|perception]' >&2; exit 2 ;;
 esac
 systemctl start rk3588-wheeltec.service rk3588-perception.target
 for component in "${COMPONENTS[@]}"; do

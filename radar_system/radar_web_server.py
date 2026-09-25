@@ -14,14 +14,17 @@ import math
 import time
 import threading
 import subprocess
+import socket
 import sys
+import uuid
 import rclpy
 from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
+from rclpy.qos import QoSProfile, ReliabilityPolicy
 
 import numpy as np
-from sensor_msgs.msg import LaserScan
+from sensor_msgs.msg import LaserScan, Image, CameraInfo
 from std_msgs.msg import String, Float32
 from std_srvs.srv import SetBool, Trigger
 
@@ -31,8 +34,24 @@ from scan_utils import clean_ranges, sector_min
 from runtime_config import PROFILE
 from motion_client import MotionClient
 from manual_drive import ManualDriveLatch
+import app_link
+from ntrip_config import CorsConfigStore, configuration_allowed
+from depth_measurement import decode_rgb
+from runtime_config import profile_hash
+
+try:
+    import cv2
+except ImportError:          # 没有 OpenCV 时 app 仍可用,只是没有视频
+    cv2 = None
 
 PORT = 8088
+CAR_NAME = os.environ.get('RK3588_CAR_NAME') or socket.gethostname()
+VIDEO_HUB = app_link.VideoHub(max_fps=float(os.environ.get('RK3588_APP_VIDEO_FPS', '12')))
+# 相机分辨率与内参;收到 camera_info / 图像后更新。app 用它把方位角和画面像素互换。
+CAMERA = {'width': 640, 'height': 480, 'fx': 570.3, 'cx': 319.5}
+APP_TELEMETRY_PERIOD_S = 0.10
+APP_RECV_TIMEOUT_S = 3.0     # app 每秒 ping 一次;3 秒没有任何消息视为断线
+CORS_CONFIG = CorsConfigStore(os.environ.get('RK3588_NTRIP_ENV', '~/rtk/ntrip.env'))
 MANUAL_PUBLISH_PERIOD_S = 0.02
 MANUAL_HEARTBEAT_TIMEOUT_S = 0.75
 
@@ -116,6 +135,14 @@ last_check_proc = 0.0
 cached_proc_running = False
 
 FOLLOWER_STALE_S = 1.5      # 跟随节点 20Hz 发状态,1.5 秒没消息即判为已停
+AI_STALE_S = 3.0            # 人体识别每帧发一次状态(约 19 fps),3 秒没消息就当没在运行(默认关闭或已挂)
+
+
+def ai_online(status, now=None):
+    """人体识别节点最近 AI_STALE_S 秒内发过状态。"""
+    rx = (status or {}).get('_rx_monotonic')
+    now = time.monotonic() if now is None else now
+    return rx is not None and 0 <= now - rx <= AI_STALE_S
 
 
 def mark_follower_staleness(payload):
@@ -168,6 +195,11 @@ def start_follower():
     global follower_proc
     if bridge_node is None:
         return False, 'motion bridge unavailable'
+    with data_lock:
+        ai_status = state.get('ai_status')
+    if not ai_online(ai_status):
+        # 人体识别默认关闭(省内存)。没有它就认不出人,跟随只会停在"人丢了,正在找"
+        return False, '人体识别没在运行，跟随用不了'
     with bridge_node.control_lock:
         ok, message = bridge_node.recover_latched_fault()
         if not ok:
@@ -208,6 +240,109 @@ def stop_follower():
         return bridge_node.select_follow(False)
 
 
+def snapshot_state():
+    """一份给前端/app 用的状态快照(跟随状态已做陈旧标记)。"""
+    running = is_follow_active()   # 不在 data_lock 里调用,避免卡住 ROS 回调
+    with data_lock:
+        state['follower_running'] = running
+        snapshot = dict(state)
+        if not ai_online(snapshot.get('ai_status')):
+            # 识别停了就不再给出它最后那一刻的人框和帧率,否则画面上会一直挂着旧框
+            snapshot['ai_status'] = {}
+            snapshot['ai_targets'] = []
+        snapshot['follower'] = mark_follower_staleness(dict(snapshot.get('follower', {})))
+        wheeltec_rx = snapshot.get('wheeltec', {}).get('_rx_monotonic')
+        snapshot['wheeltec_status_age_s'] = (
+            round(time.monotonic() - wheeltec_rx, 2) if wheeltec_rx else None)
+    if bridge_node is not None:
+        # 直接取仲裁状态,不依赖 50Hz 定时器写回的副本
+        with bridge_node.motion.lock:
+            snapshot['motion'] = dict(bridge_node.motion.state)
+        snapshot['motion_fresh'] = bridge_node.motion.fresh()
+    return snapshot
+
+
+def emergency_stop():
+    """急停:先清零手动指令,再锁存 ESTOP。不等 control_lock —— 启动跟随可能持锁十几秒。"""
+    if bridge_node is None:
+        return False, 'motion bridge unavailable'
+    bridge_node.manual_drive.set(0.0, 0.0)
+    bridge_node.motion.publish(0.0, 0.0)
+    return bridge_node.call_motion_service(bridge_node.cli_stop, Trigger.Request())
+
+
+def motion_reset():
+    if bridge_node is None:
+        return False, 'motion bridge unavailable'
+    with bridge_node.control_lock:
+        bridge_node.manual_drive.set(0.0, 0.0)
+        bridge_node.manual_drive.sample()
+        return bridge_node.call_motion_service(bridge_node.cli_reset, Trigger.Request())
+
+
+def apply_manual(vx, wz, steer_deg, action, client_id, seq):
+    """网页方向键与 app 摇杆共用的手动指令出口,返回 (HTTP 状态码, 应答)。"""
+    if bridge_node is None:
+        return 503, {'ok': False, 'error': 'motion bridge unavailable'}
+    moving = abs(vx) > 1e-6 or abs(wz) > 1e-6
+    immediate_stop = False
+    if moving:
+        # A reset can wait for a ROS service. Keep the short command
+        # lock free so a stop can preempt a request waiting here.
+        ok, message = bridge_node.recover_latched_fault()
+        if not ok:
+            return 409, {'ok': False, 'error': message}
+    else:
+        # First zero goes out before any follow/reset service holding
+        # control_lock can delay the request. The second zero
+        # below wins over a command already in that critical section.
+        bridge_node.manual_drive.accept(client_id, seq, 0.0, 0.0)
+        bridge_node.send_manual_twist(0.0, 0.0)
+        immediate_stop = bridge_node.motion.publish(0.0, 0.0)
+
+    with bridge_node.control_lock:
+        # 按会话 + 序号丢弃迟到的旧指令:网络抖动时,先发的「前进」
+        # 可能晚于「刹车」到达,不能让它在松手后又把车开起来。
+        if moving and not bridge_node.manual_drive.accept(client_id, seq, vx, wz):
+            return 200, {'ok': True, 'stale': True, 'action': action}
+        bridge_node.send_manual_twist(vx, wz)
+        sent = bridge_node.motion.publish(vx, wz)
+        if moving and not sent:
+            bridge_node.send_manual_twist(0.0, 0.0)
+
+    if not sent and (moving or not immediate_stop):
+        return 503, {'ok': False, 'error': '底盘控制状态已过期，指令未能发送；请检查连接并使用物理急停'}
+
+    with data_lock:
+        state['manual_override'] = {'active': moving, 'action': action, 'vx': vx, 'wz': wz,
+                                    'steer_deg': steer_deg, 'time': time.time()}
+    return 200, {'ok': True, 'action': action, 'vx': vx, 'wz': wz, 'steer_deg': steer_deg}
+
+
+def discovery_beacon():
+    """每秒向各网卡广播一次,路由器 WiFi 和车载热点下 app 都能自动找到车。"""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    payload = app_link.beacon(CAR_NAME, PORT, profile_hash(PROFILE))
+    targets, refreshed = ['255.255.255.255'], 0.0
+    while True:
+        now = time.monotonic()
+        if now - refreshed > 10.0:
+            refreshed = now
+            try:
+                out = subprocess.run(['ip', '-o', '-4', 'addr', 'show'], capture_output=True,
+                                     text=True, timeout=2).stdout
+                targets = app_link.broadcast_addresses(out) + ['255.255.255.255']
+            except Exception:
+                targets = ['255.255.255.255']
+        for addr in targets:
+            try:
+                sock.sendto(payload, (addr, app_link.DISCOVERY_PORT))
+            except OSError:
+                pass
+        time.sleep(1.0)
+
+
 class TrackingBridgeNode(Node):
     def __init__(self):
         super().__init__('radar_tracking_web_bridge')
@@ -233,6 +368,20 @@ class TrackingBridgeNode(Node):
         self.manual_group = MutuallyExclusiveCallbackGroup()
         self.manual_timer = self.create_timer(MANUAL_PUBLISH_PERIOD_S, self.manual_loop,
                                               callback_group=self.manual_group)
+
+        # 手机 app:相机画面只在有人看时才解码压缩,独立回调组不拖慢雷达/状态回调
+        self.video_group = MutuallyExclusiveCallbackGroup()
+        video_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT)
+        self.sub_rgb = self.create_subscription(Image, '/camera/rgb/image_raw', self.rgb_cb,
+                                                video_qos, callback_group=self.video_group)
+        self.sub_cam_info = self.create_subscription(CameraInfo, '/camera/rgb/camera_info',
+                                                     self.cam_info_cb, video_qos,
+                                                     callback_group=self.video_group)
+        self.pub_select = self.create_publisher(String, '/follower/select_target', 1)
+        # RTK 走直线：状态转给 app，app 的操作指令转给 line_node
+        self.sub_gnss = self.create_subscription(String, '/gnss/status', self.gnss_status_cb, 1)
+        self.sub_line = self.create_subscription(String, '/line/status', self.line_status_cb, 1)
+        self.pub_line = self.create_publisher(String, '/line/command', 10)
 
         self.get_logger().info('>>> 雷达、人体姿态、跟随与底盘遥测已连接')
 
@@ -285,8 +434,8 @@ class TrackingBridgeNode(Node):
             if current.get('mode') == 'ESTOP':
                 return False, '急停已锁存，请现场检查并单独复位'
             return True, ''
-        if current.get('reason') in ('motion_stall', 'reset_failed'):
-            return False, '运动卡滞已锁存：请使用物理急停并检查障碍、车轮与里程计，确认安全后单独复位'
+        if current.get('reason') == 'reset_failed':
+            return False, '底盘复位失败：请现场检查停车原因，确认安全后单独复位'
         if not fresh:
             return False, '运动状态已过期，请检查底盘服务'
         if not current.get('healthy', False):
@@ -307,6 +456,58 @@ class TrackingBridgeNode(Node):
 
     def send_manual_twist(self, vx, wz):
         self.manual_drive.set(vx, wz)
+
+    def rgb_cb(self, msg):
+        now = time.monotonic()
+        if cv2 is None or not VIDEO_HUB.wants_frame(now):
+            return
+        try:
+            bgr = cv2.cvtColor(decode_rgb(msg), cv2.COLOR_RGB2BGR)
+            ok, buf = cv2.imencode('.jpg', bgr, [cv2.IMWRITE_JPEG_QUALITY, 70])
+        except Exception:
+            return
+        if ok:
+            CAMERA['width'], CAMERA['height'] = msg.width, msg.height
+            VIDEO_HUB.publish(buf.tobytes(), msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9, now)
+
+    def cam_info_cb(self, msg):
+        if msg.k[0] > 0:
+            CAMERA.update(width=msg.width, height=msg.height, fx=msg.k[0], cx=msg.k[2])
+
+    def select_target(self, bearing_rad):
+        self.pub_select.publish(String(data=json.dumps({'bearing_rad': bearing_rad})))
+
+    def _store_status(self, key, msg):
+        try:
+            d = json.loads(msg.data)
+        except (TypeError, ValueError):
+            return
+        if isinstance(d, dict):
+            d['_rx_monotonic'] = time.monotonic()
+            with data_lock:
+                state[key] = d
+
+    def gnss_status_cb(self, msg):
+        self._store_status('gnss', msg)
+
+    def line_status_cb(self, msg):
+        self._store_status('line', msg)
+
+    def line_command(self, cmd):
+        """app 的 line 指令 -> /line/command；结果由 line_node 写进 /line/status 的 last_result。"""
+        payload = {'cmd': cmd['action'], 'id': cmd.get('id')}
+        if 'point' in cmd:
+            payload['point'] = cmd['point']
+        if 'cruise' in cmd:
+            payload['cruise'] = cmd['cruise']
+        self.pub_line.publish(String(data=json.dumps(payload)))
+
+    def route_command(self, cmd):
+        """app 的 route 指令 -> /line/command（route_set/route_start/route_clear），结果同样看 last_result。"""
+        payload = {'cmd': 'route_' + cmd['action'], 'id': cmd.get('id')}
+        if 'route' in cmd:
+            payload['route'] = cmd['route']
+        self.pub_line.publish(String(data=json.dumps(payload)))
 
     def follower_cb(self, msg):
         global state
@@ -345,8 +546,10 @@ class TrackingBridgeNode(Node):
 
     def ai_status_cb(self, msg):
         try:
+            status = json.loads(msg.data)
+            status['_rx_monotonic'] = time.monotonic()
             with data_lock:
-                state['ai_status'] = json.loads(msg.data)
+                state['ai_status'] = status
         except (TypeError, ValueError):
             pass
 
@@ -431,6 +634,8 @@ class RadarHTTPHandler(http.server.BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header('Content-Type', content_type)
         self.send_header('Content-Length', str(len(body)))
+        if self.close_connection:
+            self.send_header('Connection', 'close')
         self.send_header('Access-Control-Allow-Origin', '*')
         for key, value in (extra_headers or {}).items():
             self.send_header(key, value)
@@ -480,6 +685,30 @@ class RadarHTTPHandler(http.server.BaseHTTPRequestHandler):
             f_data['running'] = is_follow_active()
             self._send_json(f_data)
 
+        elif self.path == '/api/rtk/cors':
+            if self.headers.get('Origin'):
+                self._send_json({'ok': False, 'error': 'origin_not_allowed'}, status=403)
+                return
+            try:
+                result = CORS_CONFIG.public()
+                snap = snapshot_state()
+                rtk = app_link.rtk_telemetry(snap.get('gnss'), time.monotonic())
+                result.update(ok=True, supported=True, can_apply=configuration_allowed(snap, time.monotonic()),
+                              ntrip=rtk.get('ntrip'), rtk_stale=rtk['stale'])
+                self._send_json(result)
+            except (OSError, ValueError, TypeError):
+                self._send_json({'ok': False, 'supported': True, 'error': 'config_unreadable'}, status=500)
+
+        elif self.path == '/app/beacon':
+            # 内容与 UDP 发现广播相同。手机连车载热点时 app 用它确认"网关就是车"，别的网关不会这样回
+            self._send_body(app_link.beacon(CAR_NAME, PORT, profile_hash(PROFILE)), 'application/json')
+
+        elif self.path == '/ws':
+            self._serve_app_socket()
+
+        elif self.path.split('?')[0] == '/video.mjpg':
+            self._serve_mjpeg()
+
         elif self.path == '/api/stream':
             # 事件流没有长度,靠断开连接结束;明确声明,不让这条连接被当作可复用的长连接
             self.close_connection = True
@@ -491,17 +720,7 @@ class RadarHTTPHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             try:
                 while True:
-                    # pgrep 是子进程调用,不能放在 data_lock 里,否则会卡住 ROS 回调和其他请求
-                    running = is_follow_active()
-                    with data_lock:
-                        state['follower_running'] = running
-                        snapshot = dict(state)
-                        snapshot['follower'] = mark_follower_staleness(
-                            dict(snapshot.get('follower', {})))
-                        wheeltec_rx = snapshot.get('wheeltec', {}).get('_rx_monotonic')
-                        snapshot['wheeltec_status_age_s'] = (
-                            round(time.monotonic() - wheeltec_rx, 2) if wheeltec_rx else None)
-                        payload = json.dumps(snapshot)
+                    payload = json.dumps(snapshot_state())
                     self.wfile.write(f"data: {payload}\n\n".encode('utf-8'))
                     self.wfile.flush()
                     time.sleep(0.10) # LiDAR updates at ~10 Hz; avoid redundant mobile JSON work.
@@ -509,6 +728,129 @@ class RadarHTTPHandler(http.server.BaseHTTPRequestHandler):
                 pass
         else:
             self.send_error(404)
+
+    def _serve_app_socket(self):
+        """安卓 app 长连接:下行 hello + 10Hz 遥测,上行摇杆/跟随/急停/点选。"""
+        key = self.headers.get('Sec-WebSocket-Key')
+        if not key or 'websocket' not in (self.headers.get('Upgrade') or '').lower():
+            self.send_error(400, 'WebSocket upgrade required')
+            return
+        self.close_connection = True
+        self.send_response(101, 'Switching Protocols')
+        self.send_header('Upgrade', 'websocket')
+        self.send_header('Connection', 'Upgrade')
+        self.send_header('Sec-WebSocket-Accept', app_link.accept_key(key))
+        self.end_headers()
+        self.wfile.flush()
+        self.connection.settimeout(APP_RECV_TIMEOUT_S)
+        ws = app_link.WebSocket(self.rfile, self.wfile)
+        session = 'app-' + uuid.uuid4().hex[:10]
+        done = threading.Event()
+        drove = False
+
+        def pump():
+            seq = 0
+            try:
+                ws.send_json(app_link.build_hello(PROFILE, name=CAR_NAME, camera=dict(CAMERA),
+                                                  session=session))
+                while not done.is_set():
+                    seq += 1
+                    ws.send_json(app_link.build_telemetry(
+                        snapshot_state(), now=time.monotonic(), seq=seq,
+                        sensors=PROFILE['sensors']))
+                    done.wait(APP_TELEMETRY_PERIOD_S)
+            except Exception:
+                pass
+            finally:
+                done.set()
+
+        def reply(cmd, ok, message=''):
+            try:
+                ws.send_json({'type': 'ack', 'id': cmd.get('id'), 'cmd': cmd.get('type'),
+                              'ok': bool(ok), 'message': message})
+            except app_link.WebSocketClosed:
+                pass
+
+        def slow(cmd, fn):
+            # 启动跟随/复位可能等十几秒服务应答,不能堵住摇杆和急停的接收
+            threading.Thread(target=lambda: reply(cmd, *fn()), daemon=True).start()
+
+        threading.Thread(target=pump, daemon=True).start()
+        try:
+            while not done.is_set():
+                try:
+                    cmd = app_link.parse_command(ws.recv())
+                except app_link.CommandError as exc:
+                    reply({}, False, str(exc))
+                    continue
+                kind = cmd['type']
+                if kind == 'drive':
+                    vx, wz, steer_deg = app_link.resolve_stick(
+                        cmd['throttle'], cmd['steer'], cmd['tier'], SPEED_TIERS_MPS,
+                        REVERSE_SCALE, CHASSIS)
+                    status, result = apply_manual(vx, wz, steer_deg, 'stick', session, cmd['seq'])
+                    drove = drove or abs(vx) > 1e-6
+                    if status != 200:
+                        reply(cmd, False, result.get('error', ''))
+                elif kind == 'estop':
+                    reply(cmd, *emergency_stop())
+                elif kind == 'reset':
+                    slow(cmd, motion_reset)
+                elif kind == 'follow':
+                    slow(cmd, start_follower if cmd['enable'] else stop_follower)
+                elif kind == 'select_target':
+                    if bridge_node is None:
+                        reply(cmd, False, 'motion bridge unavailable')
+                    else:
+                        bridge_node.select_target(cmd['bearing_rad'])
+                        reply(cmd, True)
+                elif kind == 'line':
+                    if bridge_node is None:
+                        reply(cmd, False, 'motion bridge unavailable')
+                    else:
+                        # ack 只表示已转发；执行结果看遥测 line.last_result（按 id 对应）
+                        bridge_node.line_command(cmd)
+                        reply(cmd, True, 'forwarded')
+                elif kind == 'route':
+                    if bridge_node is None:
+                        reply(cmd, False, 'motion bridge unavailable')
+                    else:
+                        bridge_node.route_command(cmd)
+                        reply(cmd, True, 'forwarded')
+                elif kind == 'ping':
+                    ws.send_json({'type': 'pong', 't': cmd.get('t'), 'server': time.monotonic()})
+        except (app_link.WebSocketClosed, OSError):
+            pass
+        finally:
+            done.set()
+            if drove and bridge_node is not None:
+                # 断线的那一刻就停,不等 0.75s 心跳超时
+                bridge_node.send_manual_twist(0.0, 0.0)
+            ws.close()
+
+    def _serve_mjpeg(self):
+        self.close_connection = True
+        self.send_response(200)
+        self.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=frame')
+        self.send_header('Cache-Control', 'no-cache, no-store')
+        self.send_header('Connection', 'close')
+        self.end_headers()
+        if cv2 is None:
+            return
+        VIDEO_HUB.attach()
+        try:
+            seq = 0
+            while True:
+                frame = VIDEO_HUB.wait_next(seq, timeout=2.0)
+                if frame is None:
+                    continue
+                seq, jpeg, stamp = frame
+                self.wfile.write(app_link.mjpeg_part(jpeg, stamp))
+                self.wfile.flush()
+        except (OSError, ValueError):
+            pass
+        finally:
+            VIDEO_HUB.detach()
 
     def _send_json(self, data, status=200):
         body = json.dumps(data, ensure_ascii=False).encode('utf-8')
@@ -523,7 +865,28 @@ class RadarHTTPHandler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         global bridge_node
-        if self.path == '/api/drive_profile':
+        if self.path == '/api/rtk/cors':
+            # 拒绝网页跨源写入；账号只在正文接收，不放 URL、日志或响应里。
+            if self.headers.get('Origin'):
+                self.close_connection = True
+                self._send_json({'ok': False, 'error': 'origin_not_allowed'}, status=403)
+                return
+            try:
+                req = json.loads(self._read_body(8192).decode('utf-8'))
+                if not configuration_allowed(snapshot_state(), time.monotonic()):
+                    self._send_json({'ok': False, 'error': 'vehicle_not_idle',
+                                     'message': '请停车并退出自动作业，等待底盘在线后应用'}, status=409)
+                    return
+                saved = CORS_CONFIG.save(req)
+                # 保存成功不代表 CORS 已连通；RTK 节点加载后通过遥测确认 revision。
+                self._send_json(dict(saved, ok=True, status='pending_reload'))
+            except (ValueError, TypeError, UnicodeError):
+                self.close_connection = True
+                self._send_json({'ok': False, 'error': 'invalid_config', 'message': '账号参数格式无效'}, status=400)
+            except OSError:
+                self._send_json({'ok': False, 'error': 'save_failed', 'message': '车端保存失败'}, status=500)
+
+        elif self.path == '/api/drive_profile':
             self._send_json({
                 'speed_tiers': SPEED_TIERS_MPS,
                 'steer_tiers': STEER_TIERS_DEG,
@@ -562,11 +925,7 @@ class RadarHTTPHandler(http.server.BaseHTTPRequestHandler):
             if bridge_node is None:
                 self._send_json({'ok': False, 'message': 'motion bridge unavailable'}, status=503)
                 return
-            with bridge_node.control_lock:
-                bridge_node.manual_drive.set(0.0, 0.0)
-                bridge_node.manual_drive.sample()
-                client = bridge_node.cli_stop if self.path.endswith('/stop') else bridge_node.cli_reset
-                ok, message = bridge_node.call_motion_service(client, Trigger.Request())
+            ok, message = emergency_stop() if self.path.endswith('/stop') else motion_reset()
             self._send_json({'ok': ok, 'message': message})
 
         elif self.path == '/api/manual_drive':
@@ -596,56 +955,11 @@ class RadarHTTPHandler(http.server.BaseHTTPRequestHandler):
                     wz = yaw_from_steer(vx, steer_rad, CHASSIS)
                     steer_deg = round(math.degrees(steer_rad), 1)
 
-                if bridge_node is None:
-                    self._send_json({'ok': False, 'error': 'motion bridge unavailable'}, status=503)
-                    return
                 client_id = str(req.get('client_id', ''))[:64] or None
                 seq_raw = req.get('seq')
                 seq = int(seq_raw) if isinstance(seq_raw, (int, float)) and math.isfinite(seq_raw) else None
-                moving = abs(vx) > 1e-6 or abs(wz) > 1e-6
-
-                if moving:
-                    # A reset can wait for a ROS service. Keep the short command
-                    # lock free so a stop can preempt a request waiting here.
-                    ok, message = bridge_node.recover_latched_fault()
-                    if not ok:
-                        self._send_json({'ok': False, 'error': message}, status=409)
-                        return
-                else:
-                    # First zero goes out before any follow/reset service holding
-                    # control_lock can delay the HTTP request. The second zero
-                    # below wins over a command already in that critical section.
-                    bridge_node.manual_drive.accept(client_id, seq, 0.0, 0.0)
-                    bridge_node.send_manual_twist(0.0, 0.0)
-                    immediate_stop = bridge_node.motion.publish(0.0, 0.0)
-
-                with bridge_node.control_lock:
-                    # 按页面会话 + 序号丢弃迟到的旧指令:网络抖动时,先发的「前进」
-                    # 可能晚于「刹车」到达,不能让它在松手后又把车开起来。
-                    if moving and not bridge_node.manual_drive.accept(client_id, seq, vx, wz):
-                        self._send_json({'ok': True, 'stale': True, 'action': action})
-                        return
-                    bridge_node.send_manual_twist(vx, wz)
-                    sent = bridge_node.motion.publish(vx, wz)
-                    if moving and not sent:
-                        bridge_node.send_manual_twist(0.0, 0.0)
-
-                if not sent and (moving or not immediate_stop):
-                    self._send_json({'ok': False, 'error': '底盘控制状态已过期，指令未能发送；请检查连接并使用物理急停'}, status=503)
-                    return
-
-                with data_lock:
-                    state['manual_override'] = {
-                        'active': moving,
-                        'action': action,
-                        'vx': vx,
-                        'wz': wz,
-                        'steer_deg': steer_deg,
-                        'time': time.time()
-                    }
-
-                self._send_json({'ok': True, 'action': action, 'vx': vx,
-                                 'wz': wz, 'steer_deg': steer_deg})
+                status, reply = apply_manual(vx, wz, steer_deg, action, client_id, seq)
+                self._send_json(reply, status=status)
             except (ValueError, TypeError, KeyError) as e:
                 self._send_json({'ok': False, 'error': str(e)}, status=400)
             except Exception as e:
@@ -668,6 +982,7 @@ class ThreadedHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
 def main():
     t = threading.Thread(target=ros_worker, daemon=True)
     t.start()
+    threading.Thread(target=discovery_beacon, daemon=True).start()
     server = ThreadedHTTPServer(('0.0.0.0', PORT), RadarHTTPHandler)
     print(f"雷达 / 摄像头跟踪服务: http://0.0.0.0:{PORT}")
     server.serve_forever()

@@ -112,14 +112,33 @@ def test_client_configuration_mismatch_refuses_selection_and_commands():
 def test_managed_web_start_uses_service_instead_of_spawning_duplicate(monkeypatch):
     bridge = webtests.web.TrackingBridgeNode()
     monkeypatch.setenv('RK3588_MANAGED_FOLLOWER', '1')
+    detecting = {'fps': 19.0, '_rx_monotonic': webtests.web.time.monotonic()}
     with patch.object(webtests.web, 'bridge_node', bridge), \
+         patch.dict(webtests.web.state, {'ai_status': detecting}), \
          patch.object(bridge, 'select_follow', return_value=(True, 'FOLLOW')), \
-         patch.object(webtests.web.subprocess, 'run') as run, \
+         patch.object(webtests.web.subprocess, 'run', return_value=NS(returncode=3)) as run, \
+         patch.object(webtests.web.os, 'geteuid', return_value=1000), \
          patch.object(webtests.web.subprocess, 'Popen') as spawn:
         assert webtests.web.start_follower() == (True, 'FOLLOW')
-        run.assert_called_once()
-        assert run.call_args.args[0] == ['systemctl', 'start', 'rk3588-perception@follower.service']
+        # 先问 systemd 服务在不在跑，不在才 sudo -n 启动；不自己另起一个跟随进程
+        assert run.call_args_list[0].args[0][:2] == ['systemctl', 'is-active']
+        assert run.call_args.args[0] == ['sudo', '-n', 'systemctl', 'start', 'rk3588-perception@follower.service']
         spawn.assert_not_called()
+
+
+def test_follow_is_refused_while_person_detection_is_off(monkeypatch):
+    bridge = webtests.web.TrackingBridgeNode()
+    monkeypatch.setenv('RK3588_MANAGED_FOLLOWER', '1')
+    stopped = {'fps': 19.0, '_rx_monotonic': webtests.web.time.monotonic() - 10.0}
+    for ai_status in ({}, stopped):
+        with patch.object(webtests.web, 'bridge_node', bridge), \
+             patch.dict(webtests.web.state, {'ai_status': ai_status}), \
+             patch.object(bridge, 'select_follow') as select, \
+             patch.object(webtests.web.subprocess, 'run') as run:
+            ok, message = webtests.web.start_follower()
+            assert not ok and '人体识别' in message
+            select.assert_not_called()
+            run.assert_not_called()
 
 
 def test_ros_odometry_adapter_feeds_timestamped_local_pose():

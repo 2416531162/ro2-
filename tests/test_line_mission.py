@@ -1,0 +1,393 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""走直线任务流程(radar_system/line_mission.py)测试：融合用替身，不需要 ROS。
+
+输入类型按与融合模块约定的字段定义；字段名写错会直接 TypeError，顺带检查接口约定。
+"""
+import csv
+import json
+import math
+import os
+import sys
+import tempfile
+import unittest
+from dataclasses import dataclass
+from types import SimpleNamespace
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, 'radar_system'))
+sys.path.insert(0, ROOT)
+
+from line_mission import LineMission  # noqa: E402
+
+
+@dataclass(frozen=True)
+class ImuSample:
+    t: float
+    gyro_z: float
+
+
+@dataclass(frozen=True)
+class WheelSample:
+    t: float
+    speed: float
+    yaw_rate: float
+
+
+@dataclass(frozen=True)
+class GnssFix:
+    t: float
+    lat_deg: float
+    lon_deg: float
+    height_m: float
+    sol: str
+    sigma_n: float
+    sigma_e: float
+    sigma_u: float
+    diff_age_s: float
+    sats: int
+
+
+@dataclass(frozen=True)
+class DualHeading:
+    t: float
+    heading_deg: float
+    pitch_deg: float
+    length_m: float
+    sol: str
+    sigma_heading_deg: float
+    sats: int
+
+
+@dataclass(frozen=True)
+class GnssVelocity:
+    t: float
+    speed_mps: float
+    track_deg: float
+    sol: str
+
+
+SAMPLES = SimpleNamespace(ImuSample=ImuSample, WheelSample=WheelSample, GnssFix=GnssFix,
+                          DualHeading=DualHeading, GnssVelocity=GnssVelocity)
+
+
+class FakeFusion:
+    """位姿由测试直接给；经纬度用 1e-5°/m 的线性映射。"""
+
+    def __init__(self):
+        self.inputs = []
+        self.current = self.make(0.0, 0.0, 0.0)
+
+    @staticmethod
+    def make(x, y, yaw_deg, speed=0.0, quality='RTK_FIXED', usable=True):
+        return SimpleNamespace(x=x, y=y, yaw=math.radians(yaw_deg), speed=speed, yaw_rate=0.0,
+                               usable_for_control=usable, quality=quality, sigma_xy=0.01,
+                               sigma_yaw=math.radians(0.1), reasons=())
+
+    def pose(self, t):
+        return self.current
+
+    def to_geodetic(self, x, y):
+        return 30.0 + y * 1e-5, 120.0 + x * 1e-5
+
+    def to_local(self, lat, lon):
+        return (lon - 120.0) / 1e-5, (lat - 30.0) / 1e-5
+
+    def __getattr__(self, name):
+        if name.startswith('add_'):
+            return lambda s: self.inputs.append((name, s))
+        raise AttributeError(name)
+
+
+class Base(unittest.TestCase):
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.state = os.path.join(self.tmp.name, 'state', 'line.json')
+        self.logs = os.path.join(self.tmp.name, 'runs')
+        self.fusion = FakeFusion()
+        self.m = LineMission(self.fusion, SAMPLES, state_path=self.state, log_dir=self.logs)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def mark_line(self, length=10.0):
+        self.fusion.current = FakeFusion.make(0.0, 0.0, 0.0)
+        self.assertEqual(self.m.command({'cmd': 'mark', 'point': 'a'}, 0.0)[0], True)
+        self.fusion.current = FakeFusion.make(length, 0.0, 0.0)
+        self.assertEqual(self.m.command({'cmd': 'mark', 'point': 'B'}, 0.0)[0], True)
+        self.fusion.current = FakeFusion.make(-0.5, 0.0, 0.0)
+
+    def drive(self, t0, until, mode='NAVIGATION', dt=0.05):
+        """简单运动学：按指令移动替身位姿，返回最后一次 tick 结果和时间。"""
+        t, out = t0, None
+        while t < until:
+            out = self.m.tick(t, mode)
+            p = self.fusion.current
+            vx, wz = out[0], out[1]
+            yaw = p.yaw + wz * dt
+            self.fusion.current = FakeFusion.make(p.x + vx * dt * math.cos(yaw), p.y + vx * dt * math.sin(yaw),
+                                                  math.degrees(yaw), speed=vx)
+            t += dt
+            if self.m.phase == 'IDLE' and out[2] is False:
+                break
+        return out, t
+
+
+class TestInputs(Base):
+
+    def test_gnss_imu_wheel_are_converted_to_fusion_samples(self):
+        self.m.on_gnss(dict(kind='fix', t=1.0, lat=30.0, lon=120.0, height=20.0, sol='NARROW_INT',
+                            sigma_n=0.01, sigma_e=0.01, sigma_u=0.02, diff_age=None, sats=30))
+        self.m.on_gnss(dict(kind='heading', t=1.0, heading=91.0, pitch=0.2, length=0.331, sol='L1_INT',
+                            sigma_heading=0.3, sats=30))
+        self.m.on_gnss(dict(kind='vel', t=1.0, speed=0.5, track=1.0, sol='DOPPLER_VELOCITY'))
+        self.m.on_gnss(dict(kind='other'))
+        self.m.on_imu(1.01, 0.002)
+        self.m.on_wheel(1.02, 0.5, 0.001)
+        # rtk_node 判为无效（与两天线实时距离对不上）的测向不交给融合
+        self.m.on_gnss(dict(kind='heading', t=1.005, heading=91.0, pitch=0.2, length=0.9, sol='L1_INT',
+                            sigma_heading=0.3, sats=30, valid=False))
+        names = [n for n, _ in self.fusion.inputs]
+        self.assertEqual(names, ['add_fix', 'add_heading', 'add_velocity', 'add_imu', 'add_wheel'])
+        fix = self.fusion.inputs[0][1]
+        self.assertEqual(fix.diff_age_s, math.inf)
+        self.assertEqual(self.fusion.inputs[1][1].length_m, 0.331)
+
+
+class TestOperatorFlow(Base):
+
+    def test_mark_needs_rtk_fixed(self):
+        self.fusion.current = FakeFusion.make(0, 0, 0, quality='RTK_FLOAT')
+        ok, msg = self.m.command({'cmd': 'mark', 'point': 'A'}, 0.0)
+        self.assertFalse(ok)
+        self.assertIn('固定解', msg)
+        self.assertFalse(self.m.command({'cmd': 'mark', 'point': 'C'}, 0.0)[0])
+
+    def test_start_requires_points_and_valid_speed(self):
+        self.assertEqual(self.m.command({'cmd': 'start'}, 0.0), (False, '先记 A、B 两点'))
+        self.mark_line()
+        self.assertFalse(self.m.command({'cmd': 'start', 'cruise': 2.0}, 0.0)[0])
+        self.fusion.current = FakeFusion.make(0.0, 0.0, 50.0)
+        self.assertEqual(self.m.command({'cmd': 'start'}, 0.0), (False, 'heading_not_aligned'))
+
+    def test_full_run_saves_trim_and_log(self):
+        self.mark_line(10.0)
+        self.assertTrue(self.m.command({'cmd': 'start', 'cruise': 0.5}, 0.0)[0])
+        self.assertEqual(self.m.tick(0.05, 'IDLE'), (0.0, 0.0, True))     # 仲裁还没切过来：继续申请
+        out, t = self.drive(0.1, 60.0)
+        self.assertEqual(out, (0.0, 0.0, False))                          # 结束后交还控制权
+        self.assertEqual(self.m.message, '到达 B 点')
+        self.assertAlmostEqual(self.fusion.current.x, 10.0, delta=0.1)
+        with open(self.state) as fh:
+            self.assertIn('integral', json.load(fh))
+        logs = os.listdir(self.logs)
+        self.assertEqual(len(logs), 1)
+        with open(os.path.join(self.logs, logs[0])) as fh:
+            rows = list(csv.DictReader(fh))
+        self.assertGreater(len(rows), 100)
+        self.assertLess(max(abs(float(r['e_m'])) for r in rows), 0.01)
+        # 下一次任务读回学到的零位
+        again = LineMission(self.fusion, SAMPLES, state_path=self.state)
+        self.assertEqual(again.integral0, self.m.integral0)
+
+    def test_selection_timeout(self):
+        self.mark_line()
+        self.m.command({'cmd': 'start'}, 0.0)
+        self.assertEqual(self.m.tick(1.0, 'MANUAL')[2], True)
+        self.assertEqual(self.m.tick(3.5, 'MANUAL'), (0.0, 0.0, None))
+        self.assertEqual(self.m.phase, 'IDLE')
+        self.assertIn('控制权申请失败', self.m.message)
+        self.assertEqual(self.m.tick(3.55, 'MANUAL'), (0.0, 0.0, False))
+
+    def test_manual_takeover_ends_run(self):
+        self.mark_line()
+        self.m.command({'cmd': 'start'}, 0.0)
+        self.drive(0.05, 2.0)
+        self.assertEqual(self.m.phase, 'RUNNING')
+        self.assertEqual(self.m.tick(2.05, 'MANUAL'), (0.0, 0.0, None))
+        self.assertEqual(self.m.phase, 'IDLE')
+        self.assertIn('MANUAL', self.m.message)
+
+    def test_operator_stop_releases_navigation(self):
+        self.mark_line()
+        self.m.command({'cmd': 'start'}, 0.0)
+        self.drive(0.05, 1.0)
+        self.assertEqual(self.m.command({'cmd': 'stop'}, 1.0), (True, '已停止'))
+        self.assertEqual(self.m.tick(1.05, 'NAVIGATION'), (0.0, 0.0, False))
+        self.assertEqual(self.m.tick(1.10, 'NAVIGATION'), (0.0, 0.0, None))
+        self.assertFalse(os.path.exists(self.state))                        # 没走完不学零位
+
+    def test_pose_loss_pauses_and_operator_resumes(self):
+        self.mark_line()
+        self.m.command({'cmd': 'start'}, 0.0)
+        self.drive(0.05, 2.0)
+        p = self.fusion.current
+        self.fusion.current = FakeFusion.make(p.x, p.y, math.degrees(p.yaw), quality='DEAD_RECKONING',
+                                              usable=False)
+        self.assertEqual(self.m.tick(2.05, 'NAVIGATION'), (0.0, 0.0, None))
+        self.assertEqual((self.m.phase, self.m.tracker.st.state), ('RUNNING', 'PAUSED'))
+        self.fusion.current = FakeFusion.make(p.x, p.y, math.degrees(p.yaw))
+        self.assertEqual(self.m.tick(2.10, 'NAVIGATION')[:2], (0.0, 0.0))  # 恢复也不自己走
+        self.assertEqual(self.m.command({'cmd': 'start'}, 2.2), (True, '继续'))
+        out, _ = self.drive(2.25, 60.0)
+        self.assertEqual(self.m.message, '到达 B 点')
+
+    def test_status_is_json_ready(self):
+        self.mark_line()
+        self.m.tick(0.0, 'IDLE')
+        st = self.m.status()
+        json.dumps(st, allow_nan=False)
+        self.assertEqual(st['points']['B'], [10.0, 0.0])
+        self.assertEqual(st['pose']['quality'], 'RTK_FIXED')
+
+
+RECT = dict(kind='points', points=[[0, 0], [10, 0], [10, 8], [0, 8]], closed=True, laps=1, turn_radius=2.5,
+            cruise=0.5)
+
+
+class NoOriginFusion(FakeFusion):
+    """刚开机、还没有有效定位：融合没有原点。"""
+
+    def to_geodetic(self, x, y):
+        raise ValueError('尚未设置原点')
+
+    def to_local(self, lat, lon):
+        raise ValueError('尚未设置原点')
+
+
+class TestRoute(Base):
+
+    def setUp(self):
+        super().setUp()
+        self.route_file = os.path.join(self.tmp.name, 'rtk', 'route.json')
+        self.m = LineMission(self.fusion, SAMPLES, state_path=self.state, log_dir=self.logs,
+                             route_path=self.route_file)
+
+    def test_set_stores_geodetic_and_echoes_local(self):
+        self.assertEqual(self.m.command({'cmd': 'route_set', 'route': RECT}, 0.0), (True, '路线已保存到车上'))
+        with open(self.route_file) as fh:
+            saved = json.load(fh)
+        self.assertEqual(saved['route']['points'][1], [30.0, 120.0001])     # 存经纬度
+        st = self.m.status()
+        json.dumps(st, allow_nan=False)
+        self.assertEqual(st['route']['points'], RECT['points'])
+        self.assertIsNone(st['route']['problem'])
+        self.assertAlmostEqual(st['route']['length'], 36.0 - 3 * (5 - math.pi * 2.5 / 2), places=3)
+        self.assertEqual(st['origin'], [30.0, 120.0])
+        self.assertAlmostEqual(st['route_limits']['min_radius'], self.m.geo.min_turn_radius_m / 0.9, places=3)
+        # 重启后从文件读回；原点变了照样对得上（替身融合的原点是固定的，这里只看读回）
+        again = LineMission(self.fusion, SAMPLES, route_path=self.route_file)
+        self.assertEqual(again.status()['route']['points'], RECT['points'])
+        self.assertEqual(again.route_rev, self.m.route_rev)
+
+    def test_incomplete_draft_is_saved_with_problem(self):
+        draft = dict(RECT, points=[[0, 0], [5, 0]])
+        self.assertTrue(self.m.command({'cmd': 'route_set', 'route': draft}, 0.0)[0])
+        self.assertIn('至少要 3 个路点', self.m.status()['route']['problem'])
+        ok, msg = self.m.command({'cmd': 'route_start'}, 0.0)
+        self.assertFalse(ok)
+        self.assertIn('至少要 3 个路点', msg)
+
+    def test_bad_route_and_clear(self):
+        self.assertFalse(self.m.command({'cmd': 'route_set', 'route': {'kind': 'star'}}, 0.0)[0])
+        self.assertEqual(self.m.command({'cmd': 'route_start'}, 0.0), (False, '车上还没有路线'))
+        self.m.command({'cmd': 'route_set', 'route': RECT}, 0.0)
+        self.assertEqual(self.m.command({'cmd': 'route_clear'}, 0.0), (True, '已删除路线'))
+        self.assertIsNone(self.m.status()['route'])
+        self.assertFalse(os.path.exists(self.route_file))
+
+    def test_needs_origin(self):
+        m = LineMission(NoOriginFusion(), SAMPLES)
+        ok, msg = m.command({'cmd': 'route_set', 'route': RECT}, 0.0)
+        self.assertFalse(ok)
+        self.assertIn('还没有定位原点', msg)
+        st = m.status()
+        self.assertIsNone(st['origin'])
+        json.dumps(st, allow_nan=False)
+
+    def test_full_run_from_car_pose(self):
+        # 车在路线外、车头朝北：先接入，再跑两圈，停在第 1 个路点
+        self.fusion.current = FakeFusion.make(-2.0, -3.0, 90.0)
+        ok, msg = self.m.command({'cmd': 'route_start', 'route': dict(RECT, laps=2)}, 0.0)
+        self.assertTrue(ok, msg)
+        self.assertIn('接入', msg)
+        self.assertEqual(self.m.task, 'route')
+        out, t = self.drive(0.05, 300.0)
+        self.assertEqual(out, (0.0, 0.0, False))
+        self.assertEqual(self.m.message, '路线完成')
+        p = self.fusion.current
+        self.assertLess(math.hypot(p.x, p.y), 0.1)
+        st = self.m.tracker.status()
+        self.assertLess(st['stats']['max_m'], 0.05)
+        self.assertTrue(os.listdir(self.logs)[0].startswith('route_'))
+        self.assertFalse(os.path.exists(self.state))                        # 路线不改直线学到的零位
+
+    def test_refusals(self):
+        self.m.command({'cmd': 'route_set', 'route': RECT}, 0.0)
+        self.fusion.current = FakeFusion.make(0, 0, 0, quality='DEAD_RECKONING', usable=False)
+        self.assertIn('pose_unusable', self.m.command({'cmd': 'route_start'}, 0.0)[1])
+        self.fusion.current = FakeFusion.make(200.0, 0, 0)
+        self.assertIn('太远', self.m.command({'cmd': 'route_start'}, 0.0)[1])
+        self.fusion.current = FakeFusion.make(-1.0, 0, 0)
+        self.assertTrue(self.m.command({'cmd': 'route_start'}, 0.0)[0])
+        self.assertEqual(self.m.command({'cmd': 'start'}, 0.1), (False, '已在运行'))
+        self.assertEqual(self.m.command({'cmd': 'route_set', 'route': RECT}, 0.1), (False, '运行中不能改路线'))
+        self.assertEqual(self.m.command({'cmd': 'route_clear'}, 0.1), (False, '先停止当前任务'))
+
+    def test_pause_in_second_lap_resumes_there(self):
+        self.fusion.current = FakeFusion.make(-1.0, 0.0, 0.0)
+        self.m.command({'cmd': 'route_start', 'route': dict(RECT, laps=3)}, 0.0)
+        self.drive(0.05, 90.0)                                              # 约 1.3 圈
+        s_before = self.m.tracker.st.s
+        lap = self.m.tracker.path.length / 3
+        self.assertGreater(s_before, lap)
+        p = self.fusion.current
+        self.fusion.current = FakeFusion.make(p.x, p.y, math.degrees(p.yaw), usable=False)
+        self.m.tick(90.05, 'NAVIGATION')
+        self.assertEqual(self.m.tracker.st.state, 'PAUSED')
+        self.fusion.current = FakeFusion.make(p.x, p.y, math.degrees(p.yaw))
+        self.assertEqual(self.m.command({'cmd': 'start'}, 90.1)[0], False)  # 直线的开始不接管暂停的路线
+        self.assertEqual(self.m.command({'cmd': 'route_start'}, 90.1), (True, '继续'))
+        self.m.tick(90.15, 'NAVIGATION')
+        self.assertAlmostEqual(self.m.tracker.st.s, s_before, delta=0.3)
+
+    def test_route_start_uses_learned_trim(self):
+        self.m.integral0 = 0.05
+        self.fusion.current = FakeFusion.make(-1.0, 0.0, 0.0)
+        self.m.command({'cmd': 'route_start', 'route': RECT}, 0.0)
+        self.m.tick(0.05, 'NAVIGATION')
+        trim_line = -self.m.line_cfg.ki_per_m2 * 0.05
+        self.assertAlmostEqual(self.m.tracker.status()['trim_kappa'], trim_line, places=4)
+
+    def test_connected_points_route_runs_once_and_stops_on_last_point(self):
+        # 操作员点的点按连线顺序走：先开到第 1 个点，再到第 2、3 个点，没连回起点就不绕圈
+        path = dict(kind='path', points=[[3, 0], [10, 0], [10, 6]], closed=False, laps=3, cruise=0.5)
+        self.fusion.current = FakeFusion.make(0.0, 0.0, 0.0)
+        ok, msg = self.m.command({'cmd': 'route_start', 'route': path}, 0.0)
+        self.assertTrue(ok, msg)
+        st = self.m.status()['route']
+        self.assertEqual((st['kind'], st['laps'], st['closed'], st['length']), ('path', 1, False, 13.0))
+        out, _ = self.drive(0.05, 200.0)
+        self.assertEqual(self.m.message, '路线完成')
+        p = self.fusion.current
+        self.assertLess(math.hypot(p.x - 10, p.y - 6), 0.1)
+        self.assertLess(self.m.tracker.status()['stats']['max_m'], 0.05)    # 跟参考线的误差
+
+    def test_connected_points_start_behind_is_refused(self):
+        self.fusion.current = FakeFusion.make(0.0, 0.0, 0.0)
+        ok, msg = self.m.command({'cmd': 'route_start', 'route': dict(kind='path', points=[[-3, 0], [-6, 0]])}, 0.0)
+        self.assertFalse(ok)
+        self.assertIn('车头前方', msg)
+
+    def test_antenna_position_is_reported_while_fresh(self):
+        self.m.on_gnss(dict(kind='fix', t=1.0, lat=30.00002, lon=120.00001, height=20.0, sol='NARROW_FLOAT',
+                            sigma_n=0.02, sigma_e=0.03, sigma_u=0.05, diff_age=1.0, sats=30))
+        self.m.tick(1.5, 'IDLE')
+        self.assertEqual(self.m.status()['antenna'], dict(x=1.0, y=2.0, sol='NARROW_FLOAT', sigma=0.03))
+        self.m.tick(3.6, 'IDLE')
+        self.assertIsNone(self.m.status()['antenna'])
+
+
+if __name__ == '__main__':
+    unittest.main()

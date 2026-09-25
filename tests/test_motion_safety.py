@@ -318,6 +318,27 @@ class TestDriverRecovery(unittest.TestCase):
         self.assertGreater(p.output[0], 3.5 * (1 / 50.0) * 1.5,
                            "应当按真实经过时间累加,而不是被压成标称周期")
 
+    def test_fresh_zero_speed_feedback_does_not_latch_motion(self):
+        """持续不动交给上层有限脱困；驱动只因真正的健康故障停车。"""
+        p = make_policy()
+        t = feed_stationary(p, 4.0)
+        self.assertTrue(p.arm(t)[0])
+        for i in range(1, 101):
+            now = t + i * 0.02
+            p.feedback({"velocity": [0.0, 0.0, 0.0]}, now)
+            p.command("twist", 0.85, 0.0, now)
+            frame = p.tick(now)
+            self.assertNotEqual(frame, STOP_FRAME)
+            self.assertTrue(p.armed)
+        self.assertGreater(p.output[0], 0.06)
+        self.assertEqual(p.reason, "command_active")
+
+        # Removing the speed mismatch latch must not weaken feedback loss.
+        self.assertEqual(p.tick(now + 0.31), STOP_FRAME)
+        self.assertTrue(p.holding)
+        self.assertEqual(p.tick(now + 1.4), STOP_FRAME)
+        self.assertFalse(p.armed)
+
     def test_hard_fault_still_requires_stationary_rearm(self):
         """安全兜底没有被削弱:真故障仍然要求车停稳才能重新使能。"""
         p = make_policy()

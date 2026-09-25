@@ -112,9 +112,6 @@ class Config:
     # which is what made web driving feel "extremely slow" and jerky.
     feedback_grace_s: float = 1.00
     backlog_tolerance: int = 8
-    stall_timeout_s: float = 0.45
-    stall_min_command_m_s: float = 0.06
-    stall_min_progress_m: float = 0.01
 
     def __post_init__(self):
         if self.protocol not in ("unconfigured", "twist", "steering_angle"):
@@ -139,12 +136,6 @@ class Config:
             raise ValueError("invalid feedback grace")
         if not 0 <= self.backlog_tolerance <= 100:
             raise ValueError("invalid backlog tolerance")
-        if not 0.30 <= self.stall_timeout_s <= 1.0:
-            raise ValueError("invalid stall timeout")
-        if not 0.04 <= self.stall_min_command_m_s <= 0.15:
-            raise ValueError("invalid stall command threshold")
-        if not 0.005 <= self.stall_min_progress_m <= 0.05:
-            raise ValueError("invalid stall progress threshold")
 
 
 class ControlPolicy:
@@ -170,20 +161,6 @@ class ControlPolicy:
         self.guard_eval_ms = 0.0
         self.guard_eval_peak_ms = 0.0
         self.guard_eval_overruns = 0
-        self.stall_since = None
-        self.stall_feedback_at = None
-        self.stall_feedback_frames = 0
-        self.stall_progress_m = 0.0
-        self.stall_direction = 0
-        self.stall_latched = False
-        self.stall_report = None
-
-    def clear_stall_observation(self):
-        self.stall_since = None
-        self.stall_feedback_at = None
-        self.stall_feedback_frames = 0
-        self.stall_progress_m = 0.0
-        self.stall_direction = 0
 
     def stop(self, reason):
         """Hard disarm. Recovery requires stationary telemetry, so reserve this
@@ -194,7 +171,6 @@ class ControlPolicy:
         self.reason = reason
         self.hold_reason = None
         self.hold_since = None
-        self.clear_stall_observation()
 
     def reject(self, reason):
         """Refuse one command without disarming. The chassis stays armed and
@@ -211,7 +187,6 @@ class ControlPolicy:
             self.hold_since = now
         self.hold_reason = reason
         self.output = (0.0, 0.0)
-        self.clear_stall_observation()
 
     def release_hold(self):
         self.hold_reason = None
@@ -234,10 +209,8 @@ class ControlPolicy:
         v = telemetry["velocity"]
         self.stationary_frames = self.stationary_frames + 1 if max(abs(x) for x in v) < 0.015 else 0
 
-    def ready(self, now, *, ignore_stall=False):
+    def ready(self, now):
         c = self.config
-        if self.stall_latched and not ignore_stall:
-            return "motion_stall_latched"
         if c.receive_only:
             return "receive_only"
         if not c.protocol_confirmed or c.protocol == "unconfigured":
@@ -252,14 +225,11 @@ class ControlPolicy:
             return "waiting_for_stationary_feedback"
         return "ready"
 
-    def arm(self, now, *, clear_stall=False):
-        reason = self.ready(now, ignore_stall=clear_stall)
+    def arm(self, now):
+        reason = self.ready(now)
         if reason != "ready":
             self.stop(reason)
             return False, reason
-        if clear_stall:
-            self.stall_latched = False
-            self.stall_report = None
         self.stop("armed_waiting_command")
         self.armed = True
         self.last_tick = now
@@ -337,15 +307,12 @@ class ControlPolicy:
             self.latest = None
             self.output = (0.0, 0.0)
             self.reason = "armed_waiting_command"
-            self.clear_stall_observation()
-        if (not self.armed and not self.stall_latched
-                and self.reason not in ("operator_stop", "operator_disarmed")
+        if (not self.armed and self.reason not in ("operator_stop", "operator_disarmed")
                 and self.ready(now) == "ready"):
             self.armed = True
             self.reason = "armed_waiting_command"
         if not self.connected or not self.armed or not self.latest or self.holding:
             self.output = (0.0, 0.0)
-            self.clear_stall_observation()
             return STOP_FRAME
         _, speed, turn = self.latest
         old_speed, old_turn = self.output
@@ -375,37 +342,6 @@ class ControlPolicy:
             limit = max_yaw_at_speed(out_speed, ChassisGeometry(c.wheelbase_m, c.track_m, c.max_steering_rad))
             out_turn = max(-limit, min(limit, out_turn))
         self.output = (out_speed, out_turn)
-        # Check the FINAL transmitted speed, after the scan guard and ramp. A
-        # blocked/unknown scan commands zero and must not be mistaken for a
-        # mechanical stall. Count fresh chassis feedback, not repeated ticks.
-        direction = 1 if out_speed > 0 else -1
-        if abs(out_speed) < c.stall_min_command_m_s or self.last_rx is None:
-            self.clear_stall_observation()
-        elif self.stall_direction != direction:
-            self.clear_stall_observation()
-            self.stall_direction = direction
-            self.stall_feedback_at = self.last_rx
-            self.stall_since = now
-        elif self.stall_feedback_at != self.last_rx:
-            elapsed = max(0.0, self.last_rx - self.stall_feedback_at)
-            self.stall_feedback_at = self.last_rx
-            measured = self.last_received["velocity"][0]
-            if math.isfinite(measured):
-                self.stall_progress_m += max(0.0, measured * direction) * elapsed
-                self.stall_feedback_frames += 1
-                if self.stall_progress_m >= c.stall_min_progress_m:
-                    self.stall_since = now
-                    self.stall_progress_m = 0.0
-                    self.stall_feedback_frames = 0
-                elif now - self.stall_since >= c.stall_timeout_s and self.stall_feedback_frames >= 5:
-                    self.stall_report = {"command_m_s": round(out_speed, 3),
-                                         "feedback_m_s": round(measured, 3),
-                                         "progress_m": round(self.stall_progress_m, 3),
-                                         "duration_s": round(now - self.stall_since, 3),
-                                         "feedback_frames": self.stall_feedback_frames}
-                    self.stall_latched = True
-                    self.stop("motion_stall")
-                    return STOP_FRAME
         wire_turn = out_turn * c.steering_scale if c.protocol == "steering_angle" else out_turn
         return build_frame(out_speed, wire_turn, c.mode_byte)
 
@@ -440,7 +376,10 @@ class WheeltecDriver(Node):
         defaults.update(PROFILE['driver'])
         defaults.update(wheelbase_m=PROFILE['geometry']['wheelbase_m'],
                         max_steering_rad=PROFILE['geometry']['max_steer_rad'])
-        defaults.update(port=DEFAULT_PORT, baud=115200, frame_id=PROFILE["frames"]["odom"], base_frame_id=PROFILE["frames"]["base"], publish_tf=False, allow_test_port=False, legacy_commands=False)
+        defaults.update(port=DEFAULT_PORT, baud=115200, frame_id=PROFILE["frames"]["odom"], base_frame_id=PROFILE["frames"]["base"], publish_tf=False, allow_test_port=False, legacy_commands=False,
+                        navigation_uses_lidar=False,
+                        # 部署配置里有没有雷达：deployment/manage.py 按所选配置写进服务单元的环境变量
+                        lidar_installed=os.environ.get("RK3588_LIDAR_INSTALLED", "1") != "0")
         for name, value in defaults.items():
             self.declare_parameter(name, value, ParameterDescriptor(read_only=True))
         gp = lambda k: self.get_parameter(k).value
@@ -453,6 +392,12 @@ class WheeltecDriver(Node):
         if gp("baud") != 115200:
             raise ValueError("verified Wheeltec baud is 115200")
         self.frame_id, self.base_frame_id = gp("frame_id"), gp("base_frame_id")
+        # NAVIGATION 通道只有 RTK 走直线/走路线（line_node）在用。按用户要求这个模式不让雷达参与：
+        # 不做扫掠防撞、不要求雷达在线。急停、命令超时、底盘故障、定位丢失停车照旧。
+        self.navigation_uses_lidar = bool(gp("navigation_uses_lidar"))
+        # 没装雷达（2026-09-25 起默认配置不部署雷达）：健康检查不再要求雷达，待命和急停复位不会卡在
+        # scan_unavailable；需要雷达的跟随、以及配置成走雷达的导航在选择时直接拒绝。
+        self.lidar_installed = bool(gp("lidar_installed"))
         # 独立防撞层参数(guard_ 前缀,与 GuardConfig 字段一一对应)
         guard_defaults = vars(GuardConfig())
         for name, value in guard_defaults.items():
@@ -536,13 +481,30 @@ class WheeltecDriver(Node):
         self.worker = threading.Thread(target=self.io_loop, daemon=True)
         self.worker.start()
 
+    def lidar_bypassed(self, mode=None):
+        """这个模式不经过雷达：没装雷达时一律不经过（要雷达的模式在选择时就拒绝，见 select_motion）；
+        手动（操作员直接接管）；RTK 路线/直线（NAVIGATION）在 navigation_uses_lidar=False 时。"""
+        if not self.lidar_installed:
+            return not self.legacy_commands
+        mode = self.authority.mode if mode is None else mode
+        return not self.legacy_commands and (
+            mode == 'MANUAL' or (mode == 'NAVIGATION' and not self.navigation_uses_lidar))
+
+    def lidar_required(self, source):
+        """选择这个自动任务需要雷达：跟随一律要；导航在 navigation_uses_lidar=True 时要。"""
+        return source == 'follow' or (source == 'navigation' and self.navigation_uses_lidar)
+
     def guard_speed_filter(self, speed, turn, now):
         # Manual drive is the operator's direct override of software collision
-        # monitoring. Keep the policy's driver, stall, speed and timeout checks.
-        if not self.legacy_commands and self.authority.mode == 'MANUAL':
-            self.guard.last_reason = 'guard_manual_override'
+        # monitoring; RTK navigation runs without lidar when configured so.
+        # Keep the policy's driver, stall, speed and timeout checks.
+        if self.lidar_bypassed():
+            self.guard.last_reason = ('guard_no_lidar' if not self.lidar_installed
+                                      else 'guard_manual_override' if self.authority.mode == 'MANUAL'
+                                      else 'guard_navigation_off')
             self.guard.last_gap = None
             self.guard.last_block = None
+            self.guard.last_no_echo_used = False
             return speed, None
         old_speed, old_turn = self.policy.output
         if self.config.protocol == 'steering_angle':
@@ -567,15 +529,23 @@ class WheeltecDriver(Node):
                 self.guard.invalidate()
                 self.scan_health_at = None
                 return
+            # N10P uses -1 intensity for angular slots with no sample. Only a
+            # sampled +inf can be interpreted as a far/no-echo ray; legacy
+            # publishers without this marker keep the conservative behavior.
+            intensities = getattr(msg, 'intensities', None) or ()
+            sampled = (tuple(q != -1.0 for q in intensities)
+                       if len(intensities) == len(msg.ranges) and any(q == -1.0 for q in intensities)
+                       else None)
             self.guard.update_scan(msg.ranges, msg.angle_min, msg.angle_increment,
-                                   msg.range_min, msg.range_max, points_ready - age)
+                                   msg.range_min, msg.range_max, points_ready - age,
+                                   sampled=sampled)
             valid = (math.isfinite(msg.angle_min) and math.isfinite(msg.angle_increment)
                      and msg.angle_increment != 0 and math.isfinite(msg.range_min)
                      and math.isfinite(msg.range_max) and 0 <= msg.range_min < msg.range_max
                      and len(self.guard.points) >= PROFILE['safety']['min_scan_points'])
             self.scan_health_at = points_ready - age if valid else None
 
-    def refresh_motion_health(self, now, *, manual_request=False):
+    def refresh_motion_health(self, now, *, manual_request=False, navigation_request=False):
         p = self.policy
         telemetry = p.last_received or {}
         voltage = telemetry.get('voltage', float('nan'))
@@ -590,7 +560,8 @@ class WheeltecDriver(Node):
             faults.append('feedback_stale')
         manual = (not self.legacy_commands
                   and (manual_request or self.authority.mode == 'MANUAL'))
-        if not manual:
+        no_lidar = manual or self.lidar_bypassed() or (navigation_request and self.lidar_bypassed('NAVIGATION'))
+        if not no_lidar:
             if self.scan_health_at is None:
                 faults.append('scan_unavailable')
             elif not 0 <= now - self.scan_health_at < PROFILE['safety']['scan_timeout_s']:
@@ -630,9 +601,14 @@ class WheeltecDriver(Node):
 
     def select_motion(self, source, request, response):
         with self.lock:
+            if request.data and not self.lidar_installed and self.lidar_required(source):
+                # 先拒绝，不能先接受再因为没有雷达数据转成 FAULT
+                response.success = False
+                response.message = self.authority.mode + ': ' + source + ' needs the lidar, which is not deployed'
+                return response
             now = time.monotonic()
             self.authority.output(now)
-            self.refresh_motion_health(now)
+            self.refresh_motion_health(now, navigation_request=source == 'navigation' and request.data)
             if request.data:
                 response.success = self.authority.select(source)
             else:
@@ -652,7 +628,7 @@ class WheeltecDriver(Node):
             response.success = self.authority.reset()
             if response.success:
                 self.clear_motion_output()
-                response.success, _ = self.policy.arm(now, clear_stall=True)
+                response.success, _ = self.policy.arm(now)
                 if not response.success:
                     self.authority.fault('reset_failed', now=now)
             response.message = 'IDLE; select a new task' if response.success else 'wait for healthy sensors and stationary chassis'
@@ -676,8 +652,7 @@ class WheeltecDriver(Node):
                 if not self.legacy_commands and self.authority.mode in ('ESTOP', 'FAULT'):
                     response.success, response.message = False, 'use /motion/reset first'
                     return response
-                response.success, response.message = self.policy.arm(
-                    time.monotonic(), clear_stall=self.legacy_commands)
+                response.success, response.message = self.policy.arm(time.monotonic())
             else:
                 self.authority.stop(emergency=True)
                 self.policy.stop("operator_disarmed")
@@ -814,16 +789,8 @@ class WheeltecDriver(Node):
                         if not self.legacy_commands:
                             self.apply_motion(now)
                         frame = self.policy.tick(now)
-                        stall_detected = (self.policy.stall_latched
-                                          and self.authority.mode not in ('FAULT', 'ESTOP'))
-                        if stall_detected:
-                            self.authority.fault('motion_stall', now=now)
                         if not self.config.receive_only:
                             self.write_frame(frame)
-                        if stall_detected:
-                            self.get_logger().error(
-                                'Motion stall latched: output/feedback mismatch %s' % self.policy.stall_report)
-                            self.publish_status()
                         # Never replay missed ticks in a burst.
                         next_tx = now + 1 / self.config.tx_hz
                 time.sleep(0.002)
@@ -912,13 +879,16 @@ class WheeltecDriver(Node):
                     "frames_ok": self.parser.good, "frames_bad": self.parser.bad,
                     "bytes_in": self.rx_bytes, "age_ms": round(age * 1000, 1) if age is not None else None,
                     "telemetry": p.last_received, "output_speed_turn": p.output,
-                    "stall_latched": p.stall_latched, "stall_report": p.stall_report,
                     "tx_packets": self.tx_packets, "tx_bytes": self.tx_bytes, "last_tx_hex": self.last_tx_hex,
                     "io_errors": self.io_errors, "last_error": self.last_error,
                     "write_timeouts": self.write_timeouts,
                     "write_timeout_age_s": (round(now - self.last_write_timeout_at, 2)
                                             if self.last_write_timeout_at is not None else None),
                     "guard": {"enabled": self.guard.cfg.enabled,
+                              # RTK 路线/直线模式不经过雷达（用户要求）；app 据此显示"雷达防撞：本模式关闭"
+                              "navigation_uses_lidar": self.navigation_uses_lidar,
+                              "lidar_installed": self.lidar_installed,
+                              "bypassed": self.lidar_bypassed(),
                               "manual_override": (not self.legacy_commands
                                                   and self.authority.mode == 'MANUAL'
                                                   and p.armed and p.latest is not None
@@ -940,6 +910,7 @@ class WheeltecDriver(Node):
                               "scan_age_ms": (round((now - self.guard.scan_time) * 1000)
                                               if self.guard.scan_time is not None else None),
                               "points": len(self.guard.points),
+                              "no_echo_used": self.guard.last_no_echo_used,
                               "interventions": self.guard.interventions},
                     "steering_feedback_available": False, "stop_confirmed": bool(age is not None and age < self.config.feedback_timeout_s and p.stationary_frames >= 5)}
             data['odometry_epoch'] = self.odometry_epoch

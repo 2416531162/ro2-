@@ -280,6 +280,47 @@ def test_failed_activation_restores_previous_release_and_units(tmp_path, monkeyp
     assert len([c for c in calls if c[0]=='start']) == 1  # rollback stays stopped
 
 
+def test_activation_enables_profile_for_boot(tmp_path, monkeypatch):
+    # 断电重启后要自动起来的就是刚启用的这一套（rtk、line 曾经只 start 没 enable，重启后不起）
+    import deployment.manage as deploy
+    base, unit_dir, new = tmp_path/'opt', tmp_path/'units', tmp_path/'new'
+    for path in (base, unit_dir, new):
+        path.mkdir()
+    calls = []
+    monkeypatch.setattr(deploy, 'verify', lambda _: {})
+    monkeypatch.setattr(deploy, 'stop_stack', lambda: None)
+    monkeypatch.setattr(deploy, 'systemctl', lambda *args: calls.append(args))
+    activate(new, base, unit_dir, 'headless')
+    enabled = [c for c in calls if c[0] == 'enable'][0]
+    assert 'rk3588-perception@rtk.service' in enabled and 'rk3588-perception@line.service' in enabled
+    assert 'rk3588-wheeltec.service' in enabled
+    # 不在这个配置里的 ai、gui 都要取消开机自启；配置里有雷达，底盘就要求雷达
+    assert [c for c in calls if c[0] == 'disable'][0] == (
+        'disable', 'rk3588-perception@ai.service', 'rk3588-perception@gui.service')
+    assert 'Environment=RK3588_LIDAR_INSTALLED=1\n' in (unit_dir/'rk3588-wheeltec.service').read_text()
+
+
+def test_default_rtk_profile_deploys_no_camera_lidar_or_follower(tmp_path, monkeypatch):
+    # 默认只部署 RTK 自动驾驶和手动（网页/app 链路、RTK 接收机、走线）；相机、雷达、人体识别、跟随都不起、取消开机自启
+    import deployment.manage as deploy
+    base, unit_dir, new = tmp_path/'opt', tmp_path/'units', tmp_path/'new'
+    for path in (base, unit_dir, new):
+        path.mkdir()
+    calls = []
+    monkeypatch.setattr(deploy, 'verify', lambda _: {})
+    monkeypatch.setattr(deploy, 'stop_stack', lambda: None)
+    monkeypatch.setattr(deploy, 'systemctl', lambda *args: calls.append(args))
+    activate(new, base, unit_dir, deploy.DEFAULT_PROFILE)
+    started = [c for c in calls if c[0] == 'start'][0]
+    assert {'rk3588-perception@web.service', 'rk3588-perception@rtk.service',
+            'rk3588-perception@line.service'} <= set(started)
+    assert not any(('@' + c + '.') in name for name in started for c in ('camera', 'lidar', 'ai', 'follower', 'gui'))
+    disabled = set([c for c in calls if c[0] == 'disable'][0][1:])
+    assert disabled == {'rk3588-perception@' + c + '.service' for c in ('camera', 'lidar', 'ai', 'gui', 'follower')}
+    # 没部署雷达：底盘驱动据此不要求雷达，跟随直接拒绝
+    assert 'Environment=RK3588_LIDAR_INSTALLED=0\n' in (unit_dir/'rk3588-wheeltec.service').read_text()
+
+
 def test_release_cannot_stage_itself_recursively(tmp_path):
     with pytest.raises(ValueError, match='outside source'):
         stage(tmp_path, tmp_path/'radar_system/release')

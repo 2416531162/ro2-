@@ -16,9 +16,16 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 TREES = ('robot_core', 'radar_system', 'wheeltec_protocol', 'deployment', 'docs')
-COMPONENTS = ('camera', 'lidar', 'ai', 'web', 'gui', 'follower')
+COMPONENTS = ('camera', 'lidar', 'ai', 'web', 'gui', 'follower', 'rtk', 'line')
+# rtk 只读接收机、发状态；line（RTK 走直线）启动后空闲，只有操作员在 app 上点「开始」才申请 NAVIGATION
+# 默认配置 rtk 只有 RTK 自动驾驶（路线、A—B 直线）和手动开车（2026-09-25 用户要求）：不部署相机、雷达、
+# 人体识别、跟随。人体识别一个进程在 8GB 的 Orin Nano 上约占 2.4 GB、跟随约 1.6 GB，内存吃紧时整机会卡死。
+# 要跟人时按 follow 配置激活（全套）；底盘驱动按配置里有没有雷达决定要不要雷达（见 units()）。
 PROFILES = {'perception': ('camera', 'lidar', 'ai', 'web'),
-            'follow': COMPONENTS, 'headless': ('camera', 'lidar', 'ai', 'web', 'follower')}
+            'follow': COMPONENTS,
+            'headless': ('camera', 'lidar', 'web', 'follower', 'rtk', 'line'),
+            'rtk': ('web', 'rtk', 'line')}
+DEFAULT_PROFILE = 'rtk'
 
 
 def sha(path):
@@ -79,7 +86,7 @@ def stage(source, destination):
     return release_id
 
 
-def units(base):
+def units(base, profile=DEFAULT_PROFILE):
     # Fixed installation paths avoid systemd/shell quoting surprises.
     runner = str(base/'current/deployment/run_component.sh')
     common = 'After=network.target\n\n[Service]\nType=simple\n'
@@ -87,8 +94,10 @@ def units(base):
     common += 'Environment=HOME=/home/wheeltec\nEnvironment=USER=wheeltec\nEnvironment=ROS_LOG_DIR=/var/log/rk3588\n'
     common += 'KillMode=control-group\nTimeoutStopSec=10\nRestart=on-failure\nRestartSec=2\n'
     end = '\n[Install]\nWantedBy=multi-user.target\n'
+    # 底盘驱动据此决定要不要雷达：没部署雷达时待命、急停复位不要求雷达，跟随直接拒绝
+    lidar = 'Environment=RK3588_LIDAR_INSTALLED=' + ('1' if 'lidar' in PROFILES[profile] else '0') + '\n'
     return {
-        'rk3588-wheeltec.service': '[Unit]\nDescription=RK3588 chassis with motion authority\n'+common+f'ExecStart=/bin/bash {runner} chassis\n'+end,
+        'rk3588-wheeltec.service': '[Unit]\nDescription=RK3588 chassis with motion authority\n'+common+lidar+f'ExecStart=/bin/bash {runner} chassis\n'+end,
         'rk3588-perception@.service': '[Unit]\nDescription=RK3588 perception %i\nPartOf=rk3588-perception.target\n'+common+f'ExecStart=/bin/bash {runner} %i\n'+end,
         'rk3588-perception.target': '[Unit]\nDescription=RK3588 perception services\n'+end,
     }
@@ -135,11 +144,17 @@ def activate(release, base, unit_dir, profile):
     try:
         switch_link(base, release.resolve())
         unit_dir.mkdir(parents=True, exist_ok=True)
-        for name, content in units(base).items():
+        for name, content in units(base, profile).items():
             (unit_dir/name).write_text(content)
         systemctl('daemon-reload')
         systemctl('start', 'rk3588-wheeltec.service', 'rk3588-perception.target',
                   *('rk3588-perception@'+c+'.service' for c in PROFILES[profile]))
+        # 开机自启与刚启用的配置一致：只 start 不 enable 时，断电重启后新加的组件（rtk、line）不会起来
+        systemctl('enable', 'rk3588-wheeltec.service', 'rk3588-perception.target',
+                  *('rk3588-perception@'+c+'.service' for c in PROFILES[profile]))
+        others = [c for c in COMPONENTS if c not in PROFILES[profile]]
+        if others:
+            systemctl('disable', *('rk3588-perception@'+c+'.service' for c in others))
     except Exception:
         rollback(base, unit_dir)
         raise
@@ -168,7 +183,7 @@ def main():
     sub = p.add_subparsers(dest='action', required=True)
     s = sub.add_parser('stage'); s.add_argument('destination', type=Path); s.add_argument('--source', type=Path, default=ROOT)
     v = sub.add_parser('verify'); v.add_argument('release', type=Path)
-    a = sub.add_parser('activate'); a.add_argument('release', type=Path); a.add_argument('--profile', choices=PROFILES, default='headless')
+    a = sub.add_parser('activate'); a.add_argument('release', type=Path); a.add_argument('--profile', choices=PROFILES, default=DEFAULT_PROFILE)
     sub.add_parser('rollback')
     args = p.parse_args()
     if args.action == 'stage':

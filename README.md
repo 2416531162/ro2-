@@ -19,8 +19,9 @@ Shell 脚本；服务单元不再单独解析它。启动日志列出最终 ROS�
 - `radar_system`：ROS 适配与纯跟随引擎分离；相机/雷达关联、扫掠检查、有限脱困、网页及板载显示。
 - `wheeltec_protocol`：唯一串口出口，统一手动/跟随/导航控制权、时效检查与故障停车。
 - `deployment`：整套版本打包、内容校验、服务切换及回滚；服务启动后等待显式选择跟随。
+- 安卓 app「跟随座舱」是独立工程，不在本仓库里（本机路径 `~/Desktop/app/follow-cockpit`）。可以连车看相机与俯视图、开关跟随、换人、手动、急停；不用车时可先连 `radar_system/tools/app_demo_server.py`。
 
-当前跟随使用统一 `/odom`，GNSS 融合定位输入和导航控制入口已留好。卫星驱动、融合定位、航点规划尚未实现。之前移除的 SLAM、点云累积、地图管理、RTK/CORS 服务不在当前运行链路中。
+当前跟随使用统一 `/odom`。RTK 走直线的链路已接好但还没有实车验证：`rtk_node`（UM982 双天线接收机，有 `~/rtk/ntrip.env` 时连 CORS 差分）→ `gnss_fusion`（RTK/双天线/陀螺/轮速融合，见 [GNSS 融合](docs/GNSS_FUSION.md)）→ `line_node`（A→B 直线跟踪，经 NAVIGATION 控制权），在 app 的「直线」模式里操作。弯道路径跟踪（`radar_system/path_tracker.py`，小圆、8 字）只在仿真里验证过（`radar_system/tools/path_sim.py`），还没有接到车上。之前移除的 SLAM、点云累积、地图管理不在当前运行链路中。
 
 ```bash
 # 本机：测试、生成发布包
@@ -28,15 +29,18 @@ python3 -m pytest tests -q
 python3 deployment/manage.py stage artifacts/follow-release
 python3 deployment/manage.py verify artifacts/follow-release
 
-# 开发板：安装发布包后启动已有服务，仍需网页点击跟随
-bash radar_system/start_all.sh headless
+# 开发板：安装发布包后启动已有服务（默认 rtk 配置：网页＋RTK＋走线）
+bash radar_system/start_all.sh
 ```
 
-网页默认端口 `8088`，主页 `/`。完整部署命令、控制接口和 GNSS 接入约束见 [架构说明](docs/ARCHITECTURE_ROADMAP.md)。不能只替换一个目录；新栈需要整套发布。
+网页默认端口 `8088`，主页 `/`；安卓 app 走同一端口的 `/ws` 与 `/video.mjpg`，协议见 [app 连接协议](docs/APP_PROTOCOL.md)。完整部署命令、控制接口和 GNSS 接入约束见 [架构说明](docs/ARCHITECTURE_ROADMAP.md)。不能只替换一个目录；新栈需要整套发布。
+
+默认配置（`rtk`）只有 RTK 自动驾驶和手动开车，不部署相机、雷达、人体识别、跟随；要跟人时按 `follow` 配置激活，见架构说明里的启动配置。
 
 - [视觉模型与跟踪说明](docs/TRACKING.md)
 - [统一配置与标定](docs/TUNING.md)
 - [跟随脱困行为](docs/FOLLOWER_RECOVERY.md)
+- [RTK / IMU / 轮速融合](docs/GNSS_FUSION.md)
 - [驱动接口](wheeltec_protocol/README.md)
 
 本轮视觉模型变更未在 Jetson 上验证，不能将 30 FPS 目标视为已达成或实车验收通过。

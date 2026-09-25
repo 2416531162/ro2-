@@ -44,6 +44,12 @@ robot_load_environment() {
       "$selected" "$setup" "${ROS_DISTRO:-<unset>}" >&2
     return 1
   fi
+  # DDS 只在本机回环上做发现：车上的节点都在这台机器上，app 走的是网页服务的 WebSocket。
+  # 否则节点对外报的是它启动那一刻的 WiFi IP，换了 WiFi（手机热点 ↔ 路由器）以后，之后再启动
+  # 或崩溃重启的节点就找不到先前的节点（2026-09-25：网页服务重启后收不到底盘和 RTK）。
+  # Humble 只认 ROS_LOCALHOST_ONLY（ROS_AUTOMATIC_DISCOVERY_RANGE 是 Iron 起才有的）；
+  # ROS 的 env hook 每次 source setup.bash 都会把它改回 0，所以放在 source 之后。
+  if [ "$ROS_DISTRO" = humble ]; then export ROS_LOCALHOST_ONLY=1; fi
   _ROBOT_ENV_LOADED=1
   export RK3588_RUNTIME_RESOLVED=1
   printf 'runtime: config=%s (%s) ROS=%s [%s] Python=%s model=%s robot_config=%s depth_config=%s\n' \

@@ -190,11 +190,11 @@ class Node:
     def set_param(self, name, value):
         self._params[name] = value
 
-    def create_subscription(self, msg_type, topic, cb, qos):
+    def create_subscription(self, msg_type, topic, cb, qos, **kwargs):
         self.subscriptions_.append((topic, cb))
         return types.SimpleNamespace(topic=topic)
 
-    def create_publisher(self, msg_type, topic, qos):
+    def create_publisher(self, msg_type, topic, qos, **kwargs):
         pub = types.SimpleNamespace(topic=topic, sent=[])
         pub.publish = pub.sent.append
         self.publishers_[topic] = pub
@@ -246,6 +246,8 @@ def install():
     sensor_msg.Image = Image
     sensor_msg.LaserScan = _simple('LaserScan')
     sensor_msg.CameraInfo = _simple('CameraInfo')
+    for name in ('Imu', 'NavSatFix', 'NavSatStatus'):
+        setattr(sensor_msg, name, _simple(name))
     sensor.msg = sensor_msg
 
     std = types.ModuleType('std_msgs'); std_msg = types.ModuleType('std_msgs.msg')

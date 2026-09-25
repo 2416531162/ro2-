@@ -32,6 +32,8 @@ if [ -r "$CAMERA_WORKSPACE" ]; then
         echo "Camera workspace ROS conflict: selected $selected, $CAMERA_WORKSPACE set $ROS_DISTRO" >&2
         exit 1
     fi
+    # 工作空间的 setup.bash 又把 ROS_LOCALHOST_ONLY 改回了 0，重新设一次（原因见 ros_env.sh）
+    if [ "$ROS_DISTRO" = humble ]; then export ROS_LOCALHOST_ONLY=1; fi
     echo "Camera workspace: $CAMERA_WORKSPACE (ROS_DISTRO=$ROS_DISTRO)" >&2
 fi
 

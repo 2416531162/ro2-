@@ -92,12 +92,15 @@ python3 deployment/manage.py stage artifacts/follow-release
 python3 deployment/manage.py verify artifacts/follow-release
 ```
 
-发布目录包含 `robot_core`、`radar_system`、`wheeltec_protocol`、`deployment` 、说明文档和带 SHA256 的清单。验证检查文件集合、内容、Python 语法和配置有效性。将完整目录复制到开发板，例如 `/opt/rk3588/releases/follow-release`，在板端执行：
+发布目录包含 `robot_core`、`radar_system`、`wheeltec_protocol`、`deployment` 、说明文档和带 SHA256 的清单。验证检查文件集合、内容、Python 语法和配置有效性。将完整目录复制到开发板，例如 `/opt/rk3588/releases/follow-release`，在板端先以普通用户跑冒烟测试，通过后再激活：
 
 ```bash
+bash /opt/rk3588/releases/follow-release/deployment/smoke.sh /opt/rk3588/releases/follow-release
 sudo python3 /opt/rk3588/releases/follow-release/deployment/manage.py activate \
-  /opt/rk3588/releases/follow-release --profile headless
+  /opt/rk3588/releases/follow-release          # 不写 --profile 就是默认的 rtk
 ```
+
+冒烟测试用板上真的 rclpy 把 `rtk`、`line` 节点构造一遍再销毁（不开串口、不 spin，换到单独的 ROS 域），能拦住单元测试的 ROS 替身测不出的问题，例如节点类的方法与 `rclpy.Node` 属性同名、直接运行脚本时找不到 `robot_core`。它不检查硬件和实际运行，激活后仍要看服务状态和日志。
 
 激活先停止命名的旧服务，备份原服务单元及 `current` 指向，再切换 `/opt/rk3588/current`，重建服务并启动。启动失败时还原服务与版本，保持停车。回滚同样保持停止，避免旧程序自动恢复任务：
 
@@ -105,7 +108,17 @@ sudo python3 /opt/rk3588/releases/follow-release/deployment/manage.py activate \
 sudo python3 /opt/rk3588/current/deployment/manage.py rollback
 ```
 
-三个启动配置：`perception` 为底盘＋相机＋雷达＋AI＋网页；`headless` 再加被动跟随进程；`follow` 再加板载 GUI。启动服务不会选择 FOLLOW；网页点击跟随或调用服务后才申请控制权。发布器不自动启用开机启动。旧版如果还在独立终端运行，迁移前应停止，确保串口及 TF 只有一个拥有者。
+四个启动配置（底盘驱动 `rk3588-wheeltec` 每个配置都有）：
+- `rtk`（默认）：网页＋RTK＋走直线/路线，只有 RTK 自动驾驶和手动开车，**不部署相机、雷达、人体识别、跟随**；
+- `headless`：再加相机、雷达、被动跟随，不开人体识别；
+- `follow`：全套，含人体识别和板载 GUI；
+- `perception`：相机＋雷达＋人体识别＋网页，调试感知用。
+
+启动服务不会选择 FOLLOW；网页点击跟随或调用服务后才申请控制权。激活时开机自启跟着所选配置走：配置里的组件 enable，其余 disable，断电重启后起来的就是这一套。旧版如果还在独立终端运行，迁移前应停止，确保串口及 TF 只有一个拥有者。
+
+默认配置去掉相机、雷达、跟随（2026-09-25，用户要求，app 同时去掉了跟随、相机画面、雷达俯视图）：8GB 的 Orin Nano 上人体识别一个进程约占 2.4 GB（含显存），跟随的 MPPI（也跑 CUDA）约 1.6 GB，全开时可用内存只剩 0.7 GB，整机有卡死的风险；只留 RTK 这一套时可用约 4.7 GB。要跟人时按 `follow` 配置激活，不要只手动起几个服务：激活时按配置在底盘服务单元里写 `RK3588_LIDAR_INSTALLED`（配置里有雷达为 1，否则为 0）。为 0 时底盘驱动的健康检查不要求雷达（待命、急停复位不会卡在 `scan_unavailable`），跟随、以及 `navigation_uses_lidar=true` 的导航在选择时直接拒绝；手动和 RTK 路线本来就不经过雷达。人体识别 3 s 没发状态时，网页服务拒绝启动跟随（提示“人体识别没在运行”），遥测里 `cam_fps` 为 null、`persons` 为空，不再显示它停下前的旧人框。
+
+ROS 只在本机回环上做 DDS 发现（`radar_system/ros_env.sh` 设 `ROS_LOCALHOST_ONLY=1`，相机工作空间 source 后再设一次）。否则节点对外报的是它启动时的 WiFi IP，换 WiFi（手机热点 ↔ 路由器）后再启动或崩溃重启的节点找不到先前的节点。Humble 不认 `ROS_AUTOMATIC_DISCOVERY_RANGE`；ROS 自带的 env hook 每次 source setup.bash 都会把 `ROS_LOCALHOST_ONLY` 改回 0。在车上用 `ros2` 命令行调试前先 `source /opt/rk3588/current/radar_system/ros_env.sh`，否则可能看不到话题。
 
 安装后 `bash radar_system/start_all.sh headless` 可启动已有服务，`stop_all.sh` 停止。直接运行 `run_follower.sh` 会发起一次显式跟随选择；`--passive` 只等待选择，`--dry-run` 只计算不发运动请求。避免与服务重复启动跟随节点。
 

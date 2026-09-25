@@ -11,6 +11,8 @@ export RK3588_MANAGED_FOLLOWER=1
 case "${1:-}" in
   chassis) exec "$RK3588_PYTHON" -u "$ROOT/wheeltec_protocol/wheeltec_driver.py" --ros-args --params-file "$ROOT/wheeltec_protocol/wheeltec.yaml" ;;
   follower) exec "$RK3588_PYTHON" -u "$ROOT/radar_system/person_follower.py" --passive ;;
+  rtk) exec "$RK3588_PYTHON" -u "$ROOT/radar_system/rtk_node.py" ;;
+  line) exec "$RK3588_PYTHON" -u "$ROOT/radar_system/line_node.py" ;;
   camera|lidar|ai|web|gui) exec bash "$ROOT/radar_system/start_component.sh" "$@" ;;
-  *) echo 'Expected chassis|follower|camera|lidar|ai|web|gui' >&2; exit 2 ;;
+  *) echo 'Expected chassis|follower|rtk|line|camera|lidar|ai|web|gui' >&2; exit 2 ;;
 esac
