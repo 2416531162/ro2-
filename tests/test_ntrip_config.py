@@ -39,6 +39,62 @@ def test_atomic_private_save_and_redaction(tmp_path):
     assert Path(store.path).read_bytes() == before
 
 
+def test_disconnect_persists_keeps_credentials_and_requires_explicit_reconnect(tmp_path):
+    clients = []
+    class Client:
+        def __init__(self, env):
+            self.env, self.stopped = env, False
+            clients.append(self)
+        def start(self):
+            return self
+        def stop(self):
+            self.stopped = True
+    store = CorsConfigStore(str(tmp_path / 'ntrip.env'))
+    saved = store.save(PROFILE)
+    assert saved['enabled']
+    runtime = NtripReload(store.path, Client)
+    paused = store.set_enabled(False)
+    runtime.poll()
+    assert runtime.configured and not runtime.enabled and runtime.error is None
+    assert runtime.applied_revision == paused['revision']
+    assert runtime.client is None and clients[0].stopped
+    assert store.public()['profile'] == saved['profile']
+    assert 'NTRIP_PASS=p\n' in Path(store.path).read_text()
+    assert os.stat(store.path).st_mode & 0o777 == 0o600
+    for _ in range(10):
+        runtime.poll()
+    restarted = NtripReload(store.path, Client)
+    assert restarted.client is None and not restarted.enabled and len(clients) == 1
+    assert store.set_enabled(False)['revision'] == paused['revision']
+    resumed = store.set_enabled(True)
+    restarted.poll()
+    assert resumed['enabled'] and restarted.applied_revision == resumed['revision']
+    assert len(clients) == 2 and clients[1].env['NTRIP_PASS'] == 'p'
+    restarted.stop()
+
+
+def test_old_account_files_remain_enabled_and_invalid_switch_does_not_replace_client(tmp_path):
+    store = CorsConfigStore(str(tmp_path / 'ntrip.env'))
+    store.save(PROFILE)
+    path = Path(store.path)
+    path.write_text(path.read_text().replace('NTRIP_ENABLED=1\n', ''))
+    assert store.public()['enabled']
+    clients = []
+    class Client:
+        def __init__(self, env):
+            self.stopped = False
+            clients.append(self)
+        def start(self):
+            return self
+        def stop(self):
+            self.stopped = True
+    runtime = NtripReload(store.path, Client)
+    path.write_text(path.read_text() + 'NTRIP_ENABLED=wrong\n')
+    runtime.poll()
+    assert runtime.error == 'config_invalid' and not clients[0].stopped
+    runtime.stop()
+
+
 @pytest.mark.parametrize('change', [dict(port=0), dict(port=True), dict(port=1.5), dict(user='u:p'),
                                   dict(host='http://server'), dict(mount='../AUTO'), dict(password=' p'),
                                   dict(password=''), dict(user='u\rtest')])
@@ -143,13 +199,38 @@ def test_http_save_reload_and_receive_corrections(tmp_path, monkeypatch):
             time.sleep(.01)
         assert received and any(b'\xd3' in b for b in received)
         assert caster.ggas
+        assert request('GET')[1]['actions'] == ['disconnect', 'connect']
+        active_client = reload.client
+        status, paused = request('POST', {'action': 'disconnect'})
+        assert status == 200 and paused['configured'] and not paused['enabled']
+        assert 'password' not in paused['profile']
+        reload.poll()
+        assert reload.client is None and not active_client.thread.is_alive()
+        assert reload.applied_revision == paused['revision'] and not reload.enabled
+        assert len(received) > 0
+        count = len(received)
+        active_client._deliver(b'should_not_reach_receiver')
+        assert len(received) == count
+        assert request('POST', {'action': 'disconnect'})[1]['revision'] == paused['revision']
+        assert request('POST', {'action': 'delete'})[0] == 400
+        assert request('POST', {'action': 'connect', 'password': 'ignored'})[0] == 400
+        status, resumed = request('POST', {'action': 'connect'})
+        assert status == 200 and resumed['enabled']
+        reload.poll()
+        deadline = time.monotonic() + 3
+        while len(received) == count and time.monotonic() < deadline:
+            time.sleep(.01)
+        assert len(received) > count and reload.client is not active_client
+        assert reload.applied_revision == resumed['revision']
         status, data = request('POST', PROFILE, {'Origin': 'http://untrusted.example'})
         assert status == 403
         bad = idle(time.monotonic())
         bad['motion']['mode'] = 'FOLLOW'
         monkeypatch.setattr(web, 'snapshot_state', lambda: bad)
         assert request('POST', PROFILE)[0] == 409
-        assert store.public()['revision'] == saved['revision']
+        assert request('POST', {'action': 'disconnect'})[0] == 409
+        assert request('POST', {'action': 'connect'})[0] == 409
+        assert store.public()['revision'] == resumed['revision']
         reload.stop()
         assert not reload.client.thread.is_alive()
     finally:

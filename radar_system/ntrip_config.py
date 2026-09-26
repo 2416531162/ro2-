@@ -53,6 +53,15 @@ def profile_env(profile):
     return {key: str(profile[field]) for field, key in FIELDS.items() if profile[field] != ''}
 
 
+def ntrip_enabled(env):
+    if env is None:
+        return False
+    value = env.get('NTRIP_ENABLED', '1')
+    if value not in ('0', '1'):
+        raise ValueError('NTRIP_ENABLED 应为 0 或 1')
+    return value == '1'
+
+
 def revision(path):
     try:
         info = os.stat(path)
@@ -67,39 +76,60 @@ class CorsConfigStore:
         self.lock = threading.Lock()
 
     def public(self):
+        with self.lock:
+            return self._public()
+
+    def _public(self):
         env = load_ntrip_env(self.path)
         if env is None:
-            return dict(configured=False, revision=None, profile=None)
+            return dict(configured=False, enabled=False, revision=None, profile=None)
         profile = {field: env.get(key, '') for field, key in FIELDS.items() if field != 'password'}
         profile['port'] = int(profile['port'])
         profile['password_set'] = bool(env.get('NTRIP_PASS'))
-        return dict(configured=True, revision=revision(self.path), profile=profile)
+        return dict(configured=True, enabled=ntrip_enabled(env), revision=revision(self.path), profile=profile)
 
     def save(self, value):
         profile = validate_profile(value)
-        content = ''.join('%s=%s\n' % (key, val) for key, val in profile_env(profile).items())
-        parent = os.path.dirname(self.path)
         with self.lock:
-            os.makedirs(parent, mode=0o700, exist_ok=True)
-            if os.path.islink(self.path):
-                raise ValueError('账号文件不能是符号链接')
-            fd, temporary = tempfile.mkstemp(prefix='.ntrip-', dir=parent)
+            return self._write(dict(profile_env(profile), NTRIP_ENABLED='1'))
+
+    def set_enabled(self, enabled):
+        if not isinstance(enabled, bool):
+            raise ValueError('连接开关必须是布尔值')
+        with self.lock:
+            env = load_ntrip_env(self.path)
+            if env is None:
+                raise ValueError('车端尚未配置账号')
+            validate_profile({field: env.get(key, '') for field, key in FIELDS.items()})
+            if ntrip_enabled(env) == enabled:
+                return self._public()
+            # 保留车端凭据，不用平板尚未应用的编辑内容覆盖账号。
+            env['NTRIP_ENABLED'] = '1' if enabled else '0'
+            return self._write(env)
+
+    def _write(self, env):
+        content = ''.join('%s=%s\n' % (key, val) for key, val in env.items())
+        parent = os.path.dirname(self.path)
+        os.makedirs(parent, mode=0o700, exist_ok=True)
+        if os.path.islink(self.path):
+            raise ValueError('账号文件不能是符号链接')
+        fd, temporary = tempfile.mkstemp(prefix='.ntrip-', dir=parent)
+        try:
+            os.fchmod(fd, stat.S_IRUSR | stat.S_IWUSR)
+            with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, self.path)
+            directory = os.open(parent, os.O_RDONLY)
             try:
-                os.fchmod(fd, stat.S_IRUSR | stat.S_IWUSR)
-                with os.fdopen(fd, 'w', encoding='utf-8') as handle:
-                    handle.write(content)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                os.replace(temporary, self.path)
-                directory = os.open(parent, os.O_RDONLY)
-                try:
-                    os.fsync(directory)
-                finally:
-                    os.close(directory)
+                os.fsync(directory)
             finally:
-                if os.path.exists(temporary):
-                    os.unlink(temporary)
-            return self.public()
+                os.close(directory)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+        return self._public()
 
 
 def configuration_allowed(snapshot, now):
@@ -127,6 +157,8 @@ class NtripReload:
         self.client = None
         self.seen = object()
         self.applied_revision = None
+        self.configured = False
+        self.enabled = False
         self.error = 'not_configured'
         self.poll()
 
@@ -136,6 +168,7 @@ class NtripReload:
             if current == self.seen:
                 return
             env = load_ntrip_env(self.path)
+            enabled = ntrip_enabled(env)
             if env is not None:
                 validate_profile({field: env.get(key, '') for field, key in FIELDS.items()})
         except (OSError, ValueError, TypeError):
@@ -146,8 +179,10 @@ class NtripReload:
             self.client = None
         self.seen = current
         self.applied_revision = current
+        self.configured = env is not None
+        self.enabled = enabled
         self.error = None if env else 'not_configured'
-        if env:
+        if enabled:
             try:
                 self.client = self.client_factory(env).start()
             except (OSError, RuntimeError):

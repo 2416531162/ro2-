@@ -205,7 +205,8 @@ class RtkNode(Node):
                                bytes=n['bytes'], rtcm_types=n['rtcm_types'], error=n['error'],
                                age_s=None if n['last_rx'] is None else round(now - n['last_rx'], 1))
         else:
-            st['ntrip'] = dict(configured=False, connected=False, error=self.cors.error)
+            st['ntrip'] = dict(configured=self.cors.configured, connected=False, error=self.cors.error)
+        st['ntrip']['enabled'] = self.cors.enabled
         st['ntrip']['config_revision'] = self.cors.applied_revision
         st['ntrip']['config_error'] = self.cors.error
         return st
