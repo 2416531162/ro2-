@@ -26,6 +26,7 @@ from path_tracker import PathConfig  # noqa: E402
 from runtime_config import PROFILE  # noqa: E402
 
 FIXTURE_DIR = os.path.join(REPO, 'tests', 'fixtures', 'app_protocol')
+BODY = (PROFILE['geometry']['front_m'], PROFILE['geometry']['rear_m'], PROFILE['geometry']['half_width_m'])
 
 
 def sample_snapshot(stale=False):
@@ -113,12 +114,14 @@ def sample_route_line(now=100.0):
             'antenna': {'x': 10.12, 'y': 5.03, 'sol': 'NARROW_INT', 'sigma': 0.011},
             'route': route,
             'route_limits': {'min_radius': round(min_route_radius(), 3), 'max_points': route_plan.MAX_POINTS,
-                             'max_laps': route_plan.MAX_LAPS, 'max_entry_m': route_plan.MAX_ENTRY_M},
+                             'max_laps': route_plan.MAX_LAPS, 'max_entry_m': route_plan.MAX_ENTRY_M,
+                             'body': list(BODY)},
             'pose': {'x': 10.004, 'y': 5.0, 'yaw_deg': 90.3, 'speed': 0.5, 'quality': 'RTK_FIXED',
                      'usable': True, 'sigma_xy': 0.009, 'sigma_yaw_deg': 0.08, 'reasons': []},
             'tracker': {'state': 'RUNNING', 'reason': '', 'e': -0.004, 'heading_err_deg': 0.3, 's': 17.1,
                         'length': 66.4, 'v_cmd': 0.35, 'kappa': 0.0, 'integral': 0.0, 'trim_kappa': 0.0,
-                        'stats': {'rms_m': 0.006, 'max_m': 0.018, 'samples': 700}},
+                        'stats': {'rms_m': 0.006, 'max_m': 0.018, 'samples': 700},
+                        'gear': 'forward', 'section': 1, 'sections': 1, 'switching': False},
             'last_result': {'ok': True, 'message': '申请控制权（接入 3.5 m，全程 66.4 m）', 'id': 'r4',
                             'cmd': 'route_start'}}
 
@@ -152,24 +155,39 @@ def route_geometry_cases():
         ('连线 10cm 密点', dict(path, points=[[3 + 0.1 * i, round(0.4 * math.sin(0.15 * i), 4)] for i in range(60)]),
          [0.5, -0.2, 0.1]),
         ('连线 直角急弯', dict(path, points=[[2, 0], [6, 0], [6, 8]]), [0.0, 0.0, 0.0]),
+        ('连线 缓弯', dict(path, points=[[0, 0], [6, 0], [12, 2], [18, 2.5]]), [-2.0, 0.03, 0.05]),
         ('连线 闭环 2 圈', dict(path, points=[[3, 0], [11, 0], [11, 7], [3, 7]], closed=True, laps=2), [0.0, 0.0, 0.0]),
-        ('错误 连线 起点在正后方', dict(path, points=[[-3, 0], [-6, 0]]), [0.0, 0.0, 0.0]),
-        ('错误 连线 起点贴车侧', dict(path, points=[[0.2, 0.8], [3, 0.8]]), [0.0, 0.0, 0.0]),
+        ('连线 车在起点前方', dict(path, points=[[0, 0], [6, 0], [6, 5]]), [0.3, 0.1, 0.0]),
+        ('连线 起点在正后方', dict(path, points=[[-3, 0], [-6, 0]]), [0.0, 0.0, 0.0]),
+        ('连线 起点贴车侧', dict(path, points=[[0.2, 0.8], [3, 0.8]]), [0.0, 0.0, 0.0]),
+        ('连线 行距 0.8 m 往返', dict(path, points=[[0, 0], [6, 0], [6, 0.8], [0, 0.8]], closed=False), [-2.0, 0.0, 0.0]),
+        ('连线 折返 176°', dict(path, points=[[0, 0], [8, 0], [0, 0.5]]), [-2.0, 0.0, 0.0]),
+        ('连线 闭环 右转 3 圈', dict(path, points=[[13.5, 0], [0, 0], [0, 8], [13.5, 8]], closed=True, laps=3), [16.0, 0.0, math.pi]),
+        ('连线 急弯各角度', dict(path, points=[[0, 0], [6, 0], [6 + 5 * math.cos(math.radians(40)), 5 * math.sin(math.radians(40))],
+                                           [12, 9], [4, 9.5], [0, 3]]), [-2.0, 0.0, 0.0]),
+        ('错误 连线 太远', path, [60.0, 0.0, 0.0]),
     ]
     out = []
     for name, d, car in cases:
         spec = route_plan.parse_spec(d)
+        case = {'name': name, 'route': spec.to_dict(digits=6), 'car': car, 'min_radius': min_route_radius()}
         if spec.kind == 'path':
-            case = {'name': name, 'route': spec.to_dict(digits=6), 'car': car, 'min_radius': min_route_radius()}
+            # 路线本身（不含接入段，app 画图纸、报问题用）和从车位姿起的整趟（app 仿真用）
+            case['body'] = list(BODY)
             try:
-                pieces, entry, dev = route_plan.drawn_reference(route_plan.path_points(spec), tuple(car),
-                                                                min_route_radius())
-                case.update(reference=[list(p) for p in pieces], entry_m=entry, max_dev_m=dev, error=None)
+                route, _ = route_plan._route_sections(spec, min_route_radius(), BODY)
+                case.update(route_sections=[[d_, list(s), [list(p) for p in ps]] for d_, s, ps in route],
+                            cover=route_plan.cover_summary(spec, min_route_radius(), BODY))
+                sections, entry = route_plan.plan(spec, tuple(car), min_route_radius(), body=BODY)
+                case.update(sections=[[s.direction, list(s.path.pieces[0].pose(0.0)),
+                                       [[p.length, p.kappa] for p in s.path.pieces]] for s in sections],
+                            entry_m=entry, error=None)
             except ValueError as exc:
-                case.update(reference=None, entry_m=None, max_dev_m=None, error=str(exc))
+                case.update(sections=None, entry_m=None, error=str(exc))
+                case.setdefault('route_sections', None)
+                case.setdefault('cover', None)
             out.append(case)
             continue
-        case = {'name': name, 'route': spec.to_dict(digits=6), 'car': car, 'min_radius': min_route_radius()}
         try:
             start, pieces = route_plan.loop_pieces(spec, min_route_radius())
             entry = [] if car is None else route_plan.dubins(tuple(car), start, spec.turn_radius)
@@ -180,8 +198,12 @@ def route_geometry_cases():
         except ValueError as exc:
             case.update(start=None, entry=None, pieces=None, error=str(exc))
         out.append(case)
-    return {'max_entry_m': route_plan.MAX_ENTRY_M, 'path_step_m': route_plan.PATH_STEP_M,
-            'path_lookahead_m': route_plan.PATH_LOOKAHEAD_M, 'cases': out}
+    return {'max_entry_m': route_plan.MAX_ENTRY_M, 'cover_tol_m': route_plan.COVER_TOL_M,
+            'vertex_pass_m': route_plan.VERTEX_PASS_M, 'corner_clear_m': route_plan.CORNER_CLEAR_M,
+            'corner_extra_m': list(route_plan.CORNER_EXTRA_M), 'corner_back_m': list(route_plan.CORNER_BACK_M),
+            'min_run_m': route_plan.MIN_RUN_M, 'cusp_tie_m': route_plan.CUSP_TIE_M,
+            'entry_lead_m': route_plan.ENTRY_LEAD_M, 'on_line_m': route_plan.ON_LINE_M,
+            'on_line_deg': route_plan.ON_LINE_DEG, 'body': list(BODY), 'cases': out}
 
 
 def fixture_messages():

@@ -239,6 +239,12 @@ class TestRtkLine(unittest.TestCase):
         fresh = al.rtk_telemetry(g, 100.0)
         self.assertEqual((fresh['stale'], fresh['fix'], fresh['heading_ok']), (False, 'FIXED', True))
         self.assertTrue(fresh['ntrip']['connected'])
+        self.assertIsNone(fresh['ntrip'].get('enabled'))
+        g['ntrip'].update(enabled=False, connected=False, configured=True)
+        stopped = al.rtk_telemetry(g, 100.0)['ntrip']
+        self.assertTrue(stopped['configured'])
+        self.assertFalse(stopped['enabled'])
+        self.assertFalse(stopped['connected'])
         self.assertEqual(al.rtk_telemetry(g, 103.0), {'stale': True})
         self.assertEqual(al.rtk_telemetry(None, 100.0), {'stale': True})
 

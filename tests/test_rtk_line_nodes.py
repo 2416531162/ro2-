@@ -110,6 +110,26 @@ class TestEntrypoints(unittest.TestCase):
 
 class TestRtkNode(unittest.TestCase):
 
+    def test_disconnected_cors_keeps_receiver_and_reports_retained_account(self):
+        from ntrip_config import CorsConfigStore
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as tmp:
+            store = CorsConfigStore(os.path.join(tmp, 'ntrip.env'))
+            store.save(dict(host='127.0.0.1', port=2101, mount='AUTO', user='test', password='test'))
+            disabled = store.set_enabled(False)
+            with patch('rtk_node.NtripClient', side_effect=AssertionError('禁止自动重连')):
+                node = rtk_node.RtkNode('/dev/null', ntrip_env=store.path, serial_factory=lambda: FakeSerial([]))
+                try:
+                    node.publish_status()
+                    ntrip = json.loads(node.publishers_['/gnss/status'].sent[-1].data)['ntrip']
+                    self.assertTrue(ntrip['configured'])
+                    self.assertFalse(ntrip['enabled']); self.assertFalse(ntrip['connected'])
+                    self.assertEqual(ntrip['config_revision'], disabled['revision'])
+                    self.assertIsNone(ntrip['config_error'])
+                    self.assertTrue(node.running)
+                finally:
+                    node.shutdown()
+
     def test_publishes_measurements_and_status(self):
         # 6 个历元的主天线 + 副天线（相距 0.3312 m）+ 测向，测向才有实时基线可核对
         data = ('\r\n'.join([GGA] + epoch_lines(6) + [BESTVEL]) + '\r\n').encode()
@@ -127,7 +147,7 @@ class TestRtkNode(unittest.TestCase):
             node.publish_status()
             st = json.loads(node.publishers_['/gnss/status'].sent[-1].data)
             self.assertEqual((st['rtk'], st['heading_ok'], st['port_open']), ('FIXED', True, True))
-            self.assertEqual(st['ntrip'], dict(configured=False, connected=False, error='not_configured',
+            self.assertEqual(st['ntrip'], dict(configured=False, enabled=False, connected=False, error='not_configured',
                                               config_revision=None, config_error='not_configured'))
             node.write_corrections(b'\xd3\x00')
             self.assertEqual(fake.written, [b'BESTNAVHA 0.05\r\n', b'\xd3\x00'])

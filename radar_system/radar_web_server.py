@@ -35,6 +35,8 @@ from runtime_config import PROFILE
 from motion_client import MotionClient
 from manual_drive import ManualDriveLatch
 import app_link
+import car_display
+from display_control import ScreenControl
 from ntrip_config import CorsConfigStore, configuration_allowed
 from depth_measurement import decode_rgb
 from runtime_config import profile_hash
@@ -51,7 +53,12 @@ VIDEO_HUB = app_link.VideoHub(max_fps=float(os.environ.get('RK3588_APP_VIDEO_FPS
 CAMERA = {'width': 640, 'height': 480, 'fx': 570.3, 'cx': 319.5}
 APP_TELEMETRY_PERIOD_S = 0.10
 APP_RECV_TIMEOUT_S = 3.0     # app 每秒 ping 一次;3 秒没有任何消息视为断线
+# 车载屏幕只读显示（/display）：连着几台平板、车的网络
+APP_SESSIONS = car_display.Sessions()
+NETWORK = car_display.Network()
+APP_VIEW = car_display.AppView()          # 平板地图上正在预览的图纸，车载屏幕跟着显示
 CORS_CONFIG = CorsConfigStore(os.environ.get('RK3588_NTRIP_ENV', '~/rtk/ntrip.env'))
+SCREEN_CONTROL = ScreenControl()
 MANUAL_PUBLISH_PERIOD_S = 0.02
 MANUAL_HEARTBEAT_TIMEOUT_S = 0.75
 
@@ -651,6 +658,17 @@ class RadarHTTPHandler(http.server.BaseHTTPRequestHandler):
         })
 
     def do_GET(self):
+        if self.path == '/api/display':
+            if self.headers.get('Origin'):
+                self._send_json({'ok': False, 'error': 'origin_not_allowed'}, status=403)
+            else:
+                self._send_json(dict(SCREEN_CONTROL.status(), ok=True))
+            return
+        # 车载屏幕只读显示：页面、事件流、车辆模型；不接收指令
+        if self.path.startswith('/display') and car_display.handle(
+                self, snapshot=snapshot_state, name=CAR_NAME, profile=PROFILE, sessions=APP_SESSIONS,
+                network=NETWORK, view=APP_VIEW):
+            return
         if self.path == '/' or self.path.startswith('/index'):
             with open(TEMPLATE_PATH, 'rb') as f:
                 body = f.read()
@@ -694,7 +712,7 @@ class RadarHTTPHandler(http.server.BaseHTTPRequestHandler):
                 snap = snapshot_state()
                 rtk = app_link.rtk_telemetry(snap.get('gnss'), time.monotonic())
                 result.update(ok=True, supported=True, can_apply=configuration_allowed(snap, time.monotonic()),
-                              ntrip=rtk.get('ntrip'), rtk_stale=rtk['stale'])
+                              actions=['disconnect', 'connect'], ntrip=rtk.get('ntrip'), rtk_stale=rtk['stale'])
                 self._send_json(result)
             except (OSError, ValueError, TypeError):
                 self._send_json({'ok': False, 'supported': True, 'error': 'config_unreadable'}, status=500)
@@ -747,6 +765,7 @@ class RadarHTTPHandler(http.server.BaseHTTPRequestHandler):
         session = 'app-' + uuid.uuid4().hex[:10]
         done = threading.Event()
         drove = False
+        APP_SESSIONS.enter()
 
         def pump():
             seq = 0
@@ -817,12 +836,16 @@ class RadarHTTPHandler(http.server.BaseHTTPRequestHandler):
                     else:
                         bridge_node.route_command(cmd)
                         reply(cmd, True, 'forwarded')
+                elif kind == 'view':
+                    APP_VIEW.set(session, cmd['file'])
                 elif kind == 'ping':
                     ws.send_json({'type': 'pong', 't': cmd.get('t'), 'server': time.monotonic()})
         except (app_link.WebSocketClosed, OSError):
             pass
         finally:
             done.set()
+            APP_SESSIONS.leave()
+            APP_VIEW.clear(session)
             if drove and bridge_node is not None:
                 # 断线的那一刻就停,不等 0.75s 心跳超时
                 bridge_node.send_manual_twist(0.0, 0.0)
@@ -865,6 +888,22 @@ class RadarHTTPHandler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         global bridge_node
+        if self.path == '/api/display':
+            if self.headers.get('Origin'):
+                self.close_connection = True
+                self._send_json({'ok': False, 'error': 'origin_not_allowed'}, status=403)
+                return
+            try:
+                req = json.loads(self._read_body(1024).decode('utf-8'))
+                if not isinstance(req, dict) or set(req) != {'action'} or req['action'] not in ('desktop', 'show'):
+                    raise ValueError('invalid_action')
+                reply = SCREEN_CONTROL.request(req['action'])
+                self._send_json(dict(reply, ok=True, status='pending'))
+            except (ValueError, TypeError, UnicodeError):
+                self._send_json({'ok': False, 'error': 'invalid_action'}, status=400)
+            except (OSError, RuntimeError):
+                self._send_json({'ok': False, 'error': 'window_not_running'}, status=503)
+            return
         if self.path == '/api/rtk/cors':
             # 拒绝网页跨源写入；账号只在正文接收，不放 URL、日志或响应里。
             if self.headers.get('Origin'):
@@ -877,7 +916,16 @@ class RadarHTTPHandler(http.server.BaseHTTPRequestHandler):
                     self._send_json({'ok': False, 'error': 'vehicle_not_idle',
                                      'message': '请停车并退出自动作业，等待底盘在线后应用'}, status=409)
                     return
-                saved = CORS_CONFIG.save(req)
+                if isinstance(req, dict) and 'action' in req:
+                    action = req['action']
+                    if set(req) != {'action'} or action not in ('disconnect', 'connect'):
+                        raise ValueError('不支持的差分连接操作')
+                    if not CORS_CONFIG.public()['configured']:
+                        self._send_json({'ok': False, 'error': 'not_configured', 'message': '请先应用车端账号'}, status=400)
+                        return
+                    saved = CORS_CONFIG.set_enabled(action == 'connect')
+                else:
+                    saved = CORS_CONFIG.save(req)
                 # 保存成功不代表 CORS 已连通；RTK 节点加载后通过遥测确认 revision。
                 self._send_json(dict(saved, ok=True, status='pending_reload'))
             except (ValueError, TypeError, UnicodeError):
@@ -983,6 +1031,7 @@ def main():
     t = threading.Thread(target=ros_worker, daemon=True)
     t.start()
     threading.Thread(target=discovery_beacon, daemon=True).start()
+    NETWORK.start()
     server = ThreadedHTTPServer(('0.0.0.0', PORT), RadarHTTPHandler)
     print(f"雷达 / 摄像头跟踪服务: http://0.0.0.0:{PORT}")
     server.serve_forever()

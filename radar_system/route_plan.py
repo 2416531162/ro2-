@@ -1,18 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""路线几何：app 画的路线（连线路线 / 路点折线 / 圆）→ path_tracker.Path（一串等曲率段）。纯计算，不依赖 ROS。
+"""路线几何：app 画的路线（连线路线 / 路点折线 / 圆）→ 分段路径（每段一个 path_tracker.Path，前进或倒车）。
+纯计算，不依赖 ROS。
 
 连线路线  （app 默认，kind='path'）操作员在地图上点出点、自己把点一段段连起来，points 就是按连线顺序的点，
           相邻两点之间走直线：不自动连线；没连回起点就不闭合、不绕圈；连回起点（closed）才按 laps 跑圈。
-          车从当前位姿出发，先满舵转到对准第 1 个点再直线开过去，然后纯追踪（前瞻 PATH_LOOKAHEAD_M）
-          沿连线模拟一遍，曲率限制在车能稳定跟踪的范围内，每 PATH_STEP_M 记一段，得到"车实际能走的线"
-          ——跟踪器跟它，app 也把它画出来。点距不限；比车的最小转弯半径还急的拐角，参考线尽量贴着转过去。
-          第一个点在车后方或紧贴车身侧面（不绕圈到不了）时拒绝。
+          车身中心（车长中点，在后轴前 (front−rear)/2）要压过全部连线，拐角点也压到，不能漏：
+            缓弯  后轴按最小半径的圆弧直接转过去，车身中心离拐角点不超过 COVER_TOL_M，不停车；
+            急弯  掉头补角：车身中心开过拐角 VERTEX_PASS_M 后继续往前，等整车都开出拐角（车尾也过了
+                  CORNER_CLEAR_M）→ 倒车一次，车头摆向下一条边 → 往前开上下一条边，车身中心从拐角后面开始压。
+                  三段都可以打方向，在满足上面顺序的走法里取最短的（Reeds-Shepp 最短路径，Nav2 / OMPL 同一套），
+                  90° 多开约 3.0 m、换向 2 次，是这台车掉 90° 头的最短距离。
+          起步用 Reeds-Shepp 最短路径（可以倒车）开到第一段延长线上、车身中心到第 1 个点前 ENTRY_LEAD_M 处对正，
+          车已经压在第一段延长线上时直接开过去。终点车身中心多走 VERTEX_PASS_M。
 路点折线  相邻路点之间走直线，拐角用半径 turn_radius 的圆弧过渡（圆弧与两边直线相切，方向连续）。
           闭合路线最后一段回到第 1 个路点；多圈时第 1 个路点的拐角同样按圆弧过渡，最后一圈停在第 1 个路点。
 圆        从圆的最南点出发（逆时针时车头朝东、顺时针朝西），转 laps 圈回到这里停车。
-接入      从车当前位姿到路线起点（第 1 个路点、车头朝第 1 段方向；圆为最南点）用 Dubins 最短路径：
-          半径 turn_radius 的圆弧 + 直线 + 圆弧，或三段圆弧。只前进，不倒车。
+接入      路点折线和圆：从车当前位姿到路线起点（第 1 个路点、车头朝第 1 段方向；圆为最南点）用 Dubins
+          最短路径：半径 turn_radius 的圆弧 + 直线 + 圆弧，或三段圆弧。只前进，不倒车。
 
 坐标：本地 ENU 平面（x 东 y 北），偏航东为 0、逆时针为正；曲率左转为正。
 app 端 RouteGeometry.kt 按同样的规则画预览，两边的一致性由 export_app_fixtures 导出的样例检查。
@@ -22,14 +27,20 @@ from dataclasses import dataclass, replace
 
 KINDS = ('path', 'points', 'circle')
 MAX_POINTS = 400
-PATH_STEP_M = 0.1            # 连线路线参考线的步长
-PATH_LOOKAHEAD_M = 1.0       # 纯追踪前瞻距离：直角弯冲出最少（1.0 m 时约 1 m），平缓线仍贴线（几厘米）
-ENTRY_MAX_TURN_RAD = math.pi # 到第一个点之前累计转向超过半圈：要绕圈才能到，不做
-START_REACH_M = 0.2          # 离第一个点这么近算到了（接入段是直线对准它开过去的）
+COVER_TOL_M = 0.05           # 缓弯直接圆弧转过去时，车身中心离拐角点最多这么远；更急的弯掉头补角
+VERTEX_PASS_M = 0.05         # 车身中心开过拐角 / 终点这么远才换向、停车：差一两厘米也压得过去
+CORNER_CLEAR_M = 0.05        # 急弯先把整车开出拐角（车尾也过了拐角这么远）再倒车
+CORNER_EXTRA_M = tuple(0.05 * i for i in range(21))     # 急弯倒车前可以再多往前开这么远（候选，找最短）
+CORNER_BACK_M = (0.0, 0.1, 0.2, 0.3)                    # 倒车后可以停得离拐角再远这么多（候选）
+MIN_RUN_M = 0.05             # 两次换向之间至少开这么远，太短的段控制器跟不上
+CUSP_TIE_M = 0.01            # 一样长的走法里挑换向少的
+ENTRY_LEAD_M = 0.5           # 接入段在车身中心到第 1 个点前这么远对正第一段，控制器到点前已稳住
+ON_LINE_M = 0.05             # 车已压在第一段延长线上（横偏、车头误差都在这以内）就直接开过去
+ON_LINE_DEG = 5.0
 MAX_LAPS = 10
 MAX_COORD_M = 1000.0         # 本地坐标范围（离原点）
 MIN_LEG_M = 0.2              # 相邻路点最小间距
-MAX_TURN_DEG = 170.0         # 拐角转向超过这个角度就是折返，圆弧过渡需要的直线太长
+MAX_TURN_DEG = 170.0         # 路点折线：拐角转向超过这个角度就是折返，圆弧过渡需要的直线太长
 MAX_ENTRY_M = 30.0           # 接入路线最长：车离起点太远时先开近，不替人规划长距离穿越
 TURN_RADIUS_RANGE = (1.0, 20.0)
 CIRCLE_RADIUS_RANGE = (0.5, 100.0)
@@ -120,7 +131,7 @@ def advance(x, y, yaw, length, kappa):
     return x + (math.sin(yaw2) - math.sin(yaw)) / kappa, y - (math.cos(yaw2) - math.cos(yaw)) / kappa, yaw2
 
 
-# ---- 连线路线 ----
+# ---- 连线路线：车压过全部连线 ----
 
 def _polyline(points):
     """去掉重合点（< 1 mm），返回 (点, 累计长度)。"""
@@ -132,33 +143,6 @@ def _polyline(points):
     for a, b in zip(pts, pts[1:]):
         cum.append(cum[-1] + math.hypot(b[0] - a[0], b[1] - a[1]))
     return pts, cum
-
-
-def _point_at(pts, cum, s):
-    if s <= 0.0 or len(pts) == 1:
-        return pts[0]
-    for i in range(1, len(pts)):
-        if s <= cum[i]:
-            u = (s - cum[i - 1]) / (cum[i] - cum[i - 1])
-            return (pts[i - 1][0] + u * (pts[i][0] - pts[i - 1][0]), pts[i - 1][1] + u * (pts[i][1] - pts[i - 1][1]))
-    return pts[-1]
-
-
-def _project(pts, cum, x, y, lo, hi):
-    """折线上路程在 [lo, hi] 内离 (x, y) 最近的点的路程（同样近取路程小的）。"""
-    best_d, best_s = math.inf, lo
-    for i in range(1, len(pts)):
-        a0, a1 = cum[i - 1], cum[i]
-        if a1 < lo or a0 > hi:
-            continue
-        (ax, ay), (bx, by) = pts[i - 1], pts[i]
-        seg = a1 - a0
-        u = ((x - ax) * (bx - ax) + (y - ay) * (by - ay)) / (seg * seg)
-        u = max((lo - a0) / seg, min((hi - a0) / seg, max(0.0, min(1.0, u))))
-        d = math.hypot(x - ax - u * (bx - ax), y - ay - u * (by - ay))
-        if d < best_d - 1e-12:
-            best_d, best_s = d, a0 + u * seg
-    return best_s
 
 
 def path_points(spec):
@@ -173,76 +157,395 @@ def path_length(points):
     return _polyline(points)[1][-1] if points else 0.0
 
 
-def drawn_reference(points, car, min_radius, *, step=PATH_STEP_M, lookahead=PATH_LOOKAHEAD_M):
-    """连线折线 + 车当前位姿 → (参考线分段 [(长度, 曲率), …], 接入长度米, 参考线离连线的最大距离米)。
+def _append(pieces, length, kappa):
+    """加一段；零长度不加，与上一段曲率相同就接上。"""
+    if length <= 1e-9:
+        return
+    if pieces and pieces[-1][1] == kappa:
+        pieces[-1] = (pieces[-1][0] + length, kappa)
+    else:
+        pieces.append((length, kappa))
 
-    还没到第一个点时：满舵转到车头对准它，再直线开过去。到了（START_REACH_M 以内）以后纯追踪：瞄折线上当前投影
-    再往前 lookahead 的点，投影只往前找（不会跳到画线交叉的另一段）；曲率限制在 1/min_radius。终点在前瞻内后
-    直接瞄终点，距离不足一步时补一段直线停在它旁边。到第一个点前累计转向超过半圈、或总里程超过合理上限
-    （车转不过去、越走越偏）时抛 ValueError。
+
+def _offset(p, yaw, d):
+    """从点 p 沿 yaw 方向走 d 米（d 为负往回）。"""
+    return p[0] + d * math.cos(yaw), p[1] + d * math.sin(yaw)
+
+
+class _Sections:
+    """按车头坐标的 (方向, 长度, 曲率) 一段段接起来；方向变了就断开成新的一段。
+
+    输出每段 (方向, 起点位姿, [(长度, 曲率), …])，位姿和曲率都按行进方向（倒车段 yaw = 车头 + π、曲率反号），
+    即 path_tracker.Path 的画法。
     """
-    if not points:
-        raise ValueError('先在地图上点点、连线')
-    pts, cum = _polyline(points)
-    total, kmax = cum[-1], 1.0 / min_radius
-    x, y, yaw = car
-    entry_d = math.hypot(pts[0][0] - x, pts[0][1] - y)
-    limit = 3.0 * (entry_d + total) + 10.0
-    reached = entry_d <= START_REACH_M
-    s = travelled = turned = 0.0
-    entry_m = 0.0 if reached else None
-    pieces, dev = [], 0.0
-    while True:
-        if reached:
-            s = _project(pts, cum, x, y, s, s + 2.0 * lookahead)
-            if s > 0.0:     # 只算沿线走的偏离，开往起点那一段不算
-                px, py = _point_at(pts, cum, s)
-                dev = max(dev, math.hypot(x - px, y - py))
-            final = s + lookahead >= total
-            tx, ty = pts[-1] if final else _point_at(pts, cum, s + lookahead)
-        else:
-            final = total == 0.0
-            tx, ty = pts[0]
-        dx, dy = tx - x, ty - y
-        d = math.hypot(dx, dy)
-        alpha = wrap(math.atan2(dy, dx) - yaw) if d > 1e-9 else 0.0
-        if final and (reached or total == 0.0) and (d <= step or abs(alpha) > math.pi / 2):
-            ahead = d * math.cos(alpha)
-            if ahead > 1e-3:
-                pieces.append((ahead, 0.0))
-            break
-        if d <= 1e-9:
-            k = 0.0
-        elif not reached:
-            # 开往第一个点：先满舵转到车头对准它，再直线开过去（转过的角度最小，不多绕）。
-            # 纯追踪走圆弧到侧面的点要转两倍方位角，60–90° 的点就得转大半圈
-            # 偏角小于 1e-6 rad 就当已对准走直线：残差除以步长会把浮点误差放大（30 m 只差 0.03 mm）
-            k = math.copysign(min(kmax, abs(alpha) / step), alpha) if abs(alpha) > 1e-6 else 0.0
-            if abs(alpha) >= math.pi - 1e-9:
-                k = kmax                       # 正后方：往左转
-        elif abs(alpha) > math.pi / 2:
-            k = kmax if alpha >= 0.0 else -kmax    # 线在车后半边（急弯没跟上）：满舵往回转
-        else:
-            k = max(-kmax, min(kmax, 2.0 * math.sin(alpha) / d))
-        x, y, yaw = advance(x, y, yaw, step, k)
-        pieces.append((step, k))
-        travelled += step
-        if not reached:
-            turned += abs(k) * step
-            if turned > ENTRY_MAX_TURN_RAD:
-                raise ValueError('第一个点在车后方或太靠近车身侧面：车不倒车也不绕圈，到不了。请把第一个点画在车头前方')
-            if math.hypot(pts[0][0] - x, pts[0][1] - y) <= START_REACH_M:
-                reached, entry_m = True, travelled
-        if travelled > limit:
-            raise ValueError('路线里有车转不过去的地方（车最小转弯半径 %.2f m），参考线越走越偏' % min_radius)
-    merged = []
-    for length, k in pieces:
-        if merged and merged[-1][1] == k:
-            merged[-1] = (merged[-1][0] + length, k)
-        else:
-            merged.append((length, k))
-    return merged, (entry_m if entry_m is not None else travelled), dev
 
+    def __init__(self, pose):
+        self.pose, self.out = pose, []
+
+    def add(self, direction, length, kappa):
+        if length <= 1e-9:
+            return
+        x, y, yaw = self.pose
+        if not self.out or self.out[-1][0] != direction:
+            self.out.append((direction, (x, y, wrap(yaw if direction > 0 else yaw + math.pi)), []))
+        _append(self.out[-1][2], length, direction * kappa)
+        self.pose = advance(x, y, yaw, direction * length, kappa)
+
+
+# ---- Reeds-Shepp 最短路径（可以倒车）：公式与 OMPL ReedsSheppStateSpace 相同（Reeds & Shepp 1990）----
+
+_RS_ZERO = 1e-10
+_HALF_PI = 0.5 * math.pi
+
+
+def _rs_mod(x):
+    """取到 [−π, π]。"""
+    v = math.fmod(x, 2.0 * math.pi)
+    if v < -math.pi:
+        v += 2.0 * math.pi
+    elif v > math.pi:
+        v -= 2.0 * math.pi
+    return v
+
+
+def _rs_polar(x, y):
+    return math.hypot(x, y), math.atan2(y, x)
+
+
+def _rs_tau_omega(u, v, xi, eta, phi):
+    delta = _rs_mod(u - v)
+    a = math.sin(u) - math.sin(delta)
+    b = math.cos(u) - math.cos(delta) - 1.0
+    t1 = math.atan2(eta * a - xi * b, xi * a + eta * b)
+    t2 = 2.0 * (math.cos(delta) - math.cos(v) - math.cos(u)) + 3.0
+    tau = _rs_mod(t1 + math.pi) if t2 < 0.0 else _rs_mod(t1)
+    return tau, _rs_mod(tau - u + v - phi)
+
+
+def _rs_lsl(x, y, phi):          # 8.1  L+S+L+
+    u, t = _rs_polar(x - math.sin(phi), y - 1.0 + math.cos(phi))
+    if t >= -_RS_ZERO:
+        v = _rs_mod(phi - t)
+        if v >= -_RS_ZERO:
+            return t, u, v
+    return None
+
+
+def _rs_lsr(x, y, phi):          # 8.2  L+S+R+
+    u1, t1 = _rs_polar(x + math.sin(phi), y - 1.0 - math.cos(phi))
+    u1 = u1 * u1
+    if u1 >= 4.0:
+        u = math.sqrt(u1 - 4.0)
+        t = _rs_mod(t1 + math.atan2(2.0, u))
+        v = _rs_mod(t - phi)
+        if t >= -_RS_ZERO and v >= -_RS_ZERO:
+            return t, u, v
+    return None
+
+
+def _rs_lrl(x, y, phi):          # 8.3  L+R−L
+    u1, theta = _rs_polar(x - math.sin(phi), y - 1.0 + math.cos(phi))
+    if u1 <= 4.0:
+        u = -2.0 * math.asin(0.25 * u1)
+        t = _rs_mod(theta + 0.5 * u + math.pi)
+        v = _rs_mod(phi - t + u)
+        if t >= -_RS_ZERO and u <= _RS_ZERO:
+            return t, u, v
+    return None
+
+
+def _rs_lrlr_a(x, y, phi):       # 8.7  L+R+L−R−
+    xi, eta = x + math.sin(phi), y - 1.0 - math.cos(phi)
+    rho = 0.25 * (2.0 + math.sqrt(xi * xi + eta * eta))
+    if rho <= 1.0:
+        u = math.acos(rho)
+        t, v = _rs_tau_omega(u, -u, xi, eta, phi)
+        if t >= -_RS_ZERO and v <= _RS_ZERO:
+            return t, u, v
+    return None
+
+
+def _rs_lrlr_b(x, y, phi):       # 8.8  L+R−L−R+
+    xi, eta = x + math.sin(phi), y - 1.0 - math.cos(phi)
+    rho = (20.0 - xi * xi - eta * eta) / 16.0
+    if 0.0 <= rho <= 1.0:
+        u = -math.acos(rho)
+        if u >= -_HALF_PI:
+            t, v = _rs_tau_omega(u, u, xi, eta, phi)
+            if t >= -_RS_ZERO and v >= -_RS_ZERO:
+                return t, u, v
+    return None
+
+
+def _rs_lrsl(x, y, phi):         # 8.9  L+R−S−L−
+    rho, theta = _rs_polar(x - math.sin(phi), y - 1.0 + math.cos(phi))
+    if rho >= 2.0:
+        r = math.sqrt(rho * rho - 4.0)
+        u = 2.0 - r
+        t = _rs_mod(theta + math.atan2(r, -2.0))
+        v = _rs_mod(phi - _HALF_PI - t)
+        if t >= -_RS_ZERO and u <= _RS_ZERO and v <= _RS_ZERO:
+            return t, u, v
+    return None
+
+
+def _rs_lrsr(x, y, phi):         # 8.10 L+R−S−R−
+    xi, eta = x + math.sin(phi), y - 1.0 - math.cos(phi)
+    rho, theta = _rs_polar(-eta, xi)
+    if rho >= 2.0:
+        u = 2.0 - rho
+        v = _rs_mod(theta + _HALF_PI - phi)
+        if theta >= -_RS_ZERO and u <= _RS_ZERO and v <= _RS_ZERO:
+            return theta, u, v
+    return None
+
+
+def _rs_lrslr(x, y, phi):        # 8.11 L+R−S−L−R+
+    xi, eta = x + math.sin(phi), y - 1.0 - math.cos(phi)
+    rho, _ = _rs_polar(xi, eta)
+    if rho >= 2.0:
+        u = 4.0 - math.sqrt(rho * rho - 4.0)
+        if u <= _RS_ZERO:
+            t = _rs_mod(math.atan2((4.0 - u) * xi - 2.0 * eta, -2.0 * xi + (u - 4.0) * eta))
+            v = _rs_mod(t - phi)
+            if t >= -_RS_ZERO and v >= -_RS_ZERO:
+                return t, u, v
+    return None
+
+
+# (公式, 字, 反射后的字, 段长排法, 是否用倒序坐标)：每个公式再做时间反转、左右反射、两者都做，共 48 种
+_RS_FAMILIES = (
+    (_rs_lsl, 'LSL', 'RSR', lambda t, u, v: (t, u, v), False),
+    (_rs_lsr, 'LSR', 'RSL', lambda t, u, v: (t, u, v), False),
+    (_rs_lrl, 'LRL', 'RLR', lambda t, u, v: (t, u, v), False),
+    (_rs_lrl, 'LRL', 'RLR', lambda t, u, v: (v, u, t), True),
+    (_rs_lrlr_a, 'LRLR', 'RLRL', lambda t, u, v: (t, u, -u, v), False),
+    (_rs_lrlr_b, 'LRLR', 'RLRL', lambda t, u, v: (t, u, u, v), False),
+    (_rs_lrsl, 'LRSL', 'RLSR', lambda t, u, v: (t, -_HALF_PI, u, v), False),
+    (_rs_lrsr, 'LRSR', 'RLSL', lambda t, u, v: (t, -_HALF_PI, u, v), False),
+    (_rs_lrsl, 'LSRL', 'RSLR', lambda t, u, v: (v, u, -_HALF_PI, t), True),
+    (_rs_lrsr, 'RSRL', 'LSLR', lambda t, u, v: (v, u, -_HALF_PI, t), True),
+    (_rs_lrslr, 'LRSLR', 'RLSRL', lambda t, u, v: (t, -_HALF_PI, u, -_HALF_PI, v), False),
+)
+
+
+def reeds_shepp_paths(start, goal, radius):
+    """start → goal（(x, y, 车头)）的全部 Reeds-Shepp 候选，每个都积分验算过终点（公式或数值出错的直接丢掉）。
+
+    每个候选是 [(方向, 长度, 曲率), …]：方向 +1 前进、−1 倒车，曲率按车头（左转为正），零长度段已去掉。
+    """
+    x0, y0, yaw0 = start
+    dx, dy = goal[0] - x0, goal[1] - y0
+    c, s = math.cos(yaw0), math.sin(yaw0)
+    x, y, phi = (c * dx + s * dy) / radius, (-s * dx + c * dy) / radius, goal[2] - yaw0
+    xb, yb = x * math.cos(phi) + y * math.sin(phi), x * math.sin(phi) - y * math.cos(phi)
+    kappa = {'L': 1.0 / radius, 'R': -1.0 / radius, 'S': 0.0}
+    dist = math.hypot(dx, dy)
+    out = []
+    for fn, word, reflected, order, back in _RS_FAMILIES:
+        px, py = (xb, yb) if back else (x, y)
+        for sx, sy, sphi, flip, w in ((1, 1, 1, 1, word), (-1, 1, -1, -1, word),
+                                      (1, -1, -1, 1, reflected), (-1, -1, 1, -1, reflected)):
+            r = fn(sx * px, sy * py, sphi * phi)
+            if r is None:
+                continue
+            segs = [(1 if flip * a > 0 else -1, abs(a) * radius, kappa[ch])
+                    for ch, a in zip(w, order(*r)) if abs(a) * radius > 1e-6]
+            px_, py_, pyaw = start
+            for d, length, k in segs:
+                px_, py_, pyaw = advance(px_, py_, pyaw, d * length, k)
+            if math.hypot(px_ - goal[0], py_ - goal[1]) > 1e-6 * max(1.0, dist) or abs(wrap(pyaw - goal[2])) > 1e-6:
+                continue
+            out.append(segs)
+    return out
+
+
+def _runs(segs):
+    """连续同方向的段合成一次行驶：[(方向, 路程), …]。"""
+    runs = []
+    for d, length, _ in segs:
+        if runs and runs[-1][0] == d:
+            runs[-1] = (d, runs[-1][1] + length)
+        else:
+            runs.append((d, length))
+    return runs
+
+
+def reeds_shepp(start, goal, radius, *, end_forward=False):
+    """最短的 Reeds-Shepp 路径（一样长时挑换向少的；end_forward 时最后接着前进也算一次换向）。
+
+    两次换向之间太短（< MIN_RUN_M）的不要；都不行返回 None。
+    """
+    best = None
+    for segs in reeds_shepp_paths(start, goal, radius):
+        runs = _runs(segs)
+        if any(length < MIN_RUN_M for _, length in runs):
+            continue
+        cusps = len(runs) - 1 + (1 if end_forward and runs and runs[-1][0] < 0 else 0)
+        cost = sum(length for _, length, _ in segs) + CUSP_TIE_M * cusps
+        if best is None or cost < best[0] - 1e-9:
+            best = (cost, segs)
+    return None if best is None else best[1]
+
+
+_CORNER_CACHE = {}
+
+
+def _corner_move(theta, radius, body, start_x, back_q):
+    """急弯掉头补角（拐角在原点，第一条边沿 +x 过来，左转 θ > 0）：(后轴起点 x, 后轴终点离拐角, [(方向, 长度, 曲率), …])。
+
+    后轴从第一条边上 x = start_x（再多往前 e1）出发 → 前进一段，此时整车开出拐角 CORNER_CLEAR_M → 倒车一段 →
+    前进开到下一条边上、后轴在拐角后 back_q（再多往后 e2）处对正。只取"前进-倒车-前进"的走法（最后的前进可以
+    就是下一条边本身），在里面挑最短的；右转按左右反射。找不到返回 None。
+    """
+    key = (theta, radius, body, start_x, back_q)
+    if key in _CORNER_CACHE:
+        return _CORNER_CACHE[key]
+    front, rear, half = body
+    best = None
+    for e2 in CORNER_BACK_M:
+        q = back_q + e2
+        b = (-q * math.cos(theta), -q * math.sin(theta), theta)
+        for e1 in CORNER_EXTRA_M:
+            a = (start_x + e1, 0.0, 0.0)
+            for segs in reeds_shepp_paths(a, b, radius):
+                runs = _runs(segs)
+                if [r[0] for r in runs] not in ([1, -1], [1, -1, 1]) or any(r[1] < MIN_RUN_M for r in runs):
+                    continue
+                x, y, yaw = a
+                for dr, length, k in segs:
+                    if dr < 0:
+                        break
+                    x, y, yaw = advance(x, y, yaw, length, k)
+                clear = min(x + ax * math.cos(yaw) - ay * math.sin(yaw) for ax in (-rear, front) for ay in (-half, half))
+                if clear < CORNER_CLEAR_M - 1e-9:
+                    continue
+                cost = e1 + e2 + sum(length for _, length, _ in segs)
+                if best is None or cost < best[0] - 1e-9:
+                    best = (cost, a[0], q, segs)
+    _CORNER_CACHE[key] = None if best is None else best[1:]
+    return _CORNER_CACHE[key]
+
+
+def _cover(points, min_radius, body, labels=None):
+    """连线折线 → (分段, 掉头补角的拐角数)，不含接入段。第一段从车身中心在第 1 个点处（或更靠后）出发、前进。"""
+    pts, lab = [], []
+    for p, n in zip(points, labels or range(1, len(points) + 1)):
+        if not pts or math.hypot(p[0] - pts[-1][0], p[1] - pts[-1][1]) >= 1e-3:
+            pts.append((float(p[0]), float(p[1])))
+            lab.append(n)
+    if len(pts) < 2:
+        raise ValueError('先在地图上点点，再把点连起来')
+    r, n, pas = min_radius, len(pts), VERTEX_PASS_M
+    d = 0.5 * (body[0] - body[1])
+    legs = [(math.hypot(b[0] - a[0], b[1] - a[1]), math.atan2(b[1] - a[1], b[0] - a[0])) for a, b in zip(pts, pts[1:])]
+    turn = [0.0] * n
+    for j in range(1, n - 1):
+        turn[j] = wrap(legs[j][1] - legs[j - 1][1])
+    tangent = [r * math.tan(abs(a) / 2.0) for a in turn]
+    smooth = {j for j in range(1, n - 1) if r * (1.0 / math.cos(turn[j] / 2.0) - 1.0) <= COVER_TOL_M + 1e-12}
+    gentle = set(smooth)
+    # 相邻两个缓弯的圆弧切点要在同一条边上放得下，放不下时拐得急的那头改掉头补角
+    changed = True
+    while changed:
+        changed = False
+        for i, (length, _) in enumerate(legs):
+            a, b = i, i + 1
+            if a in smooth and b in smooth and tangent[a] + tangent[b] > length + 1e-9:
+                smooth.discard(a if abs(turn[a]) >= abs(turn[b]) else b)
+                changed = True
+    # 后轴在每条边上直线的起点、终点（相对这条边两头的点，沿边方向）。车身中心在后轴前 d：
+    # 起点后轴在第 1 个点后 d；掉头前车身中心过拐角 pas、掉头后从拐角后 pas 开始；终点车身中心过终点 pas。
+    # 边太短、挨着的缓弯圆弧占了地方时，直线就从圆弧切点开始 / 到圆弧切点为止，车身中心多开一点，照样压得到。
+    first = max(d, tangent[1] - legs[0][0]) if 1 in smooth else d
+    moves = {}
+    for j in range(1, n - 1):
+        if j in smooth:
+            continue
+        start_x = pas - d
+        if j - 1 in smooth:
+            start_x = max(start_x, tangent[j - 1] - legs[j - 1][0])
+        back_q = d + pas
+        if j + 1 in smooth:
+            back_q = max(back_q, tangent[j + 1] - legs[j][0])
+        move = _corner_move(abs(turn[j]), r, body, start_x, back_q)
+        if move is None:
+            if j in gentle:
+                raise ValueError('第 %d 个点附近的弯比车的最小转弯半径 %.2f m 还急，点又太密，车压不全：'
+                                 '把这段画缓些，或把点距拉开' % (lab[j], r))
+            raise ValueError('第 %d 个点拐 %.0f°，算不出掉头走法' % (lab[j], math.degrees(abs(turn[j]))))
+        moves[j] = move
+    h0 = legs[0][1]
+    out = _Sections(_offset(pts[0], h0, -first) + (h0,))
+    for i, (length, h) in enumerate(legs):
+        j = i + 1
+        a = -first if i == 0 else (tangent[i] if i in smooth else -moves[i][1])
+        if j == n - 1:
+            out.add(1, max(0.0, length - a + pas - d), 0.0)
+            break
+        out.add(1, length - a + (-tangent[j] if j in smooth else moves[j][0]), 0.0)
+        if j in smooth:
+            out.add(1, r * abs(turn[j]), math.copysign(1.0 / r, turn[j]))
+            continue
+        side = 1.0 if turn[j] > 0 else -1.0
+        for dr, seg, k in moves[j][2]:
+            out.add(dr, seg, side * k)
+    return out.out, len(moves)
+
+
+def cover_route(points, min_radius, body, *, labels=None):
+    """连线折线 → 车身中心压过全部连线的分段路径（不含接入段）：[(方向, (x, y, yaw), [(长度, 曲率), …]), …]。
+
+    方向 +1 前进、−1 倒车；yaw 和曲率都按行进方向（倒车段 yaw = 车头 + π）。第一段从后轴在第 1 个点后方
+    (front−rear)/2 处出发（车身中心正好在第 1 个点）。body = (front_m, rear_m, half_width_m)，后轴中心到车头、
+    车尾、半宽。labels 是每个点在 app 里的编号（闭合多圈时点会重复），只用于报错。画不成抛 ValueError。
+    """
+    return _cover(points, min_radius, body, labels)[0]
+
+
+def _route_sections(spec, min_radius, body):
+    n = len(spec.points)
+    pts = path_points(spec)
+    return _cover(pts, min_radius, body, [i % n + 1 for i in range(len(pts))])
+
+
+def cover_entry(first, car, min_radius):
+    """车当前位姿（后轴中心）→ 路线第一段（first，前进）的接入：(接入后的分段, 接入路程米)。
+
+    车已压在第一段延长线上、在起点后方：从车在线上的垂足直线开过去。否则用 Reeds-Shepp 最短路径（可以倒车）
+    开到第一段起点后方 ENTRY_LEAD_M 处对正，再直线开进来。
+    """
+    _, (x0, y0, h0), pieces = first
+    x, y, yaw = car
+    along = (x - x0) * math.cos(h0) + (y - y0) * math.sin(h0)
+    side = -(x - x0) * math.sin(h0) + (y - y0) * math.cos(h0)
+    if along <= 1e-9 and abs(side) <= ON_LINE_M and abs(wrap(yaw - h0)) <= math.radians(ON_LINE_DEG):
+        out = _Sections(_offset((x0, y0), h0, along) + (h0,))
+        out.add(1, -along, 0.0)
+        for length, k in pieces:
+            out.add(1, length, k)
+        return out.out, -along
+    goal = _offset((x0, y0), h0, -ENTRY_LEAD_M) + (h0,)
+    way = reeds_shepp(car, goal, min_radius, end_forward=True)
+    if way is None:
+        way = [(1, length, k) for length, k in dubins(car, goal, min_radius)]
+    out = _Sections(car)
+    for d, length, k in way:
+        out.add(d, length, k)
+    out.add(1, ENTRY_LEAD_M, 0.0)
+    for length, k in pieces:
+        out.add(1, length, k)
+    return out.out, sum(length for _, length, _ in way) + ENTRY_LEAD_M
+
+
+def cover_summary(spec, min_radius, body):
+    """连线路线（不含接入段）要开的总路程、换向次数、掉头补角的拐角数；画不成返回 None。"""
+    try:
+        sections, corners = _route_sections(spec, min_radius, body)
+    except ValueError:
+        return None
+    return dict(drive_m=round(sum(length for _, _, pieces in sections for length, _ in pieces), 3),
+                cusps=len(sections) - 1, corners=corners)
 
 # ---- 路线本身（不含接入段）----
 
@@ -376,7 +679,7 @@ def dubins(start, goal, radius):
 
 
 def route_length(spec, min_radius):
-    """(路线长度米, 画不成的原因)，不含接入段；状态里报给 app。"""
+    """(路线长度米, 画不成的原因)，不含接入段；状态里报给 app。连线路线的长度是连线本身（不含倒车补角）。"""
     if spec.kind == 'path':
         if len(spec.points) < 2:
             return None, '先在地图上点点，再把点连起来'
@@ -388,21 +691,26 @@ def route_length(spec, min_radius):
     return sum(p[0] for p in pieces), None
 
 
-def plan(spec, car_pose, min_radius, *, max_entry_m=MAX_ENTRY_M):
-    """整条要跑的路径：从车当前位姿接入 + 路线本身。返回 (Path, 接入长度米)。"""
-    from path_tracker import Path   # path_tracker 依赖 robot_core；只在真要建路径时导入
+def plan(spec, car_pose, min_radius, *, body=None, max_entry_m=MAX_ENTRY_M):
+    """整条要跑的路径：从车当前位姿接入 + 路线本身。返回 ([path_tracker.Section, …], 接入路程米)。
+
+    路点折线和圆只有一段（前进）；连线路线按 cover_route 分成前进、倒车交替的若干段，body 见 cover_route。
+    """
+    from path_tracker import Path, Section   # path_tracker 依赖 robot_core；只在真要建路径时导入
     if spec.kind == 'path':
         if len(spec.points) < 2:
             raise ValueError('先在地图上点点，再把点连起来')
-        pieces, entry_m, _ = drawn_reference(path_points(spec), car_pose, min_radius)
+        if body is None:
+            raise ValueError('连线路线要知道车身尺寸（body）才能算车身中心压线')
+        route, _ = _route_sections(spec, min_radius, body)
+        entry, entry_m = cover_entry(route[0], car_pose, min_radius)
         if entry_m > max_entry_m:
-            raise ValueError('车离路线起点太远（%.0f m，最多 %.0f m），请先把车开近些' % (entry_m, max_entry_m))
-        if not pieces:
-            raise ValueError('车已经在终点上')
-        return Path(car_pose, pieces, name='route_path'), entry_m
+            raise ValueError('车离路线起点太远（接入路线 %.0f m，最多 %.0f m），请先把车开近些' % (entry_m, max_entry_m))
+        return [Section(d, Path(start, pieces, name='route_path_%d' % i))
+                for i, (d, start, pieces) in enumerate(entry + route[1:])], entry_m
     start, loop = loop_pieces(spec, min_radius)
     entry = dubins(car_pose, start, spec.turn_radius)
     entry_m = sum(length for length, _ in entry)
     if entry_m > max_entry_m:
         raise ValueError('车离路线起点太远（接入路线 %.0f m，最多 %.0f m），请先把车开近些' % (entry_m, max_entry_m))
-    return Path(car_pose, entry + loop, name='route_' + spec.kind), entry_m
+    return [Section(1, Path(car_pose, entry + loop, name='route_' + spec.kind))], entry_m

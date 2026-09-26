@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""RTK 路径跟踪闭环仿真：小圆、跑道形、8 字、app 画的路点路线（带接入段）。控制器是 path_tracker.PathTracker。
+"""RTK 路径跟踪闭环仿真：小圆、跑道形、8 字、app 画的路点路线（带接入段）。控制器是 path_tracker.PathTracker；
+app 默认的连线路线（急弯开出去倒车掉头、前进倒车交替）用 run_route 整趟跑 SectionTracker，量"车身中心压没压过全部连线"。
 
 定位来源（source）：
     fused  原始传感器 → 真实融合（默认）：与 line_sim.run_fused 同一套模型——合成 UM982 日志（20 Hz，
@@ -8,15 +9,23 @@
            量化、尖峰）、轮速（2% 比例误差），经 Um982Stream 和 LineMission 的输入转换送进 gnss_fusion。
            ideal=True 时把传感器噪声、延迟都关掉，只剩控制器和底盘本身的误差。
     truth  直接用底盘真值当位姿（无噪声、无延迟），看控制律和底盘动态的下限。
-底盘与 line_sim 相同：指令延迟 60 ms、驱动加速斜坡、舵机 3 rad/s、舵角量化 0.2°，可加舵机零位偏差。
+底盘（chassis）：
+    measured  实车辨识（默认，2026-09-26 两趟连线路线记录）：指令到曲率的纯延迟 前进 0.35 s / 倒车 0.30 s，
+              曲率变化率 3.0 / 0.7 1/m/s，实际曲率 = 指令 × 0.96 / 0.90；车速指令为 0 时固件把前轮回正
+              （Akm_Vz_to_Angle），换向停车后要重新打方向。可加舵机零位偏差。
+    ideal     旧模型（与 line_sim 相同）：指令延迟 60 ms、舵机 3 rad/s、实际曲率 = 指令，停车时保持舵角。
+              比实车乐观得多：同一条连线路线圆弧上 1 cm 对实车 11 cm。
 横偏统计用真值：真实后轴中心到路径的距离。只用于离线调参和回归，不代表实车（没有轮胎侧滑）。
 
     python3 radar_system/tools/path_sim.py                      # 全部场景
     python3 radar_system/tools/path_sim.py circle_r2 figure8_r2 --seeds 8
     python3 radar_system/tools/path_sim.py circle_r2 --source truth
+    python3 radar_system/tools/path_sim.py --cover --seeds 4           # 连线路线车身中心压线（掉头补角）
+    python3 radar_system/tools/path_sim.py --cover --chassis ideal     # 旧的理想底盘模型
 """
 import argparse
 import math
+from dataclasses import replace
 import os
 import random
 import sys
@@ -27,10 +36,62 @@ sys.path.insert(0, os.path.dirname(HERE))
 sys.path.insert(0, os.path.dirname(os.path.dirname(HERE)))
 
 from line_sim import CONTROL_DT, DT, NO_POSE, Chassis, FusedSource, GaussMarkov  # noqa: E402
-from path_tracker import PathConfig, PathTracker, circle, figure8, stadium, wrap  # noqa: E402
+from path_tracker import PathConfig, PathTracker, SectionTracker, circle, figure8, stadium, wrap  # noqa: E402
 import route_plan  # noqa: E402
 
 TRANSIENT_M = 0.6          # 曲率变化后这么长算过渡段，其余算稳态
+
+
+class MeasuredChassis(Chassis):
+    """按实车辨识的转向响应：按曲率建模（纯延迟 → 变化率限幅 → 增益），前进、倒车参数不同。"""
+    DELAY_S = (0.35, 0.30)          # 前进、倒车
+    KAPPA_RATE = (3.0, 0.7)         # 1/m/s
+    GAIN = (0.96, 0.90)             # 实际曲率 / 指令曲率
+    KAPPA_LIMIT = 1.0 / 1.35        # 固件 25° 限位对应的最小半径
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.kappa = 0.0
+
+    def command(self, t, vx, wz):
+        self.queue.append((t + self.DELAY_S[0 if vx >= 0 else 1], vx, wz))
+
+    def step(self, t, dt):
+        while self.queue and self.queue[0][0] <= t:
+            _, vx, wz = self.queue.popleft()
+            self.cmd = (vx, wz)
+        vx, wz = self.cmd
+        if vx == 0 or self.driver_v * vx < 0:
+            self.driver_v = 0.0
+        else:
+            step = self.accel * dt
+            self.driver_v += max(-step, min(step, vx - self.driver_v))
+        rev = 1 if vx < 0 else 0
+        # 固件：车速指令为 0 时左前轮角 0（回正）；否则按 R = vx/wz 打方向
+        target = 0.0 if vx == 0 else self.GAIN[rev] * wz / vx
+        target = max(-self.KAPPA_LIMIT, min(self.KAPPA_LIMIT, target))
+        dk = self.KAPPA_RATE[rev] * dt
+        self.kappa += max(-dk, min(dk, target - self.kappa))
+        want = self.driver_v
+        dv = (want - self.v) * min(1.0, dt / self.tau)
+        speeding_up = abs(want) > abs(self.v) and want * self.v >= 0
+        lim = (self.accel if speeding_up else self.decel) * dt
+        self.v += max(-lim, min(lim, dv))
+        if abs(self.v) < 1e-4 and want == 0:
+            self.v = 0.0
+        kappa = self.kappa
+        if self.quant > 0:
+            q = self.quant / self.geo.wheelbase_m
+            kappa = round(kappa / q) * q
+        kappa += math.tan(self.trim) / self.geo.wheelbase_m
+        self.steer = math.atan(self.kappa * self.geo.wheelbase_m)
+        self.wz = self.v * kappa
+        self.x += self.v * dt * math.cos(self.yaw + self.wz * dt / 2)
+        self.y += self.v * dt * math.sin(self.yaw + self.wz * dt / 2)
+        self.yaw += self.wz * dt
+
+
+CHASSIS = {'measured': MeasuredChassis, 'ideal': Chassis}
 
 
 class TruthSource:
@@ -71,14 +132,14 @@ def _fused_source(seed, ideal, mount_deg, mount_err_deg, sensor_kw):
 
 def run(name='circle_r2.5', *, path=None, cruise=0.5, start=(0.0, 0.0, 0.0), source='fused', ideal=False,
         trim_deg=0.0, quant_deg=0.2, terrain=0.0, mount_deg=1.5, mount_err_deg=0.0, config=None, seed=1,
-        trace=False, warmup_s=3.0, max_time=None, integral0=None, **sensor_kw):
+        trace=False, warmup_s=3.0, max_time=None, integral0=None, chassis_model='measured', **sensor_kw):
     """start=(沿路径, 横偏, 车头误差°)，相对路径起点。返回指标字典。"""
     path = path or SCENARIOS[name]['path']()
     rng = random.Random(seed)
     cfg = config or PathConfig(cruise_mps=cruise)
     tracker = PathTracker(path, cfg)
     x0, y0, yaw0 = path.pose(0.0)
-    car = Chassis(trim_rad=math.radians(trim_deg), steer_quant_rad=math.radians(quant_deg))
+    car = CHASSIS[chassis_model](trim_rad=math.radians(trim_deg), steer_quant_rad=math.radians(quant_deg))
     along, lat, hd = start
     car.x = x0 + along * math.cos(yaw0) - lat * math.sin(yaw0)
     car.y = y0 + along * math.sin(yaw0) + lat * math.cos(yaw0)
@@ -171,6 +232,112 @@ def app_path(points, *, closed=False, laps=1, car=(0.0, 0.0, 0.0)):
     return route_plan.plan(spec, car, ChassisGeometry().min_turn_radius_m / PathConfig().kappa_margin)[0]
 
 
+def cover_gap(polyline, track, step=0.01, cell=0.25):
+    """连线上每一点到轨迹（点列）的最远距离，米。轨迹点间距要远小于要分辨的误差。"""
+    cells = {}
+    for q in track:
+        cells.setdefault((math.floor(q[0] / cell), math.floor(q[1] / cell)), []).append(q)
+    worst = 0.0
+    for a, b in zip(polyline, polyline[1:]):
+        n = max(1, int(math.hypot(b[0] - a[0], b[1] - a[1]) / step))
+        for i in range(n + 1):
+            x, y = a[0] + (b[0] - a[0]) * i / n, a[1] + (b[1] - a[1]) * i / n
+            cx, cy = math.floor(x / cell), math.floor(y / cell)
+            near = [q for dx in (-1, 0, 1) for dy in (-1, 0, 1) for q in cells.get((cx + dx, cy + dy), ())]
+            worst = max(worst, min((math.hypot(x - q[0], y - q[1]) for q in near), default=math.inf))
+    return worst
+
+
+def run_route(name='cover', *, spec, car=(-3.0, 0.0, 0.0), source='fused', ideal=False, trim_deg=0.0, quant_deg=0.2,
+              terrain=0.0, mount_deg=1.5, mount_err_deg=0.0, seed=1, warmup_s=3.0, trace=False, config=None,
+              chassis_model='measured', **sensor_kw):
+    """连线路线整趟（接入 + 掉头补角）：底盘真值的车身中心压没压过全部连线（cover_cm），各类段的真值横偏。"""
+    from robot_core.kinematics import ChassisGeometry
+    from runtime_config import PROFILE
+    g = PROFILE['geometry']
+    body = (g['front_m'], g['rear_m'], g['half_width_m'])
+    centre = 0.5 * (body[0] - body[1])
+    rng = random.Random(seed)
+    cfg = replace(config, cruise_mps=spec.cruise) if config else PathConfig(cruise_mps=spec.cruise)
+    sections, entry_m = route_plan.plan(spec, car, ChassisGeometry().min_turn_radius_m / cfg.kappa_margin, body=body)
+    tracker = SectionTracker(sections, cfg)
+    chassis = CHASSIS[chassis_model](trim_rad=math.radians(trim_deg), steer_quant_rad=math.radians(quant_deg))
+    chassis.x, chassis.y, chassis.yaw = car
+    if source == 'truth':
+        src, warmup_s = TruthSource(), 0.0
+    else:
+        src = _fused_source(seed, ideal, mount_deg, mount_err_deg, sensor_kw)
+    bumps = GaussMarkov(terrain, 0.5, rng)
+    t, next_ctrl, started = 0.0, 0.0, False
+    track, rows = [], []
+    max_time = warmup_s + tracker.length / min(cfg.cruise_mps, 0.3) * 1.5 + 3.0 * tracker.cusps + 20.0
+    while t < max_time:
+        src.step(t, chassis)
+        if t >= next_ctrl - 1e-9:
+            next_ctrl += CONTROL_DT
+            pose = src.pose(t) or NO_POSE
+            if not started and t >= warmup_s:
+                started = tracker.start(pose)
+                if not started and t > warmup_s + 5.0:
+                    break
+            if started:
+                vx, wz = tracker.update(pose, CONTROL_DT)
+                chassis.command(t, vx, wz)
+                index = tracker.index
+                sec = sections[index]
+                # 各段都不长、不自交：全程找最近点就是真值横偏
+                _, e_true, _, k_ref = sec.path.project(chassis.x, chassis.y, extend_start=cfg.start_before_m)
+                rows.append(dict(t=t, section=index, direction=sec.direction, straight=abs(k_ref) < 1e-9,
+                                 e_true=e_true, switching=tracker.switching, state=tracker.st.state, v=chassis.v))
+                if tracker.st.state in ('DONE', 'ABORTED') and abs(chassis.v) < 1e-3:
+                    break
+        chassis.step(t, DT)
+        if terrain > 0:
+            chassis.extra_wz = bumps.step(DT) * chassis.v
+            chassis.yaw += chassis.extra_wz * DT
+        cx, cy = chassis.x + centre * math.cos(chassis.yaw), chassis.y + centre * math.sin(chassis.yaw)
+        if started and (not track or math.hypot(cx - track[-1][0], cy - track[-1][1]) >= 0.002):
+            track.append((cx, cy))
+        t += DT
+    moving = [r for r in rows if not r['switching'] and r['state'] == 'RUNNING']
+
+    def peak(sel):
+        return round(max((abs(r['e_true']) for r in sel), default=0.0) * 100, 2)
+    drawn = route_plan.path_points(spec)
+    end = drawn[-1]
+    result = dict(
+        name=name, state=tracker.st.state, reason=tracker.st.reason, sections=len(sections),
+        cover_cm=round(cover_gap(drawn, track) * 100, 2),
+        vertex_cm=round(max(min(math.hypot(v[0] - q[0], v[1] - q[1]) for q in track) for v in drawn) * 100, 2),
+        fwd_line_max_cm=peak([r for r in moving if r['direction'] > 0 and r['straight'] and r['section'] > 0]),
+        rev_max_cm=peak([r for r in moving if r['direction'] < 0]),
+        arc_max_cm=peak([r for r in moving if r['direction'] > 0 and not r['straight']]),
+        end_err_cm=round(math.hypot(track[-1][0] - end[0], track[-1][1] - end[1]) * 100, 1) if track else None,
+        entry_m=round(entry_m, 2), drive_m=round(tracker.length, 2), time_s=round(t - warmup_s, 1),
+        integral=tracker.st.integral)
+    if trace:
+        result['rows'], result['track'] = rows, track
+    return result
+
+
+def _cover(points, *, closed=False, laps=1, cruise=0.5):
+    return route_plan.parse_spec(dict(kind='path', points=points, closed=closed, laps=laps, cruise=cruise))
+
+
+COVER_SCENARIOS = {
+    # 连线路线：直角、60°、钝角、缓弯、窄行往返、折返，车从第一段延长线、侧面、起点前方出发
+    'rect_2laps': dict(spec=_cover([[0, 0], [8, 0], [8, 6], [0, 6]], closed=True, laps=2)),
+    'rect_side_start': dict(spec=_cover([[0, 0], [8, 0], [8, 6], [0, 6]], closed=True), car=(-1.0, -3.0, math.pi / 2)),
+    'rect_fast_trim2': dict(spec=_cover([[0, 0], [8, 0], [8, 6], [0, 6]], closed=True, cruise=0.8), trim_deg=2.0),
+    'triangle': dict(spec=_cover([[0, 0], [10, 0], [5, 8.66]], closed=True)),
+    'zigzag': dict(spec=_cover([[3, 0], [9, 0], [12, 5], [16, 1], [22, 4]]), car=(0.3, 0.1, 0.0)),
+    'obtuse_146': dict(spec=_cover([[0, 0], [8, 0], [2, 4], [2, 12]])),
+    'gentle': dict(spec=_cover([[0, 0], [6, 0], [12, 2], [18, 2.5]])),
+    'rows_0.8': dict(spec=_cover([[0, 0], [8, 0], [8, 0.8], [0, 0.8], [0, 1.6], [8, 1.6]])),
+    'hairpin_176': dict(spec=_cover([[0, 0], [8, 0], [0, 0.5]])),
+}
+
+
 SCENARIOS = {
     'circle_r3': dict(path=lambda: circle(3.0)),
     'circle_r2.5': dict(path=lambda: circle(2.5)),
@@ -204,13 +371,28 @@ def main():
     p.add_argument('--source', choices=('fused', 'truth'), default='fused')
     p.add_argument('--ideal', action='store_true', help='融合链路但传感器无噪声、无延迟')
     p.add_argument('--seeds', type=int, default=1, help='跑几个随机种子，取最差')
+    p.add_argument('--cover', action='store_true', help='跑连线路线（倒车补角）的压线场景')
+    p.add_argument('--chassis', choices=tuple(CHASSIS), default='measured', help='底盘模型，默认实车辨识')
     args = p.parse_args()
+    if args.cover:
+        keys = ('state', 'cover_cm', 'vertex_cm', 'fwd_line_max_cm', 'rev_max_cm', 'arc_max_cm', 'end_err_cm',
+                'sections', 'drive_m', 'time_s')
+        print('%-18s' % 'scenario' + ''.join('%16s' % k for k in keys))
+        for n in args.names or list(COVER_SCENARIOS):
+            rs = [run_route(n, seed=s, source=args.source, ideal=args.ideal, chassis_model=args.chassis,
+                            **COVER_SCENARIOS[n])
+                  for s in range(1, args.seeds + 1)]
+            worst = {k: ('/'.join(sorted({r[k] for r in rs})) if k == 'state' else max((r[k] for r in rs), key=abs))
+                     for k in keys}
+            print('%-18s' % n + ''.join('%16s' % (worst[k],) for k in keys))
+        return
     keys = ('state', 'rms_cm', 'max_cm', 'arc_rms_cm', 'arc_max_cm', 'trans_max_cm', 'steer_max_deg',
             'saturated_pct', 'end_err_cm', 'fusion_pos_max_cm', 'fusion_yaw_max_deg')
     print('%-20s' % 'scenario' + ''.join('%15s' % k for k in keys))
     for n in args.names or list(SCENARIOS):
         kw = {k: v for k, v in SCENARIOS[n].items() if k != 'path'}
-        rs = [run(n, seed=s, source=args.source, ideal=args.ideal, **kw) for s in range(1, args.seeds + 1)]
+        rs = [run(n, seed=s, source=args.source, ideal=args.ideal, chassis_model=args.chassis, **kw)
+              for s in range(1, args.seeds + 1)]
 
         def worst(k):
             vals = [r[k] for r in rs if isinstance(r[k], (int, float))]

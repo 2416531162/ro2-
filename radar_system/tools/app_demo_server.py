@@ -12,6 +12,7 @@ docs/APP_PROTOCOL.md 提供与车端相同的接口:
 
     python3 radar_system/tools/app_demo_server.py            # 真机与电脑同一 WiFi
     python3 radar_system/tools/app_demo_server.py --line-demo  # 预设一条 7 m 直线,车在 A 点后方 2.5 m
+    python3 radar_system/tools/app_demo_server.py --route-demo # 预设连线矩形并开始跑,浏览器看 /display
     # 安卓模拟器里连 10.0.2.2:8088
 
 走直线、走路线用真实的 LineMission/LineTracker/PathTracker;定位是仿真车真值加厘米级噪声,始终当作 RTK 固定解。
@@ -42,6 +43,7 @@ sys.path.insert(0, HERE)
 from PIL import Image, ImageDraw  # noqa: E402
 
 import app_link  # noqa: E402
+import car_display  # noqa: E402
 import follow_sim as fs  # noqa: E402
 from runtime_config import PROFILE, profile_hash  # noqa: E402
 from robot_core.kinematics import ChassisGeometry  # noqa: E402
@@ -126,6 +128,15 @@ class DemoCar:
         self.mission.points = {'A': f.to_geodetic(0.0, 0.0), 'B': f.to_geodetic(length, 0.0)}
         car = self.sim.car
         car.x, car.y, car.yaw = -2.5, 0.25, math.radians(6.0)
+
+    def preset_route(self):
+        """--route-demo：一个 9 × 5 m 的连线矩形（四个直角都要开出去倒车掉头），车在起点后方，直接开始跑。"""
+        car = self.sim.car
+        car.x, car.y, car.yaw = -5.5, -2.0, 0.0
+        route = dict(kind='path', points=[[-3.0, -2.0], [6.0, -2.0], [6.0, 3.0], [-3.0, 3.0]], closed=True,
+                     laps=1, cruise=0.5)
+        ok, message = self.mission.command({'cmd': 'route_start', 'route': route}, self.sim.t)
+        self.line_result = dict(ok=ok, message=message, id='demo', cmd='route_start')
 
     def _on_status(self, data):
         self.status = data
@@ -287,7 +298,17 @@ class DemoCar:
                 'follower': follow,
                 'gnss': {'_rx_monotonic': time.monotonic(), 'receiver_ok': True, 'rtk': 'FIXED', 'sats': 31,
                          'diff_age': 1.0, 'sigma_h': 0.008, 'heading_ok': True, 'baseline_m': 0.331,
-                         'ntrip': {'configured': True, 'connected': True, 'error': None, 'age_s': 0.5}},
+                         'antennas': {
+                             'ant1': {'available': True, 'source': 'BESTPOSA', 'sol': 'NARROW_INT', 'fix': 'FIXED',
+                                      'sats_used': 31, 'sats_tracked': 38, 'age_s': 0.1},
+                             'ant2': {'available': True, 'source': 'BESTNAVHA', 'sol': 'NARROW_INT', 'fix': 'FIXED',
+                                      'sats_used': 28, 'sats_tracked': 36, 'age_s': 0.1, 'offset_m': 0.331,
+                                      'consistent': True}},
+                         'heading': {'sol': 'NARROW_INT', 'fix': 'FIXED', 'sats_used': 27, 'sats_tracked': 35,
+                                     'length_m': 0.331, 'pitch_deg': 0.4, 'sigma_deg': 0.12, 'ref_m': 0.331,
+                                     'valid': True},
+                         'ntrip': {'configured': True, 'connected': True, 'error': None, 'age_s': 0.5,
+                                   'bytes': int(1e6 + 900 * time.monotonic()) % 10 ** 7}},
                 'line': dict(self.mission.status(), motion_mode=self.mode, last_result=self.line_result,
                              _rx_monotonic=time.monotonic()),
             }
@@ -338,6 +359,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return
 
     def do_GET(self):
+        # 车载屏幕只读显示（与真车同一份页面和事件流）
+        if self.path.startswith('/display') and car_display.handle(
+                self, snapshot=CAR.snapshot, name='演示车 (仿真)', profile=PROFILE, sessions=SESSIONS, network=NETWORK,
+                view=VIEW):
+            return
         if self.path == '/ws':
             return self.serve_ws()
         if self.path.split('?')[0] == '/video.mjpg':
@@ -394,6 +420,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         ws = app_link.WebSocket(self.rfile, self.wfile)
         session = 'demo-' + uuid.uuid4().hex[:8]
         done = threading.Event()
+        SESSIONS.enter()
 
         def pump():
             seq = 0
@@ -444,14 +471,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 elif kind == 'route':
                     CAR.route_command(cmd)
                     ack(cmd, True, 'forwarded')
+                elif kind == 'view':
+                    VIEW.set(session, cmd['file'])
                 elif kind == 'ping':
                     ws.send_json({'type': 'pong', 't': cmd.get('t'), 'server': time.monotonic()})
         except (app_link.WebSocketClosed, OSError):
             pass
         finally:
             done.set()
+            SESSIONS.leave()
+            VIEW.clear(session)
             CAR.release(session)
             ws.close()
+
+
+SESSIONS = car_display.Sessions()
+NETWORK = car_display.Network()
+VIEW = car_display.AppView()
 
 
 class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
@@ -476,14 +512,19 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--port', type=int, default=8088)
     p.add_argument('--line-demo', action='store_true', help='预设一条 7 m 直线,车停在 A 点后方')
+    p.add_argument('--route-demo', action='store_true', help='预设一个连线矩形并直接开始跑（看车载屏幕 /display）')
     args = p.parse_args()
     CAR = DemoCar()
     if args.line_demo:
         CAR.preset_line()
+    if args.route_demo:
+        CAR.preset_route()
+    NETWORK.start()
     threading.Thread(target=CAR.run_forever, daemon=True).start()
     threading.Thread(target=beacon_loop, args=(args.port,), daemon=True).start()
     server = Server(('0.0.0.0', args.port), Handler)
     print(f'app 演示服务器: ws://0.0.0.0:{args.port}/ws  (模拟器连 10.0.2.2:{args.port})', flush=True)
+    print(f'车载屏幕显示: http://127.0.0.1:{args.port}/display', flush=True)
     server.serve_forever()
 
 

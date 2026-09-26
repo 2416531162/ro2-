@@ -238,6 +238,40 @@ def parse_command(text):
                 out['route'] = route_plan.parse_spec(msg['route']).to_dict(digits=4)
             except ValueError as exc:
                 raise CommandError('route: ' + str(exc)) from exc
+    elif kind == 'view':
+        # 平板地图上正在看的图纸（导入文件、还没应用到车）或 null；只给车载屏幕跟着显示，不改车上存的路线
+        f = msg.get('file')
+        if f is None:
+            out['file'] = None
+        elif isinstance(f, dict):
+            import route_plan
+            try:
+                route = route_plan.parse_spec(f.get('route')).to_dict(digits=4)
+            except ValueError as exc:
+                raise CommandError('view.file.route: ' + str(exc)) from exc
+            origin = f.get('origin')
+            if origin is not None:
+                if not isinstance(origin, (list, tuple)) or len(origin) != 2:
+                    raise CommandError('view.file.origin 必须是 [纬度, 经度] 或 null')
+                origin = [_finite(origin[0], 'origin', -1e9, 1e9), _finite(origin[1], 'origin', -1e9, 1e9)]
+                if abs(origin[0]) > 90.0 or abs(origin[1]) > 180.0:
+                    raise CommandError('view.file.origin 经纬度超出范围')     # 不夹到范围里，错的原点不显示
+            out['file'] = {'name': str(f.get('name') or '')[:64], 'route': route, 'origin': origin}
+            if 'control_points' in f:
+                controls = f['control_points']
+                if not isinstance(controls, list) or not 2 <= len(controls) <= 400:
+                    raise CommandError('view.file.control_points 至少 2 个，最多 400 个')
+                points = []
+                for point in controls:
+                    if not isinstance(point, (list, tuple)) or len(point) != 2:
+                        raise CommandError('control_points 每个点必须是 [东, 北]')
+                    pair = [_finite(v, 'control_points', -math.inf, math.inf) for v in point]
+                    if any(abs(v) > 1000 for v in pair):
+                        raise CommandError('control_points 坐标超出 ±1000 m')
+                    points.append(pair)
+                out['file']['control_points'] = points
+        else:
+            raise CommandError('view.file 必须是对象或 null')
     elif kind not in ('estop', 'reset'):
         raise CommandError('未知指令类型: ' + str(kind)[:32])
     return out
@@ -357,6 +391,7 @@ def rtk_telemetry(gnss, now):
                 k: g['heading'].get(k) for k in ('sol', 'fix', 'sats_used', 'sats_tracked', 'length_m', 'pitch_deg',
                                                   'sigma_deg', 'ref_m', 'valid')},
             'ntrip': {'configured': bool(n.get('configured')), 'connected': bool(n.get('connected')),
+                      **({'enabled': n['enabled']} if isinstance(n.get('enabled'), bool) else {}),
                       'error': n.get('error'), 'age_s': _num(n.get('age_s'), 1),
                       'config_revision': n.get('config_revision'), 'config_error': n.get('config_error'),
                       'bytes': n.get('bytes', 0)}}
@@ -382,7 +417,10 @@ def line_telemetry(line, now):
         'track': {'state': tr.get('state'), 'reason': tr.get('reason'), 'e': _num(tr.get('e'), 4),
                   'heading_err_deg': _num(tr.get('heading_err_deg'), 2), 's': _num(tr.get('s'), 3),
                   'length': _num(tr.get('length'), 3), 'v_cmd': _num(tr.get('v_cmd')),
-                  'rms': _num(stats.get('rms_m'), 4), 'max': _num(stats.get('max_m'), 4)},
+                  'rms': _num(stats.get('rms_m'), 4), 'max': _num(stats.get('max_m'), 4),
+                  # 连线路线倒车补角：当前档位（forward/reverse）、第几段 / 共几段、是否在换向点等车停稳
+                  'gear': tr.get('gear', 'forward'), 'section': tr.get('section', 1),
+                  'sections': tr.get('sections', 1), 'switching': bool(tr.get('switching', False))},
         'last_result': ln.get('last_result'),
         # 路线作业：地图原点（经纬度）、天线原始定位（融合位姿没有时也能在地图上画车的位置）、车上存的路线
         'task': ln.get('task', 'line'), 'origin': ln.get('origin'), 'antenna': ln.get('antenna'),

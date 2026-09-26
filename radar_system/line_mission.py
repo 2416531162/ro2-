@@ -21,7 +21,7 @@ import time
 
 import route_plan
 from line_tracker import LineConfig, LineTracker
-from path_tracker import PathConfig, PathTracker
+from path_tracker import PathConfig, SectionTracker
 
 SELECT_TIMEOUT_S = 3.0
 ANTENNA_STALE_S = 2.0       # 天线定位这么久没更新就不在状态里报
@@ -48,14 +48,22 @@ def pose_problem(pose):
 
 class LineMission:
     def __init__(self, fusion, samples, tracker=None, *, state_path=None, log_dir=None, route_path=None,
-                 path_config=None):
-        """fusion 实现 docs 里约定的 GnssFusion 接口；samples 提供 ImuSample 等输入类型（通常就是 gnss_fusion 模块）。"""
+                 path_config=None, body=None):
+        """fusion 实现 docs 里约定的 GnssFusion 接口；samples 提供 ImuSample 等输入类型（通常就是 gnss_fusion 模块）。
+
+        body = (后轴中心到车头, 到车尾, 半宽) 米，连线路线按车身中心压线；默认取共享底盘配置。
+        """
         self.fusion, self.samples = fusion, samples
         self.tracker = tracker or LineTracker(LineConfig())
         self.line_cfg, self.geo = self.tracker.cfg, self.tracker.geo
         self.path_cfg = path_config or PathConfig()
         # 路线曲率最多用到底盘最大曲率的 kappa_margin，剩下的留给纠偏（与 PathTracker 的检查一致）
         self.min_route_radius = self.geo.min_turn_radius_m / self.path_cfg.kappa_margin
+        if body is None:
+            from runtime_config import PROFILE
+            g = PROFILE['geometry']
+            body = (g['front_m'], g['rear_m'], g['half_width_m'])
+        self.body = tuple(float(v) for v in body)
         self.state_path, self.log_dir, self.route_path = state_path, log_dir, route_path
         self.task = 'line'              # 当前（或最近一次）任务：line / route
         self.points = {}                # 'A'/'B' -> (lat, lon)
@@ -230,9 +238,9 @@ class LineMission:
             spec = self._route_local()
             k = self.line_cfg.track_x_m     # 与直线相同：控制点（默认后轴中心）压在路线上
             car = (pose.x + k * math.cos(pose.yaw), pose.y + k * math.sin(pose.yaw), pose.yaw)
-            path, entry_m = route_plan.plan(spec, car, self.min_route_radius)
+            sections, entry_m = route_plan.plan(spec, car, self.min_route_radius, body=self.body)
             cfg = dataclasses.replace(self.path_cfg, cruise_mps=spec.cruise, track_x_m=k)
-            tracker = PathTracker(path, cfg, self.geo)
+            tracker = SectionTracker(sections, cfg, self.geo)
         except ValueError as exc:
             return False, str(exc)
         ok, why = tracker.check_start(pose)
@@ -240,7 +248,8 @@ class LineMission:
             return False, why
         self.tracker, self.task, self.cruise = tracker, 'route', spec.cruise
         self.phase, self.select_since = 'SELECTING', now
-        self.message = '申请控制权（接入 %.1f m，全程 %.1f m）' % (entry_m, path.length)
+        self.message = '申请控制权（接入 %.1f m，全程 %.1f m%s）' % (
+            entry_m, tracker.length, '，换向 %d 次' % tracker.cusps if tracker.cusps else '')
         return True, self.message
 
     def _store_route(self, spec):
@@ -286,6 +295,8 @@ class LineMission:
         out['rev'] = self.route_rev
         length, out['problem'] = route_plan.route_length(spec, self.min_route_radius)
         out['length'] = None if length is None else round(length, 3)
+        # 连线路线：车身中心压过全部连线要开的总路程（含掉头补角）、换向次数、掉头补角的拐角数
+        out['cover'] = route_plan.cover_summary(spec, self.min_route_radius, self.body) if spec.kind == 'path' else None
         self._route_cache = (key, out)
         return out
 
@@ -421,7 +432,9 @@ class LineMission:
                                origin=self._origin(), antenna=self._antenna_status(), route=self._route_status(),
                                route_limits=dict(min_radius=round(self.min_route_radius, 3),
                                                  max_points=route_plan.MAX_POINTS, max_laps=route_plan.MAX_LAPS,
-                                                 max_entry_m=route_plan.MAX_ENTRY_M),
+                                                 max_entry_m=route_plan.MAX_ENTRY_M,
+                                                 # 连线路线压线用的车身：后轴中心到车头、车尾、半宽（app 画同样的预览）
+                                                 body=[round(v, 4) for v in self.body]),
                                calibration=calibration() if callable(calibration) else None))
 
 

@@ -342,7 +342,7 @@ class TestRoute(Base):
         self.m.command({'cmd': 'route_start', 'route': dict(RECT, laps=3)}, 0.0)
         self.drive(0.05, 90.0)                                              # 约 1.3 圈
         s_before = self.m.tracker.st.s
-        lap = self.m.tracker.path.length / 3
+        lap = self.m.tracker.length / 3
         self.assertGreater(s_before, lap)
         p = self.fusion.current
         self.fusion.current = FakeFusion.make(p.x, p.y, math.degrees(p.yaw), usable=False)
@@ -362,6 +362,11 @@ class TestRoute(Base):
         trim_line = -self.m.line_cfg.ki_per_m2 * 0.05
         self.assertAlmostEqual(self.m.tracker.status()['trim_kappa'], trim_line, places=4)
 
+    def centre(self):
+        """车身中心（后轴前 (车头 − 车尾)/2）。"""
+        p, (front, rear, _) = self.fusion.current, self.m.body
+        return p.x + 0.5 * (front - rear) * math.cos(p.yaw), p.y + 0.5 * (front - rear) * math.sin(p.yaw)
+
     def test_connected_points_route_runs_once_and_stops_on_last_point(self):
         # 操作员点的点按连线顺序走：先开到第 1 个点，再到第 2、3 个点，没连回起点就不绕圈
         path = dict(kind='path', points=[[3, 0], [10, 0], [10, 6]], closed=False, laps=3, cruise=0.5)
@@ -370,17 +375,62 @@ class TestRoute(Base):
         self.assertTrue(ok, msg)
         st = self.m.status()['route']
         self.assertEqual((st['kind'], st['laps'], st['closed'], st['length']), ('path', 1, False, 13.0))
+        self.assertEqual(self.m.status()['route_limits']['body'], [0.67, 0.08, 0.335])
         out, _ = self.drive(0.05, 200.0)
         self.assertEqual(self.m.message, '路线完成')
-        p = self.fusion.current
-        self.assertLess(math.hypot(p.x - 10, p.y - 6), 0.1)
+        x, y = self.centre()                                               # 车身中心停在终点后 5 cm
+        self.assertLess(math.hypot(x - 10, y - 6.05), 0.05)
         self.assertLess(self.m.tracker.status()['stats']['max_m'], 0.05)    # 跟参考线的误差
 
-    def test_connected_points_start_behind_is_refused(self):
+    def test_connected_points_right_angle_is_fully_driven_over(self):
+        # 直角：车身中心开过拐角 → 整车开出去 → 倒车一次 → 往前开上下一条边；车身中心压过全部连线，拐角点也压到
+        path = dict(kind='path', points=[[0, 0], [6, 0], [6, 5]], closed=False, cruise=0.5)
+        self.fusion.current = FakeFusion.make(-2.0, 0.0, 0.0)
+        ok, msg = self.m.command({'cmd': 'route_start', 'route': path}, 0.0)
+        self.assertTrue(ok, msg)
+        self.assertIn('换向 2 次', msg)
+        cover = self.m.status()['route']['cover']
+        self.assertEqual((cover['cusps'], cover['corners']), (2, 1))
+        trace, gears, t = [], [], 0.0
+        while t < 200.0:
+            out = self.m.tick(t, 'NAVIGATION')
+            p = self.fusion.current
+            if self.m.phase == 'RUNNING':
+                gear = self.m.tracker.status()['gear']
+                if not gears or gears[-1] != gear:
+                    gears.append(gear)
+            yaw = p.yaw + out[1] * 0.05
+            self.fusion.current = FakeFusion.make(p.x + out[0] * 0.05 * math.cos(yaw),
+                                                  p.y + out[0] * 0.05 * math.sin(yaw), math.degrees(yaw), speed=out[0])
+            trace.append(self.centre())
+            t += 0.05
+            if self.m.phase == 'IDLE' and out[2] is False:
+                break
+        self.assertEqual(self.m.message, '路线完成')
+        self.assertEqual(gears, ['forward', 'reverse', 'forward'])
+        for i in range(0, 1101):                                             # 连线上每 1 cm 一点
+            q = (i / 100.0, 0.0) if i <= 600 else (6.0, (i - 600) / 100.0)
+            self.assertLess(min(math.hypot(q[0] - x, q[1] - y) for x, y in trace), 0.03, q)
+
+    def test_connected_points_start_behind_turns_around(self):
+        # 第一个点在车正后方：倒车掉头开过去
         self.fusion.current = FakeFusion.make(0.0, 0.0, 0.0)
-        ok, msg = self.m.command({'cmd': 'route_start', 'route': dict(kind='path', points=[[-3, 0], [-6, 0]])}, 0.0)
-        self.assertFalse(ok)
-        self.assertIn('车头前方', msg)
+        ok, msg = self.m.command({'cmd': 'route_start', 'route': dict(kind='path', points=[[-3, 0], [-9, 0]])}, 0.0)
+        self.assertTrue(ok, msg)
+        self.drive(0.05, 200.0)
+        self.assertEqual(self.m.message, '路线完成')
+        x, y = self.centre()
+        self.assertLess(math.hypot(x + 9.05, y), 0.05)
+
+    def test_connected_points_short_rows_need_no_long_sides(self):
+        # 行距 0.8 m 的往返：掉头在拐角外面完成，不要求两边有长直线
+        route = dict(kind='path', points=[[0, 0], [6, 0], [6, 0.8], [0, 0.8]], closed=False)
+        self.m.command({'cmd': 'route_set', 'route': route}, 0.0)
+        st = self.m.status()['route']
+        self.assertIsNone(st['problem'])
+        self.assertEqual((st['cover']['corners'], st['cover']['cusps']), (2, 4))
+        self.fusion.current = FakeFusion.make(-2.0, 0.0, 0.0)
+        self.assertTrue(self.m.command({'cmd': 'route_start'}, 0.0)[0])
 
     def test_antenna_position_is_reported_while_fresh(self):
         self.m.on_gnss(dict(kind='fix', t=1.0, lat=30.00002, lon=120.00001, height=20.0, sol='NARROW_FLOAT',
