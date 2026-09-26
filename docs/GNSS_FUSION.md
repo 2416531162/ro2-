@@ -96,6 +96,12 @@ IMU 或轮速超过时效后不无限保持旧输入继续推算；角度不确�
 （东、北）的实时距离核对测向，结论写在 `/gnss/raw` 测向消息的 `valid` 里（距离不足 0.10 m 视为室内转发器，
 不算）；`line_node` 只把 `valid` 为真的测向交给融合。
 
+位置过程噪声分方向：沿车头 `position_walk_m_sqrt_s`（轮速比例误差、打滑），垂直车头只有
+`cross_walk_m_sqrt_s + cross_walk_turn·|角速度|`。车不会横着走，直行时轮速+陀螺推算的侧向位置在几秒内
+只差毫米级，所以 RTK 的侧向短时跳动只被慢慢吸收；转弯时轮胎会侧滑，侧向噪声随角速度放大。轮速或陀螺
+中断时退回各向同性。（实车 2026-09-26：固定解 1 s 内侧移 8 cm 又跳回，接收机报的精度一直 1 cm，
+旧的各向同性模型跟着偏了 8 cm，控制器按假偏差纠偏，车真的偏出 3 cm。）
+
 GNSS 位置的观测模型为 `p_ant = [x, y] + R(yaw) @ antenna_xy`，雅可比包含杆臂对航向的导数。
 先做二维新息检验，再逐轴更新。位置采用 Schmidt 更新：更新位置及交叉协方差，保留航向和
 零偏的估计及其协方差子块。因此在航向和有效航迹都缺失时，位置观测不会暗中把航向标准差压小；
@@ -131,7 +137,9 @@ abs(gyro_z - bias) <= abs(speed * wheel_scale) * tan(max_steer_rad) / wheelbase_
 | 无双天线及有效航迹 | 仅靠陀螺推算航向，`sigma_yaw` 增长 |
 | 固定解恢复、位置新息 ≤5 cm | 常规滤波更新，逐渐收敛 |
 | 固定解恢复、位置新息 >5 cm | 可直接重置位置，标 `position_reset`，暂停控制至少一个保持窗口 |
-| 正常固定解中出现位置离群值 | 新息门限拒绝，不能当作恢复重置 |
+| 正常固定解中出现位置离群值（新息 >`soft_gate_sigma`） | 不丢弃，方差按离群程度放大（Huber）：离得越远影响越小，持续的小偏差几秒内平滑吸收，不会一步跳过去 |
+| 固定解连续离群满 `outlier_reset_s` 且位置新息 >5 cm | 多半是推算错了（车被推动、打滑），照旧直接重置位置、标 `position_reset`、暂停控制 |
+| 浮点解位置离群值 | 新息门限（5σ）拒绝，不能当作恢复重置 |
 
 BESTVEL 缺少单独的方向标准差字段，默认按 `atan2(0.03 m/s, speed)` 推算航迹噪声。
 位置序列用有符号轮程与 RTK 坐标做在线回归，至少覆盖 3 m；降级航向观测至多每秒注入一次，
@@ -175,11 +183,15 @@ BESTVEL 的 `sol` 接受常用位置解类型、`DOPPLER_VELOCITY` 或驱动已�
 | `bias_walk_deg_s_sqrt_s` | `0.001` | 零偏随机游走，(°/s)/√s |
 | `yaw_walk_deg_sqrt_s` | `0.01` | 额外航向过程噪声，°/√s |
 | `wheel_noise_mps` | `0.015` | 轮速预测不确定性，m/s |
-| `position_walk_m_sqrt_s` | `0.02` | 未建模位置过程噪声，m/√s |
+| `position_walk_m_sqrt_s` | `0.02` | 未建模位置过程噪声（沿车头方向），m/√s |
+| `cross_walk_m_sqrt_s` | `0.0015` | 垂直车头方向的位置过程噪声（直行），m/√s |
+| `cross_walk_turn` | `0.1` | 转弯时侧向过程噪声每 rad/s 角速度增加量，(m/√s)/(rad/s) |
 | `heading_floor_deg` | `0.1` | 航向观测标准差下限 |
 | `fix_floor_m` | `0.005` | 固定解各轴标准差下限，m |
 | `float_floor_m` | `0.15` | 浮点解各轴标准差下限，m |
-| `innovation_gate_sigma` | `5.0` | 航向及二维位置新息门限 |
+| `innovation_gate_sigma` | `5.0` | 航向、浮点解二维位置新息门限 |
+| `soft_gate_sigma` | `2.0` | 固定解位置超过它开始按离群程度降权 |
+| `outlier_reset_s` | `2.0` | 固定解连续离群这么久（且差 >5 cm）才重置到 RTK，s |
 | `gyro_margin_deg_s` | `0.5` | 物理角速度上限的余量，°/s |
 | `stationary_speed_mps` | `0.002` | 视作编码器静止的速度阈值，m/s |
 | `stationary_time_s` | `1.0` | 静止多久后开始直接估计零偏，s |
@@ -245,7 +257,7 @@ mount_offset = wrap(后轴速度方向 - raw_yaw)
 | `wheel_scale_sigma` / `wheel_scale_ci95` | 轮速乘数标准差 / 95% 半宽 |
 | `wheel_scale_samples` / `wheel_scale_confident` | 回归位置样本数 / 样本 ≥100 且 95% 半宽 ≤0.003 |
 | `gyro_bias_deg_s` / `gyro_bias_sigma_deg_s` | 当前陀螺零偏及标准差 |
-| `rejected` | 各传感器时间序列丢弃计数、陀螺尖峰、航向/位置离群计数 |
+| `rejected` | 各传感器时间序列丢弃计数、陀螺尖峰、航向离群计数；位置离群计数含固定解降权次数 |
 | `position_resets` / `history_samples` | 回放后的位置重置次数 / 当前缓存数量 |
 
 置信区间基于噪声模型和拟合残差，不包含卫星多路径、错误基准、安装松动或长期相关误差，

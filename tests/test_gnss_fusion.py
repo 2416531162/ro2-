@@ -424,6 +424,51 @@ def test_normal_position_outlier_cannot_reset_pose():
     assert abs(f.pose(.05).x) < .001
 
 
+def _drive_with_rtk_offset(offset, until=16.):
+    """直行 0.5 m/s，固定解按 offset(t) 向车头左侧偏；返回 (融合, [(t, 侧向误差, 位姿)])。"""
+    sim = FusionSimulation(segments=[Segment(3., 0.), Segment(until-3., .5)])
+    f = GnssFusion(sim.config)
+    f.set_origin(31.2304, 121.4737, 12.)
+    out = []
+    for event in sim.events():
+        if event.sensor == 'fix' and offset(event.sample.t):
+            d, tr = offset(event.sample.t), sim.truth(event.sample.t)
+            event = replace(event, sample=fixed_at(f, event.sample.t, x=tr.x-d*math.sin(tr.yaw),
+                                                   y=tr.y+d*math.cos(tr.yaw), yaw=tr.yaw))
+        feed(f, event)
+        if event.sensor == 'imu':
+            p = f.pose(event.sample.t)
+            if p:
+                tr = sim.truth(p.t)
+                out.append((p.t, -(p.x-tr.x)*math.sin(tr.yaw)+(p.y-tr.y)*math.cos(tr.yaw), p))
+    return f, out
+
+
+def test_brief_sideways_rtk_drift_is_ridden_through():
+    # 实车 2026-09-26：固定解 1 s 内侧移 8 cm 又跳回、接收机精度一直报 1 cm；旧融合跟着偏了 8 cm
+    f, rows = _drive_with_rtk_offset(lambda t: .08*(t-6.) if 6. <= t <= 7. else 0.)
+    assert max(abs(e) for t, e, p in rows if 6. <= t <= 9.) < .015
+    assert all(p.usable_for_control for t, e, p in rows if t >= 4.)
+    assert f.calibration()['position_resets'] == 0
+
+
+def test_small_persistent_rtk_offset_is_absorbed_without_jumps():
+    f, rows = _drive_with_rtk_offset(lambda t: .04 if t >= 6. else 0.)
+    late = [e for t, e, p in rows if t >= 14.]
+    assert min(late) > .03                                           # 最终跟上 RTK
+    assert max(abs(b[1]-a[1]) for a, b in zip(rows, rows[1:]) if b[0] >= 6.) < .005      # 每拍不跳
+    assert f.calibration()['position_resets'] == 0
+
+
+def test_large_persistent_rtk_offset_resets_after_outlier_window():
+    # 持续偏 30 cm：多半是推算错了（车被推动），outlier_reset_s 后照旧对齐 RTK 并标记重置，控制暂停
+    f, rows = _drive_with_rtk_offset(lambda t: .30 if t >= 6. else 0.)
+    unusable = [t for t, e, p in rows if t >= 4. and not p.usable_for_control]
+    assert unusable and unusable[0] >= 6. + f.config.outlier_reset_s - .1
+    assert f.calibration()['position_resets'] == 1
+    assert abs(rows[-1][1] - .30) < .01
+
+
 def test_very_late_reset_is_visible_to_current_controller():
     f = known_fusion()
     f.add_heading(heading_at(f, 0.))

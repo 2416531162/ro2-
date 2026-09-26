@@ -70,10 +70,21 @@ class FusionConfig:
     yaw_walk_deg_sqrt_s: float = 0.01
     wheel_noise_mps: float = 0.015
     position_walk_m_sqrt_s: float = 0.02
+    # 侧向（垂直车头）位置随机游走：车不会横着走，短时间内轮速+陀螺推算的侧向位置很准，RTK 的侧向跳动
+    # （实车 2026-09-26：1 s 内侧移 8 cm 又跳回，接收机报的精度一直 1 cm）只慢慢吸收。转弯时轮胎会侧滑，
+    # 每 rad/s 角速度再加 cross_walk_turn；沿车头方向仍是 position_walk_m_sqrt_s。
+    cross_walk_m_sqrt_s: float = 0.0015
+    cross_walk_turn: float = 0.1
     heading_floor_deg: float = 0.1
     fix_floor_m: float = 0.005
     float_floor_m: float = 0.15
     innovation_gate_sigma: float = 5.0
+    # 固定解位置离群（归一化新息超过这么多 σ）不整个丢掉，按离群程度放大方差：影响有界，
+    # 也不会连丢 0.5 s 后一步跳到 RTK 上
+    soft_gate_sigma: float = 2.0
+    # 固定解连续离群这么久、且差距超过 reset_distance_m：多半是推算错了（车被推动、打滑），照旧对齐到 RTK
+    # 并标记重置（控制暂停等操作员）。短时跳动（实车约 1 s）不触发
+    outlier_reset_s: float = 2.0
     gyro_margin_deg_s: float = 0.5
     stationary_speed_mps: float = 0.002
     stationary_time_s: float = 1.0
@@ -223,6 +234,7 @@ class _State:
         self.vel_n = 0
         self.vel_c = self.vel_s = self.vel_var_sum = 0.0
         self.heading_rejected = self.fix_rejected = self.gyro_rejected = self.resets = 0
+        self.outlier_since = None
         self.course_t = -math.inf
 
 
@@ -400,17 +412,21 @@ class GnssFusion:
         b, d = a * e / 2, c * e / 2
         xx, xy, xh, xb, yy, yh, yb, hh, hb, bb = s.p
         q = cfg.position_walk_m_sqrt_s ** 2 * dt
+        # 侧向随机游走只在轮速、陀螺都没中断时收紧；中断时推算本身不可信，退回各向同性
+        cross = cfg.cross_walk_m_sqrt_s + cfg.cross_walk_turn * abs(w)
+        qc = q if min(dv, dg) < dt else min(q, cross ** 2 * dt)
         qv = (cfg.wheel_noise_mps * dv) ** 2
         cs, sn = math.cos(mid), math.sin(mid)
+        qa = q - qc + qv                  # 沿车头方向比侧向多出的部分
         qh = self._gyro_q * dt
         if dg < dt:
             qh += math.radians(5.) ** 2 * (dt - dg)
         s.p = (
-            xx + 2*a*xh + 2*b*xb + a*a*hh + 2*a*b*hb + b*b*bb + q + qv*cs*cs,
-            xy + c*xh + d*xb + a*yh + b*yb + a*c*hh + (a*d+b*c)*hb + b*d*bb + qv*cs*sn,
+            xx + 2*a*xh + 2*b*xb + a*a*hh + 2*a*b*hb + b*b*bb + qc + qa*cs*cs,
+            xy + c*xh + d*xb + a*yh + b*yb + a*c*hh + (a*d+b*c)*hb + b*d*bb + qa*cs*sn,
             xh + e*xb + a*hh + (a*e+b)*hb + b*e*bb,
             xb + a*hb + b*bb,
-            yy + 2*c*yh + 2*d*yb + c*c*hh + 2*c*d*hb + d*d*bb + q + qv*sn*sn,
+            yy + 2*c*yh + 2*d*yb + c*c*hh + 2*c*d*hb + d*d*bb + qc + qa*sn*sn,
             yh + e*yb + c*hh + (c*e+d)*hb + d*e*bb,
             yb + c*hb + d*bb,
             hh + 2*e*hb + e*e*bb + qh,
@@ -530,6 +546,8 @@ class GnssFusion:
             self._end_segment()
             return
         fixed = sample.sol in _FIXED
+        if not fixed:
+            s.outlier_since = None
         floor = cfg.fix_floor_m if fixed else cfg.float_floor_m
         re, rn = max(floor, sample.sigma_e) ** 2, max(floor, sample.sigma_n) ** 2
         ax, ay = cfg.antenna_xy
@@ -537,8 +555,12 @@ class GnssFusion:
         lx, ly = cs*ax-sn*ay, sn*ax+cs*ay
         dx, dy = xy[0]-lx-s.x, xy[1]-ly-s.y
         recovering = s.position_ready and fixed and sample.t - s.fixed_t >= cfg.fixed_timeout_s - 1e-9
-        reset = recovering and math.hypot(dx, dy) > cfg.reset_distance_m
+        far = math.hypot(dx, dy) > cfg.reset_distance_m
+        persistent = (fixed and s.outlier_since is not None
+                      and sample.t - s.outlier_since >= cfg.outlier_reset_s - 1e-9)
+        reset = (recovering or persistent) and far
         if not s.position_ready or reset:
+            s.outlier_since = None
             s.x, s.y = xy[0]-lx, xy[1]-ly
             p = s.p
             s.p = (re+ly*ly*p[7], -lx*ly*p[7], ly*p[7], ly*p[8],
@@ -556,10 +578,19 @@ class GnssFusion:
             sen = p[1] + lx*p[2] - ly*p[5] - lx*ly*p[7]
             det = se*snn - sen*sen
             nis = (snn*dx*dx - 2*sen*dx*dy + se*dy*dy) / det if det > 0 else math.inf
-            if nis > cfg.innovation_gate_sigma ** 2:
+            if not fixed and nis > cfg.innovation_gate_sigma ** 2:
                 s.fix_rejected += 1
                 s.fix_reason = 'position_outlier'
                 return
+            if fixed and nis > cfg.soft_gate_sigma ** 2:
+                # 固定解离群：方差按离群程度放大（Huber），离得越远影响越小；持续的偏差几秒内平滑吸收
+                inflate = nis / cfg.soft_gate_sigma ** 2
+                re, rn = re * inflate, rn * inflate
+                s.fix_rejected += 1
+                if s.outlier_since is None:
+                    s.outlier_since = sample.t
+            elif fixed:
+                s.outlier_since = None
             # 位置用 Schmidt 更新：保留相关性，但不让位置暗中充当低噪声航向。
             self._observe((1., 0., -ly, 0.), dx, re, gate=False, update_attitude=False)
             cs, sn = math.cos(s.yaw), math.sin(s.yaw)
