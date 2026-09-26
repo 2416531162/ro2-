@@ -441,5 +441,73 @@ class TestRoute(Base):
         self.assertIsNone(self.m.status()['antenna'])
 
 
+
+class TestRtkJumps(Base):
+    """定位跳动：固定解与融合先验（交给融合之前）差 3 cm 以上记一次，1 s 内连续的合并；诊断带实际曲率。"""
+
+    def setUp(self):
+        super().setUp()
+        self.fusion.config = SimpleNamespace(antenna_xy=(0.345, 0.165))
+
+    def fix(self, t, x, y, yaw_deg, left=0.0, sol='NARROW_INT'):
+        a = math.radians(yaw_deg)
+        ax, ay = self.fusion.config.antenna_xy
+        lat, lon = self.fusion.to_geodetic(x + math.cos(a) * ax - math.sin(a) * (ay + left),
+                                           y + math.sin(a) * ax + math.cos(a) * (ay + left))
+        self.m.on_gnss(dict(kind='fix', t=t, lat=lat, lon=lon, height=20.0, sol=sol, sigma_n=0.01,
+                            sigma_e=0.01, sigma_u=0.02, diff_age=0.5, sats=30))
+
+    def test_sideways_jump_is_recorded_once_with_where_and_how_long(self):
+        self.fusion.current = FakeFusion.make(5.0, 2.0, 90.0)
+        for i in range(10):
+            self.fix(1.0 + 0.1 * i, 5.0, 2.0, 90.0)                        # 与推算一致：不记
+        self.m.tick(2.0, 'IDLE')
+        self.assertEqual(self.m.status()['rtk_events'], [])
+        for i, left in enumerate((0.02, 0.04, 0.06, 0.08, 0.05)):           # 1 s 内向左漂到 8 cm
+            self.fix(2.1 + 0.1 * i, 5.0, 2.0, 90.0, left=left)
+        self.fix(4.0, 5.0, 2.0, 90.0, left=0.05)                           # 隔 1.5 s 又偏：第二次
+        self.m.tick(4.1, 'IDLE')
+        st = self.m.status()
+        first, second = st['rtk_events']
+        self.assertAlmostEqual(first['d'], 0.08, places=6)
+        self.assertAlmostEqual(first['left'], 0.08, places=6)
+        self.assertEqual((first['x'], first['y']), (5.0, 2.0))
+        self.assertAlmostEqual(first['lat'], 30.00002, places=9)
+        self.assertAlmostEqual(first['lon'], 120.00005, places=9)
+        self.assertAlmostEqual(first['dur'], 0.3, places=6)
+        self.assertAlmostEqual(first['age_s'], 1.6, places=6)
+        self.assertEqual((first['id'], second['id']), (2.2, 4.0))
+        self.assertAlmostEqual(second['d'], 0.05, places=6)
+        self.assertAlmostEqual(st['diag']['rtk_left_m'], 0.05, places=6)
+        self.assertAlmostEqual(st['diag']['rtk_along_m'], 0.0, places=6)
+        self.assertEqual(st['diag']['jumps'], 2)
+
+    def test_not_recorded_while_fusion_is_not_fixed(self):
+        self.fusion.current = FakeFusion.make(5.0, 2.0, 0.0, quality='RTK_FLOAT', usable=False)
+        self.fix(1.0, 5.0, 2.0, 0.0, left=0.3)
+        self.m.tick(1.1, 'IDLE')
+        self.assertEqual(self.m.status()['rtk_events'], [])
+        self.assertAlmostEqual(self.m.status()['diag']['rtk_left_m'], 0.3, places=6)
+
+    def test_float_fixes_are_not_compared(self):
+        self.fusion.current = FakeFusion.make(5.0, 2.0, 0.0)
+        self.fix(1.0, 5.0, 2.0, 0.0, left=0.3, sol='NARROW_FLOAT')
+        self.m.tick(1.1, 'IDLE')
+        self.assertIsNone(self.m.status()['diag']['rtk_left_m'])
+        self.assertEqual(self.m.status()['rtk_events'], [])
+
+    def test_diag_reports_actual_curvature_from_fused_yaw_rate(self):
+        p = FakeFusion.make(1.0, 1.0, 0.0, speed=0.5)
+        p.yaw_rate = 0.1
+        self.fusion.current = p
+        self.m.tick(1.0, 'IDLE')
+        d = self.m.status()['diag']
+        self.assertAlmostEqual(d['kappa_act'], 0.2, places=9)
+        self.assertAlmostEqual(d['yaw_rate'], 0.1, places=9)
+        self.fusion.current = FakeFusion.make(1.0, 1.0, 0.0, speed=0.01)       # 几乎不动：不算曲率
+        self.m.tick(1.05, 'IDLE')
+        self.assertIsNone(self.m.status()['diag']['kappa_act'])
+
+
 if __name__ == '__main__':
     unittest.main()

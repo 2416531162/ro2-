@@ -18,6 +18,7 @@ import json
 import math
 import os
 import time
+from collections import deque
 
 import route_plan
 from line_tracker import LineConfig, LineTracker
@@ -25,6 +26,14 @@ from path_tracker import PathConfig, SectionTracker
 
 SELECT_TIMEOUT_S = 3.0
 ANTENNA_STALE_S = 2.0       # 天线定位这么久没更新就不在状态里报
+# 定位跳动：RTK 固定解与融合在同一时刻推算的主天线位置差这么多就记一次（app 在地图上标出来，
+# 反复出现的地方多半有遮挡或反射）；间隔不到 JUMP_MERGE_S 的算同一次，取最大
+JUMP_EVENT_M = 0.03
+JUMP_MERGE_S = 1.0
+JUMP_EVENTS_MAX = 50
+JUMP_EVENTS_REPORTED = 20
+RTK_FIXED_SOLS = ('NARROW_INT',)            # 与 gnss_fusion 的固定解一致
+INNOVATION_STALE_S = 1.0
 # 融合给出的原因里会禁止控制的那些，按根因排序（其余如 heading_unavailable、gyro_only 只说明降级来源），
 # 见 docs/GNSS_FUSION.md
 BLOCKING_REASONS = ('heading_uninitialized', 'imu_stale', 'wheel_stale', 'rtk_fixed_timeout', 'position_reset',
@@ -71,6 +80,9 @@ class LineMission:
         self.route_rev = 0
         self._route_cache = None
         self._antenna = None            # 最近一次天线定位 (t, lat, lon, sol, sigma)
+        self._innovation = None         # 最近一次固定解与融合推算之差 (t, 沿车头, 向左) 米
+        self._jumps = deque(maxlen=JUMP_EVENTS_MAX)     # 定位跳动记录，本次开机以来
+        self._jump = None               # 正在进行的那次跳动
         self.phase = 'IDLE'             # IDLE / SELECTING / RUNNING / RELEASING
         self.message = ''
         self.select_since = None
@@ -88,6 +100,8 @@ class LineMission:
         inf = lambda v: math.inf if v is None else v  # noqa: E731
         if kind == 'fix':
             self._antenna = (m['t'], m['lat'], m['lon'], m['sol'], max(m['sigma_n'], m['sigma_e']))
+            if m['sol'] in RTK_FIXED_SOLS:
+                self._check_innovation(m)
             self.fusion.add_fix(s.GnssFix(t=m['t'], lat_deg=m['lat'], lon_deg=m['lon'], height_m=m['height'],
                                           sol=m['sol'], sigma_n=m['sigma_n'], sigma_e=m['sigma_e'],
                                           sigma_u=m['sigma_u'], diff_age_s=inf(m['diff_age']), sats=m['sats']))
@@ -102,6 +116,41 @@ class LineMission:
         elif kind == 'vel':
             self.fusion.add_velocity(s.GnssVelocity(t=m['t'], speed_mps=m['speed'], track_deg=m['track'],
                                                     sol=m['sol']))
+
+    def _check_innovation(self, m):
+        """固定解与融合"先验"（这次观测交给融合之前，按车轮+陀螺推算到同一时刻）的主天线位置之差。
+
+        车体系分解：沿车头、向左。差 JUMP_EVENT_M 以上记一次定位跳动（车当时的位置、经纬度、最大差值）。
+        只在融合本来就是固定解、可用于控制时记，开机、失锁恢复时的大差值不算。
+        """
+        fusion = self.fusion
+        try:
+            prior = fusion.pose(m['t'])
+            if prior is None:
+                return
+            fx, fy = fusion.to_local(m['lat'], m['lon'])
+            ax, ay = fusion.config.antenna_xy
+        except (AttributeError, ValueError, TypeError):
+            return
+        c, s = math.cos(prior.yaw), math.sin(prior.yaw)
+        dx = fx - (prior.x + c * ax - s * ay)
+        dy = fy - (prior.y + s * ax + c * ay)
+        along, left = c * dx + s * dy, -s * dx + c * dy
+        self._innovation = (m['t'], along, left)
+        d = math.hypot(dx, dy)
+        if d < JUMP_EVENT_M or prior.quality != 'RTK_FIXED' or not prior.usable_for_control:
+            return
+        j = self._jump
+        if j is None or m['t'] - j['t1'] > JUMP_MERGE_S:
+            j = self._jump = dict(t0=m['t'], t1=m['t'], d=0.0)
+            self._jumps.append(j)
+        j['t1'] = m['t']
+        if d > j['d']:
+            try:
+                lat, lon = fusion.to_geodetic(prior.x, prior.y)
+            except (AttributeError, ValueError):
+                lat = lon = None
+            j.update(d=d, left=left, x=prior.x, y=prior.y, lat=lat, lon=lon)
 
     def on_imu(self, t, gyro_z):
         self.fusion.add_imu(self.samples.ImuSample(t=t, gyro_z=gyro_z))
@@ -426,6 +475,7 @@ class LineMission:
         points = {k: self.fusion.to_local(*v) for k, v in self.points.items()} if self.points else {}
         # 融合的在线标定（安装偏差、轮速比例、陀螺零偏）：只报告，经人确认后才写进 ~/rtk/fusion.json
         calibration = getattr(self.fusion, 'calibration', None)
+        calibration = calibration() if callable(calibration) else None
         return _json_safe(dict(phase=self.phase, message=self.message, cruise=self.cruise, pose=pose,
                                points={k: [round(v[0], 3), round(v[1], 3)] for k, v in points.items()},
                                tracker=self.tracker.status(), task=self.task,
@@ -435,7 +485,38 @@ class LineMission:
                                                  max_entry_m=route_plan.MAX_ENTRY_M,
                                                  # 连线路线压线用的车身：后轴中心到车头、车尾、半宽（app 画同样的预览）
                                                  body=[round(v, 4) for v in self.body]),
-                               calibration=calibration() if callable(calibration) else None))
+                               calibration=calibration, diag=self._diag(calibration),
+                               rtk_events=self._jump_events()))
+
+    def _diag(self, calibration):
+        """诊断：下发曲率与车实际走出的曲率（融合角速度 / 车速），RTK 与融合推算之差，离群、重置次数。"""
+        p, now = self.pose, self._last_tick
+        st = self.tracker.status()
+        k_act = None if p is None or abs(p.speed) < 0.05 else getattr(p, 'yaw_rate', 0.0) / p.speed
+        inn = self._innovation
+        fresh = inn is not None and now is not None and now - inn[0] <= INNOVATION_STALE_S
+        rejected = (calibration or {}).get('rejected') or {}
+        return dict(kappa_cmd=st.get('kappa'), kappa_act=k_act,
+                    yaw_rate=None if p is None else getattr(p, 'yaw_rate', None),
+                    rtk_along_m=inn[1] if fresh else None, rtk_left_m=inn[2] if fresh else None,
+                    position_outliers=rejected.get('position_outliers'),
+                    position_resets=(calibration or {}).get('position_resets'),
+                    jumps=len(self._jumps))
+
+    def _jump_events(self):
+        """最近的定位跳动：车当时的本地坐标与经纬度、最大差值、向左分量、持续时间、距今多久（秒）。"""
+        now = self._last_tick
+        out = []
+        for j in list(self._jumps)[-JUMP_EVENTS_REPORTED:]:
+            if 'x' not in j:
+                continue
+            # id：这次跳动开始的时刻（车上单调时钟），app 用它认出重复收到的同一次跳动
+            out.append(dict(id=round(j['t0'], 2), x=round(j['x'], 3), y=round(j['y'], 3),
+                            lat=None if j['lat'] is None else round(j['lat'], 9),
+                            lon=None if j['lon'] is None else round(j['lon'], 9),
+                            d=round(j['d'], 4), left=round(j['left'], 4), dur=round(j['t1'] - j['t0'], 2),
+                            age_s=None if now is None else round(max(0.0, now - j['t1']), 1)))
+        return out
 
 
 class _NoPose:

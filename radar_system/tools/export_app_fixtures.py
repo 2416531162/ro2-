@@ -123,7 +123,11 @@ def sample_route_line(now=100.0):
                         'stats': {'rms_m': 0.006, 'max_m': 0.018, 'samples': 700},
                         'gear': 'forward', 'section': 1, 'sections': 1, 'switching': False},
             'last_result': {'ok': True, 'message': '申请控制权（接入 3.5 m，全程 66.4 m）', 'id': 'r4',
-                            'cmd': 'route_start'}}
+                            'cmd': 'route_start'},
+            'diag': {'kappa_cmd': 0.0123, 'kappa_act': 0.0111, 'yaw_rate': 0.0056, 'rtk_along_m': 0.0042,
+                     'rtk_left_m': -0.0061, 'position_outliers': 3, 'position_resets': 0, 'jumps': 1},
+            'rtk_events': [{'id': 87.35, 'x': 8.2, 'y': 4.9, 'lat': 30.123500123, 'lon': 120.987750456, 'd': 0.0821,
+                            'left': 0.078, 'dur': 1.05, 'age_s': 12.5}]}
 
 
 def route_geometry_cases():

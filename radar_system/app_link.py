@@ -425,7 +425,21 @@ def line_telemetry(line, now):
         # 路线作业：地图原点（经纬度）、天线原始定位（融合位姿没有时也能在地图上画车的位置）、车上存的路线
         'task': ln.get('task', 'line'), 'origin': ln.get('origin'), 'antenna': ln.get('antenna'),
         'route': ln.get('route'), 'route_limits': ln.get('route_limits'),
+        # 诊断页：下发 / 实际曲率、RTK 与融合推算之差（米，车体系沿车头 / 向左）、离群与重置次数
+        'diag': _line_diag(ln.get('diag')),
+        # 定位跳动（地图上标出来）：编号、本地坐标、经纬度、最大差值 m、向左分量、持续 s、距今 s
+        'rtk_events': [{k: e.get(k) for k in ('id', 'x', 'y', 'lat', 'lon', 'd', 'left', 'dur', 'age_s')}
+                       for e in (ln.get('rtk_events') or []) if isinstance(e, dict)],
     }
+
+
+def _line_diag(d):
+    if not isinstance(d, dict):
+        return None
+    return {'kappa_cmd': _num(d.get('kappa_cmd'), 4), 'kappa_act': _num(d.get('kappa_act'), 4),
+            'yaw_rate': _num(d.get('yaw_rate'), 4), 'rtk_along_m': _num(d.get('rtk_along_m'), 4),
+            'rtk_left_m': _num(d.get('rtk_left_m'), 4), 'position_outliers': d.get('position_outliers'),
+            'position_resets': d.get('position_resets'), 'jumps': d.get('jumps')}
 
 
 def build_telemetry(snap, *, now, seq, sensors, include_scan=True):
