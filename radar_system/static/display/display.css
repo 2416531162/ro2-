@@ -1,0 +1,79 @@
+/* 车载屏幕：与 app 同一套深色色板（app/ui/Ui.kt Palette） */
+:root {
+  --bg: #182128; --surface: #222D35; --surface-hi: #303E48; --card: rgba(34, 45, 53, 0.94);
+  --line: #53636F; --text: #EDF2F5; --dim: #BCCAD2; --intent: #83D2EE;
+  --ok: #8CDEB6; --warn: #F0BD78; --danger: #FF9A92; --idle: #9AA8B1;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; background: var(--bg); color: var(--text); overflow: hidden; cursor: none;
+  touch-action: none; overscroll-behavior: none;
+  font-family: "Noto Sans CJK SC", "Source Han Sans SC", "PingFang SC", "Microsoft YaHei", "WenQuanYi Micro Hei", sans-serif;
+  -webkit-user-select: none; user-select: none; }
+#app { display: flex; height: 100vh; width: 100vw; }
+[hidden] { display: none !important; }   /* 图例、指北针等用 hidden 收起，不被下面的 display 覆盖 */
+
+/* ---- 地图 ---- */
+#map { position: relative; flex: 1 1 auto; min-width: 0; background: #303B44; }
+#scene { position: absolute; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+/* 叠层只用于显示状态 */
+#map > :not(canvas) { pointer-events: none; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; }
+.chip { position: absolute; left: 20px; top: 20px; max-width: calc(100% - 150px); display: flex; align-items: center; gap: 12px;
+  padding: 10px 18px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; font-size: 22px; }
+.chip i { flex: none; width: 10px; height: 10px; border-radius: 50%; background: currentColor; }
+.chip span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.compass { position: absolute; right: 30px; top: 30px; width: 80px; text-align: center; }
+.compass svg { width: 80px; height: 80px; border-radius: 50%; background: var(--card); fill: var(--intent); }
+.compass b { display: block; font-size: 20px; margin-top: 4px; }
+.scale { position: absolute; right: 22px; bottom: 22px; width: 210px; height: 100px; padding: 14px 18px; }
+.scale b { display: block; font-size: 19px; }
+.scale span { display: block; font-size: 16px; color: var(--dim); margin-top: 4px; }
+.scale i { position: absolute; right: 16px; bottom: 16px; height: 10px; border: 2px solid var(--text); border-top: none; }
+.legend { position: absolute; left: 20px; bottom: 22px; display: flex; gap: 26px; padding: 14px 20px; font-size: 17px; color: var(--dim); }
+.legend span { display: flex; align-items: center; gap: 10px; white-space: nowrap; }
+.legend span::before { content: ""; width: 22px; height: 5px; border-radius: 3px; background: var(--c); }
+.legend span.dashed::before { background: repeating-linear-gradient(90deg, var(--c) 0 7px, transparent 7px 11px); }
+#labels b { position: absolute; transform: translate(-50%, -100%); padding: 3px 10px; font-size: 17px; color: var(--intent);
+  background: var(--card); border: 1px solid var(--line); border-radius: 8px; white-space: nowrap; }
+.banner { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); padding: 22px 34px; font-size: 26px;
+  background: var(--card); border: 1px solid var(--line); border-radius: 14px; }
+
+/* ---- 右侧状态栏 ---- */
+#side { flex: 0 0 600px; display: flex; flex-direction: column; gap: 16px; padding: 22px 22px 18px; background: var(--bg);
+  border-left: 1px solid var(--line); overflow: hidden; }
+#side header { display: flex; justify-content: space-between; align-items: flex-start; }
+#side h1 { font-size: 34px; font-weight: 600; }
+#subtitle { font-size: 17px; color: var(--dim); margin-top: 2px; }
+#clock { font-size: 30px; font-variant-numeric: tabular-nums; color: var(--dim); }
+.panel { background: var(--surface); border-radius: 14px; padding: 16px 18px; }
+.panel h2 { font-size: 18px; font-weight: 500; color: var(--dim); margin-bottom: 10px; letter-spacing: 1px; }
+dl { display: grid; grid-template-columns: auto 1fr; column-gap: 18px; row-gap: 9px; font-size: 21px; }
+dt { color: var(--dim); white-space: nowrap; }
+dd { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+dd small { font-size: 17px; color: var(--dim); margin-left: 8px; }
+.rtk { display: flex; align-items: baseline; gap: 16px; margin-bottom: 12px; }
+.rtk b { font-size: 34px; font-weight: 600; }
+.rtk span { font-size: 18px; color: var(--dim); }
+.antennas { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.antenna { background: var(--surface-hi); border-radius: 12px; padding: 10px 14px; }
+.antenna h3 { font-size: 20px; font-weight: 500; color: var(--intent); }
+.antenna .role { font-size: 15px; color: var(--dim); }
+.antenna .sats { font-size: 22px; margin-top: 4px; }
+.antenna .fix { font-size: 18px; margin-top: 2px; }
+.antenna .fresh { font-size: 15px; color: var(--dim); margin-top: 2px; }
+.heading { font-size: 18px; margin-top: 12px; color: var(--dim); }
+#side footer { margin-top: auto; font-size: 15px; color: var(--idle); text-align: center; display: flex;
+  align-items: center; justify-content: center; gap: 18px; }
+/* 只在车载窗口里出现（car_display_window.py 注册了 carDesktop）：手指一点回到 Ubuntu 桌面 */
+#toDesktop { flex: 0 0 auto; min-height: 60px; padding: 0 26px; font: inherit; font-size: 20px; color: var(--text);
+  background: var(--surface-hi); border: 1px solid var(--line); border-radius: 14px; cursor: none; }
+#toDesktop:active { background: var(--line); }
+.ok { color: var(--ok) !important; } .warn { color: var(--warn) !important; } .danger { color: var(--danger) !important; }
+.idle { color: var(--idle) !important; } .intent { color: var(--intent) !important; }
+
+/* 屏幕窄（例如电脑上预览）时状态栏放到下面 */
+@media (max-width: 1100px) {
+  #app { flex-direction: column; }
+  #map { flex: 1 1 60%; }
+  #side { flex: 0 0 auto; border-left: none; border-top: 1px solid var(--line); overflow-y: auto; }
+}

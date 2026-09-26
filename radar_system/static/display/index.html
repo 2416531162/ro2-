@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1, maximum-scale=1, user-scalable=no">
+<title>车载屏幕</title>
+<link rel="stylesheet" href="/display/display.css">
+</head>
+<body>
+<!-- 车载屏幕只读显示：地图与 app 同一套 3D 画面，沿车身中线的固定视角，自动跟车，不支持拖动和缩放；不向车发送指令 -->
+<main id="app">
+  <section id="map" aria-label="三维路线地图">
+    <canvas id="scene"></canvas>
+    <div class="chip" id="status"><i></i><span>等待车辆数据</span></div>
+    <div class="compass" id="compass" hidden><svg viewBox="-27 -27 54 54" aria-hidden="true"><path d="M0,-18 L-6,7 L0,3 L6,7 Z"/></svg><b>N</b></div>
+    <div class="card scale" id="scale" hidden><b></b><span></span><i></i></div>
+    <div class="card legend" id="legend" hidden></div>
+    <div id="labels"></div>
+    <div class="banner" id="banner" hidden></div>
+  </section>
+  <aside id="side">
+    <header>
+      <div><h1 id="name">小车</h1><p id="subtitle">只读显示</p></div>
+      <div id="clock">--:--:--</div>
+    </header>
+
+    <section class="panel">
+      <h2>连接状态</h2>
+      <dl id="links"></dl>
+    </section>
+
+    <section class="panel">
+      <h2>卫星状态</h2>
+      <div class="rtk" id="rtk"><b>RTK --</b><span></span></div>
+      <div class="antennas">
+        <div class="antenna" id="ant1"><h3>左 · ANT1</h3><p class="role">主天线 / 定位</p><p class="sats">卫星 —</p><p class="fix">定位：—</p><p class="fresh">无数据</p></div>
+        <div class="antenna" id="ant2"><h3>右 · ANT2</h3><p class="role">副天线 / 定向</p><p class="sats">卫星 —</p><p class="fix">定位：—</p><p class="fresh">等待副天线数据</p></div>
+      </div>
+      <p class="heading" id="heading">双天线测向 —</p>
+    </section>
+
+    <section class="panel">
+      <h2>定位与作业</h2>
+      <dl id="work"></dl>
+    </section>
+
+    <footer><span>车载屏幕 · 固定视角，自动跟车 · 只读显示</span><button id="toDesktop" type="button" hidden>回到桌面</button></footer>
+  </aside>
+</main>
+<script src="/display/display.js"></script>
+</body>
+</html>
