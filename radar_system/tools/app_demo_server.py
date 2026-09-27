@@ -48,12 +48,14 @@ import follow_sim as fs  # noqa: E402
 from runtime_config import PROFILE, profile_hash  # noqa: E402
 from robot_core.kinematics import ChassisGeometry  # noqa: E402
 from line_mission import LineMission  # noqa: E402
+from field_plan_service import FieldPlanService  # noqa: E402
 
 CAMERA = {'width': 640, 'height': 480, 'fx': 570.3, 'cx': 319.5}
 FY, CY = 570.3, 239.5
 CAM_HEIGHT_M = 0.55
 PERSON_HEIGHT_M = 1.70
 TIERS = {k: PROFILE['manual'][k + '_mps'] for k in app_link.SPEED_TIERS}
+FIELD_PLANS = FieldPlanService()
 
 
 def looping_walk(start, legs, repeat=40):
@@ -241,8 +243,14 @@ class DemoCar:
     def route_command(self, cmd):
         with self.lock:
             payload = {'cmd': 'route_' + cmd['action'], 'id': cmd.get('id')}
-            if 'route' in cmd:
-                payload['route'] = cmd['route']
+            if cmd['action'] == 'field_start':
+                value = FIELD_PLANS.get(cmd['preview_token'])
+                # Cache expiry uses wall time; the simulated mission runs on its own clock.
+                value['created_at'] = self.sim.t
+                payload.update(field_plan=value, allow_outside=cmd.get('allow_outside', False))
+            for key in ('route', 'route_rev', 'job_id', 'preview_token', 'operation', 'element', 'from_m', 'to_m', 'overlap_m', 'allow_outside'):
+                if key in cmd:
+                    payload[key] = cmd[key]
             ok, message = self.mission.command(payload, self.sim.t)
             self.line_result = dict(ok=ok, message=message, id=cmd.get('id'), cmd=payload['cmd'])
 
@@ -380,6 +388,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_POST(self):
+        if self.path == '/api/field/plan':
+            try:
+                if self.headers.get('Origin'):
+                    raise ValueError('不接受网页跨源规划请求')
+                size = int(self.headers.get('Content-Length', 0))
+                if not 0 < size <= 262144:
+                    raise ValueError('规划请求大小无效')
+                request = json.loads(self.rfile.read(size).decode('utf-8'))
+                data = dict(ok=True, plan=FIELD_PLANS.prepare(request, CAR.snapshot()['line']))
+                status = 200
+            except (ValueError, KeyError, TypeError, UnicodeError) as exc:
+                self.close_connection = True
+                data, status = dict(ok=False, message=str(exc)), 400
+            body = json.dumps(data, ensure_ascii=False).encode('utf-8')
+            self.send_response(status)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path == '/api/motion/stop':
             ok, msg = CAR.estop()
             body = json.dumps({'ok': ok, 'message': msg}).encode()
@@ -469,8 +497,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     CAR.line_command(cmd)
                     ack(cmd, True, 'forwarded')
                 elif kind == 'route':
-                    CAR.route_command(cmd)
-                    ack(cmd, True, 'forwarded')
+                    try:
+                        CAR.route_command(cmd)
+                        ack(cmd, True, 'forwarded')
+                    except ValueError as exc:
+                        ack(cmd, False, str(exc))
                 elif kind == 'view':
                     VIEW.set(session, cmd['file'])
                 elif kind == 'ping':

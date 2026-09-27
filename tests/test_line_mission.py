@@ -109,6 +109,7 @@ class Base(unittest.TestCase):
         self.m = LineMission(self.fusion, SAMPLES, state_path=self.state, log_dir=self.logs)
 
     def tearDown(self):
+        self.m._close_log()
         self.tmp.cleanup()
 
     def mark_line(self, length=10.0):
@@ -353,6 +354,71 @@ class TestRoute(Base):
         self.assertEqual(self.m.command({'cmd': 'route_start'}, 90.1), (True, '继续'))
         self.m.tick(90.15, 'NAVIGATION')
         self.assertAlmostEqual(self.m.tracker.st.s, s_before, delta=0.3)
+
+    def gyro_only(self, p, sigma_deg=1.0, extra=()):
+        """测向无效、陀螺维持的航向不确定度过了融合门槛：融合判不可控制（主天线仍是固定解）。"""
+        q = FakeFusion.make(p.x, p.y, math.degrees(p.yaw), speed=p.speed, usable=False)
+        q.sigma_yaw = math.radians(sigma_deg)
+        q.reasons = ('heading_unavailable', 'gyro_only', 'heading_uncertain') + tuple(extra)
+        return q
+
+    def drive_gyro(self, t0, until, sigma_deg=1.0, fix2='NARROW_INT', extra=(), dt=0.05):
+        """同 drive，但每步都是测向无效的位姿；fix2 是副天线每步的解（None 为不来）。"""
+        t = t0
+        while t < until:
+            if fix2:
+                self.m.on_gnss({'kind': 'fix2', 't': t, 'sol': fix2})
+            self.fusion.current = self.gyro_only(self.fusion.current, sigma_deg, extra)
+            vx, wz, _ = self.m.tick(t, 'NAVIGATION')
+            p = self.fusion.current
+            yaw = p.yaw + wz * dt
+            self.fusion.current = FakeFusion.make(p.x + vx * dt * math.cos(yaw), p.y + vx * dt * math.sin(yaw),
+                                                  math.degrees(yaw), speed=vx)
+            t += dt
+        return t
+
+    def running_rect(self):
+        """重新建一个任务，开始跑矩形路线 5 s。"""
+        self.m.command({'cmd': 'stop'}, 0.0)  # Each subtest starts a new job; restart now preserves a checkpoint.
+        self.m._close_log()
+        self.fusion = FakeFusion()
+        self.m = LineMission(self.fusion, SAMPLES, state_path=self.state, log_dir=self.logs, route_path=self.route_file)
+        self.fusion.current = FakeFusion.make(-1.0, 0.0, 0.0)
+        self.m.command({'cmd': 'route_start', 'route': RECT}, 0.0)
+        self.drive(0.05, 5.0)
+        self.assertEqual(self.m.tracker.st.state, 'RUNNING')
+
+    def test_heading_float_keeps_going_on_gyro_when_both_antennas_fixed(self):
+        self.running_rect()
+        s0 = self.m.tracker.st.s
+        self.drive_gyro(5.0, 15.0)
+        self.assertEqual((self.m.phase, self.m.tracker.st.state), ('RUNNING', 'RUNNING'))
+        self.assertGreater(self.m.tracker.st.s, s0 + 3.0)
+        self.assertIn('gyro_hold', self.m.status()['pose']['reasons'])
+
+    def test_gyro_hold_needs_both_antennas_fixed_and_small_uncertainty(self):
+        # 副天线没来 / 不是固定解、航向不确定度超过 2°、还有别的禁止原因：照旧暂停
+        for kw in (dict(fix2=None), dict(fix2='NARROW_FLOAT'), dict(sigma_deg=2.5), dict(extra=('position_reset',))):
+            with self.subTest(case=str(kw)):
+                self.running_rect()
+                self.drive_gyro(5.0, 6.0, **kw)
+                self.assertEqual(self.m.tracker.st.state, 'PAUSED')
+
+    def test_pause_resumes_by_itself_once_pose_is_usable_again(self):
+        self.running_rect()
+        p = self.fusion.current
+        self.fusion.current = FakeFusion.make(p.x, p.y, math.degrees(p.yaw), usable=False)
+        self.m.tick(5.0, 'NAVIGATION')
+        self.assertEqual(self.m.tracker.st.state, 'PAUSED')
+        self.fusion.current = FakeFusion.make(p.x, p.y, math.degrees(p.yaw))
+        for t in (5.05, 5.5, 5.95):                              # 恢复不到 1 s：还停着
+            self.assertEqual(self.m.tick(t, 'NAVIGATION')[:2], (0.0, 0.0))
+        self.assertEqual(self.m.tracker.st.state, 'PAUSED')
+        s0 = self.m.tracker.st.s
+        self.drive(6.1, 10.0)
+        self.assertEqual(self.m.tracker.st.state, 'RUNNING')
+        self.assertEqual(self.m.message, '定位恢复，自动继续')
+        self.assertGreater(self.m.tracker.st.s, s0 + 1.0)
 
     def test_route_start_uses_learned_trim(self):
         self.m.integral0 = 0.05

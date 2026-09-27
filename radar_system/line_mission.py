@@ -22,7 +22,8 @@ from collections import deque
 
 import route_plan
 from line_tracker import LineConfig, LineTracker
-from path_tracker import PathConfig, SectionTracker
+from path_tracker import PathConfig, SectionTracker, differential_config
+from route_operations import RouteOperations
 
 SELECT_TIMEOUT_S = 3.0
 ANTENNA_STALE_S = 2.0       # 天线定位这么久没更新就不在状态里报
@@ -36,8 +37,15 @@ RTK_FIXED_SOLS = ('NARROW_INT',)            # 与 gnss_fusion 的固定解一致
 INNOVATION_STALE_S = 1.0
 # 融合给出的原因里会禁止控制的那些，按根因排序（其余如 heading_unavailable、gyro_only 只说明降级来源），
 # 见 docs/GNSS_FUSION.md
-BLOCKING_REASONS = ('heading_uninitialized', 'imu_stale', 'wheel_stale', 'rtk_fixed_timeout', 'position_reset',
+BLOCKING_REASONS = ('heading_uninitialized', 'imu_stale', 'imu_mismatch', 'wheel_stale', 'rtk_fixed_timeout', 'position_reset',
                     'heading_uncertain', 'position_uncertain')
+# 测向浮点（无效）时航向只靠陀螺和行驶轨迹维持，融合的航向不确定度一过 0.5° 就判不可控制。
+# 主、副天线都是固定解（位置可信）时放宽到这么多照样走，原因里加 gyro_hold（2026-09-27 用户要求：
+# 走着走着测向变浮点不能停，要靠 IMU 维持）
+GYRO_HOLD_SIGMA_YAW_DEG = 2.0
+FIX2_MAX_AGE_S = 1.0        # 副天线固定解这么久内来过就算还固定着
+# 因定位问题暂停后，定位连续可用这么久就自动接着走（操作员停止、控制权被切走照样结束，不会自动恢复）
+AUTO_RESUME_S = 1.0
 
 
 def pose_problem(pose):
@@ -57,10 +65,12 @@ def pose_problem(pose):
 
 class LineMission:
     def __init__(self, fusion, samples, tracker=None, *, state_path=None, log_dir=None, route_path=None,
-                 path_config=None, body=None):
+                 path_config=None, body=None, nozzle_x=None):
         """fusion 实现 docs 里约定的 GnssFusion 接口；samples 提供 ImuSample 等输入类型（通常就是 gnss_fusion 模块）。
 
         body = (后轴中心到车头, 到车尾, 半宽) 米，连线路线按车身中心压线；默认取共享底盘配置。
+        差速车（tracker.geo.differential，Gen5）的连线路线改按喷头压线（nozzle_x：喷头在后轴前多少米，
+        默认取共享配置 drive.nozzle_x_m），急弯停车原地转向。
         """
         self.fusion, self.samples = fusion, samples
         self.tracker = tracker or LineTracker(LineConfig())
@@ -73,6 +83,14 @@ class LineMission:
             g = PROFILE['geometry']
             body = (g['front_m'], g['rear_m'], g['half_width_m'])
         self.body = tuple(float(v) for v in body)
+        self.differential = bool(getattr(self.geo, 'differential', False))
+        if self.differential:
+            if path_config is None:
+                self.path_cfg = differential_config(self.path_cfg)
+            if nozzle_x is None:
+                from runtime_config import PROFILE
+                nozzle_x = PROFILE['drive']['nozzle_x_m']
+        self.nozzle_x = float(nozzle_x) if self.differential else None
         self.state_path, self.log_dir, self.route_path = state_path, log_dir, route_path
         self.task = 'line'              # 当前（或最近一次）任务：line / route
         self.points = {}                # 'A'/'B' -> (lat, lon)
@@ -80,6 +98,8 @@ class LineMission:
         self.route_rev = 0
         self._route_cache = None
         self._antenna = None            # 最近一次天线定位 (t, lat, lon, sol, sigma)
+        self._fix2_t = None             # 副天线最近一次固定解的时刻
+        self._usable_since = None       # 暂停中定位从什么时候起一直可用（自动继续用）
         self._innovation = None         # 最近一次固定解与融合推算之差 (t, 沿车头, 向左) 米
         self._jumps = deque(maxlen=JUMP_EVENTS_MAX)     # 定位跳动记录，本次开机以来
         self._jump = None               # 正在进行的那次跳动
@@ -93,6 +113,8 @@ class LineMission:
         self._log = self._log_file = None
         self.integral0 = self._load_integral()
         self._load_route()
+        self.last_motion_mode = None
+        self.operations = RouteOperations(self)
 
     # ---- 传感器输入 ----
     def on_gnss(self, m):
@@ -105,6 +127,10 @@ class LineMission:
             self.fusion.add_fix(s.GnssFix(t=m['t'], lat_deg=m['lat'], lon_deg=m['lon'], height_m=m['height'],
                                           sol=m['sol'], sigma_n=m['sigma_n'], sigma_e=m['sigma_e'],
                                           sigma_u=m['sigma_u'], diff_age_s=inf(m['diff_age']), sats=m['sats']))
+        elif kind == 'fix2':
+            # 副天线只用来判断「两根天线都固定」（测向浮点时靠陀螺维持航向的前提），不进融合
+            if m.get('sol') in RTK_FIXED_SOLS:
+                self._fix2_t = m['t']
         elif kind == 'heading':
             # 只用 rtk_node 判为有效的测向（整周固定，且两根天线固定解的平面实时距离 ≥0.10 m）。
             # 融合不再按基线长度判断，所以没带 valid 字段的也不用
@@ -152,8 +178,10 @@ class LineMission:
                 lat = lon = None
             j.update(d=d, left=left, x=prior.x, y=prior.y, lat=lat, lon=lon)
 
-    def on_imu(self, t, gyro_z):
-        self.fusion.add_imu(self.samples.ImuSample(t=t, gyro_z=gyro_z))
+    def on_imu(self, t, gyro_z, yaw=None):
+        """yaw：IMU 自己算的航向角（弧度，左转为正）。融合 yaw_input = 'angle' 时用它的增量推算航向。"""
+        extra = {} if yaw is None else {'yaw': yaw}
+        self.fusion.add_imu(self.samples.ImuSample(t=t, gyro_z=gyro_z, **extra))
 
     def on_wheel(self, t, speed, yaw_rate):
         self.fusion.add_wheel(self.samples.WheelSample(t=t, speed=speed, yaw_rate=yaw_rate))
@@ -162,6 +190,20 @@ class LineMission:
     def command(self, cmd, now):
         """返回 (是否接受, 说明)。start 被接受只表示开始申请控制权，结果看 tick/status。"""
         kind = cmd.get('cmd')
+        if kind=='route_field_start':
+            try:return True,self.operations.start_field(cmd,now)
+            except (ValueError,TypeError,KeyError) as exc:return False,str(exc)
+        if kind in ('route_pause', 'route_preview', 'route_resume', 'route_rework'):
+            try:
+                if kind == 'route_pause':
+                    message = self.operations.pause(cmd, now)
+                elif kind == 'route_preview':
+                    message = self.operations.prepare(cmd, now)
+                else:
+                    message = self.operations.commit(cmd, now, kind.removeprefix('route_'))
+                return True, message
+            except (ValueError, TypeError, KeyError) as exc:
+                return False, str(exc)
         if kind == 'mark':
             return self._mark(str(cmd.get('point', '')).upper(), now)
         if kind == 'clear':
@@ -176,14 +218,15 @@ class LineMission:
         if kind == 'route_start':
             return self._route_start(cmd, now)
         if kind == 'route_clear':
-            if self.phase != 'IDLE':
+            if self.phase != 'IDLE' or self.operations.held:
                 return False, '先停止当前任务'
             self._store_route(None)
+            self.operations.clear()
             return True, '已删除路线'
         if kind == 'stop':
             self.tracker.stop('operator')
-            if self.phase in ('SELECTING', 'RUNNING'):
-                self._finish('操作员停止')
+            if self.phase in ('SELECTING', 'RUNNING', 'PAUSING', 'PAUSED') or self.operations.held:
+                self._finish('操作员停止', state='CANCELLED')
             return True, '已停止'
         return False, '未知指令'
 
@@ -212,9 +255,23 @@ class LineMission:
     def _paused(self, task):
         return self.phase == 'RUNNING' and self.task == task and self.tracker.st.state == 'PAUSED'
 
-    def _resume(self, now):
-        """定位恢复后操作员再按开始：控制权还在，重新检查起步条件就走。"""
+    def _control_pose(self, now):
+        """控制用的位姿：融合位姿，只因测向无效、陀螺维持的航向不确定度超了融合门槛而不可控制时，
+        若主天线（融合已是 RTK 固定解）和副天线都固定、不确定度不超过 GYRO_HOLD_SIGMA_YAW_DEG，照样可用。"""
         pose = self.fusion.pose(now)
+        if pose is None or pose.usable_for_control:
+            return pose
+        reasons = tuple(getattr(pose, 'reasons', ()))
+        blocking = [r for r in BLOCKING_REASONS if r in reasons]
+        fix2 = self._fix2_t is not None and now - self._fix2_t <= FIX2_MAX_AGE_S
+        if (blocking == ['heading_uncertain'] and 'heading_unavailable' in reasons and fix2
+                and pose.quality == 'RTK_FIXED' and pose.sigma_yaw <= math.radians(GYRO_HOLD_SIGMA_YAW_DEG)):
+            return _with(pose, usable_for_control=True, reasons=reasons + ('gyro_hold',))
+        return pose
+
+    def _resume(self, now):
+        """定位恢复后接着走（操作员再按开始，或 tick 里定位连续可用 AUTO_RESUME_S 后自动）：控制权还在，重新检查起步条件。"""
+        pose = self._control_pose(now)
         problem = pose_problem(pose)
         if problem:
             return False, problem
@@ -222,6 +279,8 @@ class LineMission:
         return ok, '继续' if ok else self.tracker.st.reason
 
     def _start(self, cmd, now):
+        if self.operations.held:
+            return False, '路线任务断点已保留，请先继续或结束任务'
         if self._paused('line'):
             return self._resume(now)
         if self.phase != 'IDLE':
@@ -231,7 +290,7 @@ class LineMission:
         cruise = float(cmd.get('cruise', self.cruise))
         if not 0.05 <= cruise <= 1.0:
             return False, '速度应在 0.05–1.0 m/s'
-        pose = self.fusion.pose(now)
+        pose = self._control_pose(now)
         problem = pose_problem(pose)
         if problem:
             return False, problem
@@ -249,7 +308,7 @@ class LineMission:
 
     # ---- 路线 ----
     def _route_set(self, raw):
-        if self.phase != 'IDLE':
+        if self.phase != 'IDLE' or self.operations.held:
             return False, '运行中不能改路线'
         try:
             spec = route_plan.parse_spec(raw)
@@ -262,6 +321,7 @@ class LineMission:
         except ValueError as exc:
             return False, str(exc)
         self._store_route(stored)
+        self.operations.clear()
         return True, '路线已保存到车上'
 
     def _route_local(self):
@@ -269,6 +329,8 @@ class LineMission:
         return self.route.map_points(self.fusion.to_local)
 
     def _route_start(self, cmd, now):
+        if self.operations.held:
+            return False, '任务断点已保留，请使用继续作业；重新开始须先结束原任务'
         if self._paused('route'):
             return self._resume(now)
         if self.phase != 'IDLE':
@@ -279,7 +341,7 @@ class LineMission:
                 return False, why
         if self.route is None:
             return False, '车上还没有路线'
-        pose = self.fusion.pose(now)
+        pose = self._control_pose(now)
         problem = pose_problem(pose)
         if problem:
             return False, problem
@@ -287,18 +349,27 @@ class LineMission:
             spec = self._route_local()
             k = self.line_cfg.track_x_m     # 与直线相同：控制点（默认后轴中心）压在路线上
             car = (pose.x + k * math.cos(pose.yaw), pose.y + k * math.sin(pose.yaw), pose.yaw)
-            sections, entry_m = route_plan.plan(spec, car, self.min_route_radius, body=self.body)
+            sections, entry_m = route_plan.plan(spec, car, self.min_route_radius, body=self.body, nozzle_x=self.nozzle_x)
             cfg = dataclasses.replace(self.path_cfg, cruise_mps=spec.cruise, track_x_m=k)
-            tracker = SectionTracker(sections, cfg, self.geo)
+            tracker = SectionTracker(sections, cfg, self.geo, **self.section_options())
         except ValueError as exc:
             return False, str(exc)
         ok, why = tracker.check_start(pose)
         if not ok:
             return False, why
+        try:
+            self.operations.begin(sections)
+        except ValueError as exc:
+            return False, str(exc)
         self.tracker, self.task, self.cruise = tracker, 'route', spec.cruise
         self.phase, self.select_since = 'SELECTING', now
-        self.message = '申请控制权（接入 %.1f m，全程 %.1f m%s）' % (
-            entry_m, tracker.length, '，换向 %d 次' % tracker.cusps if tracker.cusps else '')
+        turns = '，换向 %d 次' % tracker.cusps if tracker.cusps else ''
+        if self.differential:
+            # 倒车几段（每段前后各换向一次，tracker.reversals 是换向次数）
+            reverses = sum(1 for sec in sections if sec.direction < 0)
+            turns = ('，原地转向 %d 次' % tracker.pivots if tracker.pivots else '') + \
+                    ('，倒车 %d 次' % reverses if reverses else '')
+        self.message = '申请控制权（接入 %.1f m，全程 %.1f m%s）' % (entry_m, tracker.length, turns)
         return True, self.message
 
     def _store_route(self, spec):
@@ -345,7 +416,8 @@ class LineMission:
         length, out['problem'] = route_plan.route_length(spec, self.min_route_radius)
         out['length'] = None if length is None else round(length, 3)
         # 连线路线：车身中心压过全部连线要开的总路程（含掉头补角）、换向次数、掉头补角的拐角数
-        out['cover'] = route_plan.cover_summary(spec, self.min_route_radius, self.body) if spec.kind == 'path' else None
+        out['cover'] = route_plan.cover_summary(spec, self.min_route_radius, self.body, nozzle_x=self.nozzle_x) \
+            if spec.kind == 'path' else None
         self._route_cache = (key, out)
         return out
 
@@ -371,7 +443,19 @@ class LineMission:
         """返回 (vx, wz, select)。select=True/False 表示节点要调用 /motion/navigation，None 不动。"""
         dt = 0.05 if self._last_tick is None else max(0.0, min(0.2, now - self._last_tick))
         self._last_tick = now
-        self.pose = pose = self.fusion.pose(now)
+        self.last_motion_mode = motion_mode
+        self.pose = pose = self._control_pose(now)
+        if self.phase == 'PAUSING':
+            try:
+                return self.operations.hold_tick(now, pose, motion_mode)
+            except ValueError as exc:
+                self.phase, self.message = 'PAUSED', str(exc)
+                return 0.0, 0.0, False
+        if self.phase == 'PAUSED':
+            if self.release_pending:
+                self.release_pending = False
+                return 0.0, 0.0, False
+            return 0.0, 0.0, None
         if self.phase == 'IDLE' and self.release_pending:
             self.release_pending = False
             return 0.0, 0.0, False
@@ -395,8 +479,17 @@ class LineMission:
             return 0.0, 0.0, None
         if pose is None:
             pose = _NoPose()
+        self._auto_resume(now, pose)
         vx, wz = self.tracker.update(pose, dt)
         self._write_log(now, pose, vx)
+        try:
+            self.operations.capture(now)
+        except ValueError as exc:
+            self.operations.record.update(state='PAUSING', reason='storage_error')
+            self.tracker.pause('storage_error')
+            self.operations.still_since = None
+            self.phase, self.message = 'PAUSING', str(exc) + '；正在停车'
+            return 0.0, 0.0, None
         st = self.tracker.st.state
         if st == 'DONE':
             if self.task == 'line':
@@ -408,16 +501,39 @@ class LineMission:
             return 0.0, 0.0, None
         return vx, wz, None
 
+    def _auto_resume(self, now, pose):
+        """定位问题暂停后，定位连续可用 AUTO_RESUME_S 就接着走；起步检查没过（如离线太远）隔 AUTO_RESUME_S 再试。"""
+        if self.operations.held or self.tracker.st.state != 'PAUSED' or not pose.usable_for_control:
+            self._usable_since = None
+            return
+        if self._usable_since is None:
+            self._usable_since = now
+        if now - self._usable_since < AUTO_RESUME_S - 1e-9:
+            return
+        if self.tracker.start(pose):
+            self.message = '定位恢复，自动继续'
+            self._usable_since = None
+        else:
+            self._usable_since = now
+
     def _start_integral(self):
         """直线学到的舵机零位（积分）。路线控制器积分增益不同，按相同的零位曲率换算过去。"""
         if self.task == 'line':
             return self.integral0
         return self.integral0 * self.line_cfg.ki_per_m2 / self.tracker.cfg.ki_per_m2
 
-    def _finish(self, message):
+    def _finish(self, message, state=None):
+        try:
+            self.operations.capture(self._last_tick or 0, force=True)
+        except ValueError:
+            pass
         self.phase, self.message = 'IDLE', message
         self.release_pending = True
         self._close_log()
+        try:
+            self.operations.finish(state or ('DONE' if self.tracker.st.state == 'DONE' else 'INTERRUPTED'), message)
+        except ValueError as exc:
+            self.message += '；' + str(exc)
 
     # ---- 记录与持久化 ----
     def _open_log(self, now):
@@ -484,9 +600,21 @@ class LineMission:
                                                  max_points=route_plan.MAX_POINTS, max_laps=route_plan.MAX_LAPS,
                                                  max_entry_m=route_plan.MAX_ENTRY_M,
                                                  # 连线路线压线用的车身：后轴中心到车头、车尾、半宽（app 画同样的预览）
-                                                 body=[round(v, 4) for v in self.body]),
+                                                 body=[round(v, 4) for v in self.body],
+                                                 # 差速车（能原地转）按喷头压线：nozzle_x 喷头在后轴前多少米
+                                                 drive=self.geo.drive, nozzle_x=self.nozzle_x,
+                                                 pivot_rate=self.geo.pivot_rate_rad_s,
+                                                 pivot_accel=self.geo.pivot_accel_rad_s2,
+                                                 accel=self.path_cfg.accel_mps2,
+                                                 lateral_accel=self.path_cfg.lat_accel_mps2),
                                calibration=calibration, diag=self._diag(calibration),
-                               rtk_events=self._jump_events()))
+                               rtk_events=self._jump_events(), operations=self.operations.status()))
+
+    def section_options(self):
+        """SectionTracker 按底盘的额外参数：差速车原地转向、倒车曲率照走（没有转向机构转不够）。"""
+        if not self.differential:
+            return {}
+        return dict(pivot_rate=self.geo.pivot_rate_rad_s, pivot_accel=self.geo.pivot_accel_rad_s2, reverse_gain=1.0)
 
     def _diag(self, calibration):
         """诊断：下发曲率与车实际走出的曲率（融合角速度 / 车速），RTK 与融合推算之差，离群、重置次数。"""
@@ -517,6 +645,16 @@ class LineMission:
                             d=round(j['d'], 4), left=round(j['left'], 4), dur=round(j['t1'] - j['t0'], 2),
                             age_s=None if now is None else round(max(0.0, now - j['t1']), 1)))
         return out
+
+
+def _with(pose, **changes):
+    """位姿换几个字段的副本（融合给的是 dataclass，测试替身是 SimpleNamespace）。"""
+    if dataclasses.is_dataclass(pose):
+        return dataclasses.replace(pose, **changes)
+    out = type(pose)(**vars(pose))
+    for key, value in changes.items():
+        setattr(out, key, value)
+    return out
 
 
 class _NoPose:

@@ -6,12 +6,17 @@ import os
 from pathlib import Path
 
 DEFAULT_PATH = Path(__file__).with_name('robot.json')
+# 底盘驱动方式：ackermann 旧 Wheeltec 前轮转向；differential Gen5 两后轮差速、前面自由万向轮（能原地转）
+DRIVE_TYPES = ('ackermann', 'differential')
 
 
 def load_profile(path=None):
     path = Path(path or os.environ.get('RK3588_ROBOT_CONFIG', DEFAULT_PATH))
     profile = json.loads(path.read_text())
     default = json.loads(DEFAULT_PATH.read_text())
+    if isinstance(profile, dict) and 'drive' not in profile:
+        # 加 drive 段之前的现场配置（/etc/rk3588/robot.json）没有这一段，按旧车（阿克曼）读
+        profile['drive'] = dict(default['drive'], type='ackermann')
     if set(profile) != set(default) or profile.get('schema_version') != 1:
         raise ValueError('unsupported robot profile schema')
     for section, values in default.items():
@@ -47,6 +52,14 @@ def load_profile(path=None):
         raise ValueError('invalid reverse speed ratio')
     if profile['frames']['odom'] == profile['frames']['base']:
         raise ValueError('odom and base frames must differ')
+    drive = profile['drive']
+    if drive['type'] not in DRIVE_TYPES:
+        raise ValueError('drive.type must be one of ' + '/'.join(DRIVE_TYPES))
+    if min(drive['min_radius_m'], drive['pivot_rate_rad_s'], drive['pivot_accel_rad_s2']) <= 0 \
+            or drive['pivot_rate_rad_s'] > profile['driver']['max_yaw_rate_rad_s'] + 1e-9:
+        raise ValueError('invalid drive limits')
+    if not 0 <= drive['nozzle_x_m'] < g['front_m']:
+        raise ValueError('nozzle must be between the rear axle and the front of the body')
     return profile
 
 

@@ -27,6 +27,8 @@ from runtime_config import PROFILE  # noqa: E402
 
 FIXTURE_DIR = os.path.join(REPO, 'tests', 'fixtures', 'app_protocol')
 BODY = (PROFILE['geometry']['front_m'], PROFILE['geometry']['rear_m'], PROFILE['geometry']['half_width_m'])
+# 差速车（Gen5）的缓弯半径：共享配置 drive.min_radius_m（0.5 m）/ kappa_margin，与 line_mission 相同
+PIVOT_RADIUS = PROFILE['drive']['min_radius_m'] / PathConfig().kappa_margin
 
 
 def sample_snapshot(stale=False):
@@ -66,7 +68,8 @@ def sample_gnss(now=100.0):
                 'ant2': dict(available=True, source='BESTNAVH', sol='NARROW_INT', fix='FIXED',
                              sats_used=29, sats_tracked=37, age_s=0.4, offset_m=0.331, consistent=True)},
             'heading': dict(sol='L1_INT', fix='FIXED', sats_used=28, sats_tracked=36, length_m=0.331,
-                            pitch_deg=-0.8, sigma_deg=0.28, ref_m=0.331, valid=True),
+                            pitch_deg=-0.8, sigma_deg=0.28, ref_m=0.331, valid=True,
+                            yaw_deg=90.18),     # 双天线测出的车头方向（ENU，东 0 逆时针）：车头朝北
             'ntrip': {'configured': True, 'connected': True, 'mount': 'AUTO', 'bytes': 81234,
                       'rtcm_types': [1005, 1074, 1084, 1124], 'error': None, 'age_s': 0.4,
                       'config_revision': 'fixture-1', 'config_error': None}}
@@ -97,7 +100,7 @@ def sample_bad_heading_gnss(now=100.0):
     g = sample_gnss(now)
     g.update(heading_ok=False, heading_sol='NARROW_FLOAT', baseline_m=2.097,
              heading=dict(sol='NARROW_FLOAT', fix='FLOAT', sats_used=30, sats_tracked=38, length_m=2.097,
-                          pitch_deg=72.8, sigma_deg=18.8, ref_m=None, valid=False))
+                          pitch_deg=72.8, sigma_deg=18.8, ref_m=None, valid=False, yaw_deg=None))
     g['antennas'] = dict(g['antennas'], ant2=dict(g['antennas']['ant2'], sats_used=31, sats_tracked=38,
                                                   offset_m=2.716, consistent=None))
     return g
@@ -115,7 +118,7 @@ def sample_route_line(now=100.0):
             'route': route,
             'route_limits': {'min_radius': round(min_route_radius(), 3), 'max_points': route_plan.MAX_POINTS,
                              'max_laps': route_plan.MAX_LAPS, 'max_entry_m': route_plan.MAX_ENTRY_M,
-                             'body': list(BODY)},
+                             'body': list(BODY), 'drive': 'ackermann', 'nozzle_x': None},
             'pose': {'x': 10.004, 'y': 5.0, 'yaw_deg': 90.3, 'speed': 0.5, 'quality': 'RTK_FIXED',
                      'usable': True, 'sigma_xy': 0.009, 'sigma_yaw_deg': 0.08, 'reasons': []},
             'tracker': {'state': 'RUNNING', 'reason': '', 'e': -0.004, 'heading_err_deg': 0.3, 's': 17.1,
@@ -127,7 +130,10 @@ def sample_route_line(now=100.0):
             'diag': {'kappa_cmd': 0.0123, 'kappa_act': 0.0111, 'yaw_rate': 0.0056, 'rtk_along_m': 0.0042,
                      'rtk_left_m': -0.0061, 'position_outliers': 3, 'position_resets': 0, 'jumps': 1},
             'rtk_events': [{'id': 87.35, 'x': 8.2, 'y': 4.9, 'lat': 30.123500123, 'lon': 120.987750456, 'd': 0.0821,
-                            'left': 0.078, 'dur': 1.05, 'age_s': 12.5}]}
+                            'left': 0.078, 'dur': 1.05, 'age_s': 12.5}],
+            # 车身姿态（IMU）：右侧略低 1.25°、车头抬起 2.4°（REP-103：横滚左侧抬起为正，俯仰车头压低为正），
+            # IMU 偏航比它启动时左转了 12.6°（没有磁力计，只是相对值）
+            'attitude': {'roll_deg': 1.25, 'pitch_deg': -2.4, 'yaw_deg': 12.6, 'source': 'imu_madgwick'}}
 
 
 def route_geometry_cases():
@@ -190,6 +196,23 @@ def route_geometry_cases():
                 case.update(sections=None, entry_m=None, error=str(exc))
                 case.setdefault('route_sections', None)
                 case.setdefault('cover', None)
+            # 差速车（Gen5）同一条路线：喷头压线、急弯原地转向（app PivotRoute.kt 对照）；喷头在后轴前或两轮中间
+            nozzle = 0.30 if len(out) % 2 == 0 else 0.0
+            try:
+                pivot, corners = route_plan._pivot_route_sections(spec, PIVOT_RADIUS, nozzle)
+                case['pivot'] = dict(radius=PIVOT_RADIUS, nozzle_x=nozzle, corners=corners, pivots=route_plan.pivot_count(pivot),
+                                     sections=[[d_, list(st), [list(p) for p in ps]] for d_, st, ps in pivot])
+                if car is not None:
+                    # 从车位姿起的整趟（原地转向接入 + 路线），接入太远时记原因
+                    try:
+                        plan, entry_m = route_plan.plan(spec, tuple(car), PIVOT_RADIUS, nozzle_x=nozzle)
+                        case['pivot'].update(plan=[[s.direction, list(s.path.pieces[0].pose(0.0)),
+                                                    [[p.length, p.kappa] for p in s.path.pieces]] for s in plan],
+                                             entry_m=entry_m, plan_error=None)
+                    except ValueError as exc:
+                        case['pivot'].update(plan=None, entry_m=None, plan_error=str(exc))
+            except ValueError as exc:
+                case['pivot'] = dict(radius=PIVOT_RADIUS, nozzle_x=nozzle, error=str(exc))
             out.append(case)
             continue
         try:

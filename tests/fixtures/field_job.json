@@ -1,0 +1,456 @@
+{
+  "format": "follow-cockpit-field-job",
+  "version": 1,
+  "status": "draft",
+  "note": "多段划线作业格式草案：车端尚未支持，字段可能调整。现有 App 请使用逐段导出的路线文件。",
+  "name": "低压湿线路线 · 轮轴右外0.50米",
+  "template": {
+    "kind": "football-11",
+    "length": 105,
+    "width": 68,
+    "line_width": 0.12,
+    "measured_to_outer_edge": true,
+    "spot_diameter": 0.2
+  },
+  "vehicle": {
+    "min_turn_radius": 1.92,
+    "paint_speed": 0.5,
+    "transit_speed": 0.8,
+    "tight_arcs_by_chords": true,
+    "paint_dry_minutes": 20
+  },
+  "frame": {
+    "field": "x 沿边线、y 沿球门线，原点在左下角线外沿，单位 m",
+    "survey": null
+  },
+  "start_ref": "c-ll",
+  "placement": {
+    "crs_name": "8003",
+    "axis_order": "north_east",
+    "rigid": true,
+    "a": {
+      "ref": null,
+      "x_north": null,
+      "y_east": null
+    },
+    "b": {
+      "ref": null,
+      "x_north": null,
+      "y_east": null
+    },
+    "check": {
+      "ref": null,
+      "x_north": null,
+      "y_east": null
+    },
+    "result": null
+  },
+  "sequence": [
+    {
+      "order": 1,
+      "action": "paint",
+      "option": {
+        "reversed": false
+      },
+      "id": "left-penalty-arc",
+      "name": "左罚球弧",
+      "kind": "arc",
+      "length_m": 16.8932,
+      "field": {
+        "center": [
+          11,
+          34
+        ],
+        "radius": 9.09,
+        "start_deg": -53.2403,
+        "sweep_deg": 106.4807
+      },
+      "survey": null
+    },
+    {
+      "order": 2,
+      "action": "paint",
+      "option": {
+        "reversed": false
+      },
+      "id": "right-penalty-area",
+      "name": "右罚球区",
+      "kind": "polyline",
+      "length_m": 72.96,
+      "field": {
+        "points": [
+          [
+            104.94,
+            13.9
+          ],
+          [
+            88.56,
+            13.9
+          ],
+          [
+            88.56,
+            54.1
+          ],
+          [
+            104.94,
+            54.1
+          ]
+        ],
+        "closed": false
+      },
+      "survey": null
+    },
+    {
+      "order": 3,
+      "action": "paint",
+      "option": {
+        "reversed": true
+      },
+      "id": "centre-circle",
+      "name": "中圈",
+      "kind": "circle",
+      "length_m": 57.1142,
+      "field": {
+        "center": [
+          52.5,
+          34
+        ],
+        "radius": 9.09
+      },
+      "survey": null
+    },
+    {
+      "order": 4,
+      "action": "paint",
+      "option": {
+        "reversed": true
+      },
+      "id": "left-goal-area",
+      "name": "左球门区",
+      "kind": "polyline",
+      "length_m": 28.96,
+      "field": {
+        "points": [
+          [
+            0.06,
+            24.9
+          ],
+          [
+            5.44,
+            24.9
+          ],
+          [
+            5.44,
+            43.1
+          ],
+          [
+            0.06,
+            43.1
+          ]
+        ],
+        "closed": false
+      },
+      "survey": null
+    },
+    {
+      "order": 5,
+      "action": "paint",
+      "option": {
+        "reversed": true
+      },
+      "id": "corner-ll",
+      "name": "左下角球弧",
+      "kind": "arc",
+      "length_m": 1.4765,
+      "field": {
+        "center": [
+          0,
+          0
+        ],
+        "radius": 0.94,
+        "start_deg": 0,
+        "sweep_deg": 90
+      },
+      "survey": null
+    },
+    {
+      "order": 6,
+      "action": "paint",
+      "option": {
+        "reversed": false
+      },
+      "id": "right-goal-area",
+      "name": "右球门区",
+      "kind": "polyline",
+      "length_m": 28.96,
+      "field": {
+        "points": [
+          [
+            104.94,
+            24.9
+          ],
+          [
+            99.56,
+            24.9
+          ],
+          [
+            99.56,
+            43.1
+          ],
+          [
+            104.94,
+            43.1
+          ]
+        ],
+        "closed": false
+      },
+      "survey": null
+    },
+    {
+      "order": 7,
+      "action": "paint",
+      "option": {
+        "reversed": true
+      },
+      "id": "corner-ur",
+      "name": "右上角球弧",
+      "kind": "arc",
+      "length_m": 1.4765,
+      "field": {
+        "center": [
+          105,
+          68
+        ],
+        "radius": 0.94,
+        "start_deg": 180,
+        "sweep_deg": 90
+      },
+      "survey": null
+    },
+    {
+      "order": 8,
+      "action": "paint",
+      "option": {
+        "reversed": true
+      },
+      "id": "corner-ul",
+      "name": "左上角球弧",
+      "kind": "arc",
+      "length_m": 1.4765,
+      "field": {
+        "center": [
+          0,
+          68
+        ],
+        "radius": 0.94,
+        "start_deg": 270,
+        "sweep_deg": 90
+      },
+      "survey": null
+    },
+    {
+      "order": 9,
+      "action": "paint",
+      "option": {
+        "reversed": true
+      },
+      "id": "left-penalty-area",
+      "name": "左罚球区",
+      "kind": "polyline",
+      "length_m": 72.96,
+      "field": {
+        "points": [
+          [
+            0.06,
+            13.9
+          ],
+          [
+            16.44,
+            13.9
+          ],
+          [
+            16.44,
+            54.1
+          ],
+          [
+            0.06,
+            54.1
+          ]
+        ],
+        "closed": false
+      },
+      "survey": null
+    },
+    {
+      "order": 10,
+      "action": "paint",
+      "option": {
+        "reversed": true
+      },
+      "id": "right-penalty-arc",
+      "name": "右罚球弧",
+      "kind": "arc",
+      "length_m": 16.8932,
+      "field": {
+        "center": [
+          94,
+          34
+        ],
+        "radius": 9.09,
+        "start_deg": 126.7597,
+        "sweep_deg": 106.4807
+      },
+      "survey": null
+    },
+    {
+      "order": 11,
+      "action": "paint",
+      "option": {
+        "reversed": true
+      },
+      "id": "corner-lr",
+      "name": "右下角球弧",
+      "kind": "arc",
+      "length_m": 1.4765,
+      "field": {
+        "center": [
+          105,
+          0
+        ],
+        "radius": 0.94,
+        "start_deg": 90,
+        "sweep_deg": 90
+      },
+      "survey": null
+    },
+    {
+      "order": 12,
+      "action": "paint",
+      "option": {
+        "reversed": true
+      },
+      "id": "halfway",
+      "name": "中线",
+      "kind": "polyline",
+      "length_m": 67.88,
+      "field": {
+        "points": [
+          [
+            52.5,
+            0.06
+          ],
+          [
+            52.5,
+            67.94
+          ]
+        ],
+        "closed": false
+      },
+      "survey": null
+    },
+    {
+      "order": 13,
+      "action": "paint",
+      "option": {
+        "start": 1,
+        "reversed": true
+      },
+      "id": "boundary",
+      "name": "边线与球门线",
+      "kind": "polyline",
+      "length_m": 345.52,
+      "field": {
+        "points": [
+          [
+            0.06,
+            0.06
+          ],
+          [
+            104.94,
+            0.06
+          ],
+          [
+            104.94,
+            67.94
+          ],
+          [
+            0.06,
+            67.94
+          ]
+        ],
+        "closed": true
+      },
+      "survey": null
+    }
+  ],
+  "skipped": [],
+  "manual": [
+    {
+      "id": "centre-mark",
+      "name": "中点",
+      "kind": "point",
+      "length_m": 0,
+      "field": {
+        "center": [
+          52.5,
+          34
+        ],
+        "diameter": 0.2
+      },
+      "survey": null,
+      "reason": "车能开到点上停住，但车端还没有“停车打点”作业，也还没装喷头；加上后可以自动打点，现在先人工补。"
+    },
+    {
+      "id": "left-penalty-mark",
+      "name": "左罚球点",
+      "kind": "point",
+      "length_m": 0,
+      "field": {
+        "center": [
+          11,
+          34
+        ],
+        "diameter": 0.2
+      },
+      "survey": null,
+      "reason": "车能开到点上停住，但车端还没有“停车打点”作业，也还没装喷头；加上后可以自动打点，现在先人工补。"
+    },
+    {
+      "id": "right-penalty-mark",
+      "name": "右罚球点",
+      "kind": "point",
+      "length_m": 0,
+      "field": {
+        "center": [
+          94,
+          34
+        ],
+        "diameter": 0.2
+      },
+      "survey": null,
+      "reason": "车能开到点上停住，但车端还没有“停车打点”作业，也还没装喷头；加上后可以自动打点，现在先人工补。"
+    }
+  ],
+  "totals": {
+    "paint_m": 714.0468,
+    "transit_m_straight": 781.5501,
+    "manual_m": 0
+  },
+  "simulation": {
+    "preset": "custom",
+    "nozzle": {
+      "x": 0,
+      "y": -0.5
+    },
+    "castor": {
+      "x": 0.35,
+      "y": 0
+    },
+    "seed": 1,
+    "ideal": false,
+    "smartTransit": true,
+    "dryWait": true,
+    "waitPerHitMin": 5,
+    "dots": true
+  }
+}

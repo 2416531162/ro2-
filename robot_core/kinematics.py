@@ -1,5 +1,8 @@
 """Shared symmetric Ackermann steering convention used by the existing chassis.
 
+The Gen5 chassis is differential (drive.type = differential): ChassisGeometry.differential
+tells callers that the car can turn in place and has no steering angle.
+
 All callers use the same wheelbase/track model; firmware validation remains a
 hardware acceptance item. SI body yaw is derived from speed and steering.
 """
@@ -23,6 +26,12 @@ class ChassisGeometry:
     wheelbase_m: float = PROFILE["geometry"]["wheelbase_m"]    # AxleSpacing 前后轴距 (前轮轴心 -> 后轮轴心)
     track_m: float = PROFILE["geometry"]["track_m"]    # WheelSpacing 左右轮距 (轮中心距)
     max_steer_rad: float = PROFILE["geometry"]["max_steer_rad"]    # ★ 舵机物理限位,标称 20°,尚未实测确认
+    # 驱动方式（robot.json 的 drive 段）。differential：两后轮差速、前面自由万向轮，能原地转；
+    # 此时 wheelbase / max_steer 不参与运动学，track_m 是两驱动轮的轮距
+    drive: str = PROFILE["drive"]["type"]
+    diff_min_radius_m: float = PROFILE["drive"]["min_radius_m"]     # 差速车跟踪圆弧的最小半径（内侧轮还有速度）
+    pivot_rate_rad_s: float = PROFILE["drive"]["pivot_rate_rad_s"]  # 原地转向最大角速度
+    pivot_accel_rad_s2: float = PROFILE["drive"]["pivot_accel_rad_s2"]
 
     def __post_init__(self):
         if self.wheelbase_m <= 0:
@@ -31,11 +40,28 @@ class ChassisGeometry:
             raise ValueError("track_m 不能为负")
         if not 0 < self.max_steer_rad < math.pi / 2:
             raise ValueError("max_steer_rad 超出合理范围")
+        if self.drive not in ("ackermann", "differential"):
+            raise ValueError("drive 只能是 ackermann 或 differential")
+        if min(self.diff_min_radius_m, self.pivot_rate_rad_s, self.pivot_accel_rad_s2) <= 0:
+            raise ValueError("差速底盘的最小半径、原地转向角速度和角加速度必须为正")
+
+    @property
+    def differential(self):
+        """两轮差速（能原地转）。"""
+        return self.drive == "differential"
 
     @property
     def min_turn_radius_m(self):
-        """满舵时的转弯半径。"""
+        """满舵时的转弯半径；差速车是跟踪圆弧的最小半径（原地转向另算）。"""
+        if self.differential:
+            return self.diff_min_radius_m
         return self.wheelbase_m / math.tan(self.max_steer_rad) + 0.5 * self.track_m
+
+
+def differential_wheels(vx, wz, track_m):
+    """差速车 (车速, 角速度) → (左轮, 右轮) 线速度；左转 wz > 0 时右轮快。"""
+    half = 0.5 * track_m
+    return vx - wz * half, vx + wz * half
 
 
 def yaw_from_steer(speed_mps, steer_rad, geometry):

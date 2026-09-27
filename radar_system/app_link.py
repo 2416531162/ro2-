@@ -168,7 +168,7 @@ def client_frame(opcode, payload, mask=b'\x01\x02\x03\x04', fin=True):
 
 SPEED_TIERS = ('low', 'med', 'high')
 LINE_ACTIONS = ('mark', 'start', 'stop', 'clear')
-ROUTE_ACTIONS = ('set', 'start', 'clear')
+ROUTE_ACTIONS = ('set', 'start', 'clear', 'pause', 'preview', 'resume', 'rework', 'field_start')
 RTK_STALE_S = 2.0      # /gnss/status 2 Hz
 LINE_STALE_S = 1.5     # /line/status 5 Hz
 
@@ -184,6 +184,13 @@ def _finite(value, name, lo, hi):
     if not math.isfinite(value):
         raise CommandError(name + ' 必须是有限数值')
     return max(lo, min(hi, value))
+
+
+def _route_distance(value, name, lo, hi):
+    # Unlike joystick normalization, a requested repair interval must never be clamped.
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not lo <= value <= hi:
+        raise CommandError('%s 必须是 %g–%g 内的有限数值' % (name, lo, hi))
+    return float(value)
 
 
 def parse_command(text):
@@ -230,6 +237,47 @@ def parse_command(text):
         if action not in ROUTE_ACTIONS:
             raise CommandError('route.action 必须是 ' + '/'.join(ROUTE_ACTIONS))
         out['action'] = action
+        if action=='field_start':
+            token=msg.get('preview_token')
+            if not isinstance(token,str) or not 1<=len(token)<=80:raise CommandError('缺少规划标识')
+            if not isinstance(msg.get('allow_outside',False),bool):raise CommandError('越界确认格式错误')
+            out.update(preview_token=token,allow_outside=msg.get('allow_outside',False))
+        if action in ('pause', 'preview', 'resume', 'rework'):
+            if 'allow_outside' in msg:
+                if type(msg['allow_outside']) is not bool:raise CommandError('越界确认格式错误')
+                out['allow_outside']=msg['allow_outside']
+            rev = msg.get('route_rev')
+            if isinstance(rev, bool) or not isinstance(rev, int) or rev < 0:
+                raise CommandError('route_rev 必须是路线版本号')
+            out['route_rev'] = rev
+            for key in ('job_id', 'preview_token'):
+                if key in msg:
+                    value = msg[key]
+                    if not isinstance(value, str) or not 1 <= len(value) <= 80:
+                        raise CommandError(key + ' 格式无效')
+                    out[key] = value
+            if action == 'pause' and 'job_id' not in out:
+                raise CommandError('暂停需要 job_id')
+            if action in ('resume', 'rework') and 'preview_token' not in out:
+                raise CommandError('请先预览接入路径')
+            if action == 'preview':
+                operation = msg.get('operation')
+                if operation not in ('resume', 'rework'):
+                    raise CommandError('operation 必须是 resume 或 rework')
+                out['operation'] = operation
+                if operation == 'resume':
+                    if 'job_id' not in out:
+                        raise CommandError('续画需要 job_id')
+                    out['overlap_m'] = _route_distance(msg.get('overlap_m', 0), 'overlap_m', 0, 0.5)
+                else:
+                    element = msg.get('element')
+                    if isinstance(element, bool) or not isinstance(element, int) or not 0 <= element < 20000:
+                        raise CommandError('element 必须是线段编号')
+                    out['element'] = element
+                    for key in ('from_m', 'to_m'):
+                        out[key] = _route_distance(msg.get(key), key, 0, 1000000)
+                    if out['to_m'] - out['from_m'] < 0.2:
+                        raise CommandError('补画范围至少 0.2 m')
         if action == 'set' and 'route' not in msg:
             raise CommandError('route.set 需要 route')
         if action in ('set', 'start') and 'route' in msg:
@@ -286,6 +334,8 @@ def resolve_stick(throttle, steer, tier, tiers_mps, reverse_scale, geometry):
     from robot_core.kinematics import yaw_from_steer
     throttle = max(-1.0, min(1.0, float(throttle)))
     steer = max(-1.0, min(1.0, float(steer)))
+    if getattr(geometry, 'differential', False):
+        return _differential_stick(throttle, steer, tier, tiers_mps, reverse_scale, geometry)
     if abs(throttle) < 0.05:
         return 0.0, 0.0, 0.0
     base = tiers_mps.get(tier, tiers_mps['med'])
@@ -293,6 +343,23 @@ def resolve_stick(throttle, steer, tier, tiers_mps, reverse_scale, geometry):
     steer_rad = steer * geometry.max_steer_rad
     wz = yaw_from_steer(vx, steer_rad, geometry)
     return round(vx, 4), round(wz, 4), round(math.degrees(steer_rad), 1)
+
+
+def _differential_stick(throttle, steer, tier, tiers_mps, reverse_scale, geometry):
+    """差速车（两后轮差速、前面万向轮）：摇杆打横就原地转，没有前轮转角（返回 0°）。
+
+    角速度上限 = 原地转向角速度 × 本档车速 / 最快档车速，慢档转得也慢；前进时同一比例的角速度，
+    车速越快弯越大。倒车时往左打是车尾往左（与旧车、方向盘一样的手感），所以角速度反号。
+    """
+    moving = abs(throttle) >= 0.05
+    if not moving and abs(steer) < 0.05:
+        return 0.0, 0.0, 0.0
+    base = tiers_mps.get(tier, tiers_mps['med'])
+    vx = throttle * base * (reverse_scale if throttle < 0 else 1.0) if moving else 0.0
+    wz = steer * geometry.pivot_rate_rad_s * base / max(tiers_mps.values())
+    if vx < 0:
+        wz = -wz
+    return round(vx, 4), round(wz, 4), 0.0
 
 
 # =============================================================================
@@ -343,8 +410,9 @@ def _num(value, digits=2):
 
 
 def build_hello(profile, *, name, camera, video_path='/video.mjpg', session=None):
-    g, s = profile['geometry'], profile['sensors']
+    g, s, drive = profile['geometry'], profile['sensors'], profile['drive']
     tan = math.tan(g['max_steer_rad'])
+    differential = drive['type'] == 'differential'
     return {
         'type': 'hello', 'v': PROTOCOL_VERSION, 'name': name, 'session': session,
         'video': video_path,
@@ -352,7 +420,9 @@ def build_hello(profile, *, name, camera, video_path='/video.mjpg', session=None
             'front_m': g['front_m'], 'rear_m': g['rear_m'], 'half_width_m': g['half_width_m'],
             'wheelbase_m': g['wheelbase_m'], 'track_m': g['track_m'],
             'max_steer_deg': round(math.degrees(g['max_steer_rad']), 1),
-            'min_turn_radius_m': round(g['wheelbase_m'] / tan + 0.5 * g['track_m'], 3),
+            'min_turn_radius_m': round(drive['min_radius_m'] if differential else g['wheelbase_m'] / tan + 0.5 * g['track_m'], 3),
+            # 差速车能原地转，没有前轮转角；nozzle_x_m 是喷头（差速车连线路线的压线点）在后轴前多少米
+            'drive': drive['type'], 'nozzle_x_m': drive['nozzle_x_m'],
             'lidar_x_m': s['lidar_x_m'], 'lidar_y_m': s['lidar_y_m'],
             'camera_x_m': s['camera_x_m'], 'camera_y_m': s['camera_y_m'],
             'camera_yaw_rad': s['camera_yaw_rad'],
@@ -387,9 +457,11 @@ def rtk_telemetry(gnss, now):
                 'offset_m': _num(a.get('offset_m'), 3), 'consistent': a.get('consistent')}
                 for name in ('ant1', 'ant2')
                 for a in [(g.get('antennas') or {}).get(name) or {}]},
-            'heading': None if not g.get('heading') else {
-                k: g['heading'].get(k) for k in ('sol', 'fix', 'sats_used', 'sats_tracked', 'length_m', 'pitch_deg',
-                                                  'sigma_deg', 'ref_m', 'valid')},
+            'heading': None if not g.get('heading') else dict(
+                {k: g['heading'].get(k) for k in ('sol', 'fix', 'sats_used', 'sats_tracked', 'length_m', 'pitch_deg',
+                                                   'sigma_deg', 'ref_m', 'valid')},
+                # 双天线测出的车头方向（ENU 度，东 0 逆时针）：只在测向有效时给
+                yaw_deg=_num(g['heading'].get('yaw_deg'), 2) if g['heading'].get('valid') is True else None),
             'ntrip': {'configured': bool(n.get('configured')), 'connected': bool(n.get('connected')),
                       **({'enabled': n['enabled']} if isinstance(n.get('enabled'), bool) else {}),
                       'error': n.get('error'), 'age_s': _num(n.get('age_s'), 1),
@@ -407,6 +479,7 @@ def line_telemetry(line, now):
     pose = ln.get('pose')
     return {
         'stale': False, 'phase': ln.get('phase'), 'message': ln.get('message'),
+        **({'operations': ln['operations']} if ln.get('operations') is not None else {}),
         'cruise': _num(ln.get('cruise')), 'motion_mode': ln.get('motion_mode'),
         'points': ln.get('points') or {},
         'pose': None if not pose else {
@@ -418,19 +491,33 @@ def line_telemetry(line, now):
                   'heading_err_deg': _num(tr.get('heading_err_deg'), 2), 's': _num(tr.get('s'), 3),
                   'length': _num(tr.get('length'), 3), 'v_cmd': _num(tr.get('v_cmd')),
                   'rms': _num(stats.get('rms_m'), 4), 'max': _num(stats.get('max_m'), 4),
-                  # 连线路线倒车补角：当前档位（forward/reverse）、第几段 / 共几段、是否在换向点等车停稳
+                  # 连线路线倒车补角：当前档位（forward/reverse）、第几段 / 共几段、是否在换向点等车停稳；
+                  # 差速车换段时是否正在原地转向
                   'gear': tr.get('gear', 'forward'), 'section': tr.get('section', 1),
-                  'sections': tr.get('sections', 1), 'switching': bool(tr.get('switching', False))},
+                  'sections': tr.get('sections', 1), 'switching': bool(tr.get('switching', False)),
+                  'pivoting': bool(tr.get('pivoting', False))},
         'last_result': ln.get('last_result'),
         # 路线作业：地图原点（经纬度）、天线原始定位（融合位姿没有时也能在地图上画车的位置）、车上存的路线
         'task': ln.get('task', 'line'), 'origin': ln.get('origin'), 'antenna': ln.get('antenna'),
         'route': ln.get('route'), 'route_limits': ln.get('route_limits'),
         # 诊断页：下发 / 实际曲率、RTK 与融合推算之差（米，车体系沿车头 / 向左）、离群与重置次数
         'diag': _line_diag(ln.get('diag')),
+        # 车身姿态（IMU，imu_filter_madgwick）：横滚左侧抬起为正、俯仰车头压低为正（REP-103），度；
+        # yaw_deg 是 IMU 自己的偏航（没有磁力计：相对 imu 组件启动时，左转为正，会漂）；没有时为 None
+        'attitude': _line_attitude(ln.get('attitude')),
         # 定位跳动（地图上标出来）：编号、本地坐标、经纬度、最大差值 m、向左分量、持续 s、距今 s
         'rtk_events': [{k: e.get(k) for k in ('id', 'x', 'y', 'lat', 'lon', 'd', 'left', 'dur', 'age_s')}
                        for e in (ln.get('rtk_events') or []) if isinstance(e, dict)],
     }
+
+
+def _line_attitude(a):
+    if not isinstance(a, dict):
+        return None
+    roll, pitch = _num(a.get('roll_deg'), 2), _num(a.get('pitch_deg'), 2)
+    if roll is None or pitch is None:
+        return None
+    return {'roll_deg': roll, 'pitch_deg': pitch, 'yaw_deg': _num(a.get('yaw_deg'), 2), 'source': a.get('source')}
 
 
 def _line_diag(d):

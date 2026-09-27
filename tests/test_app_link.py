@@ -248,6 +248,25 @@ class TestRtkLine(unittest.TestCase):
         self.assertEqual(al.rtk_telemetry(g, 103.0), {'stale': True})
         self.assertEqual(al.rtk_telemetry(None, 100.0), {'stale': True})
 
+    def test_rtk_heading_yaw_only_when_valid(self):
+        self.assertEqual(al.rtk_telemetry(fixtures.sample_gnss(now=100.0), 100.0)['heading']['yaw_deg'], 90.18)
+        self.assertIsNone(al.rtk_telemetry(fixtures.sample_bad_heading_gnss(now=100.0), 100.0)['heading']['yaw_deg'])
+        g = fixtures.sample_gnss(now=100.0)
+        g['heading'] = dict(g['heading'], valid=False)          # 测向无效时车端就算带了角度也不转给 app
+        self.assertIsNone(al.rtk_telemetry(g, 100.0)['heading']['yaw_deg'])
+        g['heading'] = {k: v for k, v in fixtures.sample_gnss(now=100.0)['heading'].items() if k != 'yaw_deg'}
+        self.assertIsNone(al.rtk_telemetry(g, 100.0)['heading']['yaw_deg'])   # 旧车端没这项
+
+    def test_line_attitude_passes_through_and_rejects_bad_numbers(self):
+        ln = fixtures.sample_route_line(now=100.0)
+        self.assertEqual(al.line_telemetry(ln, 100.0)['attitude'],
+                         {'roll_deg': 1.25, 'pitch_deg': -2.4, 'yaw_deg': 12.6, 'source': 'imu_madgwick'})
+        old = dict(ln, attitude={'roll_deg': 1.25, 'pitch_deg': -2.4, 'source': 'imu_madgwick'})   # 只有横滚俯仰的车端
+        self.assertIsNone(al.line_telemetry(old, 100.0)['attitude']['yaw_deg'])
+        self.assertIsNone(al.line_telemetry(dict(ln, attitude=None), 100.0)['attitude'])
+        self.assertIsNone(al.line_telemetry(dict(ln, attitude={'roll_deg': float('nan'), 'pitch_deg': 1.0}), 100.0)['attitude'])
+        self.assertIsNone(al.line_telemetry(fixtures.sample_line(now=100.0), 100.0)['attitude'])   # 旧车端没这项
+
     def test_line_section_goes_stale(self):
         ln = fixtures.sample_line(now=100.0)
         fresh = al.line_telemetry(ln, 100.0)

@@ -99,7 +99,7 @@ class LineNode(Node):
             self._select_at = None
             self.motion.publish(0.0, 0.0)
             self.motion.select(False)
-        if self.mission.phase == 'RUNNING' and self.motion.active():
+        if self.mission.phase in ('RUNNING', 'PAUSING') and self.motion.active():
             self.motion.publish(vx, wz)
 
     def publish_status(self):

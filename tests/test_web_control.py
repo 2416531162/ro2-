@@ -372,6 +372,22 @@ class TestAppSocket(unittest.TestCase):
         sent = self.bridge.pub_select.sent[-1]
         self.assertAlmostEqual(json.loads(sent.data)['bearing_rad'], 0.2)
 
+    def test_route_operation_identity_and_ranges_cross_real_websocket(self):
+        self.read_json('hello')
+        commands=[dict(action='pause',job_id='job-1'),
+                  dict(action='preview',operation='resume',job_id='job-1',overlap_m=.1),
+                  dict(action='preview',operation='rework',element=2,from_m=4.0,to_m=8.0),
+                  dict(action='resume',job_id='job-1',preview_token='resume-ticket'),
+                  dict(action='rework',preview_token='rework-ticket')]
+        for i,fields in enumerate(commands):
+            message=dict(type='route',id='op-%d'%i,route_rev=7,**fields)
+            self.send(message)
+            ack=self.read_json('ack')
+            self.assertTrue(ack['ok'],ack)
+            forwarded=json.loads(self.bridge.pub_line.sent[-1].data)
+            self.assertEqual(forwarded,dict(cmd='route_'+fields['action'],
+                **{k:v for k,v in message.items() if k not in ('type','action')}))
+
     def test_line_commands_forwarded_and_rtk_status_in_telemetry(self):
         self.read_json('hello')
         self.send({'type': 'line', 'action': 'mark', 'point': 'a', 'id': 'l1'})

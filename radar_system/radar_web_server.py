@@ -59,6 +59,8 @@ NETWORK = car_display.Network()
 APP_VIEW = car_display.AppView()          # 平板地图上正在预览的图纸，车载屏幕跟着显示
 CORS_CONFIG = CorsConfigStore(os.environ.get('RK3588_NTRIP_ENV', '~/rtk/ntrip.env'))
 SCREEN_CONTROL = ScreenControl()
+from field_plan_service import FieldPlanService
+FIELD_PLANS = FieldPlanService()
 MANUAL_PUBLISH_PERIOD_S = 0.02
 MANUAL_HEARTBEAT_TIMEOUT_S = 0.75
 
@@ -512,8 +514,12 @@ class TrackingBridgeNode(Node):
     def route_command(self, cmd):
         """app 的 route 指令 -> /line/command（route_set/route_start/route_clear），结果同样看 last_result。"""
         payload = {'cmd': 'route_' + cmd['action'], 'id': cmd.get('id')}
-        if 'route' in cmd:
-            payload['route'] = cmd['route']
+        if cmd['action']=='field_start':
+            payload['field_plan']=FIELD_PLANS.get(cmd['preview_token'])
+            payload['allow_outside']=cmd.get('allow_outside',False)
+        for key in ('route', 'route_rev', 'job_id', 'preview_token', 'operation', 'element', 'from_m', 'to_m', 'overlap_m', 'allow_outside'):
+            if key in cmd:
+                payload[key] = cmd[key]
         self.pub_line.publish(String(data=json.dumps(payload)))
 
     def follower_cb(self, msg):
@@ -808,7 +814,7 @@ class RadarHTTPHandler(http.server.BaseHTTPRequestHandler):
                         cmd['throttle'], cmd['steer'], cmd['tier'], SPEED_TIERS_MPS,
                         REVERSE_SCALE, CHASSIS)
                     status, result = apply_manual(vx, wz, steer_deg, 'stick', session, cmd['seq'])
-                    drove = drove or abs(vx) > 1e-6
+                    drove = drove or abs(vx) > 1e-6 or abs(wz) > 1e-6     # 差速车原地转也算开过
                     if status != 200:
                         reply(cmd, False, result.get('error', ''))
                 elif kind == 'estop':
@@ -834,8 +840,11 @@ class RadarHTTPHandler(http.server.BaseHTTPRequestHandler):
                     if bridge_node is None:
                         reply(cmd, False, 'motion bridge unavailable')
                     else:
-                        bridge_node.route_command(cmd)
-                        reply(cmd, True, 'forwarded')
+                        try:
+                            bridge_node.route_command(cmd)
+                            reply(cmd, True, 'forwarded')
+                        except ValueError as exc:
+                            reply(cmd,False,str(exc))
                 elif kind == 'view':
                     APP_VIEW.set(session, cmd['file'])
                 elif kind == 'ping':
@@ -888,6 +897,19 @@ class RadarHTTPHandler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         global bridge_node
+        if self.path == '/api/field/plan':
+            if self.headers.get('Origin'):
+                self.close_connection = True
+                self._send_json({'ok': False, 'message': '不接受网页跨源规划请求'}, status=403)
+                return
+            try:
+                request = json.loads(self._read_body(262144).decode('utf-8'))
+                result = FIELD_PLANS.prepare(request, snapshot_state().get('line'), time.monotonic())
+                self._send_json({'ok': True, 'plan': result})
+            except (ValueError, KeyError, TypeError, UnicodeError) as exc:
+                self.close_connection = True
+                self._send_json({'ok': False, 'message': str(exc)}, status=400)
+            return
         if self.path == '/api/display':
             if self.headers.get('Origin'):
                 self.close_connection = True

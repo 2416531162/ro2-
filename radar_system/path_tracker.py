@@ -183,6 +183,12 @@ class PathConfig:
     stop_tol_m: float = 0.02
 
 
+def differential_config(config=PathConfig()):
+    """差速车（Gen5）的跟踪参数：直接下发车速和角速度，没有前轮转向的执行延迟、也不会转不够。
+    轮毂电机的响应实车还没辨识，延迟先按 0.1 s。"""
+    return replace(config, delay_s=0.1, steer_gain=1.0)
+
+
 @dataclass
 class PathState:
     state: str = 'IDLE'              # IDLE / RUNNING / PAUSED / DONE / ABORTED
@@ -260,6 +266,12 @@ class PathTracker:
         self._clock = 0.0
         self._sent.clear()
         return True
+
+    def pause(self, reason='operator'):
+        self.st.state, self.st.reason = 'PAUSED', reason
+        self.st.v_cmd = self._v_prev = 0.0
+        self._sent.clear()
+        return 0.0, 0.0
 
     def stop(self, reason='operator'):
         if self.st.state in ('RUNNING', 'PAUSED'):
@@ -414,16 +426,29 @@ class SectionTracker:
     """
 
     def __init__(self, sections, config=PathConfig(), geometry=None, *, reverse_mps=0.3, reverse_gain=0.90,
-                 still_mps=0.02, settle_s=0.3, switch_timeout_s=5.0):
+                 still_mps=0.02, settle_s=0.3, switch_timeout_s=5.0, pivot_rate=None, pivot_accel=1.0,
+                 pivot_tol=math.radians(1.0), pivot_timeout_s=20.0, pivot_stop_tol=0.005):
+        """pivot_rate 不为 None（差速车）：下一段起点车头方向与车差 pivot_tol 以上时，停稳后原地转过去再开，
+        起步时也一样；角速度不超过 pivot_rate、角加速度不超过 pivot_accel。阿克曼车为 None，不原地转。"""
         self.sections = list(sections)
         if not self.sections:
             raise ValueError('路径是空的')
         self.cfg = config
         self.geo = geometry or ChassisGeometry()
         self.still_mps, self.settle_s, self.switch_timeout_s = still_mps, settle_s, switch_timeout_s
+        if pivot_rate is not None and not (pivot_rate > 0 and pivot_accel > 0 and pivot_tol > 0):
+            raise ValueError('原地转向的角速度、角加速度和容差必须为正')
+        self.pivot_rate, self.pivot_accel, self.pivot_tol = pivot_rate, pivot_accel, pivot_tol
+        self.pivot_timeout_s = pivot_timeout_s
         self.trackers = []
         for i, sec in enumerate(self.sections):
-            cfg = config if i == 0 else replace(config, start_min_left_m=config.stop_tol_m)
+            cfg = config if i == 0 else replace(config, start_min_left_m=min(config.start_min_left_m, config.stop_tol_m))
+            if getattr(sec,'cruise_mps',None) is not None:
+                if not math.isfinite(sec.cruise_mps) or not .02<=sec.cruise_mps<=1.2:raise ValueError('分段速度无效')
+                cfg=replace(cfg,cruise_mps=sec.cruise_mps)
+            if pivot_rate is not None and i < len(self.sections) - 1:
+                # 差速车段尾要停准：原地转 90° 后，停车差的那点前后距离就成了下一条边上的横偏
+                cfg = replace(cfg, stop_tol_m=min(cfg.stop_tol_m, pivot_stop_tol))
             if sec.direction < 0:
                 # 倒车实测只走出下发曲率的 0.90（前进 0.96），延迟相近
                 cfg = replace(cfg, cruise_mps=min(cfg.cruise_mps, reverse_mps), track_x_m=-cfg.track_x_m,
@@ -436,8 +461,16 @@ class SectionTracker:
             total += sec.path.length
         self.length = total
         self.cusps = len(self.sections) - 1
+        # 倒车换向次数、段与段之间原地转向的次数（差速车；阿克曼车为 0）
+        self.reversals = sum(1 for a, b in zip(self.sections, self.sections[1:]) if a.direction != b.direction)
+        self.pivots = 0 if pivot_rate is None else sum(
+            1 for a, b in zip(self.sections, self.sections[1:])
+            if abs(wrap(b.car_pose(0.0)[2] - a.car_pose(a.path.length)[2])) > pivot_tol)
         self.index = 0
-        self.switching = False          # 段尾已停车指令，等车停稳换向
+        self.switching = False          # 段尾已停车指令，等车停稳换向（差速车还可能要原地转向）
+        self._next = 1                  # 换段时要开始的那一段（起步前原地转向时是 0）
+        self._pivot = None              # 原地转向的目标车头方向；None 为没在转
+        self._w = self._pivot_t = 0.0   # 原地转向当前下发的角速度、已经转了多久
         self._still = self._wait = 0.0
         self._integral = 0.0            # 前进坐标
         self._done = [0.0, 0, 0.0]      # 已跑完各段的 横偏平方和、样本数、最大横偏
@@ -451,6 +484,10 @@ class SectionTracker:
 
     def check_start(self, pose, hint=None):
         i = self.index if self.st.state == 'PAUSED' else 0
+        if i == 0 and self.st.state != 'PAUSED' and self.pivot_rate is not None and pose.usable_for_control \
+                and self._misaligned(0, pose):
+            # 差速车起步先原地转向：车头方向不算，只看位置在不在第一段起点附近
+            pose = _Travel(pose.x, pose.y, self._heading(0), pose.speed, pose.yaw_rate, True)
         return self.trackers[i].check_start(self._view(self.sections[i], pose), hint)
 
     def start(self, pose, integral=None):
@@ -468,15 +505,31 @@ class SectionTracker:
             return ok
         if integral is not None:
             self._integral = integral
-        self.index, self.switching = 0, False
+        self.index, self.switching, self._pivot = 0, False, None
         self._done = [0.0, 0, 0.0]
         sec, tr = self.sections[0], self.trackers[0]
+        if self.pivot_rate is not None and pose.usable_for_control and self._misaligned(0, pose):
+            # 差速车起步：先原地转到第一段的方向（位置照样要在第一段起点附近）
+            ok, why = self.check_start(pose)
+            if not ok:
+                st.state, st.reason = 'IDLE', why
+                return False
+            self.switching, self._next, self._still, self._wait = True, 0, 0.0, 0.0
+            st.state, st.reason, st.stats = 'RUNNING', '', {}
+            self._sync()
+            return True
         if not tr.start(self._view(sec, pose), integral=sec.direction * self._integral):
             st.state, st.reason = 'IDLE', tr.st.reason
             return False
         st.state, st.reason, st.stats = 'RUNNING', '', {}
         self._sync()
         return True
+
+    def pause(self, reason='operator'):
+        self.trackers[self.index].pause(reason)
+        self.st.state, self.st.reason = 'PAUSED', reason
+        self.st.v_cmd = 0.0
+        return 0.0, 0.0
 
     def stop(self, reason='operator'):
         self.trackers[self.index].stop(reason)
@@ -502,7 +555,7 @@ class SectionTracker:
             if self.index == len(self.sections) - 1:
                 st.state, st.reason = 'DONE', ''
             else:
-                self.switching, self._still, self._wait = True, 0.0, 0.0
+                self.switching, self._next, self._still, self._wait = True, self.index + 1, 0.0, 0.0
             st.v_cmd = 0.0
             return 0.0, 0.0
         if tr.st.state in ('ABORTED', 'PAUSED'):
@@ -514,17 +567,27 @@ class SectionTracker:
         st = self.st
         st.v_cmd = 0.0
         if st.state == 'PAUSED':
+            self._w = 0.0               # 原地转向中暂停：车已停下，继续时从 0 重新加速
             return 0.0, 0.0
         if not pose.usable_for_control:
             st.state, st.reason = 'PAUSED', 'pose_unusable'
+            self._w = 0.0
             return 0.0, 0.0
+        i = self._next
+        if self._pivot is not None:
+            return self._turn(pose, dt)
         self._wait += dt
-        self._still = self._still + dt if abs(pose.speed) < self.still_mps else 0.0
+        still = abs(pose.speed) < self.still_mps
+        if self.pivot_rate is not None:         # 差速车刚原地转完：转动也要停下来
+            still = still and abs(pose.yaw_rate) < 0.05
+        self._still = self._still + dt if still else 0.0
         if self._still < self.settle_s - 1e-9:
             if self._wait > self.switch_timeout_s:
                 st.state, st.reason = 'ABORTED', 'not_stopped_at_cusp'
             return 0.0, 0.0
-        i = self.index + 1
+        if self.pivot_rate is not None and self._misaligned(i, pose):
+            self._pivot, self._w, self._pivot_t = self._heading(i), 0.0, 0.0
+            return self._turn(pose, dt)
         sec, tr = self.sections[i], self.trackers[i]
         if not tr.start(self._view(sec, pose), integral=sec.direction * self._integral):
             st.state, st.reason = 'ABORTED', 'cusp_' + tr.st.reason
@@ -532,6 +595,35 @@ class SectionTracker:
         self.index, self.switching = i, False
         self._sync()
         return 0.0, 0.0
+
+    def _heading(self, i):
+        """第 i 段起点的车头方向。"""
+        return self.sections[i].car_pose(0.0)[2]
+
+    def _misaligned(self, i, pose):
+        return abs(wrap(self._heading(i) - pose.yaw)) > self.pivot_tol
+
+    def _turn(self, pose, dt):
+        """原地转向：角速度按剩下的角度梯形规划（到目标正好停下），每步按角加速度限幅；转到容差内、
+        角速度降到 0 后回去等停稳。返回 (0, wz)。"""
+        st = self.st
+        self._pivot_t += dt
+        if self._pivot_t > self.pivot_timeout_s:
+            st.state, st.reason = 'ABORTED', 'pivot_timeout'
+            self._pivot, self._w = None, 0.0
+            return 0.0, 0.0
+        err = wrap(self._pivot - pose.yaw)
+        if abs(err) <= self.pivot_tol:
+            want = 0.0
+        else:
+            want = math.copysign(min(self.pivot_rate, math.sqrt(2.0 * self.pivot_accel * (abs(err) - 0.5 * self.pivot_tol)),
+                                     2.0 * abs(err)), err)
+        step = self.pivot_accel * dt
+        self._w += max(-step, min(step, want - self._w))
+        if want == 0.0 and abs(self._w) < 1e-9:
+            self._pivot, self._w, self._still, self._wait = None, 0.0, 0.0, 0.0
+            return 0.0, 0.0
+        return 0.0, self._w
 
     def _close(self, tr):
         stats = tr.st.stats
@@ -562,4 +654,5 @@ class SectionTracker:
                     s=st.s, length=st.length, kappa_ref=st.kappa_ref, v_cmd=st.v_cmd, kappa=st.kappa,
                     integral=st.integral, trim_kappa=-self.cfg.ki_per_m2 * st.integral, stats=dict(st.stats),
                     gear='reverse' if self.sections[self.index].direction < 0 else 'forward',
-                    section=self.index + 1, sections=len(self.sections), switching=self.switching)
+                    section=self.index + 1, sections=len(self.sections), switching=self.switching,
+                    pivoting=self._pivot is not None)
