@@ -20,7 +20,13 @@ import gi
 
 gi.require_version('Gtk', '3.0')
 gi.require_version('Gdk', '3.0')
-gi.require_version('WebKit2', '4.0')
+# WebKitGTK：Ubuntu 24.04（RK3588）只有 4.1，22.04（Jetson）是 4.0；两者给 Python 的接口相同，只是底层网络库不同
+for _webkit in ('4.1', '4.0'):
+    try:
+        gi.require_version('WebKit2', _webkit)
+        break
+    except ValueError:
+        continue
 from gi.repository import Gdk, GLib, Gtk, WebKit2  # noqa: E402
 from display_control import ScreenControl  # noqa: E402
 from screen_x11 import DesktopMode  # noqa: E402

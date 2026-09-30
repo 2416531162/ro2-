@@ -15,17 +15,24 @@ import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
-TREES = ('robot_core', 'radar_system', 'wheeltec_protocol', 'deployment', 'docs')
-COMPONENTS = ('camera', 'lidar', 'ai', 'web', 'gui', 'follower', 'rtk', 'line')
+TREES = ('robot_core', 'radar_system', 'wheeltec_protocol', 'oid_protocol', 'rion_protocol', 'deployment', 'docs')
+COMPONENTS = ('camera', 'lidar', 'ai', 'web', 'gui', 'follower', 'rtk', 'line', 'imu', 'jobrec')
 # rtk 只读接收机、发状态；line（RTK 走直线）启动后空闲，只有操作员在 app 上点「开始」才申请 NAVIGATION
 # 默认配置 rtk 只有 RTK 自动驾驶（路线、A—B 直线）和手动开车（2026-09-25 用户要求）：不部署相机、雷达、
 # 人体识别、跟随。人体识别一个进程在 8GB 的 Orin Nano 上约占 2.4 GB、跟随约 1.6 GB，内存吃紧时整机会卡死。
 # 要跟人时按 follow 配置激活（全套）；底盘驱动按配置里有没有雷达决定要不要雷达（见 units()）。
 PROFILES = {'perception': ('camera', 'lidar', 'ai', 'web'),
             'follow': COMPONENTS,
-            'headless': ('camera', 'lidar', 'web', 'follower', 'rtk', 'line'),
-            'rtk': ('web', 'rtk', 'line')}
+            'headless': ('camera', 'lidar', 'web', 'follower', 'rtk', 'line', 'imu', 'jobrec'),
+            # imu：车身横滚俯仰（app 显示；以后 RTK 天线杆臂补偿也要用）。旧车是 imu_filter_madgwick；
+            # Gen5 是 HDA536T 驱动，它还发融合要的 /imu，所以 Gen5 跑 line 必须有 imu
+            # jobrec：作业自动记录（radar_system/job_recorder.py），点开始作业就把原始数据存到 ~/rtk/jobs，排查问题用
+            'rtk': ('web', 'rtk', 'line', 'imu', 'jobrec')}
 DEFAULT_PROFILE = 'rtk'
+# 服务用哪个账号跑：activate 默认用执行 sudo 的账号（Jetson 车上就是 wheeltec，正点原子 RK3588 上是板子的登录账号）
+DEFAULT_USER = 'wheeltec'
+# Gen5：两台欧艾迪驱动器和 HDA536T IMU 挂在同一条 CAN（RK3588 板载 CAN1，系统里叫 can0）上，统一 500K
+CAN_BITRATE = 500000
 
 
 def sha(path):
@@ -86,17 +93,34 @@ def stage(source, destination):
     return release_id
 
 
-def units(base, profile=DEFAULT_PROFILE):
+def units(base, profile=DEFAULT_PROFILE, user=DEFAULT_USER, group=None, home=None):
     # Fixed installation paths avoid systemd/shell quoting surprises.
     runner = str(base/'current/deployment/run_component.sh')
-    common = 'After=network.target\n\n[Service]\nType=simple\n'
-    common += 'User=wheeltec\nGroup=wheeltec\nWorkingDirectory='+str(base/'current')+'\nLogsDirectory=rk3588\n'
-    common += 'Environment=HOME=/home/wheeltec\nEnvironment=USER=wheeltec\nEnvironment=ROS_LOG_DIR=/var/log/rk3588\n'
+    group, home = group or user, home or '/home/'+user
+    for value in (user, group, home):
+        if not re.fullmatch(r'[A-Za-z0-9_./-]+', value):
+            raise ValueError('account name or home has unsupported characters: %r' % value)
+    common = 'After=network.target rk3588-can.service\n\n[Service]\nType=simple\n'
+    # dialout：RTK 接收机的 USB 串口；CAN 原始套接字不需要额外权限
+    common += 'User='+user+'\nGroup='+group+'\nSupplementaryGroups=dialout\n'
+    common += 'WorkingDirectory='+str(base/'current')+'\nLogsDirectory=rk3588\n'
+    common += 'Environment=HOME='+home+'\nEnvironment=USER='+user+'\nEnvironment=ROS_LOG_DIR=/var/log/rk3588\n'
     common += 'KillMode=control-group\nTimeoutStopSec=10\nRestart=on-failure\nRestartSec=2\n'
+    # Participating processes arm systemd's watchdog themselves; legacy third-party
+    # components (e.g. imu_filter_madgwick) retain their existing restart policy.
+    common += 'NotifyAccess=main\nEnvironment=RK3588_WATCHDOG_SEC=20\nTimeoutAbortSec=3\n'
     end = '\n[Install]\nWantedBy=multi-user.target\n'
     # 底盘驱动据此决定要不要雷达：没部署雷达时待命、急停复位不要求雷达，跟随直接拒绝
     lidar = 'Environment=RK3588_LIDAR_INSTALLED=' + ('1' if 'lidar' in PROFILES[profile] else '0') + '\n'
+    # CAN 口开机起成 500K；restart-ms：总线出错（bus-off）后 0.1 s 自动恢复，不然要人重起接口。
+    # 没有 can0 的车（旧车 Wheeltec 走串口）条件不满足，直接跳过，不算失败
+    can = ('[Unit]\nDescription=RK3588 CAN bus for Gen5 drivers and IMU\nConditionPathExists=/sys/class/net/can0\n'
+           'Before=rk3588-wheeltec.service rk3588-perception.target\n\n[Service]\nType=oneshot\nRemainAfterExit=yes\n'
+           'ExecStartPre=-/usr/sbin/ip link set can0 down\n'
+           'ExecStart=/usr/sbin/ip link set can0 type can bitrate %d restart-ms 100\n'
+           'ExecStart=/usr/sbin/ip link set can0 up\n' % CAN_BITRATE) + end
     return {
+        'rk3588-can.service': can,
         'rk3588-wheeltec.service': '[Unit]\nDescription=RK3588 chassis with motion authority\n'+common+lidar+f'ExecStart=/bin/bash {runner} chassis\n'+end,
         'rk3588-perception@.service': '[Unit]\nDescription=RK3588 perception %i\nPartOf=rk3588-perception.target\n'+common+f'ExecStart=/bin/bash {runner} %i\n'+end,
         'rk3588-perception.target': '[Unit]\nDescription=RK3588 perception services\n'+end,
@@ -128,7 +152,7 @@ def switch_link(base, release):
     pending.replace(base/'current')
 
 
-def activate(release, base, unit_dir, profile):
+def activate(release, base, unit_dir, profile, account=(DEFAULT_USER, None, None)):
     verify(release)
     if (base/'current').exists() and not (base/'current').is_symlink():
         raise ValueError('current must be a managed symlink')
@@ -144,13 +168,13 @@ def activate(release, base, unit_dir, profile):
     try:
         switch_link(base, release.resolve())
         unit_dir.mkdir(parents=True, exist_ok=True)
-        for name, content in units(base, profile).items():
+        for name, content in units(base, profile, *account).items():
             (unit_dir/name).write_text(content)
         systemctl('daemon-reload')
-        systemctl('start', 'rk3588-wheeltec.service', 'rk3588-perception.target',
+        systemctl('start', 'rk3588-can.service', 'rk3588-wheeltec.service', 'rk3588-perception.target',
                   *('rk3588-perception@'+c+'.service' for c in PROFILES[profile]))
         # 开机自启与刚启用的配置一致：只 start 不 enable 时，断电重启后新加的组件（rtk、line）不会起来
-        systemctl('enable', 'rk3588-wheeltec.service', 'rk3588-perception.target',
+        systemctl('enable', 'rk3588-can.service', 'rk3588-wheeltec.service', 'rk3588-perception.target',
                   *('rk3588-perception@'+c+'.service' for c in PROFILES[profile]))
         others = [c for c in COMPONENTS if c not in PROFILES[profile]]
         if others:
@@ -178,12 +202,24 @@ def rollback(base, unit_dir):
     # Leave stopped: an older follower might auto-select motion on startup.
 
 
+def service_account(user):
+    """账号 -> (账号, 主组, 家目录)；板子上没有这个账号就报错，不写出起不来的服务。"""
+    import grp
+    import pwd
+    try:
+        pw = pwd.getpwnam(user)
+    except KeyError:
+        raise SystemExit('板子上没有账号 %s：用 --user 指定服务用哪个账号跑' % user)
+    return user, grp.getgrgid(pw.pw_gid).gr_name, pw.pw_dir
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     sub = p.add_subparsers(dest='action', required=True)
     s = sub.add_parser('stage'); s.add_argument('destination', type=Path); s.add_argument('--source', type=Path, default=ROOT)
     v = sub.add_parser('verify'); v.add_argument('release', type=Path)
     a = sub.add_parser('activate'); a.add_argument('release', type=Path); a.add_argument('--profile', choices=PROFILES, default=DEFAULT_PROFILE)
+    a.add_argument('--user', help='服务用哪个账号跑（默认执行 sudo 的账号；没有 sudo 时 %s）' % DEFAULT_USER)
     sub.add_parser('rollback')
     args = p.parse_args()
     if args.action == 'stage':
@@ -194,7 +230,8 @@ def main():
         if sys.platform != 'linux' or os.geteuid() != 0:
             p.error('activate/rollback require root on the Linux board')
         if args.action == 'activate':
-            activate(args.release.resolve(), Path('/opt/rk3588'), Path('/etc/systemd/system'), args.profile)
+            activate(args.release.resolve(), Path('/opt/rk3588'), Path('/etc/systemd/system'), args.profile,
+                     service_account(args.user or os.environ.get('SUDO_USER') or DEFAULT_USER))
         else:
             rollback(Path('/opt/rk3588'), Path('/etc/systemd/system'))
 

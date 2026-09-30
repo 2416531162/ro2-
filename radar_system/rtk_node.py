@@ -2,9 +2,14 @@
 # -*- coding: utf-8 -*-
 """RTK 节点：独占 UM982 串口（雷迅 CUAV 双天线），发布测量和状态；有账号文件时跑 NTRIP 差分。
 
+接收机可以接在车上的 USB 串口，也可以接在安卓平板的串口上：平板 app 把串口原始字节经 TCP 48622
+原样转过来（gnss_bridge.TabletSerialServer），差分改正数原路写回。两路同时监听，正在出数据的那一路
+一直用下去，它 2 s 没数据才换另一路；两路的数据从不混在一起（换路时解析状态、钟差全部重来）。
+
     /gnss/raw      std_msgs/String JSON，每条测量一条（fix / heading / vel，字段见 um982.Um982Stream）；
                    时间是本机单调时钟的测量时刻，走直线节点（融合）用它
-    /gnss/status   std_msgs/String JSON，2 Hz：定位等级、卫星数、差分龄期、航向、各日志频率、NTRIP 状态
+    /gnss/status   std_msgs/String JSON，2 Hz：定位等级、卫星数、差分龄期、航向、各日志频率、NTRIP 状态；
+                   测向有效时 heading.yaw_deg 是双天线测出的车头方向（与 /gnss/heading 同一换算），否则为 null
     /gnss/fix      sensor_msgs/NavSatFix，ANT1 位置（frame_id gnss），协方差 ENU 对角
     /gnss/heading  sensor_msgs/Imu，只有车头方向（ENU，东为 0 逆时针），已扣 ~/rtk/fusion.json 里的安装偏差；
                    航向无效时不发。后两个是 ROS 2 标准消息，Foxglove 地图、rviz2、rosbag、robot_localization 可直接用
@@ -28,11 +33,17 @@ from std_msgs.msg import String
 
 from um982 import RTK_FIXED, RTK_FLOAT, NtripClient, Um982Stream
 from ntrip_config import NtripReload
+import runtime_config  # bootstraps the release root for direct script launches
+from robot_core.service_watchdog import watchdog
+from gnss_bridge import TABLET_PORT, TabletSerialServer
 
 DEFAULT_PORT = ('/dev/serial/by-id/usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_Controller_'
                 'b0d06fec6eabed1183a10e9aa7669f5d-if00-port0')
 DEFAULT_ENV = '~/rtk/ntrip.env'
 FUSION_CONFIG = '~/rtk/fusion.json'     # 标定（安装偏差）与走直线节点共用这一份
+# 只增加副天线 20 Hz 日志（与主天线 BESTPOS 同频，按测量时刻配对检查两天线距离），不清除已有输出、不写接收机闪存
+ANT2_LOG = b'BESTNAVHA 0.05\r\n'
+SOURCE_HOLD_S = 2.0                     # 正在用的一路（USB / 平板）这么久没数据才换另一路
 
 # sensor_msgs/NavSatStatus 的取值（照 nmea_navsat_driver 的对应：单点 FIX、伪距差分 SBAS、RTK 浮点/固定 GBAS）
 NO_FIX, FIX, SBAS_FIX, GBAS_FIX = -1, 0, 1, 2
@@ -67,14 +78,16 @@ def heading_valid(m):
     return bool(m.get('valid'))
 
 
-def heading_imu(m, stamp, mount_offset_deg=0.0, baseline_yaw_body_deg=-90.0):
-    """/gnss/raw 的 heading 消息 → 只带航向的 sensor_msgs/Imu。
+def vehicle_yaw(heading_deg, mount_offset_deg=0.0, baseline_yaw_body_deg=-90.0):
+    """HEADING（ANT1→ANT2 方向，正北顺时针，度）→ 车头 ENU 偏航（弧度，−π…π）：
+    90° − HEADING − 基线在车体系的方向 + 安装偏差，与 gnss_fusion 的换算相同。"""
+    yaw = math.radians(90.0 - heading_deg - baseline_yaw_body_deg + mount_offset_deg)
+    return math.atan2(math.sin(yaw), math.cos(yaw))
 
-    HEADING 是 ANT1→ANT2 方向（正北顺时针）；车头 ENU 偏航 = 90° − HEADING − 基线在车体系的方向 + 安装偏差，
-    与 gnss_fusion 的换算相同。
-    """
-    yaw = math.radians(90.0 - m['heading'] - baseline_yaw_body_deg + mount_offset_deg)
-    yaw = math.atan2(math.sin(yaw), math.cos(yaw))
+
+def heading_imu(m, stamp, mount_offset_deg=0.0, baseline_yaw_body_deg=-90.0):
+    """/gnss/raw 的 heading 消息 → 只带航向的 sensor_msgs/Imu（车头方向见 vehicle_yaw）。"""
+    yaw = vehicle_yaw(m['heading'], mount_offset_deg, baseline_yaw_body_deg)
     msg = Imu()
     msg.header.stamp, msg.header.frame_id = stamp, 'base_link'
     msg.orientation.x = msg.orientation.y = 0.0
@@ -97,7 +110,8 @@ def load_heading_calibration(path=FUSION_CONFIG):
 
 
 class RtkNode(Node):
-    def __init__(self, port, baud=921600, ntrip_env=DEFAULT_ENV, serial_factory=None, fusion_config=FUSION_CONFIG):
+    def __init__(self, port, baud=921600, ntrip_env=DEFAULT_ENV, serial_factory=None, fusion_config=FUSION_CONFIG,
+                 tablet_port=None):
         super().__init__('rtk_node')
         self.port, self.baud = port, baud
         self.serial_factory = serial_factory
@@ -115,11 +129,24 @@ class RtkNode(Node):
         self.write_lock = threading.Lock()
         self.ser = None
         self.port_error = None
+        self.source = None                  # 正在用的接收机数据：'usb' / 'tablet'，还没收到过为 None
+        self.source_rx = {}                 # 每一路最后收到数据的时刻
         self.running = True
         self.cors = NtripReload(ntrip_env, lambda env: NtripClient(env, self.gga_report, self.write_corrections))
+        # 平板串口转发（tablet_port=None 不监听；0 由系统分配端口，测试用）
+        self.tablet, self.tablet_error = None, None
+        if tablet_port is not None:
+            try:
+                self.tablet = TabletSerialServer(tablet_port, on_connect=self.tablet_connected)
+            except OSError as exc:          # 端口被占：只用 USB，状态里写明
+                self.tablet_error = '%s: %s' % (type(exc).__name__, exc)
+                self.get_logger().error('平板串口转发端口 %s 打不开：%s' % (tablet_port, exc))
         self.create_timer(0.5, self.publish_status)
         self.reader = threading.Thread(target=self.read_loop, daemon=True)
         self.reader.start()
+        if self.tablet is not None:
+            self.tablet_reader = threading.Thread(target=self.tablet_loop, daemon=True)
+            self.tablet_reader.start()
 
     # ---- 串口 ----
     def open_serial(self):
@@ -131,13 +158,12 @@ class RtkNode(Node):
     def read_loop(self):
         # 读线程不能悄悄死掉：任何异常都写进状态（port_error）再重试，app 和日志里看得到
         while self.running:
+            watchdog.tick("serial")
             if self.ser is None:
                 try:
                     ser = self.open_serial()
                     with self.write_lock:
-                        # 只增加副天线 20 Hz 日志（与主天线 BESTPOS 同频，按测量时刻配对检查两天线距离），
-                        # 不清除已有输出、不写接收机闪存。
-                        ser.write(b'BESTNAVHA 0.05\r\n')
+                        ser.write(ANT2_LOG)
                         self.ser = ser
                     self.port_error = None
                 except Exception as exc:        # 串口不存在、没权限、pyserial 没装……
@@ -163,9 +189,40 @@ class RtkNode(Node):
                     self.port_error = 'data: %s: %s' % (type(exc).__name__, exc)
                     self.get_logger().error('处理串口数据出错：%r' % exc)
 
-    def on_serial_data(self, data, t_rx):
+    # ---- 平板串口转发 ----
+    def tablet_connected(self):
+        # 平板那头的接收机串口同样补上副天线日志；平板原样写进串口
+        self.tablet.write(ANT2_LOG)
+        self.get_logger().info('平板串口转发已连接：%s' % self.tablet.peer)
+
+    def tablet_loop(self):
+        while self.running:
+            watchdog.tick("tablet")
+            try:
+                data = self.tablet.read(4096)
+            except Exception as exc:        # 不让读线程悄悄死掉
+                self.tablet_error = '%s: %s' % (type(exc).__name__, exc)
+                time.sleep(0.5)
+                continue
+            if data:
+                try:
+                    self.on_serial_data(data, time.monotonic(), 'tablet')
+                except Exception as exc:
+                    self.tablet_error = 'data: %s: %s' % (type(exc).__name__, exc)
+                    self.get_logger().error('处理平板串口数据出错：%r' % exc)
+
+    def on_serial_data(self, data, t_rx, source='usb'):
         # 不能叫 handle：会遮住 rclpy.Node.handle，Node.__init__ 里 `with self.handle:` 就崩了
         with self.stream_lock:
+            self.source_rx[source] = t_rx
+            if source != self.source:
+                last = self.source_rx.get(self.source)
+                if last is not None and t_rx - last < SOURCE_HOLD_S:
+                    return                  # 另一路正在出数据：两台接收机（或同一台的两个口）不混用
+                if self.source is not None:
+                    self.get_logger().warning('接收机数据来源 %s → %s' % (self.source, source))
+                self.source = source
+                self.stream = Um982Stream()     # 换一路：钟差、两天线配对、上一条测量全部重来
             messages = self.stream.feed(data, t_rx)
         for m in messages:
             self.pub_raw.publish(String(data=json.dumps(m, allow_nan=False)))
@@ -185,6 +242,11 @@ class RtkNode(Node):
             return self.stream.gga_report()
 
     def write_corrections(self, data):
+        # 差分改正数写给正在用的那台接收机
+        if self.source == 'tablet':
+            if self.tablet is not None:
+                self.tablet.write(data)
+            return
         with self.write_lock:
             if self.ser is not None:
                 try:
@@ -197,8 +259,23 @@ class RtkNode(Node):
         now = time.monotonic() if now is None else now
         with self.stream_lock:
             st = self.stream.status(now)
-        st['port_open'] = self.ser is not None
-        st['port_error'] = self.port_error
+            hd = self.stream.last.get('heading')
+        if st.get('heading') is not None:
+            # 双天线测出的车头方向（ENU 度，已扣安装偏差）：只在测向有效时给，无效时的数不能拿来显示
+            ok = st['heading'].get('valid') and hd is not None and heading_valid(hd)
+            st['heading']['yaw_deg'] = round(math.degrees(vehicle_yaw(
+                hd['heading'], self.mount_offset_deg, self.baseline_yaw_body_deg)), 2) if ok else None
+        tablet = self.tablet.status() if self.tablet is not None else None
+        st['source'] = self.source
+        if self.source == 'tablet':
+            st['port_open'] = bool(tablet and tablet['connected'])
+            st['port_error'] = None if st['port_open'] else 'tablet disconnected'
+        else:
+            st['port_open'] = self.ser is not None
+            st['port_error'] = self.port_error
+        st['usb'] = dict(open=self.ser is not None, error=self.port_error)
+        st['tablet'] = dict(listening=tablet is not None, error=self.tablet_error,
+                            **(tablet or dict(port=None, connected=False, peer=None)))
         if self.cors.client is not None:
             n = self.cors.client.status()
             st['ntrip'] = dict(configured=True, connected=n['connected'], mount=n['mount'],
@@ -218,6 +295,8 @@ class RtkNode(Node):
     def shutdown(self):
         self.running = False
         self.cors.stop()
+        if self.tablet is not None:
+            self.tablet.close()
 
 
 def main():
@@ -225,10 +304,14 @@ def main():
     p.add_argument('--port', default=os.environ.get('RK3588_RTK_PORT', DEFAULT_PORT))
     p.add_argument('--baud', type=int, default=921600)
     p.add_argument('--ntrip-env', default=os.environ.get('RK3588_NTRIP_ENV', DEFAULT_ENV))
+    p.add_argument('--tablet-port', type=int, default=int(os.environ.get('RK3588_RTK_TABLET_PORT', TABLET_PORT)),
+                   help='平板串口转发的 TCP 端口，0 不监听')
     argv = __import__('sys').argv[1:]
     args = p.parse_args(argv[:argv.index('--ros-args')] if '--ros-args' in argv else argv)
     rclpy.init()
-    node = RtkNode(args.port, args.baud, args.ntrip_env)
+    node = RtkNode(args.port, args.baud, args.ntrip_env, tablet_port=args.tablet_port or None)
+    watchdog.start("ros", "serial", *(("tablet",) if node.tablet is not None else ()))
+    node.create_timer(0.5, lambda: watchdog.tick("ros"))
 
     def on_signal(_sig=None, _frame=None):
         raise KeyboardInterrupt
@@ -240,6 +323,7 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        watchdog.close()
         node.shutdown()
         node.destroy_node()
         if rclpy.ok():

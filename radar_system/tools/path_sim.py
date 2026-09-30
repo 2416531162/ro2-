@@ -10,6 +10,9 @@ app 默认的连线路线（急弯开出去倒车掉头、前进倒车交替）�
            ideal=True 时把传感器噪声、延迟都关掉，只剩控制器和底盘本身的误差。
     truth  直接用底盘真值当位姿（无噪声、无延迟），看控制律和底盘动态的下限。
 底盘（chassis）：
+    differential  Gen5 差速底盘（两后轮毂电机 + 前自由万向轮，能原地转）：指令延迟 80 ms 后换成左右轮目标速度，
+              每个轮按 0.6 m/s² 限加速度、不超过 1.2 m/s（app 本机仿真的预演假设，电机实际响应还没辨识）；
+              run_route 按喷头压线、急弯原地转向规划，融合打开 drive_differential。
     measured  实车辨识（默认，2026-09-26 两趟连线路线记录）：指令到曲率的纯延迟 前进 0.35 s / 倒车 0.30 s，
               曲率变化率 3.0 / 0.7 1/m/s，实际曲率 = 指令 × 0.96 / 0.90；车速指令为 0 时固件把前轮回正
               （Akm_Vz_to_Angle），换向停车后要重新打方向。可加舵机零位偏差。
@@ -35,8 +38,11 @@ sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.dirname(HERE))
 sys.path.insert(0, os.path.dirname(os.path.dirname(HERE)))
 
+from collections import deque  # noqa: E402
+
 from line_sim import CONTROL_DT, DT, NO_POSE, Chassis, FusedSource, GaussMarkov  # noqa: E402
-from path_tracker import PathConfig, PathTracker, SectionTracker, circle, figure8, stadium, wrap  # noqa: E402
+from path_tracker import (PathConfig, PathTracker, SectionTracker, circle, differential_config, figure8,  # noqa: E402
+                          stadium, wrap)
 import route_plan  # noqa: E402
 
 TRANSIENT_M = 0.6          # 曲率变化后这么长算过渡段，其余算稳态
@@ -91,7 +97,40 @@ class MeasuredChassis(Chassis):
         self.yaw += self.wz * dt
 
 
-CHASSIS = {'measured': MeasuredChassis, 'ideal': Chassis}
+class DifferentialChassis:
+    """Gen5 差速底盘：(vx, wz) 延迟 delay_s 后换成左右轮目标速度（超过 max_wheel 按比例缩），每个轮按
+    wheel_accel 限加速度；车速 = 两轮平均，角速度 = 轮速差 / 轮距。前面万向轮随动，不影响运动。"""
+    TRACK_M = 0.675                 # Gen5 CAD 后轮轮距
+    NOZZLE_X_M = 0.30               # 喷头在后轴前（天线版总装图的横移臂）
+
+    def __init__(self, delay_s=0.08, max_wheel=1.2, wheel_accel=0.6, **_ackermann_only):
+        self.x = self.y = self.yaw = 0.0
+        self.v = self.wz = self.steer = 0.0
+        self.left = self.right = 0.0
+        self.delay_s, self.max_wheel, self.wheel_accel = delay_s, max_wheel, wheel_accel
+        self.queue, self.cmd = deque(), (0.0, 0.0)
+
+    def command(self, t, vx, wz):
+        self.queue.append((t + self.delay_s, vx, wz))
+
+    def step(self, t, dt):
+        while self.queue and self.queue[0][0] <= t:
+            _, vx, wz = self.queue.popleft()
+            self.cmd = (vx, wz)
+        vx, wz = self.cmd
+        half = 0.5 * self.TRACK_M
+        tl, tr = vx - wz * half, vx + wz * half
+        scale = min(1.0, self.max_wheel / max(abs(tl), abs(tr), 1e-12))
+        step = self.wheel_accel * dt
+        self.left += max(-step, min(step, tl * scale - self.left))
+        self.right += max(-step, min(step, tr * scale - self.right))
+        self.v, self.wz = 0.5 * (self.left + self.right), (self.right - self.left) / self.TRACK_M
+        self.x += self.v * dt * math.cos(self.yaw + self.wz * dt / 2)
+        self.y += self.v * dt * math.sin(self.yaw + self.wz * dt / 2)
+        self.yaw += self.wz * dt
+
+
+CHASSIS = {'measured': MeasuredChassis, 'ideal': Chassis, 'differential': DifferentialChassis}
 
 
 class TruthSource:
@@ -115,7 +154,7 @@ class _Pose:
         self.x, self.y, self.yaw, self.speed, self.yaw_rate = x, y, yaw, speed, yaw_rate
 
 
-def _fused_source(seed, ideal, mount_deg, mount_err_deg, sensor_kw):
+def _fused_source(seed, ideal, mount_deg, mount_err_deg, sensor_kw, differential=False):
     import gnss_fusion
     rx = dict(pos_drift=0.006, pos_white=0.003, hdg_drift_deg=0.1, hdg_white_deg=0.25, vel_noise=0.02,
               mount_deg=mount_deg, outage=None, heading_outage=None)
@@ -127,7 +166,8 @@ def _fused_source(seed, ideal, mount_deg, mount_err_deg, sensor_kw):
                   wheel_delay=0.0)
     for k, v in sensor_kw.items():
         (rx if k in rx else mo)[k] = v
-    return FusedSource(seed, gnss_fusion.FusionConfig(mount_offset_deg=mount_deg - mount_err_deg), rx, mo)
+    return FusedSource(seed, gnss_fusion.FusionConfig(mount_offset_deg=mount_deg - mount_err_deg,
+                                                      drive_differential=differential), rx, mo)
 
 
 def run(name='circle_r2.5', *, path=None, cruise=0.5, start=(0.0, 0.0, 0.0), source='fused', ideal=False,
@@ -251,26 +291,36 @@ def cover_gap(polyline, track, step=0.01, cell=0.25):
 def run_route(name='cover', *, spec, car=(-3.0, 0.0, 0.0), source='fused', ideal=False, trim_deg=0.0, quant_deg=0.2,
               terrain=0.0, mount_deg=1.5, mount_err_deg=0.0, seed=1, warmup_s=3.0, trace=False, config=None,
               chassis_model='measured', **sensor_kw):
-    """连线路线整趟（接入 + 掉头补角）：底盘真值的车身中心压没压过全部连线（cover_cm），各类段的真值横偏。"""
+    """连线路线整趟（接入 + 掉头补角）：底盘真值的车身中心压没压过全部连线（cover_cm），各类段的真值横偏。
+
+    chassis_model='differential'（Gen5）：喷头压线、急弯原地转向，cover_cm 量的是喷头；另报原地转向次数 pivots。
+    """
     from robot_core.kinematics import ChassisGeometry
     from runtime_config import PROFILE
     g = PROFILE['geometry']
     body = (g['front_m'], g['rear_m'], g['half_width_m'])
-    centre = 0.5 * (body[0] - body[1])
+    diff = chassis_model == 'differential'
+    geo = ChassisGeometry(drive='differential', track_m=DifferentialChassis.TRACK_M) if diff else ChassisGeometry()
+    nozzle = DifferentialChassis.NOZZLE_X_M if diff else None
+    centre = nozzle if diff else 0.5 * (body[0] - body[1])
     rng = random.Random(seed)
-    cfg = replace(config, cruise_mps=spec.cruise) if config else PathConfig(cruise_mps=spec.cruise)
-    sections, entry_m = route_plan.plan(spec, car, ChassisGeometry().min_turn_radius_m / cfg.kappa_margin, body=body)
-    tracker = SectionTracker(sections, cfg)
+    base = PathConfig(cruise_mps=spec.cruise)
+    cfg = replace(config, cruise_mps=spec.cruise) if config else (differential_config(base) if diff else base)
+    sections, entry_m = route_plan.plan(spec, car, geo.min_turn_radius_m / cfg.kappa_margin, body=body, nozzle_x=nozzle)
+    extra = dict(pivot_rate=geo.pivot_rate_rad_s, pivot_accel=geo.pivot_accel_rad_s2, reverse_gain=1.0) if diff else {}
+    tracker = SectionTracker(sections, cfg, geo, **extra)
+    pivots = route_plan.pivot_count([(sec.direction, sec.path.pose(0.0), [(p.length, p.kappa) for p in sec.path.pieces])
+                                     for sec in sections]) if diff else 0
     chassis = CHASSIS[chassis_model](trim_rad=math.radians(trim_deg), steer_quant_rad=math.radians(quant_deg))
     chassis.x, chassis.y, chassis.yaw = car
     if source == 'truth':
         src, warmup_s = TruthSource(), 0.0
     else:
-        src = _fused_source(seed, ideal, mount_deg, mount_err_deg, sensor_kw)
+        src = _fused_source(seed, ideal, mount_deg, mount_err_deg, sensor_kw, differential=diff)
     bumps = GaussMarkov(terrain, 0.5, rng)
     t, next_ctrl, started = 0.0, 0.0, False
     track, rows = [], []
-    max_time = warmup_s + tracker.length / min(cfg.cruise_mps, 0.3) * 1.5 + 3.0 * tracker.cusps + 20.0
+    max_time = warmup_s + tracker.length / min(cfg.cruise_mps, 0.3) * 1.5 + 3.0 * tracker.cusps + 8.0 * pivots + 20.0
     while t < max_time:
         src.step(t, chassis)
         if t >= next_ctrl - 1e-9:
@@ -303,7 +353,13 @@ def run_route(name='cover', *, spec, car=(-3.0, 0.0, 0.0), source='fused', ideal
 
     def peak(sel):
         return round(max((abs(r['e_true']) for r in sel), default=0.0) * 100, 2)
-    drawn = route_plan.path_points(spec)
+    if spec.kind == 'circle':
+        # 图纸上的圆（喷头要画的线），每 2° 一点
+        cx, cy = spec.center
+        drawn = [(cx + spec.radius * math.cos(math.radians(a)), cy + spec.radius * math.sin(math.radians(a)))
+                 for a in range(0, 361, 2)]
+    else:
+        drawn = route_plan.path_points(spec)
     end = drawn[-1]
     result = dict(
         name=name, state=tracker.st.state, reason=tracker.st.reason, sections=len(sections),
@@ -312,9 +368,10 @@ def run_route(name='cover', *, spec, car=(-3.0, 0.0, 0.0), source='fused', ideal
         fwd_line_max_cm=peak([r for r in moving if r['direction'] > 0 and r['straight'] and r['section'] > 0]),
         rev_max_cm=peak([r for r in moving if r['direction'] < 0]),
         arc_max_cm=peak([r for r in moving if r['direction'] > 0 and not r['straight']]),
-        end_err_cm=round(math.hypot(track[-1][0] - end[0], track[-1][1] - end[1]) * 100, 1) if track else None,
+        end_err_cm=round(math.hypot(track[-1][0] - end[0], track[-1][1] - end[1]) * 100, 1)
+        if track and spec.kind != 'circle' else None,
         entry_m=round(entry_m, 2), drive_m=round(tracker.length, 2), time_s=round(t - warmup_s, 1),
-        integral=tracker.st.integral)
+        integral=tracker.st.integral, pivots=pivots)
     if trace:
         result['rows'], result['track'] = rows, track
     return result

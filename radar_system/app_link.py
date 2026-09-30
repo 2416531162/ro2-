@@ -23,6 +23,10 @@ import threading
 
 import numpy as np
 
+from heading_hold import HoldConfig
+
+STRAIGHT = HoldConfig()     # IMU 定向直行的参数（hello 里告诉 app）
+
 PROTOCOL_VERSION = 1
 DISCOVERY_PORT = 48620
 DISCOVERY_MAGIC = 'rk3588-follow'
@@ -169,6 +173,7 @@ def client_frame(opcode, payload, mask=b'\x01\x02\x03\x04', fin=True):
 SPEED_TIERS = ('low', 'med', 'high')
 LINE_ACTIONS = ('mark', 'start', 'stop', 'clear')
 ROUTE_ACTIONS = ('set', 'start', 'clear', 'pause', 'preview', 'resume', 'rework', 'field_start')
+STRAIGHT_ACTIONS = ('go', 'stop')
 RTK_STALE_S = 2.0      # /gnss/status 2 Hz
 LINE_STALE_S = 1.5     # /line/status 5 Hz
 
@@ -210,6 +215,18 @@ def parse_command(text):
         out['steer'] = _finite(msg.get('steer', 0.0), 'steer', -1.0, 1.0)
         tier = msg.get('tier', 'med')
         out['tier'] = tier if tier in SPEED_TIERS else 'med'
+        seq = msg.get('seq')
+        out['seq'] = int(seq) if isinstance(seq, int) and not isinstance(seq, bool) else None
+    elif kind == 'straight':
+        # IMU 定向直行：app 点开始后每 50 ms 发一次 go（同一个 run），点停止发 stop；车速、方向由车端定（heading_hold）
+        action = msg.get('action')
+        if action not in STRAIGHT_ACTIONS:
+            raise CommandError('straight.action 必须是 ' + '/'.join(STRAIGHT_ACTIONS))
+        out['action'] = action
+        run = msg.get('run')
+        if isinstance(run, bool) or not isinstance(run, int) or not 0 <= run < 2 ** 31:
+            raise CommandError('straight.run 必须是作业编号')
+        out['run'] = run
         seq = msg.get('seq')
         out['seq'] = int(seq) if isinstance(seq, int) and not isinstance(seq, bool) else None
     elif kind == 'follow':
@@ -325,6 +342,11 @@ def parse_command(text):
     return out
 
 
+# 摇杆死区：比例小于它当 0。app 自己有死区，固定发 high、行程线性换成指令（刚出死区约 0.04，
+# 选的最高速比最快档低时油门按比例缩），这里只挡数值噪声
+STICK_DEADBAND = 0.02
+
+
 def resolve_stick(throttle, steer, tier, tiers_mps, reverse_scale, geometry):
     """摇杆 (-1..1, -1..1) + 速度档 -> (vx, wz, 实际前轮转角度数)。
 
@@ -336,7 +358,7 @@ def resolve_stick(throttle, steer, tier, tiers_mps, reverse_scale, geometry):
     steer = max(-1.0, min(1.0, float(steer)))
     if getattr(geometry, 'differential', False):
         return _differential_stick(throttle, steer, tier, tiers_mps, reverse_scale, geometry)
-    if abs(throttle) < 0.05:
+    if abs(throttle) < STICK_DEADBAND:
         return 0.0, 0.0, 0.0
     base = tiers_mps.get(tier, tiers_mps['med'])
     vx = throttle * base * (reverse_scale if throttle < 0 else 1.0)
@@ -351,8 +373,8 @@ def _differential_stick(throttle, steer, tier, tiers_mps, reverse_scale, geometr
     角速度上限 = 原地转向角速度 × 本档车速 / 最快档车速，慢档转得也慢；前进时同一比例的角速度，
     车速越快弯越大。倒车时往左打是车尾往左（与旧车、方向盘一样的手感），所以角速度反号。
     """
-    moving = abs(throttle) >= 0.05
-    if not moving and abs(steer) < 0.05:
+    moving = abs(throttle) >= STICK_DEADBAND
+    if not moving and abs(steer) < STICK_DEADBAND:
         return 0.0, 0.0, 0.0
     base = tiers_mps.get(tier, tiers_mps['med'])
     vx = throttle * base * (reverse_scale if throttle < 0 else 1.0) if moving else 0.0
@@ -429,6 +451,9 @@ def build_hello(profile, *, name, camera, video_path='/video.mjpg', session=None
         },
         'camera': camera,
         'speed_tiers': {k: profile['manual'][k + '_mps'] for k in SPEED_TIERS},
+        # IMU 定向直行（只用 IMU 偏航，不用 RTK）：固定车速、目标精度、偏差超过 abort_deg 停车
+        'straight': {'speed_mps': STRAIGHT.speed, 'tolerance_deg': STRAIGHT.tolerance_deg,
+                     'abort_deg': STRAIGHT.abort_deg},
     }
 
 
@@ -447,6 +472,9 @@ def rtk_telemetry(gnss, now):
             'diff_age': _num(g.get('diff_age'), 1), 'sigma_h': _num(g.get('sigma_h'), 3),
             'heading_ok': bool(g.get('heading_ok')), 'baseline_m': _num(g.get('baseline_m'), 3),
             'receiver_ok': bool(g.get('receiver_ok')),
+            # 接收机数据从哪来：'usb'（车上串口）/ 'tablet'（平板串口转发，见 gnss_bridge）；旧 RTK 节点没有
+            'source': g.get('source') if g.get('source') in ('usb', 'tablet') else None,
+            'tablet_connected': bool((g.get('tablet') or {}).get('connected')),
             'antennas': {name: {
                 'available': bool(a.get('available')), 'source': a.get('source'),
                 'sol': a.get('sol'), 'fix': a.get('fix', 'NONE'),
@@ -505,6 +533,9 @@ def line_telemetry(line, now):
         # 车身姿态（IMU，imu_filter_madgwick）：横滚左侧抬起为正、俯仰车头压低为正（REP-103），度；
         # yaw_deg 是 IMU 自己的偏航（没有磁力计：相对 imu 组件启动时，左转为正，会漂）；没有时为 None
         'attitude': _line_attitude(ln.get('attitude')),
+        # 倾斜补偿（融合按 IMU 横滚俯仰把天线三维杠杆臂投到水平面）：天线高度 m、在不在补、没补的原因
+        # （no_height / attitude_stale / too_steep / imu_mismatch）、用的横滚俯仰°、补偿量（车体系前、左，m）；旧车端没有为 None
+        'tilt': _line_tilt(ln.get('tilt')),
         # 定位跳动（地图上标出来）：编号、本地坐标、经纬度、最大差值 m、向左分量、持续 s、距今 s
         'rtk_events': [{k: e.get(k) for k in ('id', 'x', 'y', 'lat', 'lon', 'd', 'left', 'dur', 'age_s')}
                        for e in (ln.get('rtk_events') or []) if isinstance(e, dict)],
@@ -520,6 +551,16 @@ def _line_attitude(a):
     return {'roll_deg': roll, 'pitch_deg': pitch, 'yaw_deg': _num(a.get('yaw_deg'), 2), 'source': a.get('source')}
 
 
+def _line_tilt(t):
+    if not isinstance(t, dict) or not isinstance(t.get('active'), bool):
+        return None
+    reason = t.get('reason')
+    return {'height_m': _num(t.get('height_m'), 3), 'active': t['active'],
+            'reason': reason if isinstance(reason, str) else None,
+            'roll_deg': _num(t.get('roll_deg'), 2), 'pitch_deg': _num(t.get('pitch_deg'), 2),
+            'forward_m': _num(t.get('forward_m'), 4), 'left_m': _num(t.get('left_m'), 4)}
+
+
 def _line_diag(d):
     if not isinstance(d, dict):
         return None
@@ -527,6 +568,28 @@ def _line_diag(d):
             'yaw_rate': _num(d.get('yaw_rate'), 4), 'rtk_along_m': _num(d.get('rtk_along_m'), 4),
             'rtk_left_m': _num(d.get('rtk_left_m'), 4), 'position_outliers': d.get('position_outliers'),
             'position_resets': d.get('position_resets'), 'jumps': d.get('jumps')}
+
+
+STRAIGHT_KEYS = ('run', 'state', 'reason', 'target_deg', 'yaw_deg', 'error_deg', 'max_error_deg',
+                 'within_pct', 'elapsed_s', 'speed', 'wz')
+
+
+def straight_telemetry(st):
+    """heading_hold.HeadingHold.status() → 遥测 straight；没有时 None（不带这一项）。数字只收有限值。
+    车端的作业键是 (连接会话, app 的作业编号)：拆成 session 和 run，app 用 hello 里的 session 认自己的那次。"""
+    if not isinstance(st, dict):
+        return None
+    out = {'imu_ok': bool(st.get('imu_ok')), 'state': st.get('state', 'idle')}
+    for key in STRAIGHT_KEYS[2:]:
+        if key in st:
+            v = st[key]
+            out[key] = v if isinstance(v, str) or v is None else _num(v, 3)
+    run = st.get('run')
+    if isinstance(run, tuple) and len(run) == 2:
+        out['session'], run = run
+    if isinstance(run, int) and not isinstance(run, bool):
+        out['run'] = run
+    return out
 
 
 def build_telemetry(snap, *, now, seq, sensors, include_scan=True):
@@ -587,6 +650,9 @@ def build_telemetry(snap, *, now, seq, sensors, include_scan=True):
         'rtk': rtk_telemetry(snap.get('gnss'), now),
         'line': line_telemetry(snap.get('line'), now),
     }
+    straight = straight_telemetry(snap.get('straight'))
+    if straight is not None:
+        out['straight'] = straight
     ranges = snap.get('ranges')
     if include_scan and ranges:
         out['scan'] = {'a0': _num(snap.get('angle_min', 0.0), 5),

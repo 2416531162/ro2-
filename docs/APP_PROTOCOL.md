@@ -48,7 +48,8 @@
 | `line`（路线） | `task`（line/route，当前或最近一次任务）、`origin`（本地坐标原点的 [纬度, 经度]，融合还没有有效定位时为 null；`line_node` 每次启动取第一次有效定位，原点会变，路线存经纬度所以照样对得上）、`antenna`（主天线最近一次定位：`x`/`y` 本地米、`sol`、`sigma` 米；超过 2 s 没更新为 null。融合位姿不可用时 app 用它画车的位置）、`route`（车上存的路线，换算到当前本地坐标：`kind` points/circle、`points` [[x,y]…]、`closed`、`center`、`radius`、`clockwise`、`laps`、`turn_radius`、`cruise`、`rev` 版本号、`length` 路线长度米（不含接入段；连线路线是连线本身）、`problem` 画不成的原因（null 表示可以跑）、`cover` 连线路线才有：`drive_m` 压过全部连线实际要开的路程（含倒车补角，不含接入段）、`cusps` 换向次数、`corners` 掉头补角的拐角数；画不成为 null）、`route_limits`（`min_radius` 能稳定跟踪的最小转弯半径、`max_points`、`max_laps`、`max_entry_m`、`body` 连线路线压线用的车身 [后轴中心到车头, 到车尾, 半宽] 米、`drive` 同 hello、`nozzle_x` 差速车连线路线按喷头压线时喷头在后轴前多少米（阿克曼车为 null，仍按车身中心）。差速车的 `cover` 另有 `pivots` 原地转向次数，`corners` 是原地转向的拐角数、`cusps` 是倒车换向次数） |
 | `line`（诊断） | `diag`：`kappa_cmd` 下发曲率、`kappa_act` 车实际走出的曲率（融合角速度 / 车速，车速 < 0.05 m/s 为 null；车头坐标左转为正，1/m）、`yaw_rate` rad/s、`rtk_along_m` / `rtk_left_m` 最近一次 RTK 固定解与融合在同一时刻推算的主天线位置之差（车体系沿车头 / 向左，米；超过 1 s 没有新的固定解为 null）、`position_outliers` 融合里位置离群（降权或拒绝）次数、`position_resets` 位置重置次数、`jumps` 本次开机以来的定位跳动次数。只读，app 的诊断页画曲线用 |
 | `line`（定位跳动） | `rtk_events`：最近 20 次定位跳动（RTK 固定解与融合推算差 3 cm 以上，间隔不到 1 s 的算同一次）：`id` 这次开始的时刻（车上单调时钟，同一次在每帧里重复出现）、`x`/`y` 车当时的本地坐标、`lat`/`lon`、`d` 最大差值米、`left` 向左分量、`dur` 持续秒、`age_s` 距今秒。只在融合本来是固定解、可用于控制时记。app 按经纬度累计，在地图上标出反复跳动的地点 |
-| `line`（车身姿态） | `attitude`：`roll_deg` 横滚、`pitch_deg` 俯仰、`yaw_deg` IMU 偏航，度，ROS REP-103 车体系（x 车头、y 左、z 上）：横滚左侧抬起（右侧压低）为正，俯仰车头压低为正，偏航左转为正（−180…180）；`source` 为 `imu_madgwick`（旧车：`imu` 组件是 ROS 2 `imu_filter_madgwick`，gain 0.01，读底盘原始 `/imu`，发 `/imu/data`）或 `hda536t`（Gen5：`imu` 组件是瑞芬 HDA536T 驱动，姿态是传感器自己算的，偏航上电为 0），只给 app 显示、不参与控制；0.5 s 没有新姿态或车端没有 `imu` 组件时为 null。没有磁力计，`yaw_deg` 没有绝对参考：0 大致是 `imu` 组件启动时的车头方向，随陀螺零偏漂移（实测静止约 3°/分钟），组件重启归零；旧车端没有这一项。绝对航向：`rtk.heading.yaw_deg`（双天线，只在固定时有）、`pose.yaw_deg`（RTK 融合，控制用）|
+| `line`（车身姿态） | `attitude`：`roll_deg` 横滚、`pitch_deg` 俯仰、`yaw_deg` IMU 偏航，度，ROS REP-103 车体系（x 车头、y 左、z 上）：横滚左侧抬起（右侧压低）为正，俯仰车头压低为正，偏航左转为正（−180…180）；`source` 为 `imu_madgwick`（旧车：`imu` 组件是 ROS 2 `imu_filter_madgwick`，gain 0.01，读底盘原始 `/imu`，发 `/imu/data`）或 `hda536t`（Gen5：`imu` 组件是瑞芬 HDA536T 驱动，姿态是传感器自己算的，偏航上电为 0），这一项只给 app 显示（填了天线高度时融合用同一份横滚俯仰做倾斜补偿，见下一行）；0.5 s 没有新姿态或车端没有 `imu` 组件时为 null。没有磁力计，`yaw_deg` 没有绝对参考：0 大致是 `imu` 组件启动时的车头方向，随陀螺零偏漂移（实测静止约 3°/分钟），组件重启归零；旧车端没有这一项。绝对航向：`rtk.heading.yaw_deg`（双天线，只在固定时有）、`pose.yaw_deg`（RTK 融合，控制用）|
+| `line`（倾斜补偿） | `tilt`：融合按 IMU 横滚俯仰把 ANT1 的三维杠杆臂投到水平面（`docs/GNSS_FUSION.md`「倾斜补偿」）。`height_m` 天线相位中心离地高度（`~/rtk/fusion.json` 的 `antenna_height_m`，0 表示没填、不补）、`active` 这会儿在不在补、`reason` 没补的原因（`no_height` 没填高度 / `attitude_stale` 0.2 s 没有新姿态 / `too_steep` 横滚或俯仰超过 15° / `imu_mismatch` IMU 已不用），`active` 时再给用的 `roll_deg` / `pitch_deg`（度，REP-103）和补偿量 `forward_m` / `left_m`（天线水平位置比平地时偏了多少，车体系前、左，米），不在补时这四项为 null。没补只降级：`pose.reasons` 加 `tilt_uncompensated`（没填高度时不加），不影响 `usable`。旧车端没有这一项（null） |
 
 跟随节点停止或状态超过 1.5 s 未更新时 `follow.stale=true`，`target`/`tracks` 置空，界面不得显示旧目标。
 `rtk` 超过 2 s、`line` 超过 1.5 s 未更新时只发 `{"stale": true}`，界面不得显示旧的定位等级或偏差。
@@ -60,7 +61,7 @@
 
 | 指令 | 字段 | 车端处理 |
 |---|---|---|
-| `drive` | `throttle`、`steer`（-1..1）、`tier`（low/med/high）、`seq` | 按档位与共享运动学换算成 vx/wz，走与网页相同的 `apply_manual`；乱序旧指令丢弃 |
+| `drive` | `throttle`、`steer`（-1..1）、`tier`（low/med/high）、`seq` | 按档位与共享运动学换算成 vx/wz，走与网页相同的 `apply_manual`；比例小于 2%（`STICK_DEADBAND`）当 0；乱序旧指令丢弃。app 1.9 起不分档：固定发 `high`，油门、方向已按摇杆行程过曲线（刚出死区约 0.025，推一半约 0.2，推满 1） |
 | `follow` | `enable` | 启动/停止跟随（后台执行，结果回 ack） |
 | `estop` | — | 先清零手动，再锁存 ESTOP，不等其他操作的锁 |
 | `reset` | — | 健康且停稳时复位 |

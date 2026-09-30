@@ -17,6 +17,8 @@
 路点折线  相邻路点之间走直线，拐角用半径 turn_radius 的圆弧过渡（圆弧与两边直线相切，方向连续）。
           闭合路线最后一段回到第 1 个路点；多圈时第 1 个路点的拐角同样按圆弧过渡，最后一圈停在第 1 个路点。
 圆        从圆的最南点出发（逆时针时车头朝东、顺时针朝西），转 laps 圈回到这里停车。
+          差速车（Gen5）按喷头画圆：喷头在后轴中点前 nozzle_x，后轴中点走半径 √(R²−nozzle_x²) 的同心圆，
+          喷头正好在半径 R 上；最后多走 VERTEX_PASS_M 让喷头盖过起点。接入同连线路线（pivot_entry，原地转向）。
 接入      路点折线和圆：从车当前位姿到路线起点（第 1 个路点、车头朝第 1 段方向；圆为最南点）用 Dubins
           最短路径：半径 turn_radius 的圆弧 + 直线 + 圆弧，或三段圆弧。只前进，不倒车。
 
@@ -35,7 +37,8 @@ CORNER_EXTRA_M = tuple(0.05 * i for i in range(21))     # 急弯倒车前可以�
 CORNER_BACK_M = (0.0, 0.1, 0.2, 0.3)                    # 倒车后可以停得离拐角再远这么多（候选）
 MIN_RUN_M = 0.05             # 两次换向之间至少开这么远，太短的段控制器跟不上
 CUSP_TIE_M = 0.01            # 一样长的走法里挑换向少的
-ENTRY_LEAD_M = 0.5           # 接入段在车身中心到第 1 个点前这么远对正第一段，控制器到点前已稳住
+ENTRY_LEAD_M = 1.0           # 接入段在车身中心到第 1 个点前这么远对正第一段，控制器到点前已稳住。
+                             # 2026-09-30 实车：原地转向后起步万向轮甩尾，横偏 1.1 m 左右才收回来，0.5 m 不够
 ON_LINE_M = 0.05             # 车已压在第一段延长线上（横偏、车头误差都在这以内）就直接开过去
 ON_LINE_DEG = 5.0
 MAX_LAPS = 10
@@ -562,8 +565,15 @@ def cover_summary(spec, min_radius, body, *, nozzle_x=None):
 # ---- 差速车（Gen5：两后轮差速、前面自由万向轮）：急弯停车原地转向 ----
 # 与 app 的 PivotRoute.kt 同一套规则（app 本机仿真按它画），两边的一致性由 app 端 PivotParityTest 检查。
 
-PIVOT_ARC_TOL_M = 0.01       # 缓弯按 min_radius 圆弧转过去离拐角不超过这么远才直接转，否则停车原地转
+PIVOT_ARC_TOL_M = 0.01       # 喷头在两后轮中间时：缓弯按缓弯半径圆弧转过去离拐角不超过这么远才直接转，否则停车原地转
 PIVOT_TOL_RAD = math.radians(1.0)   # 前后两段车头方向差这么多以上才算原地转向（与 SectionTracker 的 pivot_tol 相同）
+PIVOT_REVERSE_MIN_M = 0.50          # 急弯原地转向后至少退 0.5 m，再前进回到拐角；喷头位置仍按实际杆臂算
+# 喷头在后轴前时后轴被喷头拖着走（见 _pulled_cover）：每片喷头走不超过 nozzle_x × PULL_STEP，片内按等曲率接
+# （片端车头方向准确，片内误差约 (PULL_STEP·d)²·φ/(12d)，d 0.30 m、拐 28° 约 0.8 mm）；车头与边的夹角
+# 收敛到 PULL_SETTLE_RAD 后用一段圆弧把后轴正好收回到边上（收回时喷头最多偏 PULL_SETTLE_RAD·d/4，约 0.3 mm）
+PULL_STEP = 0.25
+PULL_SETTLE_RAD = math.radians(0.25)
+PULL_STRAIGHT_RAD = 1e-6     # 夹角小于这么多就当已经对齐，直接走直线
 
 
 class _PivotSections:
@@ -608,10 +618,10 @@ def pivot_count(sections):
 def _pivot_cover(points, radius, nozzle_x):
     """连线折线 → 差速车分段（不含接入段）和原地转向的拐角数。压线点（喷头）在后轴中点前 nozzle_x。
 
-    缓弯（转向小于 90°、按 radius 圆弧转过去离拐角不超过 PIVOT_ARC_TOL_M）直接转过去；急弯停车原地转向：
-    后轴中点开到拐角点，绕后轴中点转到下一条边的方向，再倒车 nozzle_x 让喷头回到拐角点，然后往前开。
-    nozzle_x = 0（喷头在两后轮中间）时急弯只停车转向，不倒车。第一段从喷头在第 1 个点处出发、前进，
-    终点喷头多走 VERTEX_PASS_M。
+    喷头在后轴前（nozzle_x > 0）：喷头沿连线走、后轴被拖着走，缓弯不停车，急弯原地转向，见 _pulled_cover。
+    喷头在两后轮中间（nozzle_x = 0）：缓弯（转向小于 90°、按 radius 圆弧转过去离拐角不超过 PIVOT_ARC_TOL_M）
+    直接圆弧转过去；急弯后轴中点开到拐角点停车，原地转到下一条边的方向。
+    第一段从喷头在第 1 个点处出发、前进，终点喷头多走 VERTEX_PASS_M。
     """
     if not (math.isfinite(radius) and radius > 0):
         raise ValueError('缓弯半径无效')
@@ -623,6 +633,8 @@ def _pivot_cover(points, radius, nozzle_x):
             pts.append((float(p[0]), float(p[1])))
     if len(pts) < 2:
         raise ValueError('先在地图上点点，再把点连起来')
+    if nozzle_x > 0:
+        return _pulled_cover(pts, radius, nozzle_x)
     n, d, pas = len(pts), nozzle_x, VERTEX_PASS_M
     legs = [(math.hypot(b[0] - a[0], b[1] - a[1]), math.atan2(b[1] - a[1], b[0] - a[0])) for a, b in zip(pts, pts[1:])]
     turn = [0.0] * n
@@ -661,6 +673,75 @@ def _pivot_cover(points, radius, nozzle_x):
         out.pivot(turn[j])
         out.add(-1, d, 0.0)
     return out.out, n - 2 - len(smooth)
+
+
+def _pulled_cover(pts, radius, d):
+    """喷头在后轴前 d（> 0）：喷头沿连线走，后轴像拖车一样被喷头拖着走（曳物线），喷头始终压在线上。
+
+    车头与下一条边的夹角 φ 决定后轴要转多急：后轴转弯半径 d / tan|φ|。|φ| ≤ atan(d / radius)（Gen5 d 0.30、
+    radius 0.556 约 28°）的拐角不停车拖过去；更急的停车原地转向：后轴中点开到拐角点（喷头开过拐角 d），
+    原地转到下一条边的方向，倒车 max(d, PIVOT_REVERSE_MIN_M)，再往前回到拐角点继续压线。
+    每条边都从已接好的路径上的喷头位置量起（朝这条边的终点），片内近似的误差不往后面的边累积。
+    """
+    n, limit = len(pts), math.atan(d / radius)
+    h0 = math.atan2(pts[1][1] - pts[0][1], pts[1][0] - pts[0][0])
+    out = _PivotSections(_offset(pts[0], h0, -d) + (h0,))
+    corners = 0
+    for i in range(1, n):
+        x, y, yaw = out.pose
+        nx, ny = x + d * math.cos(yaw), y + d * math.sin(yaw)
+        head = math.atan2(pts[i][1] - ny, pts[i][0] - nx)
+        if i > 1 and abs(wrap(yaw - head)) > limit + 1e-12:
+            # 急弯：后轴开到拐角点，原地转向，至少退 0.5 m；前进时经过拐角，额外退的距离不改变压线点
+            corners += 1
+            out.add(1, d, 0.0)
+            out.pivot(wrap(head - yaw))
+            out.add(-1, max(d, PIVOT_REVERSE_MIN_M), 0.0)
+            x, y, yaw = out.pose
+            nx, ny = x + d * math.cos(yaw), y + d * math.sin(yaw)
+        dist = math.hypot(pts[i][0] - nx, pts[i][1] - ny) + (VERTEX_PASS_M if i == n - 1 else 0.0)
+        _pull(out, wrap(yaw - head), dist, d)
+    return out.out, corners
+
+
+def _pull(out, phi, dist, d):
+    """喷头沿直线走 dist 米、车头比这条线偏左 phi 时后轴被拖出的路径，接在 out 后面。
+
+    曳物线：tan(φ/2) = tan(φ0/2)·e^(−s/d)（s 是喷头走过的路程），后轴路程 s − d·ln((1+t0²)/(1+t²))，
+    后轴曲率 −tan φ / d。夹角收敛到 PULL_SETTLE_RAD 后，用一段圆弧把后轴正好收回到线上、车头对齐，再走直线；
+    边太短来不及收回就一直拖到这条边的终点。
+    """
+    if abs(phi) < PULL_STRAIGHT_RAD:
+        out.add(1, dist, 0.0)
+        return
+    settle = min(abs(phi), PULL_SETTLE_RAD)
+    half = math.tan(settle / 2.0)
+    s_c = d * math.log(math.tan(abs(phi) / 2.0) / half)
+    # 收回圆弧：后轴离线 d·sin(settle)、车头偏 settle，半径 d / tan(settle/2) 的圆弧转 settle 正好回到线上，
+    # 这期间喷头沿线正好走 2d
+    if s_c + 2.0 * d > dist:
+        _tractrix(out, phi, dist, d)
+        return
+    _tractrix(out, phi, s_c, d)
+    out.add(1, d * settle / half, -math.copysign(half / d, phi))
+    out.add(1, dist - s_c - 2.0 * d, 0.0)
+
+
+def _tractrix(out, phi0, dist, d):
+    """喷头沿直线走 dist 米，后轴被拖着走的那段曳物线，按每片喷头走不超过 PULL_STEP·d 分成等曲率片。"""
+    if dist <= 0.0:
+        return
+    t0 = math.tan(phi0 / 2.0)
+    k = max(1, math.ceil(dist / (PULL_STEP * d) - 1e-9))
+    prev_phi, prev_sa = phi0, 0.0
+    for j in range(1, k + 1):
+        s = dist * j / k
+        t = t0 * math.exp(-s / d)
+        phi = 2.0 * math.atan(t)
+        sa = s - d * math.log((1.0 + t0 * t0) / (1.0 + t * t))
+        if sa - prev_sa > 1e-12:
+            out.add(1, sa - prev_sa, (phi - prev_phi) / (sa - prev_sa))
+            prev_phi, prev_sa = phi, sa
 
 
 def pivot_cover(points, radius, nozzle_x):
@@ -706,8 +787,11 @@ def pivot_entry(first, car, nozzle_x=0.0):
 
 # ---- 路线本身（不含接入段）----
 
-def loop_pieces(spec, min_radius):
-    """返回 (起点位姿, [(长度, 曲率), …])；画不成（路点不够、拐角太急、半径太小）时抛 ValueError（中文说明）。"""
+def loop_pieces(spec, min_radius, nozzle_x=None):
+    """返回 (起点位姿, [(长度, 曲率), …])；画不成（路点不够、拐角太急、半径太小）时抛 ValueError（中文说明）。
+
+    nozzle_x 不为 None（差速车）时圆按喷头画：返回后轴中点要走的圆（见模块说明）；不给时是图纸上的圆本身
+    （车载屏幕、续画按图纸画用）。"""
     if spec.turn_radius < min_radius - 1e-9:
         raise ValueError('转弯半径 %.2f m 小于车能稳定跟踪的 %.2f m' % (spec.turn_radius, min_radius))
     if spec.kind == 'path':
@@ -719,9 +803,24 @@ def loop_pieces(spec, min_radius):
             raise ValueError('圆半径 %.2f m 小于车能稳定跟踪的 %.2f m' % (spec.radius, min_radius))
         cx, cy = spec.center
         sign = -1.0 if spec.clockwise else 1.0
+        if nozzle_x is not None and nozzle_x > 0:
+            r = circle_axle_radius(spec.radius, nozzle_x, min_radius)
+            start = (cx, cy - r, math.pi if spec.clockwise else 0.0)
+            return start, [(2.0 * math.pi * r * spec.laps + VERTEX_PASS_M, sign / r)]
         start = (cx, cy - spec.radius, math.pi if spec.clockwise else 0.0)
         return start, [(2.0 * math.pi * spec.radius * spec.laps, sign / spec.radius)]
     return _points_loop(spec)
+
+
+def circle_axle_radius(radius, nozzle_x, min_radius):
+    """喷头（后轴中点前 nozzle_x）画半径 radius 的圆时，后轴中点要走的圆半径 √(R²−d²)；太小时抛 ValueError。"""
+    if radius <= nozzle_x + 1e-9:
+        raise ValueError('圆半径 %.2f m 要大于喷头到后轴的 %.2f m' % (radius, nozzle_x))
+    r = math.sqrt(radius * radius - nozzle_x * nozzle_x)
+    if r < min_radius - 1e-9:
+        raise ValueError('圆半径 %.2f m 太小：喷头画这个圆时后轴要转 %.2f m 的圆，小于车能稳定跟踪的 %.2f m'
+                         % (radius, r, min_radius))
+    return r
 
 
 def _points_loop(spec):
@@ -835,14 +934,15 @@ def dubins(start, goal, radius):
     return best[1]
 
 
-def route_length(spec, min_radius):
-    """(路线长度米, 画不成的原因)，不含接入段；状态里报给 app。连线路线的长度是连线本身（不含倒车补角）。"""
+def route_length(spec, min_radius, nozzle_x=None):
+    """(路线长度米, 画不成的原因)，不含接入段；状态里报给 app。连线路线的长度是连线本身（不含倒车补角）；
+    圆和路点折线是车要开的路程（差速车的圆是后轴中点的圆，见 loop_pieces）。"""
     if spec.kind == 'path':
         if len(spec.points) < 2:
             return None, '先在地图上点点，再把点连起来'
         return path_length(path_points(spec)), None
     try:
-        _, pieces = loop_pieces(spec, min_radius)
+        _, pieces = loop_pieces(spec, min_radius, nozzle_x if spec.kind == 'circle' else None)
     except ValueError as exc:
         return None, str(exc)
     return sum(p[0] for p in pieces), None
@@ -871,6 +971,14 @@ def plan(spec, car_pose, min_radius, *, body=None, max_entry_m=MAX_ENTRY_M, nozz
             raise ValueError('车离路线起点太远（接入路线 %.0f m，最多 %.0f m），请先把车开近些' % (entry_m, max_entry_m))
         return [Section(d, Path(start, pieces, name='route_path_%d' % i))
                 for i, (d, start, pieces) in enumerate(entry + route[1:])], entry_m
+    if spec.kind == 'circle' and nozzle_x is not None:
+        # 差速车：喷头画圆，接入原地转向对准、直线开过去（与连线路线同一套）
+        start, loop = loop_pieces(spec, min_radius, nozzle_x)
+        entry, entry_m = pivot_entry((1, start, loop), car_pose, nozzle_x)
+        if entry_m > max_entry_m:
+            raise ValueError('车离路线起点太远（接入路线 %.0f m，最多 %.0f m），请先把车开近些' % (entry_m, max_entry_m))
+        return [Section(d, Path(s, pieces, name='route_circle_%d' % i))
+                for i, (d, s, pieces) in enumerate(entry)], entry_m
     start, loop = loop_pieces(spec, min_radius)
     entry = dubins(car_pose, start, spec.turn_radius)
     entry_m = sum(length for length, _ in entry)

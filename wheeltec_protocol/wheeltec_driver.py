@@ -18,6 +18,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from runtime_config import PROFILE, profile_hash
+from robot_core.service_watchdog import watchdog
 from robot_core.kinematics import ChassisGeometry, yaw_from_steer, steer_from_yaw, max_yaw_at_speed
 from motion_authority import MotionAuthority
 from scan_guard import GuardConfig, ScanGuard  # noqa: E402
@@ -758,6 +759,7 @@ class WheeltecDriver(Node):
     def io_loop(self):
         next_tx = time.monotonic()
         while self.running:
+            watchdog.tick("io")
             try:
                 if self.ser is None:
                     # The board's CH343 has exceeded shorter write deadlines
@@ -934,14 +936,17 @@ class WheeltecDriver(Node):
 def main():
     if not ROS_AVAILABLE:
         raise SystemExit("Source ROS Jazzy and install ros-jazzy-ackermann-msgs / python3-serial")
+    watchdog.start("ros", "io")
     rclpy.init()
     node = None
     try:
         node = WheeltecDriver()
+        node.create_timer(0.5, lambda: watchdog.tick("ros"))
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
     finally:
+        watchdog.close()
         if node:
             node.shutdown()
             node.destroy_node()

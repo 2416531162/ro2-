@@ -17,6 +17,7 @@ import subprocess
 import socket
 import sys
 import uuid
+import gc
 import rclpy
 from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor
@@ -24,7 +25,8 @@ from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 
 import numpy as np
-from sensor_msgs.msg import LaserScan, Image, CameraInfo
+from sensor_msgs.msg import LaserScan, Image, CameraInfo, Imu
+from nav_msgs.msg import Odometry
 from std_msgs.msg import String, Float32
 from std_srvs.srv import SetBool, Trigger
 
@@ -32,8 +34,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from motion_safety import ChassisGeometry, yaw_from_steer, steer_from_yaw, clamp
 from scan_utils import clean_ranges, sector_min
 from runtime_config import PROFILE
+from robot_core.service_watchdog import watchdog
 from motion_client import MotionClient
 from manual_drive import ManualDriveLatch
+from heading_hold import HeadingHold, yaw_from_quaternion
 import app_link
 import car_display
 from display_control import ScreenControl
@@ -62,6 +66,8 @@ SCREEN_CONTROL = ScreenControl()
 from field_plan_service import FieldPlanService
 FIELD_PLANS = FieldPlanService()
 MANUAL_PUBLISH_PERIOD_S = 0.02
+GC_SLOW_S = 0.05            # 一次垃圾回收超过这么久记一条 gc_slow 日志
+STALL_LOG_S = 0.15          # 50 Hz 手动循环两次之间隔超过这么久记一条 web_stall 日志（进程卡了）
 MANUAL_HEARTBEAT_TIMEOUT_S = 0.75
 
 # =============================================================================
@@ -268,6 +274,7 @@ def snapshot_state():
         with bridge_node.motion.lock:
             snapshot['motion'] = dict(bridge_node.motion.state)
         snapshot['motion_fresh'] = bridge_node.motion.fresh()
+        snapshot['straight'] = bridge_node.straight.status()
     return snapshot
 
 
@@ -275,6 +282,7 @@ def emergency_stop():
     """急停:先清零手动指令,再锁存 ESTOP。不等 control_lock —— 启动跟随可能持锁十几秒。"""
     if bridge_node is None:
         return False, 'motion bridge unavailable'
+    bridge_node.straight.end('estop')
     bridge_node.manual_drive.set(0.0, 0.0)
     bridge_node.motion.publish(0.0, 0.0)
     return bridge_node.call_motion_service(bridge_node.cli_stop, Trigger.Request())
@@ -284,16 +292,22 @@ def motion_reset():
     if bridge_node is None:
         return False, 'motion bridge unavailable'
     with bridge_node.control_lock:
+        bridge_node.straight.end('manual')
         bridge_node.manual_drive.set(0.0, 0.0)
         bridge_node.manual_drive.sample()
         return bridge_node.call_motion_service(bridge_node.cli_reset, Trigger.Request())
 
 
-def apply_manual(vx, wz, steer_deg, action, client_id, seq):
-    """网页方向键与 app 摇杆共用的手动指令出口,返回 (HTTP 状态码, 应答)。"""
+def apply_manual(vx, wz, steer_deg, action, client_id, seq, hold=None):
+    """网页方向键与 app 摇杆共用的手动指令出口,返回 (HTTP 状态码, 应答)。
+
+    hold:IMU 定向直行的作业键 (会话, 作业编号),这时 vx 是直行车速,实际发的车速和角速度由
+    bridge_node.straight 按 IMU 偏航算;别的手动指令(摇杆、网页方向键)一来就接管,直行结束。"""
     if bridge_node is None:
         return 503, {'ok': False, 'error': 'motion bridge unavailable'}
     moving = abs(vx) > 1e-6 or abs(wz) > 1e-6
+    if hold is None:
+        bridge_node.straight.end('manual')
     immediate_stop = False
     if moving:
         # A reset can wait for a ROS service. Keep the short command
@@ -314,9 +328,11 @@ def apply_manual(vx, wz, steer_deg, action, client_id, seq):
         # 可能晚于「刹车」到达,不能让它在松手后又把车开起来。
         if moving and not bridge_node.manual_drive.accept(client_id, seq, vx, wz):
             return 200, {'ok': True, 'stale': True, 'action': action}
-        bridge_node.send_manual_twist(vx, wz)
-        sent = bridge_node.motion.publish(vx, wz)
+        bridge_node.send_manual_twist(vx, wz, hold)
+        out_vx, out_wz = (vx, wz) if hold is None else bridge_node.straight.step(hold)
+        sent = bridge_node.motion.publish(out_vx, out_wz)
         if moving and not sent:
+            bridge_node.straight.end('chassis')
             bridge_node.send_manual_twist(0.0, 0.0)
 
     if not sent and (moving or not immediate_stop):
@@ -369,12 +385,24 @@ class TrackingBridgeNode(Node):
         self.control_lock = threading.RLock()
         self.is_armed = False
 
-        self.manual_drive = ManualDriveLatch(MANUAL_HEARTBEAT_TIMEOUT_S)
+        self.manual_drive = ManualDriveLatch(MANUAL_HEARTBEAT_TIMEOUT_S, allow_pivot=CHASSIS.differential)
+        # IMU 定向直行:只用 /imu/data 的偏航角(不用 RTK)。独立回调组,50 Hz 不被别的回调拖住
+        self.straight = HeadingHold()
+        self.imu_group = MutuallyExclusiveCallbackGroup()
+        self.sub_imu = self.create_subscription(Imu, '/imu/data', self.imu_cb, 20,
+                                                callback_group=self.imu_group)
+        # 里程计车速:直行时判断车走起来没有(轮子卡住时不累积积分,松开后不猛甩)
+        self.sub_odom = self.create_subscription(Odometry, '/odom', self.odom_cb, 10,
+                                                 callback_group=self.imu_group)
+        # 直行状态 10 Hz 发出去：作业记录（job_recorder）据此自动记下每次直行
+        self.pub_straight = self.create_publisher(String, '/straight/status', 5)
+        self.create_timer(0.1, self.publish_straight, callback_group=self.imu_group)
         # HTTP 工作线程只写入最新期望值，ROS executor 线程以 50Hz 稳定发布。
         # 这避免了短按时只有一个 Twist，与底盘 0.5s 看门狗互相抢时序的卡顿。
         # 放进独立回调组:即便别的订阅正在忙,这个 50Hz 定时器也不会被饿死。
-        # 配合 main() 里的 MultiThreadedExecutor 使用。
+        # 执行器是 MultiThreadedExecutor 时才分线程；EventsExecutor 只有一个线程（见 make_executor）。
         self.manual_group = MutuallyExclusiveCallbackGroup()
+        self._manual_loop_at = None
         self.manual_timer = self.create_timer(MANUAL_PUBLISH_PERIOD_S, self.manual_loop,
                                               callback_group=self.manual_group)
 
@@ -456,15 +484,47 @@ class TrackingBridgeNode(Node):
         return self.call_motion_service(self.cli_reset, Trigger.Request())
 
     def manual_loop(self):
-        with self.control_lock:
-            vx, wz, active, publish_zero = self.manual_drive.sample(time.monotonic())
+        watchdog.tick('ros')
+        tick = time.monotonic()
+        last, self._manual_loop_at = self._manual_loop_at, tick
+        if last is not None and tick - last > STALL_LOG_S:
+            print(f'web_stall seconds={tick - last:.3f}', file=sys.stderr, flush=True)
+        # 启动跟随、复位在 HTTP 线程里拿着 control_lock 等服务应答：这一拍不发（原来也是等锁、不发），
+        # 不能在执行器线程里干等——单线程执行器等着就没人收那个服务应答了
+        if not self.control_lock.acquire(blocking=False):
+            return
+        try:
+            now = time.monotonic()
+            vx, wz, active, publish_zero, hold = self.manual_drive.sample_hold(now)
+            if active and hold is not None:
+                vx, wz = self.straight.step(hold, now)      # 直行:车速、方向按 IMU 偏航算
+            elif not active:
+                # 停止、急停、接管都先结束了直行;这里还在跑说明 app 的 go 断了 0.75 s
+                self.straight.end('command_timeout')
             if active or publish_zero:
                 self.motion.publish(vx if active else 0.0, wz if active else 0.0)
+        finally:
+            self.control_lock.release()
         with data_lock:
             state['motion'] = dict(self.motion.state)
 
-    def send_manual_twist(self, vx, wz):
-        self.manual_drive.set(vx, wz)
+    def send_manual_twist(self, vx, wz, hold=None):
+        self.manual_drive.set(vx, wz, hold=hold)
+
+    def publish_straight(self):
+        self.pub_straight.publish(String(data=json.dumps(self.straight.status(), ensure_ascii=False)))
+
+    def imu_cb(self, msg):
+        try:
+            if float(msg.orientation_covariance[0]) < 0:     # ROS 约定:这条不带姿态
+                return
+        except (TypeError, IndexError, ValueError, AttributeError):
+            pass
+        o = msg.orientation
+        self.straight.on_imu(yaw_from_quaternion(o.x, o.y, o.z, o.w), msg.angular_velocity.z, time.monotonic())
+
+    def odom_cb(self, msg):
+        self.straight.on_odom(msg.twist.twist.linear.x, time.monotonic())
 
     def rgb_cb(self, msg):
         now = time.monotonic()
@@ -610,20 +670,58 @@ class TrackingBridgeNode(Node):
 
 
 
+def tune_gc():
+    """启动完把已有对象冻结（gc.freeze），之后的完整回收只扫新建的对象；一次回收超过 GC_SLOW_S 记 gc_slow 日志。
+    2026-09-30 实车：web 进程每隔几秒卡 0.2–0.4 s（只有执行器线程在跑、占着 GIL），IMU 直行误判 IMU 中断、
+    平板遥测断续；同样这些模块完整回收一次在小核上就要约 70 ms。"""
+    gc.collect()
+    gc.freeze()
+    started = []
+
+    def watch(phase, info):
+        if phase == 'start':
+            started[:] = [time.monotonic()]
+        elif started:
+            seconds = time.monotonic() - started.pop()
+            if seconds > GC_SLOW_S:
+                print(f'gc_slow generation={info.get("generation")} seconds={seconds:.3f} '
+                      f'collected={info.get("collected")} frozen={gc.get_freeze_count()}',
+                      file=sys.stderr, flush=True)
+    gc.callbacks.append(watch)
+
+
+def make_executor():
+    """rclpy 的 MultiThreadedExecutor 每个事件都在 Python 里调度：web 节点每秒 110–170 个事件（IMU 50 Hz、
+    50 Hz 手动下发、odom、电压……），执行器线程平时就占小核 50–60%，和 HTTP/websocket 线程抢 GIL，每隔几秒卡
+    0.2–0.4 s（2026-09-30 实车：直行误判 IMU 中断、平板遥测断续）。EventsExecutor 在 C++ 里排队分发，同样的
+    订阅和定时器板上实测 8.7%。它只有一个线程：回调里不能等服务应答（这里的回调都只存数据、发指令；
+    manual_loop 拿不到 control_lock 就跳过这一拍）。Jazzy 里是实验功能，导入不到就用原来的。"""
+    try:
+        from rclpy.experimental import EventsExecutor
+        executor = EventsExecutor()
+    except Exception as exc:
+        print(f'ros_executor=MultiThreadedExecutor (EventsExecutor unavailable: {exc})', file=sys.stderr, flush=True)
+        return MultiThreadedExecutor(num_threads=2)
+    print('ros_executor=EventsExecutor', file=sys.stderr, flush=True)
+    return executor
+
+
 def ros_worker():
     global bridge_node
-    try:
-        rclpy.init()
-    except Exception:
-        pass
+    # main owns SIGTERM/SIGINT. rclpy's default handler used to stop just this
+    # thread, leaving the HTTP server alive until systemd's forced kill.
+    from rclpy.signals import SignalHandlerOptions
+    from rclpy.executors import ExternalShutdownException
+    rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
     node = TrackingBridgeNode()
     bridge_node = node
-    executor = MultiThreadedExecutor(num_threads=2)
+    executor = make_executor()
     executor.add_node(node)
+    tune_gc()
     try:
         executor.spin()
-    except Exception:
-        pass
+    except ExternalShutdownException:
+        pass  # expected when main handles SIGTERM and shuts down the ROS context
     finally:
         try:
             executor.shutdown()
@@ -817,6 +915,21 @@ class RadarHTTPHandler(http.server.BaseHTTPRequestHandler):
                     drove = drove or abs(vx) > 1e-6 or abs(wz) > 1e-6     # 差速车原地转也算开过
                     if status != 200:
                         reply(cmd, False, result.get('error', ''))
+                elif kind == 'straight':
+                    # IMU 定向直行:go 每 50 ms 一条(同一个 run 接着开,新 run 按当时的 IMU 偏航定目标),
+                    # stop 停车;停没停、为什么停看遥测 straight
+                    if bridge_node is None:
+                        reply(cmd, False, 'motion bridge unavailable')
+                    elif cmd['action'] == 'go':
+                        status, result = apply_manual(bridge_node.straight.cfg.speed, 0.0, 0.0, 'straight',
+                                                      session, cmd['seq'], hold=(session, cmd['run']))
+                        drove = True
+                        if status != 200:
+                            reply(cmd, False, result.get('error', ''))
+                    else:
+                        bridge_node.straight.end('user')
+                        status, result = apply_manual(0.0, 0.0, 0.0, 'straight', session, cmd['seq'])
+                        reply(cmd, status == 200, result.get('error', ''))
                 elif kind == 'estop':
                     reply(cmd, *emergency_stop())
                 elif kind == 'reset':
@@ -857,6 +970,9 @@ class RadarHTTPHandler(http.server.BaseHTTPRequestHandler):
             APP_VIEW.clear(session)
             if drove and bridge_node is not None:
                 # 断线的那一刻就停,不等 0.75s 心跳超时
+                run = bridge_node.straight.run
+                if isinstance(run, tuple) and run[0] == session:
+                    bridge_node.straight.end('disconnected')
                 bridge_node.send_manual_twist(0.0, 0.0)
             ws.close()
 
@@ -1050,13 +1166,30 @@ class ThreadedHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
 
 def main():
+    import signal
+    stopping = threading.Event()
+    signal.signal(signal.SIGTERM, lambda *_: stopping.set())
+    signal.signal(signal.SIGINT, lambda *_: stopping.set())
+    watchdog.start('http', 'ros')
+    server = ThreadedHTTPServer(('0.0.0.0', PORT), RadarHTTPHandler)
+    server.timeout = 0.25
     t = threading.Thread(target=ros_worker, daemon=True)
     t.start()
     threading.Thread(target=discovery_beacon, daemon=True).start()
     NETWORK.start()
-    server = ThreadedHTTPServer(('0.0.0.0', PORT), RadarHTTPHandler)
-    print(f"雷达 / 摄像头跟踪服务: http://0.0.0.0:{PORT}")
-    server.serve_forever()
+    try:
+        print(f"雷达 / 摄像头跟踪服务: http://0.0.0.0:{PORT}")
+        while not stopping.is_set():
+            if not t.is_alive():
+                raise RuntimeError('ROS worker exited while HTTP server was running')
+            server.handle_request()
+            watchdog.tick('http')
+    finally:
+        watchdog.close()
+        server.server_close()
+        if rclpy.ok():
+            rclpy.shutdown()
+        t.join(timeout=2.0)
 
 if __name__ == '__main__':
     main()

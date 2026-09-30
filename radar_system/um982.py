@@ -26,10 +26,14 @@ RTK_FIXED = frozenset({'NARROW_INT'})
 RTK_FLOAT = frozenset({'NARROW_FLOAT', 'L1_FLOAT', 'IONOFREE_FLOAT', 'WIDE_INT', 'L1_INT'})
 # 双天线航向：整周模糊度固定才可信
 HEADING_FIXED = frozenset({'L1_INT', 'NARROW_INT', 'WIDE_INT'})
-# 双天线间距不写死、也不用实测：两根天线都是 RTK 固定解时，按同一测量时刻两者平面坐标（东、北，
-# 不算高差）的实时距离作参考（最近 BASELINE_REF_WINDOW_S 秒的中位数，至少 BASELINE_REF_MIN_SAMPLES 组）。
-# 用户要求：两根天线都固定就信——测向是整周固定解、且有这个实时参考（两根都固定）就算有效，
-# 不再比较测向长度。参考距离小于 MIN_BASELINE_M 说明两根天线收到的是同一个信号（室内转发器），不算。
+# 用户规则（2026-09-29）：测向是整周固定解、且接收机报的基线长度在这个范围内就算有效，
+# 不要求两根天线的位置也是 RTK 固定解。Gen5 两天线相距约 0.415 m；范围外（室内转发器约几毫米、
+# 模糊度固定错了的长度）不算。
+HEADING_BASELINE_MIN_M = 0.30
+HEADING_BASELINE_MAX_M = 0.50
+# 两根天线都是 RTK 固定解时，同一测量时刻两者平面坐标（东、北，不算高差）的实时距离照实上报
+# （最近 BASELINE_REF_WINDOW_S 秒的中位数，至少 BASELINE_REF_MIN_SAMPLES 组），只作显示，不参与判定。
+# 小于 MIN_BASELINE_M 说明两根天线收到的是同一个信号（室内转发器），不报。
 BASELINE_REF_WINDOW_S = 3.0
 BASELINE_REF_MIN_SAMPLES = 5
 MIN_BASELINE_M = 0.10
@@ -477,10 +481,10 @@ class Um982Stream:
                 if d is not None:
                     self.baseline_pairs.append((msg['t'], d))
             elif msg['kind'] == 'heading':
-                # 下游（rtk_node 发布、走线融合）都按这里的 valid 取舍，不再各自按固定长度判断
+                # 下游（rtk_node 发布、走线融合）都按这里的 valid 取舍
                 ref = self._baseline_ref(msg['t'])
                 msg['baseline_ref'] = None if ref is None else round(ref, 3)
-                msg['valid'] = bool(msg['sol'] in HEADING_FIXED and ref is not None)
+                msg['valid'] = heading_usable(msg['sol'], msg['length'])
             q = self.times[msg['kind']]
             q.append(t_rx)
             while q and q[0] < t_rx - self.RATE_WINDOW_S:
@@ -524,7 +528,7 @@ class Um982Stream:
         antennas = dict(ant1=antenna('fix', 'BESTPOS'), ant2=antenna('fix2', 'BESTNAVH'))
         fix = fix if antennas['ant1']['available'] else None
         hd = hd if hd and now - hd['t_rx'] < 1.0 else None
-        # 副天线离主天线的实时距离照实报（两根都固定时）；两根都固定就信，不再做一致性判断
+        # 副天线离主天线的实时距离照实报（两根都固定时），只作显示，不做一致性判断
         antennas['ant2'].update(offset_m=None, consistent=None)
         if antennas['ant1']['available'] and antennas['ant2']['available']:
             offset = self._antenna_offset()
@@ -575,6 +579,12 @@ class Um982Stream:
         dn = math.radians(b['lat'] - a['lat']) * _WGS84_A * (1.0 - _WGS84_E2) / w ** 1.5
         de = math.radians(b['lon'] - a['lon']) * _WGS84_A / math.sqrt(w) * math.cos(phi)
         return math.hypot(dn, de)
+
+
+def heading_usable(sol, length_m):
+    """测向是否可用于定车头：整周固定，且基线长度在 HEADING_BASELINE_MIN_M–MAX_M 之内。"""
+    return bool(sol in HEADING_FIXED and length_m is not None and math.isfinite(length_m)
+                and HEADING_BASELINE_MIN_M <= length_m <= HEADING_BASELINE_MAX_M)
 
 
 def heading_grade(sol):

@@ -36,9 +36,9 @@
     "min_scan_points": 10
   },
   "driver": {
-    "max_speed_m_s": 1.2,
+    "max_speed_m_s": 1.5,
     "max_yaw_rate_rad_s": 1.0,
-    "acceleration_m_s2": 0.6,
+    "acceleration_m_s2": 1.0,
     "steering_rate_rad_s": 2.5,
     "cmd_timeout_s": 0.5,
     "feedback_timeout_s": 0.6,
@@ -57,7 +57,7 @@
   "manual": {
     "low_mps": 0.3,
     "med_mps": 0.6,
-    "high_mps": 1.0,
+    "high_mps": 1.5,
     "reverse_scale": 0.6
   },
   "drive": {

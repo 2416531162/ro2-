@@ -18,13 +18,15 @@ class Request:
 class MotionAuthority:
     SOURCES = ('manual', 'follow', 'navigation')
 
-    def __init__(self, timeout_s=.35, settle_s=.30, fault_grace_s=0.0):
+    def __init__(self, timeout_s=.35, settle_s=.30, fault_grace_s=0.0, allow_pivot=False):
+        """allow_pivot：差速车（Gen5）能原地转，手动指令车速 0、角速度不为 0 是原地转，不是停车。"""
         if not all(math.isfinite(v) and v > 0 for v in (timeout_s, settle_s)):
             raise ValueError('invalid authority timeout')
         if not math.isfinite(fault_grace_s) or fault_grace_s < 0:
             raise ValueError('invalid fault grace')
         self.timeout_s, self.settle_s = timeout_s, settle_s
         self.fault_grace_s = fault_grace_s
+        self.allow_pivot = bool(allow_pivot)
         self.mode = 'IDLE'
         self.epoch = uuid.uuid4().hex
         self.reason = 'startup'
@@ -38,15 +40,17 @@ class MotionAuthority:
         self.previous_epoch = None
         self.previous_mode = None
         self.epoch_transition_time = 0.0
+        self.unhealthy_since_transition = False
 
     def _transition(self, mode, reason, now=None):
         self.previous_mode = self.mode
         self.mode, self.reason = mode, reason
+        self.unhealthy_since_transition = False
         self.previous_epoch = self.epoch
         transition_now = time.monotonic() if now is None else now
         self.epoch_transition_time = transition_now
         self.epoch = uuid.uuid4().hex
-        was_moving = abs(self.request.vx) > 1e-6
+        was_moving = abs(self.request.vx) > 1e-6 or (self.allow_pivot and abs(self.request.wz) > 1e-6)
         self.request = Request()
         self.received = None
         self.last_stamp.clear()
@@ -73,6 +77,7 @@ class MotionAuthority:
                     and now - self.unhealthy_since >= self.fault_grace_s):
                 self._transition('FAULT', 'sensor_or_driver_fault', now=now)
             self.stationary_since = None
+            self.unhealthy_since_transition = True
             return
         self.healthy = True
         self.unhealthy_since = None
@@ -127,6 +132,11 @@ class MotionAuthority:
                 and self.previous_mode in ('IDLE', 'FOLLOW', 'NAVIGATION')
                 and prev_epoch is not None
                 and data['epoch'] == prev_epoch and now - prev_time < 0.60
+            ) or (
+                # 手动松手刚超时回空闲（换了代次），网页端还没收到新代次就又推了：同一个操作员接着开
+                source == 'manual' and self._manual_resume()
+                and prev_epoch is not None
+                and data['epoch'] == prev_epoch and now - prev_time < 0.60
             )
             if not epoch_valid or stamp <= 0 or not 0 <= ros_now - stamp <= self.timeout_s:
                 return False
@@ -137,17 +147,36 @@ class MotionAuthority:
         if not self.healthy or self.mode in ('ESTOP', 'FAULT'):
             return False
         if source == 'manual':
-            if abs(vx) < 1e-6:
-                self.stop()
+            if abs(vx) < 1e-6 and (not self.allow_pivot or abs(wz) < 1e-6):
+                # 零速（摇杆回中）：手动开着时就地停（留在 MANUAL、不换代次，回中再推马上能走；
+                # 松手不再发指令后 timeout_s 超时回 IDLE）；自动驾驶时照旧停车回 IDLE、不会自己恢复；
+                # 本来就空闲时什么也不做——app 摇杆回中时每 50 ms 发一次零速，每次都换代次的话
+                # 网页端手里的代次总是旧的，再推的指令被丢、还要重新等静止，起步一顿一顿
+                if self.mode == 'MANUAL':
+                    self.last_stamp[source] = stamp
+                    self.request = Request()
+                    self.received = now - (ros_now - stamp)
+                elif self.mode != 'IDLE':
+                    self.stop()
                 return True
             if self.mode != 'MANUAL':
+                # 手动松手超时回空闲后又推：同一个操作员接着开，不用再等静止 settle_s（车还在滑行时再推，
+                # 原来要先停死再等 0.3 s，开起来一顿一顿）；从跟随 / 导航接管、急停或故障复位之后照旧要等
+                resume = self._manual_resume()
                 self._transition('MANUAL', 'manual_takeover', now=now)
+                if resume:
+                    self.wait_stationary = False
         elif self.mode != source.upper():
             return False
         self.last_stamp[source] = stamp
         self.request = Request(float(vx), float(wz))
         self.received = now - (ros_now - stamp)
         return True
+
+    def _manual_resume(self):
+        # 回空闲之后底盘报过不健康（断链重连、启动保护等）：车的状态不可信，照旧要等停稳
+        return (self.mode == 'IDLE' and self.reason == 'command_timeout' and self.previous_mode == 'MANUAL'
+                and not self.unhealthy_since_transition)
 
     def output(self, now):
         if self.received is not None and not 0 <= now - self.received <= self.timeout_s:

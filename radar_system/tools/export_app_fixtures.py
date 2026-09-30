@@ -133,7 +133,10 @@ def sample_route_line(now=100.0):
                             'left': 0.078, 'dur': 1.05, 'age_s': 12.5}],
             # 车身姿态（IMU）：右侧略低 1.25°、车头抬起 2.4°（REP-103：横滚左侧抬起为正，俯仰车头压低为正），
             # IMU 偏航比它启动时左转了 12.6°（没有磁力计，只是相对值）
-            'attitude': {'roll_deg': 1.25, 'pitch_deg': -2.4, 'yaw_deg': 12.6, 'source': 'imu_madgwick'}}
+            'attitude': {'roll_deg': 1.25, 'pitch_deg': -2.4, 'yaw_deg': 12.6, 'source': 'imu_madgwick'},
+            # 倾斜补偿：天线高 0.40 m，按上面的姿态天线比平地时往后 1.72 cm、往右 0.88 cm（车体系前、左为正）
+            'tilt': {'height_m': 0.4, 'active': True, 'reason': None, 'roll_deg': 1.25, 'pitch_deg': -2.4,
+                     'forward_m': -0.0172, 'left_m': -0.0088}}
 
 
 def route_geometry_cases():
@@ -151,6 +154,10 @@ def route_geometry_cases():
         ('接入 车在起点正后方', rect, [-3.0, 0.0, 0.0]),
         ('接入 车在起点前方反向', rect, [2.0, 0.5, math.pi]),
         ('接入 圆', dict(rect, kind='circle', center=[3.0, 4.0], radius=2.5), [6.0, 6.0, -2.0]),
+        # 现场定点画圆：车（喷头）停在圆心；差速车喷头画圆、原地转向接入
+        ('圆 车在圆心 顺时针 2 圈', dict(rect, kind='circle', center=[1.0, 2.0], radius=2.0, clockwise=True, laps=2),
+         [0.7, 2.0, 0.0]),
+        ('错误 圆 差速车半径太小', dict(rect, kind='circle', center=[0.0, 0.0], radius=0.6, clockwise=False), [0.0, 0.0, 0.0]),
         ('接入 已在起点', rect, [0.0, 0.0, 0.0]),
         ('错误 路点太少', dict(rect, points=[[0, 0], [5, 0]]), None),
         ('错误 拐角不够长', dict(rect, points=[[0, 0], [3, 0], [3, 2]], closed=False), None),
@@ -224,6 +231,22 @@ def route_geometry_cases():
                         error=None)
         except ValueError as exc:
             case.update(start=None, entry=None, pieces=None, error=str(exc))
+        if spec.kind == 'circle':
+            # 差速车（Gen5）同一个圆：喷头画半径 R 的圆（后轴走 √(R²−d²)），原地转向接入（app 对照）
+            try:
+                pstart, ppieces = route_plan.loop_pieces(spec, PIVOT_RADIUS, 0.30)
+                case['pivot'] = dict(radius=PIVOT_RADIUS, nozzle_x=0.30, start=list(pstart),
+                                     pieces=[list(p) for p in ppieces])
+                if car is not None:
+                    try:
+                        plan, entry_m = route_plan.plan(spec, tuple(car), PIVOT_RADIUS, nozzle_x=0.30)
+                        case['pivot'].update(plan=[[s.direction, list(s.path.pieces[0].pose(0.0)),
+                                                    [[p.length, p.kappa] for p in s.path.pieces]] for s in plan],
+                                             entry_m=entry_m, plan_error=None)
+                    except ValueError as exc:
+                        case['pivot'].update(plan=None, entry_m=None, plan_error=str(exc))
+            except ValueError as exc:
+                case['pivot'] = dict(radius=PIVOT_RADIUS, nozzle_x=0.30, error=str(exc))
         out.append(case)
     return {'max_entry_m': route_plan.MAX_ENTRY_M, 'cover_tol_m': route_plan.COVER_TOL_M,
             'vertex_pass_m': route_plan.VERTEX_PASS_M, 'corner_clear_m': route_plan.CORNER_CLEAR_M,

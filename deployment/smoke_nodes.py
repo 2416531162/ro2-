@@ -7,7 +7,11 @@
 robot_core）。这里按 systemd 直接运行 radar_system/xxx_node.py 的方式设置 sys.path；不打开串口、
 不连 CORS、不 spin。由 smoke.sh 换到单独的 ROS 域，不和正在运行的服务互相看见。
 
-    bash deployment/smoke.sh <发布目录> [rtk line]      # activate 之前在车上跑，失败就不要激活
+    bash deployment/smoke.sh <发布目录> [rtk line imu oid jobrec]      # activate 之前在车上跑，失败就不要激活
+
+imu（Gen5 的 HDA536T 驱动）用假 CAN 总线喂一个周期，查真 sensor_msgs/Imu 能填好、发出去；oid（Gen5 底盘驱动）
+只在共享配置是差速车时查，默认只收不发，没有 can0 也能构造、发状态。换到正点原子 RK3588（ROS 2 Jazzy）后第一次
+上板，先跑这个。
 """
 import os
 import sys
@@ -56,7 +60,114 @@ def check_line():
             node.destroy_node()
 
 
-CHECKS = {'rtk': check_rtk, 'line': check_line}
+def _script_dir(name):
+    """与 systemd 直接运行 <目录>/xxx.py 一样：脚本所在目录在 sys.path 最前面。"""
+    path = os.path.join(RELEASE, name)
+    if path not in sys.path:
+        sys.path.insert(0, path)
+
+
+def check_imu():
+    _script_dir('rion_protocol')
+    import hda536t_codec as hc
+    import hda536t_imu
+
+    class Bus:
+        """一个输出周期：角度、加速度、陀螺三帧（左转 10°/s，车头抬起 2°，静止水平）。"""
+        def __init__(self):
+            self.frames = [(0x585, hc.encode_pdo(hc.ANGLE, 1.0, 2.0, 3.0, 25)),
+                           (0x585, hc.encode_pdo(hc.ACCEL, 0.0, 0.0, -1.0)),
+                           (0x585, hc.encode_pdo(hc.GYRO, 0.0, 0.0, -10.0))]
+            self.sent = []
+
+        def recv(self):
+            return self.frames.pop(0) if self.frames else None
+
+        def send(self, can_id, data):
+            self.sent.append((can_id, bytes(data)))
+
+        def close(self):
+            pass
+
+    bus = Bus()
+    node = hda536t_imu.Hda536tNode(bus=bus)
+    try:
+        raw, data = [], []
+        for pub, out in ((node.pub_raw, raw), (node.pub_data, data)):
+            real = pub.publish
+            pub.publish = lambda msg, real=real, out=out: (out.append(msg), real(msg))
+        while node.poll():
+            pass
+        assert len(raw) == 1 and len(data) == 1, (len(raw), len(data))
+        assert abs(raw[0].angular_velocity.z - 0.17453) < 1e-3, raw[0].angular_velocity.z
+        assert raw[0].orientation_covariance[0] == -1.0          # 融合用的原始 /imu 不带姿态
+        assert abs(raw[0].linear_acceleration.z - 9.807) < 0.01, raw[0].linear_acceleration.z
+        assert data[0].orientation_covariance[0] > 0 and abs(data[0].orientation.w - 1.0) > 1e-4
+        node.publish_status()
+        assert bus.sent == [], bus.sent                           # 从不往总线发
+    finally:
+        node.destroy_node()
+
+
+def check_oid():
+    _script_dir('oid_protocol')
+    import oid_driver
+    if oid_driver.PROFILE['drive']['type'] != 'differential':
+        print('（共享配置不是差速车，跳过 oid）', flush=True)
+        return
+    node = oid_driver.OidDriver()
+    try:
+        assert node.config.receive_only, '冒烟测试不带参数文件，必须只收不发'
+        time.sleep(0.5)
+        node.publish_status()
+        node.publish_oid_status()
+    finally:
+        node.shutdown()
+        node.destroy_node()
+
+
+def check_jobrec():
+    """作业自动记录：真 rosbag2 写一段 mcap（开始 → 停下 → 跑完）再读回来；记录的话题类型都找得到、能建原始字节订阅。"""
+    import json
+    import shutil
+    import tempfile
+    import job_recorder
+    import rosbag2_py
+    from rclpy.node import Node
+    from rclpy.serialization import serialize_message
+    from std_msgs.msg import String
+    root = tempfile.mkdtemp(prefix='jobrec-smoke-')
+    try:
+        clock = [0.0]
+        rec = job_recorder.JobRecorder(root=root, files=lambda: [], clock=lambda: clock[0], log=lambda m: None)
+        job = dict(id='smoke-0001', state='RUNNING', label='smoke')
+        for t, phase, state in ((0, 'IDLE', None), (1, 'RUNNING', 'RUNNING'), (2, 'IDLE', 'DONE'), (8, 'IDLE', 'DONE')):
+            clock[0] = t
+            status = dict(phase=phase, task='route', operations=dict(job=dict(job, state=state) if state else None))
+            rec.on_message('/line/status', 'std_msgs/msg/String', serialize_message(String(data=json.dumps(status))),
+                           int((1790000000 + t) * 1e9), status)
+        [name] = os.listdir(root)
+        with open(os.path.join(root, name, 'job.json'), encoding='utf-8') as fh:
+            info = json.load(fh)
+        assert info['result']['state'] == 'DONE' and len(info['segments']) == 1, info
+        reader = rosbag2_py.SequentialReader()
+        reader.open(rosbag2_py.StorageOptions(uri=os.path.join(root, name, 'seg01'), storage_id='mcap'),
+                    rosbag2_py.ConverterOptions('cdr', 'cdr'))
+        read = []
+        while reader.has_next():
+            topic, data, _t = reader.read_next()
+            read.append(topic)
+        assert read.count('/line/status') == 4, read      # 开始前 1 条 + 开始 + 停下后 2 条
+        node = Node('jobrec_smoke')
+        try:
+            job_recorder.attach(node, job_recorder.JobRecorder(root=root, files=lambda: [], log=lambda m: None))
+        finally:
+            node.destroy_node()
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+CHECKS = {'rtk': check_rtk, 'line': check_line, 'imu': check_imu, 'oid': check_oid, 'jobrec': check_jobrec}
 
 
 def main(names=None):

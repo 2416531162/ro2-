@@ -4,9 +4,9 @@ set -euo pipefail
 # 底盘要不要雷达是激活时按配置写进服务单元的；换配置请用 manage.py activate，不要只用这里多起几个服务。
 PROFILE_NAME="${1:-rtk}"
 case "$PROFILE_NAME" in
-  rtk) COMPONENTS=(web rtk line) ;;
-  follow) COMPONENTS=(camera lidar ai web gui follower rtk line) ;;
-  headless) COMPONENTS=(camera lidar web follower rtk line) ;;
+  rtk) COMPONENTS=(web rtk line imu jobrec) ;;
+  follow) COMPONENTS=(camera lidar ai web gui follower rtk line imu jobrec) ;;
+  headless) COMPONENTS=(camera lidar web follower rtk line imu jobrec) ;;
   perception) COMPONENTS=(camera lidar ai web) ;;
   *) echo 'Usage: start_all.sh [rtk|follow|headless|perception]' >&2; exit 2 ;;
 esac

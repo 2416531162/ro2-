@@ -13,6 +13,7 @@ docs/APP_PROTOCOL.md 提供与车端相同的接口:
     python3 radar_system/tools/app_demo_server.py            # 真机与电脑同一 WiFi
     python3 radar_system/tools/app_demo_server.py --line-demo  # 预设一条 7 m 直线,车在 A 点后方 2.5 m
     python3 radar_system/tools/app_demo_server.py --route-demo # 预设连线矩形并开始跑,浏览器看 /display
+    python3 radar_system/tools/app_demo_server.py --gen5       # Gen5 差速底盘:两台模拟的欧艾迪驱动器,能原地转
     # 安卓模拟器里连 10.0.2.2:8088
 
 走直线、走路线用真实的 LineMission/LineTracker/PathTracker;定位是仿真车真值加厘米级噪声,始终当作 RTK 固定解。
@@ -39,6 +40,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 sys.path.insert(0, os.path.dirname(os.path.dirname(HERE)))
 sys.path.insert(0, HERE)
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(HERE)), 'oid_protocol'))
+if '--gen5' in sys.argv:
+    # Gen5 差速底盘:共享配置换成 robot_gen5.json(要在导入 runtime_config 之前),车用两台模拟驱动器开
+    os.environ.setdefault('RK3588_ROBOT_CONFIG',
+                          os.path.join(os.path.dirname(os.path.dirname(HERE)), 'robot_core', 'robot_gen5.json'))
 
 from PIL import Image, ImageDraw  # noqa: E402
 
@@ -51,6 +57,17 @@ from line_mission import LineMission  # noqa: E402
 from field_plan_service import FieldPlanService  # noqa: E402
 
 CAMERA = {'width': 640, 'height': 480, 'fx': 570.3, 'cx': 319.5}
+DEMO_ANTENNA = (0.345, 0.165, 0.40)     # 演示用 ANT1 杠杆臂：前、左、离地高度，m
+
+
+def demo_tilt(roll_deg, pitch_deg):
+    """演示用倾斜补偿状态（真车由融合的 tilt_status 给，公式同 gnss_fusion._lever）：天线水平位置比平地时偏了多少。"""
+    ax, ay, h = DEMO_ANTENNA
+    r, p = math.radians(roll_deg), math.radians(pitch_deg)
+    fwd = ax * math.cos(p) + (ay * math.sin(r) + h * math.cos(r)) * math.sin(p) - ax
+    left = ay * math.cos(r) - h * math.sin(r) - ay
+    return {'height_m': h, 'active': True, 'reason': None, 'roll_deg': round(roll_deg, 2),
+            'pitch_deg': round(pitch_deg, 2), 'forward_m': round(fwd, 4), 'left_m': round(left, 4)}
 FY, CY = 570.3, 239.5
 CAM_HEIGHT_M = 0.55
 PERSON_HEIGHT_M = 1.70
@@ -106,9 +123,13 @@ class DemoFusion:
 class DemoCar:
     """仿真车 + 与 MotionAuthority 同样语义的模式:IDLE/MANUAL/FOLLOW/NAVIGATION/ESTOP。"""
 
-    def __init__(self):
+    def __init__(self, gen5=False):
         world, target = build_world()
-        self.sim = fs.Sim(world, target, fs.make_config())
+        chassis = None
+        if gen5:
+            from oid_sim import OidSimCar
+            chassis = OidSimCar()       # 下发指令经真的 CanLink 编成 CAN 帧,两台模拟驱动器转出轮速
+        self.sim = fs.Sim(world, target, fs.make_config(), chassis=chassis)
         self.sim.samples = __import__('collections').deque(maxlen=50)
         self.sim.control_hook = self._control
         self.engine = self.sim.engine
@@ -123,6 +144,7 @@ class DemoCar:
         self.geo = ChassisGeometry()
         self.mission = LineMission(DemoFusion(lambda: self.sim.car), samples=None)
         self.line_result = None
+        self.imu_yaw0 = None    # 演示 IMU 偏航的零点：第一次出状态时的车头方向
 
     def preset_line(self, length=7.0):
         """--line-demo:A 在原点、B 在正前方,车放在 A 后 2.5 m(助跑)、左偏 25 cm、车头偏 6°。"""
@@ -186,7 +208,7 @@ class DemoCar:
             seq = cmd.get('seq')
             vx, wz, deg = app_link.resolve_stick(cmd['throttle'], cmd['steer'], cmd['tier'],
                                                  TIERS, PROFILE['manual']['reverse_scale'], self.geo)
-            moving = abs(vx) > 1e-6
+            moving = abs(vx) > 1e-6 or abs(wz) > 1e-6       # 差速车打横是原地转
             last = self.last_seq.get(session)
             if moving and seq is not None and last is not None and seq <= last:
                 return True, 'stale'
@@ -292,6 +314,11 @@ class DemoCar:
             following = self.mode == 'FOLLOW'
             follow['stale'] = False
             vx, wz, deg = self.manual
+            yaw_deg = math.degrees(car.yaw)
+            if self.imu_yaw0 is None:
+                self.imu_yaw0 = yaw_deg
+            wrap = lambda a: (a + 180.0) % 360.0 - 180.0  # noqa: E731
+            roll, pitch = 1.2 * math.sin(self.sim.t / 7.0), -0.8 + 0.6 * math.sin(self.sim.t / 5.0)
             return {
                 'hz': 10.0, 'voltage': 24.2, 'battery_pct': 83,
                 'ranges': ranges, 'angle_min': 0.0, 'angle_increment': 2 * math.pi / fs.BINS,
@@ -314,11 +341,17 @@ class DemoCar:
                                       'consistent': True}},
                          'heading': {'sol': 'NARROW_INT', 'fix': 'FIXED', 'sats_used': 27, 'sats_tracked': 35,
                                      'length_m': 0.331, 'pitch_deg': 0.4, 'sigma_deg': 0.12, 'ref_m': 0.331,
-                                     'valid': True},
+                                     'valid': True, 'yaw_deg': round(wrap(yaw_deg), 2)},
                          'ntrip': {'configured': True, 'connected': True, 'error': None, 'age_s': 0.5,
                                    'bytes': int(1e6 + 900 * time.monotonic()) % 10 ** 7}},
                 'line': dict(self.mission.status(), motion_mode=self.mode, last_result=self.line_result,
-                             _rx_monotonic=time.monotonic()),
+                             _rx_monotonic=time.monotonic(),
+                             # 演示用车身姿态：地面略有起伏；IMU 偏航相对启动时，按实车陀螺零偏 0.056°/s 漂
+                             # （真车由 imu 组件 + line_node 给出）
+                             attitude={'roll_deg': round(roll, 2), 'pitch_deg': round(pitch, 2),
+                                       'yaw_deg': round(wrap(yaw_deg - self.imu_yaw0 + 0.056 * self.sim.t), 2),
+                                       'source': 'imu_madgwick'},
+                             tilt=demo_tilt(roll, pitch)),
             }
 
     # ---- 合成相机画面 ----
@@ -544,8 +577,9 @@ def main():
     p.add_argument('--port', type=int, default=8088)
     p.add_argument('--line-demo', action='store_true', help='预设一条 7 m 直线,车停在 A 点后方')
     p.add_argument('--route-demo', action='store_true', help='预设一个连线矩形并直接开始跑（看车载屏幕 /display）')
+    p.add_argument('--gen5', action='store_true', help='Gen5 差速底盘（两台模拟的欧艾迪单路驱动器，能原地转）')
     args = p.parse_args()
-    CAR = DemoCar()
+    CAR = DemoCar(gen5=args.gen5)
     if args.line_demo:
         CAR.preset_line()
     if args.route_demo:

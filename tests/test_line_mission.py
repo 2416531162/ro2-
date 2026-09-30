@@ -548,6 +548,14 @@ class TestRtkJumps(Base):
         self.assertAlmostEqual(st['diag']['rtk_along_m'], 0.0, places=6)
         self.assertEqual(st['diag']['jumps'], 2)
 
+    def test_jump_count_keeps_counting_past_the_kept_records(self):
+        """记录只留最近 50 次，但次数一直往上数：作业记录按首末相减（2026-09-30 满 50 后每次作业都算成 0）。"""
+        self.fusion.current = FakeFusion.make(5.0, 2.0, 90.0)
+        for i in range(60):
+            self.fix(10.0 + 2.0 * i, 5.0, 2.0, 90.0, left=0.05)             # 隔 2 s 偏一次：每次单独算
+        self.m.tick(200.0, 'IDLE')
+        self.assertEqual(self.m.status()['diag']['jumps'], 60)
+
     def test_not_recorded_while_fusion_is_not_fixed(self):
         self.fusion.current = FakeFusion.make(5.0, 2.0, 0.0, quality='RTK_FLOAT', usable=False)
         self.fix(1.0, 5.0, 2.0, 0.0, left=0.3)

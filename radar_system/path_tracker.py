@@ -181,12 +181,27 @@ class PathConfig:
     abort_heading_rad: float = math.radians(45.0)
     slow_offset_m: float = 0.10      # 横偏超过它开始降速，积分也停
     stop_tol_m: float = 0.02
+    # 起步慢走：每段从停着起步后先走 start_creep_m，车速不超过 start_creep_mps（0 为不用）。差速车的万向轮在原地转向、
+    # 换向后是横着的，一起步就把车身甩歪（2026-09-30 实车：车头甩 5–8°，线头 1 m 内偏 4–8 cm）；慢走让它先转回来
+    start_creep_mps: float = 0.0
+    start_creep_m: float = 0.3
+    # 起步锁车头（差速车）：每段起步后 start_hold_m 内，车头误差的纠正速度（1/s）不低于 start_hold_rate，不够的部分
+    # 直接给角速度（不超过 start_hold_max rad/s）。曲率反馈给出的角速度 = 车速 × 曲率，慢走时几乎为 0：2026-09-30
+    # 实车原地转完起步，车头按原地转的方向再甩 4–13°（21 次 19 次同向），0.1 m/s 时只给出 0.06 rad/s，压不住，
+    # 喷嘴偏 5–10 cm，之后 5 m 才回来。0 为不用
+    start_hold_m: float = 0.0
+    start_hold_rate: float = 2.0
+    start_hold_max: float = 0.3
 
 
 def differential_config(config=PathConfig()):
-    """差速车（Gen5）的跟踪参数：直接下发车速和角速度，没有前轮转向的执行延迟、也不会转不够。
-    轮毂电机的响应实车还没辨识，延迟先按 0.1 s。"""
-    return replace(config, delay_s=0.1, steer_gain=1.0)
+    """差速车（Gen5）的跟踪参数：直接下发车速和角速度，前轮是随动万向轮，不会转不够。
+    执行延迟按 2026-09-30 实车 IMU 直行辨识：陀螺 ≈ 0.44 s 前的角速度指令 × 1.02–1.04（原来没辨识，
+    按 0.1 s 时仿真 0.8 m/s 画直线偏 20 cm 以上，按 0.44 s 约 2 cm）。弯道横向加速度 0.12 m/s²
+    （2026-09-30 用户嫌转弯慢，0.08 时 R 2.2 m 的圆只有 0.41 m/s；仿真 0.12 时 R 1.2–3 m 圆 p95 多 0.1–0.2 cm）：
+    R 2.2 m 约 0.51 m/s，角球弧 R 1 m 约 0.35 m/s，中圈、罚球弧（R 9.15 m）按 0.8 m/s 画；
+    场地规划经 route_limits 用同一个值。起步先按 0.1 m/s 慢走 0.3 m（万向轮回正），起步 0.6 m 内锁车头。"""
+    return replace(config, delay_s=0.44, steer_gain=1.0, lat_accel_mps2=0.12, start_creep_mps=0.1, start_hold_m=0.6)
 
 
 @dataclass
@@ -221,10 +236,11 @@ class PathTracker:
         self.st = PathState(length=path.length)
         self._hint = None
         self._v_prev = 0.0
+        self._creep_from = None
         self._kfb = 0.0
         self._sum2 = self._n = self._max = 0.0
         self._clock = 0.0
-        self._sent = deque()            # (下发时刻, 车速, 下发曲率)：还在底盘执行延迟里的指令
+        self._sent = deque()            # (下发时刻, 车速, 下发角速度)：还在底盘执行延迟里的指令
 
     def locate(self, x, y, yaw, hint=None):
         """车体控制点相对路径的 (路程, 横偏, 车头误差, 路径曲率)。"""
@@ -261,6 +277,7 @@ class PathTracker:
             self.st.integral = integral
         self._hint = self.locate(pose.x, pose.y, pose.yaw, hint)[0]
         self._kfb = 0.0
+        self._creep_from = None         # 起步慢走、锁车头从哪里（路程）算起：第一个控制周期记下
         self._v_prev = max(0.0, pose.speed)
         self._sum2 = self._n = self._max = 0.0
         self._clock = 0.0
@@ -282,15 +299,16 @@ class PathTracker:
     def update(self, pose, dt):
         """返回 (vx, wz)。pose 需有 x, y, yaw, speed, yaw_rate, usable_for_control。"""
         self._clock += dt
-        v, kappa = self._control(pose, dt)
-        self._sent.append((self._clock, v, kappa))
-        return v, v * kappa
+        v, kappa, w_hold = self._control(pose, dt)
+        wz = v * kappa + w_hold
+        self._sent.append((self._clock, v, wz))
+        return v, wz
 
     def predict(self, x, y, yaw):
         """已发出、还在执行延迟里的指令都执行完后的 (x, y, yaw)。
 
         第 i 条指令在 [t_i, t_i+1) 期间有效、晚 delay_s 才作用到车上，所以车接下来 delay_s 内怎么走，由
-        [现在 − delay_s, 现在) 期间有效的那些指令决定；车实际曲率 = 下发曲率 × steer_gain。
+        [现在 − delay_s, 现在) 期间有效的那些指令决定；车实际角速度 = 下发角速度 × steer_gain。
         """
         d = self.cfg.delay_s
         sent = self._sent
@@ -299,27 +317,30 @@ class PathTracker:
         if d <= 0.0:
             return x, y, yaw
         start = self._clock - d
-        for i, (t, v, k) in enumerate(sent):
+        for i, (t, v, w) in enumerate(sent):
             end = sent[i + 1][0] if i + 1 < len(sent) else self._clock
             a = max(t, start)
-            if end <= a or v == 0.0:
+            if end <= a or (v == 0.0 and w == 0.0):
                 continue
-            x, y, yaw = Piece(x, y, yaw, 0.0, k * self.cfg.steer_gain, 0.0).pose(v * (end - a))
+            if v == 0.0:                # 起步锁车头：车没动、只转
+                yaw += w * self.cfg.steer_gain * (end - a)
+                continue
+            x, y, yaw = Piece(x, y, yaw, 0.0, w / v * self.cfg.steer_gain, 0.0).pose(v * (end - a))
         return x, y, yaw
 
     def _control(self, pose, dt):
-        """返回 (车速, 下发曲率)。"""
+        """返回 (车速, 下发曲率, 起步锁车头另加的角速度)。"""
         st, cfg = self.st, self.cfg
         if st.state not in ('RUNNING', 'PAUSED'):
             st.v_cmd = 0.0
-            return 0.0, 0.0
+            return 0.0, 0.0, 0.0
         if not pose.usable_for_control:
             st.state, st.reason = 'PAUSED', 'pose_unusable'
             st.v_cmd, self._v_prev = 0.0, 0.0
-            return 0.0, 0.0
+            return 0.0, 0.0, 0.0
         if st.state == 'PAUSED':
             st.reason = 'pose_recovered_waiting_operator'
-            return 0.0, 0.0
+            return 0.0, 0.0, 0.0
 
         # 执行延迟：先按已发出的指令把位姿推到 delay_s 之后，现在算的指令正好在那时生效（Smith 预估）；
         # 再按当前速度和角速度推 lead_s（弯道上角速度不为 0，推出去的是一段圆弧）
@@ -338,14 +359,18 @@ class PathTracker:
         if abs(e_now) > cfg.abort_offset_m or abs(he_now) > cfg.abort_heading_rad:
             st.state, st.reason = 'ABORTED', 'off_line'
             st.v_cmd, self._v_prev = 0.0, 0.0
-            return 0.0, 0.0
+            return 0.0, 0.0, 0.0
         remaining = self.path.length - s
         if remaining <= cfg.stop_tol_m:
             st.state, st.reason = 'DONE', ''
             st.v_cmd, self._v_prev = 0.0, 0.0
-            return 0.0, 0.0
+            return 0.0, 0.0, 0.0
 
-        if abs(e) < cfg.slow_offset_m:
+        if self._creep_from is None:
+            self._creep_from = s_now
+        started = s_now - self._creep_from          # 这次起步后走了多远
+        # 起步锁车头这段不积分：起步甩头是一下子的，积进去会在后面几米反向拖着偏
+        if abs(e) < cfg.slow_offset_m and started >= cfg.start_hold_m:
             lim = cfg.integral_limit / cfg.ki_per_m2
             st.integral = max(-lim, min(lim, st.integral + e * ds))
 
@@ -373,16 +398,24 @@ class PathTracker:
         if abs(e) > cfg.slow_offset_m:
             v *= max(0.4, 1.0 - (abs(e) - cfg.slow_offset_m) / 0.3)
         v = min(v, max(cfg.min_mps, math.sqrt(2.0 * cfg.decel_mps2 * max(0.0, remaining - cfg.stop_tol_m))))
+        if cfg.start_creep_mps > 0 and started < cfg.start_creep_m:
+            v = min(v, cfg.start_creep_mps)
         v = min(v, self._v_prev + cfg.accel_mps2 * dt)
         self._v_prev = v
         st.v_cmd = v
+        w_hold = 0.0
+        if cfg.start_hold_m > 0 and started < cfg.start_hold_m:
+            # 起步锁车头：曲率反馈的车头纠正速度是 车速 × k_theta，不到 start_hold_rate 的差额直接给角速度
+            # （车头误差用执行延迟之后的预估，与曲率反馈同一个参考方向）
+            gain = max(0.0, cfg.start_hold_rate - v * self.k_theta)
+            w_hold = max(-cfg.start_hold_max, min(cfg.start_hold_max, -gain * (he - theta_ref)))
 
         if s_now >= 0.0:
             self._n += 1
             self._sum2 += e_now * e_now
             self._max = max(self._max, abs(e_now))
             st.stats = dict(rms_m=math.sqrt(self._sum2 / self._n), max_m=self._max, samples=int(self._n))
-        return v, kappa
+        return v, kappa, w_hold
 
     def status(self):
         st = self.st
@@ -427,18 +460,24 @@ class SectionTracker:
 
     def __init__(self, sections, config=PathConfig(), geometry=None, *, reverse_mps=0.3, reverse_gain=0.90,
                  still_mps=0.02, settle_s=0.3, switch_timeout_s=5.0, pivot_rate=None, pivot_accel=1.0,
-                 pivot_tol=math.radians(1.0), pivot_timeout_s=20.0, pivot_stop_tol=0.005):
-        """pivot_rate 不为 None（差速车）：下一段起点车头方向与车差 pivot_tol 以上时，停稳后原地转过去再开，
-        起步时也一样；角速度不超过 pivot_rate、角加速度不超过 pivot_accel。阿克曼车为 None，不原地转。"""
+                 pivot_tol=math.radians(1.0), pivot_timeout_s=20.0, pivot_stop_tol=0.005,
+                 pivot_min=math.radians(5.0), pivot_retries=2, pivot_floor=0.1):
+        """pivot_rate 不为 None（差速车）：下一段起点车头方向与车差 pivot_min 以上时，停稳后原地转过去再开，
+        起步时也一样；角速度不超过 pivot_rate、角加速度不超过 pivot_accel。阿克曼车为 None，不原地转。
+        原地转仍按 pivot_tol 瞄准；转完差 pivot_min 以内不补转，直接慢速往前开，万向轮回正、车头由跟踪纠正
+        （2026-09-30 实车：转完一停车头回弹约 1°，按 1° 补转时小指令推不动，反复补转卡住 27 s）。
+        转完仍差 pivot_min 以上最多补转 pivot_retries 次，再不行按 pivot_timeout 中止。没转到位时角速度不低于
+        pivot_floor（rad/s，0.1 约轮子 33 erpm；实车 ±5–19 erpm 收尾磨 1.6 s，±14 erpm 补转推不动）。"""
         self.sections = list(sections)
         if not self.sections:
             raise ValueError('路径是空的')
         self.cfg = config
         self.geo = geometry or ChassisGeometry()
         self.still_mps, self.settle_s, self.switch_timeout_s = still_mps, settle_s, switch_timeout_s
-        if pivot_rate is not None and not (pivot_rate > 0 and pivot_accel > 0 and pivot_tol > 0):
+        if pivot_rate is not None and not (pivot_rate > 0 and pivot_accel > 0 and 0 < pivot_tol <= pivot_min):
             raise ValueError('原地转向的角速度、角加速度和容差必须为正')
         self.pivot_rate, self.pivot_accel, self.pivot_tol = pivot_rate, pivot_accel, pivot_tol
+        self.pivot_min, self.pivot_retries, self.pivot_floor = pivot_min, pivot_retries, pivot_floor
         self.pivot_timeout_s = pivot_timeout_s
         self.trackers = []
         for i, sec in enumerate(self.sections):
@@ -465,12 +504,15 @@ class SectionTracker:
         self.reversals = sum(1 for a, b in zip(self.sections, self.sections[1:]) if a.direction != b.direction)
         self.pivots = 0 if pivot_rate is None else sum(
             1 for a, b in zip(self.sections, self.sections[1:])
-            if abs(wrap(b.car_pose(0.0)[2] - a.car_pose(a.path.length)[2])) > pivot_tol)
+            if abs(wrap(b.car_pose(0.0)[2] - a.car_pose(a.path.length)[2])) > pivot_min)
         self.index = 0
         self.switching = False          # 段尾已停车指令，等车停稳换向（差速车还可能要原地转向）
         self._next = 1                  # 换段时要开始的那一段（起步前原地转向时是 0）
         self._pivot = None              # 原地转向的目标车头方向；None 为没在转
         self._w = self._pivot_t = 0.0   # 原地转向当前下发的角速度、已经转了多久
+        self._turns = 0                 # 这次起步 / 换段已经原地转了几次（补转计数）
+        self._turn_clock = 0.0
+        self._turn_sent = deque()      # 原地转向预估也记录零速：暂停、停稳等待时旧指令仍可能在执行
         self._still = self._wait = 0.0
         self._integral = 0.0            # 前进坐标
         self._done = [0.0, 0, 0.0]      # 已跑完各段的 横偏平方和、样本数、最大横偏
@@ -506,6 +548,8 @@ class SectionTracker:
         if integral is not None:
             self._integral = integral
         self.index, self.switching, self._pivot = 0, False, None
+        self._turn_clock = 0.0
+        self._turn_sent.clear()
         self._done = [0.0, 0, 0.0]
         sec, tr = self.sections[0], self.trackers[0]
         if self.pivot_rate is not None and pose.usable_for_control and self._misaligned(0, pose):
@@ -514,7 +558,7 @@ class SectionTracker:
             if not ok:
                 st.state, st.reason = 'IDLE', why
                 return False
-            self.switching, self._next, self._still, self._wait = True, 0, 0.0, 0.0
+            self.switching, self._next, self._still, self._wait, self._turns = True, 0, 0.0, 0.0, 0
             st.state, st.reason, st.stats = 'RUNNING', '', {}
             self._sync()
             return True
@@ -540,6 +584,16 @@ class SectionTracker:
 
     def update(self, pose, dt):
         """返回 (vx, wz)，vx 倒车为负。pose 需有 x, y, yaw, speed, yaw_rate, usable_for_control。"""
+        if self.pivot_rate is None:
+            return self._update(pose, dt)
+        self._turn_clock += dt
+        output = self._update(pose, dt)
+        self._turn_sent.append((self._turn_clock, output[1]))
+        while len(self._turn_sent) >= 2 and self._turn_sent[1][0] <= self._turn_clock - self.cfg.delay_s + 1e-9:
+            self._turn_sent.popleft()
+        return output
+
+    def _update(self, pose, dt):
         st = self.st
         if st.state not in ('RUNNING', 'PAUSED'):
             st.v_cmd = 0.0
@@ -555,7 +609,7 @@ class SectionTracker:
             if self.index == len(self.sections) - 1:
                 st.state, st.reason = 'DONE', ''
             else:
-                self.switching, self._next, self._still, self._wait = True, self.index + 1, 0.0, 0.0
+                self.switching, self._next, self._still, self._wait, self._turns = True, self.index + 1, 0.0, 0.0, 0
             st.v_cmd = 0.0
             return 0.0, 0.0
         if tr.st.state in ('ABORTED', 'PAUSED'):
@@ -586,6 +640,10 @@ class SectionTracker:
                 st.state, st.reason = 'ABORTED', 'not_stopped_at_cusp'
             return 0.0, 0.0
         if self.pivot_rate is not None and self._misaligned(i, pose):
+            if self._turns > self.pivot_retries:        # 转了 1 + pivot_retries 次还差 pivot_min 以上：车转不过去
+                st.state, st.reason = 'ABORTED', 'pivot_timeout'
+                return 0.0, 0.0
+            self._turns += 1
             self._pivot, self._w, self._pivot_t = self._heading(i), 0.0, 0.0
             return self._turn(pose, dt)
         sec, tr = self.sections[i], self.trackers[i]
@@ -601,7 +659,8 @@ class SectionTracker:
         return self.sections[i].car_pose(0.0)[2]
 
     def _misaligned(self, i, pose):
-        return abs(wrap(self._heading(i) - pose.yaw)) > self.pivot_tol
+        """车头与第 i 段起点方向差 pivot_min 以上，要原地转；以内直接开，由跟踪纠正。"""
+        return abs(wrap(self._heading(i) - pose.yaw)) > self.pivot_min
 
     def _turn(self, pose, dt):
         """原地转向：角速度按剩下的角度梯形规划（到目标正好停下），每步按角加速度限幅；转到容差内、
@@ -612,12 +671,25 @@ class SectionTracker:
             st.state, st.reason = 'ABORTED', 'pivot_timeout'
             self._pivot, self._w = None, 0.0
             return 0.0, 0.0
-        err = wrap(self._pivot - pose.yaw)
-        if abs(err) <= self.pivot_tol:
+        # 与 PathTracker.predict 相同：剩余角度按队列里的角速度全部执行完之后的车头算。
+        # 小容差留出模型误差余量；末段收敛放缓到 1.4/s，覆盖 0.3–0.6 s 延迟、0.9–1.2 增益的失配。
+        # 最高转速和角加速度不变；仍须经过 _switch 的实测停稳和最终航向检查。
+        yaw = pose.yaw
+        start = self._turn_clock - self.cfg.delay_s
+        sent = self._turn_sent
+        for i, (stamp, rate) in enumerate(sent):
+            end = sent[i + 1][0] if i + 1 < len(sent) else self._turn_clock
+            yaw += rate * self.cfg.steer_gain * max(0.0, end - max(start, stamp))
+        err = wrap(self._pivot - yaw)
+        tolerance = self.pivot_tol * (0.5 if self.cfg.delay_s > 0 else 1.0)
+        if abs(err) <= tolerance:
             want = 0.0
         else:
-            want = math.copysign(min(self.pivot_rate, math.sqrt(2.0 * self.pivot_accel * (abs(err) - 0.5 * self.pivot_tol)),
-                                     2.0 * abs(err)), err)
+            # 末段不低于 pivot_floor：实车原地转几 erpm 的小指令轮子推不动，按比例收尾会一直挂着
+            want = math.copysign(max(min(self.pivot_floor, self.pivot_rate),
+                                     min(self.pivot_rate,
+                                         math.sqrt(2.0 * self.pivot_accel * (abs(err) - 0.5 * tolerance)),
+                                         (1.4 if self.cfg.delay_s > 0 else 2.0) * abs(err))), err)
         step = self.pivot_accel * dt
         self._w += max(-step, min(step, want - self._w))
         if want == 0.0 and abs(self._w) < 1e-9:

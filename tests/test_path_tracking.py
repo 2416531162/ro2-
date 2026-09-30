@@ -169,13 +169,25 @@ class TestDelayCompensation(unittest.TestCase):
         tr = PathTracker(Path((0.0, 0.0, 0.0), [(10.0, 0.0)]), PathConfig(delay_s=0.3, steer_gain=0.9))
         # 现在 t=1.0：延迟窗口 [0.7, 1.0)。0.5 发的直行指令在 0.7–0.8 仍有效，0.8 发的弯道指令在 0.8–1.0 有效
         tr._clock = 1.0
-        tr._sent = deque([(0.2, 0.9, 0.3), (0.5, 0.4, 0.0), (0.8, 0.4, 0.5)])
+        # (下发时刻, 车速, 角速度)：0.8 发的是车速 0.4、曲率 0.5 → 角速度 0.2
+        tr._sent = deque([(0.2, 0.9, 0.27), (0.5, 0.4, 0.0), (0.8, 0.4, 0.2)])
         x, y, yaw = tr.predict(0.0, 0.0, 0.0)
         ex, ey, eyaw = Path((0.04, 0.0, 0.0), [(0.08, 0.45)]).pose(0.08)     # 直行 0.04 m + 实际曲率 0.45 走 0.08 m
         self.assertAlmostEqual(x, ex, places=9)
         self.assertAlmostEqual(y, ey, places=9)
         self.assertAlmostEqual(yaw, eyaw, places=9)
         self.assertEqual(len(tr._sent), 2)                                     # 0.2 发的已完全生效，丢掉
+
+    def test_prediction_turns_in_place_when_standing(self):
+        """起步锁车头：车速 0、只给角速度的指令也算进预估（只转、不走）。"""
+        from collections import deque
+        tr = PathTracker(Path((0.0, 0.0, 0.0), [(10.0, 0.0)]), PathConfig(delay_s=0.3, steer_gain=0.9))
+        tr._clock = 1.0
+        tr._sent = deque([(0.6, 0.0, 0.1), (0.9, 0.2, 0.0)])
+        x, y, yaw = tr.predict(0.0, 0.0, 0.0)
+        self.assertAlmostEqual(yaw, 0.1 * 0.9 * 0.2, places=9)                 # 0.7–0.9 只转
+        self.assertAlmostEqual(x, 0.2 * 0.1 * math.cos(yaw), places=9)         # 0.9–1.0 按转后的车头直行
+        self.assertAlmostEqual(y, 0.2 * 0.1 * math.sin(yaw), places=9)
 
     def test_reported_error_is_where_the_car_is_now(self):
         from collections import deque

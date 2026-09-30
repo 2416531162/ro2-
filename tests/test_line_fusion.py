@@ -8,6 +8,7 @@
 数字来自离线仿真，不代表实车；实车以 ~/rtk/runs/*.csv 为准。
 """
 import csv
+import dataclasses
 import json
 import math
 import os
@@ -229,23 +230,41 @@ class TestLineNodeWithRealFusion(unittest.TestCase):
         self.assertEqual((st['phase'], st['pose']['quality'], st['pose']['usable']), ('IDLE', 'RTK_FIXED', True))
         self.assertAlmostEqual(st['points']['B'][0] - st['points']['A'][0], 7.0, delta=0.03)
 
-    def test_rtk_loss_stops_and_waits_for_operator(self):
+    def test_rtk_loss_stops_then_resumes_by_itself(self):
         # 起步后约 6 s 进入 1 s 的失锁区（记点、倒车这一段约 36 s）
         rig = Rig(self.tmp.name, receiver_kw=dict(outage=(1e9, 1e9)))
         self.mark_and_back_up(rig)
-        self.assertTrue(rig.cmd(cmd='start')['ok'])
+        # 0.5 m/s 标定的停车距离（不带 cruise 时默认 0.8，失锁后要多滑一段）
+        self.assertTrue(rig.cmd(cmd='start', cruise=0.5)['ok'])
         rig.wait(6.0)
         self.assertEqual(rig.mission.phase, 'RUNNING')
         rig.receiver.outage = (rig.t, rig.t + 1.0)
         x_lost = rig.car.x
         self.assertTrue(rig.wait(3.0, until=lambda: rig.mission.tracker.st.state == 'PAUSED' and abs(rig.car.v) < 1e-3))
         self.assertLess(rig.car.x - x_lost, 0.5)
-        rig.wait(2.0)                              # 固定解恢复
-        self.assertEqual(rig.mission.tracker.st.reason, 'pose_recovered_waiting_operator')
-        self.assertLess(abs(rig.car.v), 1e-3)      # 恢复了也不自己走
-        self.assertEqual(rig.cmd(cmd='start')['message'], '继续')
+        # 固定解恢复、定位连续可用 1 s 后自己接着走（2026-09-27 起不再等操作员再按开始）
+        self.assertTrue(rig.wait(5.0, until=lambda: rig.mission.tracker.st.state == 'RUNNING'))
+        self.assertEqual(rig.mission.message, '定位恢复，自动继续')
         self.assertTrue(rig.wait(30.0, until=lambda: rig.mission.phase == 'IDLE'))
         self.assertEqual(rig.mission.message, '到达 B 点')
+
+    def test_heading_float_all_the_way_holds_on_gyro_and_reaches_b(self):
+        # 起步前测向就没解（副天线仍是固定解），全程靠陀螺 / 行驶轨迹维持航向。融合的航向门槛调到 0.06°（仿真里约 0.004°/s 地涨），
+        # 让「航向不确定」很快出现：两根天线都固定就不停车，一直开到 B
+        rig = Rig(self.tmp.name)
+        self.mark_and_back_up(rig)
+        f = rig.mission.fusion
+        f.config = dataclasses.replace(f.config, control_sigma_yaw_deg=0.06)
+        rig.receiver.heading_outage = (rig.t, 1e9)
+        rig.wait(0.5)
+        self.assertTrue(rig.cmd(cmd='start')['ok'])
+        start, held = len(rig.rows), 0
+        while rig.mission.phase != 'IDLE' and rig.t < 200:
+            rig.wait(0.05)
+            held += 'gyro_hold' in tuple(getattr(rig.mission.pose, 'reasons', ()) or ())
+        self.assertEqual(rig.mission.message, '到达 B 点')
+        self.assertGreater(held, 20)                                 # 确实用上了陀螺维持（> 1 s）
+        self.assertNotIn('PAUSED', {r['state'] for r in rig.rows[start:]})
 
     def test_indoor_repeater_heading_is_rejected(self):
         # 室内转发器：两根天线收到同一个信号，基线只有几毫米 → 双天线航向无效，不能记点

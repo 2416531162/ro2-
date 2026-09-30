@@ -11,6 +11,8 @@
     route_clear       删除路线
 stop 停止任何任务；到终点、偏离、定位丢失、控制权被抢走也会停。
 每趟记录一份 CSV；直线正常走完的趟次把学到的舵机零位（积分）存下来，下次起步直接用（路线起步也用它）。
+差速车（Gen5）的直线改用 line_cascade.ImuLineTracker：IMU 航向保持做内环、RTK 横偏修正做外环（底盘转向晚
+0.44 s，LineTracker 0.8 m/s 会来回大摆）；它的积分单位不同，不读也不存上面的舵机零位。
 """
 import csv
 import dataclasses
@@ -21,6 +23,7 @@ import time
 from collections import deque
 
 import route_plan
+from line_cascade import NOTICES as CASCADE_NOTICES, REASON_TEXT, SHARED_FIELDS, CascadeConfig, ImuLineTracker
 from line_tracker import LineConfig, LineTracker
 from path_tracker import PathConfig, SectionTracker, differential_config
 from route_operations import RouteOperations
@@ -37,8 +40,8 @@ RTK_FIXED_SOLS = ('NARROW_INT',)            # 与 gnss_fusion 的固定解一致
 INNOVATION_STALE_S = 1.0
 # 融合给出的原因里会禁止控制的那些，按根因排序（其余如 heading_unavailable、gyro_only 只说明降级来源），
 # 见 docs/GNSS_FUSION.md
-BLOCKING_REASONS = ('heading_uninitialized', 'imu_stale', 'imu_mismatch', 'wheel_stale', 'rtk_fixed_timeout', 'position_reset',
-                    'heading_uncertain', 'position_uncertain')
+BLOCKING_REASONS = ('heading_uninitialized', 'imu_stale', 'imu_mismatch', 'wheel_stale', 'rtk_hold_timeout',
+                    'rtk_fixed_timeout', 'position_reset', 'heading_uncertain', 'position_uncertain')
 # 测向浮点（无效）时航向只靠陀螺和行驶轨迹维持，融合的航向不确定度一过 0.5° 就判不可控制。
 # 主、副天线都是固定解（位置可信）时放宽到这么多照样走，原因里加 gyro_hold（2026-09-27 用户要求：
 # 走着走着测向变浮点不能停，要靠 IMU 维持）
@@ -46,6 +49,11 @@ GYRO_HOLD_SIGMA_YAW_DEG = 2.0
 FIX2_MAX_AGE_S = 1.0        # 副天线固定解这么久内来过就算还固定着
 # 因定位问题暂停后，定位连续可用这么久就自动接着走（操作员停止、控制权被切走照样结束，不会自动恢复）
 AUTO_RESUME_S = 1.0
+# 定点画线 start 没带 cruise 时的车速（用户定的画线速度）；不再沿用上一次任务（跑过别的速度的路线也不影响）
+LINE_CRUISE_MPS = 0.8
+# 卫星位置不可信、按推算维持（融合 rtk_hold_s，Gen5 5 s）时给操作员的话；恢复后改回「行驶中」
+RTK_NOTICE_HOLD = '卫星定位不可信，按 IMU 推算行驶'
+RTK_NOTICE_TIMEOUT = '卫星定位不可信超过 5 s，已停车，定位恢复后自动继续'
 
 
 def pose_problem(pose):
@@ -98,10 +106,12 @@ class LineMission:
         self.route_rev = 0
         self._route_cache = None
         self._antenna = None            # 最近一次天线定位 (t, lat, lon, sol, sigma)
+        self._imu = None                # 最近一帧 IMU (t, 偏航 rad, 陀螺 z rad/s)，差速车定点画线的内环用
         self._fix2_t = None             # 副天线最近一次固定解的时刻
         self._usable_since = None       # 暂停中定位从什么时候起一直可用（自动继续用）
         self._innovation = None         # 最近一次固定解与融合推算之差 (t, 沿车头, 向左) 米
-        self._jumps = deque(maxlen=JUMP_EVENTS_MAX)     # 定位跳动记录，本次开机以来
+        self._jumps = deque(maxlen=JUMP_EVENTS_MAX)     # 定位跳动记录，本次开机以来（只留最近 50 次）
+        self._jump_count = 0            # 本次开机以来定位跳动总次数（作业记录按首末相减，不能用上面那个的长度）
         self._jump = None               # 正在进行的那次跳动
         self.phase = 'IDLE'             # IDLE / SELECTING / RUNNING / RELEASING
         self.message = ''
@@ -128,9 +138,16 @@ class LineMission:
                                           sol=m['sol'], sigma_n=m['sigma_n'], sigma_e=m['sigma_e'],
                                           sigma_u=m['sigma_u'], diff_age_s=inf(m['diff_age']), sats=m['sats']))
         elif kind == 'fix2':
-            # 副天线只用来判断「两根天线都固定」（测向浮点时靠陀螺维持航向的前提），不进融合
+            # 副天线：判断「两根天线都固定」（测向浮点时靠陀螺维持航向的前提）；带位置时交给融合做双天线位置互检
+            # （两个固定解位置之差必须等于测向基线，对不上就不信固定解），不直接进融合
             if m.get('sol') in RTK_FIXED_SOLS:
                 self._fix2_t = m['t']
+            add_fix2 = getattr(self.fusion, 'add_fix2', None)
+            if callable(add_fix2) and m.get('lat') is not None and m.get('lon') is not None:
+                add_fix2(s.GnssFix(t=m['t'], lat_deg=m['lat'], lon_deg=m['lon'], height_m=m.get('height', 0.0),
+                                   sol=m['sol'], sigma_n=m.get('sigma_n', 0.01), sigma_e=m.get('sigma_e', 0.01),
+                                   sigma_u=m.get('sigma_u', 0.02), diff_age_s=inf(m.get('diff_age')),
+                                   sats=m.get('sats', 0)))
         elif kind == 'heading':
             # 只用 rtk_node 判为有效的测向（整周固定，且两根天线固定解的平面实时距离 ≥0.10 m）。
             # 融合不再按基线长度判断，所以没带 valid 字段的也不用
@@ -155,7 +172,9 @@ class LineMission:
             if prior is None:
                 return
             fx, fy = fusion.to_local(m['lat'], m['lon'])
-            ax, ay = fusion.config.antenna_xy
+            # 与融合用同一个杠杆臂（含倾斜补偿），坡上天线偏出去的那段不算跳动
+            lever = getattr(fusion, 'antenna_lever', None)
+            ax, ay = lever() if callable(lever) else fusion.config.antenna_xy
         except (AttributeError, ValueError, TypeError):
             return
         c, s = math.cos(prior.yaw), math.sin(prior.yaw)
@@ -170,6 +189,7 @@ class LineMission:
         if j is None or m['t'] - j['t1'] > JUMP_MERGE_S:
             j = self._jump = dict(t0=m['t'], t1=m['t'], d=0.0)
             self._jumps.append(j)
+            self._jump_count += 1
         j['t1'] = m['t']
         if d > j['d']:
             try:
@@ -178,10 +198,15 @@ class LineMission:
                 lat = lon = None
             j.update(d=d, left=left, x=prior.x, y=prior.y, lat=lat, lon=lon)
 
-    def on_imu(self, t, gyro_z, yaw=None):
-        """yaw：IMU 自己算的航向角（弧度，左转为正）。融合 yaw_input = 'angle' 时用它的增量推算航向。"""
+    def on_imu(self, t, gyro_z, yaw=None, roll=None, pitch=None):
+        """yaw：IMU 自己算的航向角（弧度，左转为正）。融合 yaw_input = 'angle' 时用它的增量推算航向。
+        roll / pitch：IMU 算好的横滚、俯仰（弧度，REP-103），融合做倾斜补偿用；两个都有才给。"""
         extra = {} if yaw is None else {'yaw': yaw}
+        if roll is not None and pitch is not None:
+            extra.update(roll=roll, pitch=pitch)
         self.fusion.add_imu(self.samples.ImuSample(t=t, gyro_z=gyro_z, **extra))
+        if yaw is not None and math.isfinite(yaw) and math.isfinite(gyro_z):
+            self._imu = (t, yaw, gyro_z)
 
     def on_wheel(self, t, speed, yaw_rate):
         self.fusion.add_wheel(self.samples.WheelSample(t=t, speed=speed, yaw_rate=yaw_rate))
@@ -275,8 +300,9 @@ class LineMission:
         problem = pose_problem(pose)
         if problem:
             return False, problem
+        self._sync_imu(self.tracker, now)
         ok = self.tracker.start(pose)
-        return ok, '继续' if ok else self.tracker.st.reason
+        return ok, '继续' if ok else REASON_TEXT.get(self.tracker.st.reason, self.tracker.st.reason)
 
     def _start(self, cmd, now):
         if self.operations.held:
@@ -287,24 +313,49 @@ class LineMission:
             return False, '已在运行'
         if not {'A', 'B'} <= set(self.points):
             return False, '先记 A、B 两点'
-        cruise = float(cmd.get('cruise', self.cruise))
+        cruise = float(cmd['cruise']) if cmd.get('cruise') is not None else LINE_CRUISE_MPS
         if not 0.05 <= cruise <= 1.0:
             return False, '速度应在 0.05–1.0 m/s'
         pose = self._control_pose(now)
         problem = pose_problem(pose)
         if problem:
             return False, problem
-        tracker = LineTracker(dataclasses.replace(self.line_cfg, cruise_mps=cruise), self.geo)
+        tracker = self._line_tracker(cruise)
+        self._sync_imu(tracker, now)
         try:
             tracker.set_line(self.fusion.to_local(*self.points['A']), self.fusion.to_local(*self.points['B']))
         except ValueError as exc:
             return False, str(exc)
         ok, why = tracker.check_start(pose)
         if not ok:
-            return False, why
+            return False, REASON_TEXT.get(why, why)
         self.tracker, self.task, self.cruise = tracker, 'line', cruise
         self.phase, self.select_since, self.message = 'SELECTING', now, '申请控制权'
         return True, '申请控制权'
+
+    def _line_tracker(self, cruise):
+        """定点画线的控制器：差速车用 IMU 航向内环 + RTK 横偏外环（起步、限速、停车规则抄 LineConfig），
+        阿克曼旧车照旧 LineTracker。"""
+        if self.differential:
+            shared = {name: getattr(self.line_cfg, name) for name in SHARED_FIELDS}
+            return ImuLineTracker(CascadeConfig(cruise_mps=cruise, nozzle_x_m=self.nozzle_x, **shared), self.geo)
+        return LineTracker(dataclasses.replace(self.line_cfg, cruise_mps=cruise), self.geo)
+
+    def _sync_imu(self, tracker, now):
+        """IMU 航向内环要此刻的时钟、最近一帧 IMU（与 IMU 回调、融合同一个单调时钟）和融合用的天线杠杆臂
+        （航向跳变时按 IMU 航向改算位置）；别的控制器没有 sync。"""
+        sync = getattr(tracker, 'sync', None)
+        if sync is not None:
+            sync(now, self._imu, self._antenna_lever())
+
+    def _antenna_lever(self):
+        """融合正在用的主天线水平杠杆臂（车体系前、左，m，含倾斜补偿）；拿不到时 None。"""
+        try:
+            lever = getattr(self.fusion, 'antenna_lever', None)
+            ax, ay = lever() if callable(lever) else self.fusion.config.antenna_xy
+            return float(ax), float(ay)
+        except (AttributeError, TypeError, ValueError):
+            return None
 
     # ---- 路线 ----
     def _route_set(self, raw):
@@ -413,7 +464,7 @@ class LineMission:
             return None
         out = spec.to_dict()
         out['rev'] = self.route_rev
-        length, out['problem'] = route_plan.route_length(spec, self.min_route_radius)
+        length, out['problem'] = route_plan.route_length(spec, self.min_route_radius, nozzle_x=self.nozzle_x)
         out['length'] = None if length is None else round(length, 3)
         # 连线路线：车身中心压过全部连线要开的总路程（含掉头补角）、换向次数、掉头补角的拐角数
         out['cover'] = route_plan.cover_summary(spec, self.min_route_radius, self.body, nozzle_x=self.nozzle_x) \
@@ -445,6 +496,7 @@ class LineMission:
         self._last_tick = now
         self.last_motion_mode = motion_mode
         self.pose = pose = self._control_pose(now)
+        self._sync_imu(self.tracker, now)
         if self.phase == 'PAUSING':
             try:
                 return self.operations.hold_tick(now, pose, motion_mode)
@@ -462,7 +514,8 @@ class LineMission:
         if self.phase == 'SELECTING':
             if motion_mode == 'NAVIGATION':
                 if pose is None or not self.tracker.start(pose, integral=self._start_integral()):
-                    self._finish('起步检查未通过：%s' % (self.tracker.st.reason if pose else 'no_pose'))
+                    why = self.tracker.st.reason if pose else 'no_pose'
+                    self._finish('起步检查未通过：%s' % REASON_TEXT.get(why, why))
                     return 0.0, 0.0, None
                 self.phase, self.message = 'RUNNING', '行驶中'
                 self._open_log(now)
@@ -481,6 +534,19 @@ class LineMission:
             pose = _NoPose()
         self._auto_resume(now, pose)
         vx, wz = self.tracker.update(pose, dt)
+        # 航向跳变按 IMU 维持 / 超过 5 s 停车等航向（定点画线控制器）、卫星位置不可信按推算维持 / 超时停车（融合）：
+        # 报给操作员，过去了改回「行驶中」
+        notice = getattr(self.tracker, 'notice', None)
+        text = notice() if callable(notice) else None
+        reasons = getattr(pose, 'reasons', ()) or ()
+        if not text and 'rtk_hold_timeout' in reasons:
+            text = RTK_NOTICE_TIMEOUT
+        elif not text and 'rtk_hold' in reasons:
+            text = RTK_NOTICE_HOLD
+        if text:
+            self.message = text
+        elif self.message in CASCADE_NOTICES + (RTK_NOTICE_HOLD, RTK_NOTICE_TIMEOUT):
+            self.message = '行驶中'
         self._write_log(now, pose, vx)
         try:
             self.operations.capture(now)
@@ -497,7 +563,8 @@ class LineMission:
             self._finish('到达 B 点' if self.task == 'line' else '路线完成')
             return 0.0, 0.0, None
         if st == 'ABORTED':
-            self._finish('中止：%s' % self.tracker.st.reason)
+            why = self.tracker.st.reason
+            self._finish('中止：%s' % REASON_TEXT.get(why, why))
             return 0.0, 0.0, None
         return vx, wz, None
 
@@ -510,16 +577,18 @@ class LineMission:
             self._usable_since = now
         if now - self._usable_since < AUTO_RESUME_S - 1e-9:
             return
+        why = self.tracker.st.reason
         if self.tracker.start(pose):
-            self.message = '定位恢复，自动继续'
+            self.message = '航向恢复，自动继续' if why == 'heading_jump' else '定位恢复，自动继续'
             self._usable_since = None
         else:
             self._usable_since = now
 
     def _start_integral(self):
-        """直线学到的舵机零位（积分）。路线控制器积分增益不同，按相同的零位曲率换算过去。"""
+        """直线学到的舵机零位（积分）。路线控制器积分增益不同，按相同的零位曲率换算过去。
+        差速车定点画线（ImuLineTracker）的积分是航向偏置、单位不同：不用，从 0 开始。"""
         if self.task == 'line':
-            return self.integral0
+            return None if isinstance(self.tracker, ImuLineTracker) else self.integral0
         return self.integral0 * self.line_cfg.ki_per_m2 / self.tracker.cfg.ki_per_m2
 
     def _finish(self, message, state=None):
@@ -570,8 +639,8 @@ class LineMission:
             return 0.0
 
     def _save_integral(self):
-        # 只从走满 5 m 的趟次学习，短线积分还没收敛
-        if not self.state_path or self.tracker.st.length < 5.0:
+        # 只从走满 5 m 的趟次学习，短线积分还没收敛；差速车定点画线的积分不是舵机零位，不存
+        if not self.state_path or self.tracker.st.length < 5.0 or isinstance(self.tracker, ImuLineTracker):
             return
         self.integral0 = self.tracker.st.integral
         os.makedirs(os.path.dirname(self.state_path) or '.', exist_ok=True)
@@ -592,6 +661,9 @@ class LineMission:
         # 融合的在线标定（安装偏差、轮速比例、陀螺零偏）：只报告，经人确认后才写进 ~/rtk/fusion.json
         calibration = getattr(self.fusion, 'calibration', None)
         calibration = calibration() if callable(calibration) else None
+        # 倾斜补偿：天线高度、在不在补、没补的原因、补偿量（app 姿态卡片显示）
+        tilt = getattr(self.fusion, 'tilt_status', None)
+        tilt = tilt() if callable(tilt) else None
         return _json_safe(dict(phase=self.phase, message=self.message, cruise=self.cruise, pose=pose,
                                points={k: [round(v[0], 3), round(v[1], 3)] for k, v in points.items()},
                                tracker=self.tracker.status(), task=self.task,
@@ -607,7 +679,7 @@ class LineMission:
                                                  pivot_accel=self.geo.pivot_accel_rad_s2,
                                                  accel=self.path_cfg.accel_mps2,
                                                  lateral_accel=self.path_cfg.lat_accel_mps2),
-                               calibration=calibration, diag=self._diag(calibration),
+                               calibration=calibration, diag=self._diag(calibration), tilt=tilt,
                                rtk_events=self._jump_events(), operations=self.operations.status()))
 
     def section_options(self):
@@ -629,7 +701,7 @@ class LineMission:
                     rtk_along_m=inn[1] if fresh else None, rtk_left_m=inn[2] if fresh else None,
                     position_outliers=rejected.get('position_outliers'),
                     position_resets=(calibration or {}).get('position_resets'),
-                    jumps=len(self._jumps))
+                    jumps=self._jump_count)
 
     def _jump_events(self):
         """最近的定位跳动：车当时的本地坐标与经纬度、最大差值、向左分量、持续时间、距今多久（秒）。"""
