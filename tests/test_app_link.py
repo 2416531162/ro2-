@@ -111,6 +111,43 @@ class TestCommands(unittest.TestCase):
                                math.pi)
 
 
+class TestStraight(unittest.TestCase):
+    """IMU 定向直行:指令校验、hello 里的参数、遥测透传。"""
+
+    def test_straight_commands(self):
+        self.assertEqual(al.parse_command('{"type":"straight","action":"go","run":3,"seq":17}'),
+                         {'type': 'straight', 'action': 'go', 'run': 3, 'seq': 17})
+        self.assertEqual(al.parse_command('{"type":"straight","action":"stop","run":3,"id":"s1"}'),
+                         {'type': 'straight', 'id': 's1', 'action': 'stop', 'run': 3, 'seq': None})
+        for bad in ('{"type":"straight","action":"go"}', '{"type":"straight","action":"go","run":true}',
+                    '{"type":"straight","action":"go","run":-1}', '{"type":"straight","action":"go","run":1.5}',
+                    '{"type":"straight","action":"left","run":1}'):
+            with self.subTest(bad), self.assertRaises(al.CommandError):
+                al.parse_command(bad)
+
+    def test_hello_advertises_fixed_speed_and_tolerance(self):
+        hello = al.build_hello(PROFILE, name='x', camera={})
+        self.assertEqual(hello['straight'], {'speed_mps': 0.8, 'tolerance_deg': 1.0, 'abort_deg': 5.0})
+
+    def test_straight_telemetry_splits_session_and_run(self):
+        st = {'imu_ok': True, 'yaw_deg': 30.4, 'run': ('app-1', 3), 'state': 'stopped', 'reason': 'user',
+              'target_deg': 30.0, 'error_deg': 0.4, 'max_error_deg': 0.83, 'within_pct': 98.5,
+              'elapsed_s': 12.3, 'speed': 0.0, 'wz': float('nan')}
+        self.assertEqual(al.straight_telemetry(st), {
+            'imu_ok': True, 'state': 'stopped', 'session': 'app-1', 'run': 3, 'reason': 'user',
+            'target_deg': 30.0, 'yaw_deg': 30.4, 'error_deg': 0.4, 'max_error_deg': 0.83, 'within_pct': 98.5,
+            'elapsed_s': 12.3, 'speed': 0.0, 'wz': None})
+        self.assertEqual(al.straight_telemetry({'imu_ok': False, 'yaw_deg': None, 'state': 'idle'}),
+                         {'imu_ok': False, 'state': 'idle', 'yaw_deg': None})
+        self.assertIsNone(al.straight_telemetry(None))
+        tel = al.build_telemetry(dict(fixtures.sample_snapshot(), straight=st), now=1.0, seq=1,
+                                 sensors=PROFILE['sensors'])
+        self.assertEqual(tel['straight']['run'], 3)
+        self.assertNotIn('straight', al.build_telemetry(fixtures.sample_snapshot(), now=1.0, seq=1,
+                                                        sensors=PROFILE['sensors']))
+        json.dumps(tel, allow_nan=False)
+
+
 class TestStick(unittest.TestCase):
     tiers = {'low': 0.5, 'med': 0.85, 'high': 1.2}
 
@@ -118,7 +155,12 @@ class TestStick(unittest.TestCase):
         return al.resolve_stick(throttle, steer, tier, self.tiers, 0.6, ChassisGeometry())
 
     def test_deadband_stops(self):
-        self.assertEqual(self.resolve(0.03, 1.0), (0.0, 0.0, 0.0))
+        self.assertEqual(self.resolve(0.015, 1.0), (0.0, 0.0, 0.0))
+
+    def test_app_creep_command_moves_slowly(self):
+        # app 1.9 不分档、固定发 high，刚出死区约 0.029：车以约 3.5 cm/s 挪（旧车最快档 1.2 m/s）
+        vx, _, _ = self.resolve(0.029, 0.0, 'high')
+        self.assertAlmostEqual(vx, 0.029 * 1.2, places=4)
 
     def test_reverse_is_scaled_and_steer_is_limited(self):
         geo = ChassisGeometry()
@@ -238,15 +280,36 @@ class TestRtkLine(unittest.TestCase):
         g = fixtures.sample_gnss(now=100.0)
         fresh = al.rtk_telemetry(g, 100.0)
         self.assertEqual((fresh['stale'], fresh['fix'], fresh['heading_ok']), (False, 'FIXED', True))
-        self.assertTrue(fresh['ntrip']['connected'])
-        self.assertIsNone(fresh['ntrip'].get('enabled'))
-        g['ntrip'].update(enabled=False, connected=False, configured=True)
+        # 样本的接收机在平板串口上：车端 CORS 让给平板，没连
+        self.assertEqual((fresh['ntrip']['connected'], fresh['ntrip']['paused']), (False, 'tablet'))
+        self.assertTrue(fresh['ntrip']['enabled'])
+        g['ntrip'].update(enabled=False, connected=False, configured=True, paused=None)
         stopped = al.rtk_telemetry(g, 100.0)['ntrip']
         self.assertTrue(stopped['configured'])
         self.assertFalse(stopped['enabled'])
         self.assertFalse(stopped['connected'])
         self.assertEqual(al.rtk_telemetry(g, 103.0), {'stale': True})
         self.assertEqual(al.rtk_telemetry(None, 100.0), {'stale': True})
+
+    def test_rtk_source_tells_app_where_the_receiver_is(self):
+        g = fixtures.sample_gnss(now=100.0)
+        rtk = al.rtk_telemetry(g, 100.0)
+        self.assertEqual((rtk['source'], rtk['tablet_connected']), ('tablet', True))
+        g.update(source='usb', tablet=dict(g['tablet'], connected=False))
+        rtk = al.rtk_telemetry(g, 100.0)
+        self.assertEqual((rtk['source'], rtk['tablet_connected']), ('usb', False))
+        old = {k: v for k, v in g.items() if k not in ('source', 'usb', 'tablet')}   # 旧 RTK 节点不报来源
+        self.assertEqual((al.rtk_telemetry(old, 100.0)['source'], al.rtk_telemetry(old, 100.0)['tablet_connected']),
+                         (None, False))
+        g['source'] = 'nonsense'
+        self.assertIsNone(al.rtk_telemetry(g, 100.0)['source'])
+        # 车端 CORS 让给平板：app 据此显示「车端 CORS 已暂停（数据来自平板）」
+        g['ntrip'] = dict(g.get('ntrip') or {}, paused='tablet')
+        self.assertEqual(al.rtk_telemetry(g, 100.0)['ntrip']['paused'], 'tablet')
+        g['ntrip']['paused'] = 'other'
+        self.assertIsNone(al.rtk_telemetry(g, 100.0)['ntrip']['paused'])
+        del g['ntrip']['paused']
+        self.assertIsNone(al.rtk_telemetry(g, 100.0)['ntrip']['paused'])
 
     def test_rtk_heading_yaw_only_when_valid(self):
         self.assertEqual(al.rtk_telemetry(fixtures.sample_gnss(now=100.0), 100.0)['heading']['yaw_deg'], 90.18)

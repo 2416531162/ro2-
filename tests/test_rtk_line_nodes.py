@@ -103,7 +103,7 @@ class TestEntrypoints(unittest.TestCase):
         spec = importlib.util.spec_from_file_location('smoke_nodes', os.path.join(ROOT, 'deployment', 'smoke_nodes.py'))
         smoke = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(smoke)
-        self.assertEqual(smoke.main(['rtk', 'line']), 0)
+        self.assertEqual(smoke.main(['rtk', 'line', 'imu', 'oid']), 0)     # 旧车配置：oid 跳过
         smoke.CHECKS['broken'] = lambda: 1 / 0
         self.assertEqual(smoke.main(['broken']), 1)
 
@@ -148,7 +148,7 @@ class TestRtkNode(unittest.TestCase):
             st = json.loads(node.publishers_['/gnss/status'].sent[-1].data)
             self.assertEqual((st['rtk'], st['heading_ok'], st['port_open']), ('FIXED', True, True))
             self.assertEqual(st['ntrip'], dict(configured=False, enabled=False, connected=False, error='not_configured',
-                                              config_revision=None, config_error='not_configured'))
+                                              config_revision=None, config_error='not_configured', paused=None))
             node.write_corrections(b'\xd3\x00')
             self.assertEqual(fake.written, [b'BESTNAVHA 0.05\r\n', b'\xd3\x00'])
             self.assertIsNotNone(node.gga_report())
@@ -162,6 +162,10 @@ class TestRtkNode(unittest.TestCase):
             imu = node.publishers_['/gnss/heading'].sent[-1]
             yaw = math.degrees(2 * math.atan2(imu.orientation.z, imu.orientation.w))
             self.assertAlmostEqual(yaw, 88.75, places=6)
+            self.assertEqual(st['heading']['yaw_deg'], 88.75)            # 状态里给 app 的是同一个车头方向
+            with node.stream_lock:                                       # 测向无效：不给角度
+                node.stream.last['heading'] = dict(node.stream.last['heading'], valid=False)
+            self.assertIsNone(node.status(node.stream.last['heading']['t_rx'])['heading']['yaw_deg'])
             self.assertAlmostEqual(imu.orientation_covariance[8], math.radians(0.28) ** 2)
             self.assertEqual(imu.angular_velocity_covariance[0], -1.0)
         finally:
@@ -195,6 +199,98 @@ class TestRtkNode(unittest.TestCase):
         self.assertEqual((cfg.mount_offset_deg, cfg.antenna_xy), (1.5, (0.3, 0.1)))
         self.assertFalse(hasattr(cfg, 'baseline_m'))
         self.assertEqual(line_node.load_fusion_config(gnss_fusion, '/nonexistent/fusion.json'), gnss_fusion.FusionConfig())
+
+    def test_receiver_on_tablet_serial(self):
+        # USB 上没有接收机：平板 app 经 TCP 转来串口原始字节，车照常解析发布；差分由平板自己连 CORS，车端 CORS 暂停
+        def no_usb():
+            raise OSError('no such device')
+
+        import socket
+        node = rtk_node.RtkNode('/dev/null', ntrip_env='/nonexistent', serial_factory=no_usb, tablet_port=0)
+        try:
+            tablet = socket.create_connection(('127.0.0.1', node.tablet.port), timeout=2)
+            self.addCleanup(tablet.close)
+            tablet.sendall(('\r\n'.join([GGA] + epoch_lines(6)) + '\r\n').encode())
+            raw = node.publishers_['/gnss/raw'].sent
+            deadline = time.time() + 2
+            while len(raw) < 18 and time.time() < deadline:
+                time.sleep(0.01)
+            self.assertEqual([json.loads(m.data)['kind'] for m in raw], ['fix', 'fix2', 'heading'] * 6)
+            st = node.status()
+            self.assertEqual((st['source'], st['port_open'], st['port_error'], st['rtk']), ('tablet', True, None, 'FIXED'))
+            self.assertTrue(st['tablet']['connected'])
+            self.assertFalse(st['usb']['open'])
+            self.assertIn('no such device', st['usb']['error'])
+            node.publish_status()
+            self.assertEqual((node.cors.paused, node.status()['ntrip']['paused']), ('tablet', 'tablet'))
+            node.write_corrections(b'\xd3\x00\x13')                   # 车端不往平板写
+            tablet.settimeout(0.2)
+            with self.assertRaises(socket.timeout):
+                tablet.recv(16)
+        finally:
+            node.shutdown()
+
+    def test_car_cors_pauses_while_tablet_is_the_source(self):
+        # 平板用同一个 CORS 账号自己连：车端在用平板数据时不能也连（同一账号两处登录会互相顶掉）
+        clients = []
+
+        class Client:
+            def __init__(self, env):
+                self.stopped = False
+                clients.append(self)
+
+            def start(self):
+                return self
+
+            def stop(self):
+                self.stopped = True
+
+            def status(self):
+                return dict(connected=False, mount=None, bytes=0, rtcm_types=[], error=None, last_rx=None)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            from ntrip_config import CorsConfigStore, NtripReload
+            store = CorsConfigStore(os.path.join(tmp, 'ntrip.env'))
+            store.save(dict(host='127.0.0.1', port=2101, mount='AUTO', user='u', password='p', fallback_mount=''))
+            node = rtk_node.RtkNode('/dev/null', ntrip_env='/nonexistent', serial_factory=lambda: FakeSerial([]))
+            try:
+                node.cors = NtripReload(store.path, Client)
+                self.assertEqual(len(clients), 1)
+                usb = (BESTPOS + '\r\n').encode()
+                node.on_serial_data(usb, 100.0, 'usb')
+                node.publish_status()
+                self.assertIsNone(node.status(100.1)['ntrip']['paused'])
+                node.on_serial_data(usb, 103.0, 'tablet')              # USB 停了：换平板
+                node.publish_status()
+                self.assertTrue(clients[0].stopped)
+                self.assertIsNone(node.cors.client)
+                self.assertEqual(node.status(103.1)['ntrip']['paused'], 'tablet')
+                node.publish_status()                                   # 暂停期间不重连
+                self.assertEqual(len(clients), 1)
+                node.on_serial_data(usb, 106.0, 'usb')                 # 平板停了：换回 USB，车端 CORS 恢复
+                node.publish_status()
+                self.assertEqual(len(clients), 2)
+                self.assertIsNone(node.status(106.1)['ntrip']['paused'])
+            finally:
+                node.shutdown()
+
+    def test_two_receivers_are_never_mixed(self):
+        node = rtk_node.RtkNode('/dev/null', ntrip_env='/nonexistent', serial_factory=lambda: FakeSerial([]))
+        try:
+            usb = (BESTPOS + '\r\n').encode()
+            node.on_serial_data(usb, 100.0, 'usb')
+            node.on_serial_data(usb, 100.5, 'tablet')                   # USB 正出数据：平板这一路不用
+            self.assertEqual(node.source, 'usb')
+            self.assertEqual(len(node.publishers_['/gnss/raw'].sent), 1)
+            node.on_serial_data(usb, 101.0, 'usb')
+            node.on_serial_data(usb, 103.5, 'tablet')                   # USB 2.5 s 没数据：换平板，解析重来
+            self.assertEqual(node.source, 'tablet')
+            self.assertEqual(len(node.publishers_['/gnss/raw'].sent), 3)
+            self.assertEqual(node.status(103.6)['source'], 'tablet')
+            node.on_serial_data(usb, 104.0, 'usb')                      # 平板在出数据：USB 回来也不抢
+            self.assertEqual((node.source, len(node.publishers_['/gnss/raw'].sent)), ('tablet', 3))
+        finally:
+            node.shutdown()
 
     def test_port_error_is_reported_and_retried(self):
         calls = []
@@ -288,6 +384,25 @@ class TestLineNode(unittest.TestCase):
         status = json.loads(self.node.pub_status.sent[-1].data)
         self.assertEqual((status['phase'], status['motion_mode']), ('IDLE', 'NAVIGATION'))
 
+    def test_operator_pause_publishes_zero_until_still_then_releases_navigation(self):
+        self.fusion.current=FakeFusion.make(-1,0,0)
+        self.assertTrue(self.cmd(cmd='route_start',route=dict(kind='path',points=[[0,0],[10,0]],closed=False))['ok'])
+        self.node.control();self.motion.mode='NAVIGATION'
+        self.t[0]+=.05;self.node.control()
+        mission=self.node.mission
+        self.assertTrue(self.cmd(cmd='route_pause',route_rev=mission.route_rev,job_id=mission.operations.record['id'])['ok'])
+        self.fusion.current.speed=.1
+        self.t[0]+=.05;self.node.control()
+        self.assertEqual('PAUSING',mission.phase)
+        self.assertEqual((0,0),self.motion.published[-1])
+        self.fusion.current.speed=0
+        for _ in range(9):self.t[0]+=.05;self.node.control()
+        self.assertEqual('PAUSED',mission.phase)
+        self.assertFalse(self.motion.selects[-1])
+        self.motion.mode='IDLE'
+        for _ in range(50):self.t[0]+=.05;self.node.control()
+        self.assertEqual('PAUSED',mission.phase)
+
     def test_sensor_time_uses_header_stamp(self):
         # 替身的 ROS 时钟固定在 1000.0 s；本节点的单调时钟是 self.t[0] = 100.0
         def imu(sec, nanosec):
@@ -299,6 +414,38 @@ class TestLineNode(unittest.TestCase):
         self.assertEqual(self.node.msg_time(imu(998, 0)), 100.0)                         # 太旧，不信
         self.assertEqual(self.node.msg_time(imu(1001, 0)), 100.0)                        # 在未来，不信
         self.assertEqual(self.node.msg_time(types.SimpleNamespace()), 100.0)             # 没有消息头
+
+    def test_attitude_from_madgwick_goes_into_status_and_expires(self):
+        def imu_data(roll_deg=0.0, pitch_deg=0.0, cov0=0.0, yaw_deg=0.0):
+            # ZYX（先偏航、再俯仰、再横滚）欧拉角的四元数
+            r, p, y = (math.radians(v) / 2 for v in (roll_deg, pitch_deg, yaw_deg))
+            cr, sr, cp, sp, cy, sy = math.cos(r), math.sin(r), math.cos(p), math.sin(p), math.cos(y), math.sin(y)
+            msg = sys.modules['sensor_msgs.msg'].Imu()
+            msg.orientation = types.SimpleNamespace(x=sr * cp * cy - cr * sp * sy, y=cr * sp * cy + sr * cp * sy,
+                                                    z=cr * cp * sy - sr * sp * cy, w=cr * cp * cy + sr * sp * sy)
+            msg.orientation_covariance = [cov0] + [0.0] * 8
+            return msg
+
+        def status():
+            self.node.publish_status()
+            return json.loads(self.node.pub_status.sent[-1].data)['attitude']
+
+        self.assertIsNone(status())                                   # 还没收到 /imu/data
+        self.node.on_attitude(imu_data(roll_deg=5.0))                 # 左侧抬起 5°
+        self.assertAlmostEqual(status()['roll_deg'], 5.0, places=1)
+        self.assertAlmostEqual(status()['pitch_deg'], 0.0, places=1)
+        self.node.on_attitude(imu_data(pitch_deg=-3.0))               # 车头抬起 3°
+        a = status()
+        self.assertAlmostEqual(a['pitch_deg'], -3.0, places=1)
+        self.assertEqual(a['source'], 'imu_madgwick')
+        self.node.on_attitude(imu_data(roll_deg=2.0, pitch_deg=-1.0, yaw_deg=-135.0))   # IMU 偏航：右转 135°
+        a = status()
+        self.assertEqual((round(a['roll_deg'], 1), round(a['pitch_deg'], 1), round(a['yaw_deg'], 1)), (2.0, -1.0, -135.0))
+        self.node.on_attitude(imu_data(roll_deg=30.0, cov0=-1.0))     # 不带姿态的消息（驱动原始 /imu）不用
+        self.assertAlmostEqual(status()['roll_deg'], 2.0, places=1)
+        self.t[0] += 0.6                                              # 超过 0.5 s 没新姿态：不报
+        self.assertIsNone(status())
+        self.assertIsNone(line_node.attitude_deg(0.0, 0.0, 0.0, 0.0))
 
     def test_bad_command_reported(self):
         self.node.on_command(ros_stubs.String(data='[1,2]'))

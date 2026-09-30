@@ -73,6 +73,38 @@ def test_disconnect_persists_keeps_credentials_and_requires_explicit_reconnect(t
     restarted.stop()
 
 
+def test_pause_for_tablet_stops_client_tracks_config_and_resume_reconnects(tmp_path):
+    # 数据来自平板串口时平板自己连 CORS：车端暂停（不重连），账号文件照常跟踪，恢复后按最新账号重连
+    clients = []
+    class Client:
+        def __init__(self, env):
+            self.env, self.stopped = env, False
+            clients.append(self)
+        def start(self):
+            return self
+        def stop(self):
+            self.stopped = True
+    store = CorsConfigStore(str(tmp_path / 'ntrip.env'))
+    store.save(PROFILE)
+    runtime = NtripReload(store.path, Client)
+    runtime.pause('tablet')
+    runtime.pause('tablet')
+    assert runtime.paused == 'tablet' and runtime.client is None and clients[0].stopped
+    saved = store.save(dict(PROFILE, mount='NEW'))
+    runtime.poll()
+    assert runtime.applied_revision == saved['revision'] and runtime.client is None and len(clients) == 1
+    runtime.resume()
+    assert runtime.paused is None and len(clients) == 2 and clients[1].env['NTRIP_MOUNT'] == 'NEW'
+    runtime.resume()
+    assert len(clients) == 2
+    store.set_enabled(False)
+    runtime.poll()
+    runtime.pause('tablet')
+    runtime.resume()                                     # 用户断开的账号：恢复暂停也不连
+    assert runtime.client is None and len(clients) == 2
+    runtime.stop()
+
+
 def test_old_account_files_remain_enabled_and_invalid_switch_does_not_replace_client(tmp_path):
     store = CorsConfigStore(str(tmp_path / 'ntrip.env'))
     store.save(PROFILE)

@@ -3,8 +3,9 @@
 """RTK 节点：独占 UM982 串口（雷迅 CUAV 双天线），发布测量和状态；有账号文件时跑 NTRIP 差分。
 
 接收机可以接在车上的 USB 串口，也可以接在安卓平板的串口上：平板 app 把串口原始字节经 TCP 48622
-原样转过来（gnss_bridge.TabletSerialServer），差分改正数原路写回。两路同时监听，正在出数据的那一路
-一直用下去，它 2 s 没数据才换另一路；两路的数据从不混在一起（换路时解析状态、钟差全部重来）。
+原样转过来（gnss_bridge.TabletSerialServer）。两路同时监听，正在出数据的那一路一直用下去，它 2 s 没数据
+才换另一路；两路的数据从不混在一起（换路时解析状态、钟差全部重来）。平板那一路的差分由平板用同一个
+CORS 账号自己连、直接写进平板串口，车端这时暂停自己的 CORS（同一账号两处登录会互相顶掉），换回 USB 再连。
 
     /gnss/raw      std_msgs/String JSON，每条测量一条（fix / heading / vel，字段见 um982.Um982Stream）；
                    时间是本机单调时钟的测量时刻，走直线节点（融合）用它
@@ -74,7 +75,7 @@ def navsat_fix(m, stamp):
 
 
 def heading_valid(m):
-    """Um982Stream 已按两天线固定解的实时距离核对过测向（见 um982.BASELINE_REF_*），这里只看它的结论。"""
+    """Um982Stream 已按整周固定 + 基线长度范围判过测向（见 um982.heading_usable），这里只看它的结论。"""
     return bool(m.get('valid'))
 
 
@@ -191,8 +192,8 @@ class RtkNode(Node):
 
     # ---- 平板串口转发 ----
     def tablet_connected(self):
-        # 平板那头的接收机串口同样补上副天线日志；平板原样写进串口
-        self.tablet.write(ANT2_LOG)
+        # 单向：车不往平板写。副天线日志（BESTNAVHA）由平板 app 按串口带宽自己补（平板串口 115200，
+        # 照 USB 那样固定发 20 Hz 会把串口挤满）；差分由平板自己连 CORS
         self.get_logger().info('平板串口转发已连接：%s' % self.tablet.peer)
 
     def tablet_loop(self):
@@ -242,10 +243,8 @@ class RtkNode(Node):
             return self.stream.gga_report()
 
     def write_corrections(self, data):
-        # 差分改正数写给正在用的那台接收机
+        # 车端 CORS 只给 USB 上的接收机；平板那一路由平板自己连 CORS（这时车端 CORS 已暂停）
         if self.source == 'tablet':
-            if self.tablet is not None:
-                self.tablet.write(data)
             return
         with self.write_lock:
             if self.ser is not None:
@@ -286,9 +285,18 @@ class RtkNode(Node):
         st['ntrip']['enabled'] = self.cors.enabled
         st['ntrip']['config_revision'] = self.cors.applied_revision
         st['ntrip']['config_error'] = self.cors.error
+        st['ntrip']['paused'] = self.cors.paused
         return st
 
+    def sync_cors(self):
+        """数据来自平板时暂停车端 CORS（平板自己连），换回 USB（或还没数据）时恢复。"""
+        if self.source == 'tablet':
+            self.cors.pause('tablet')
+        else:
+            self.cors.resume()
+
     def publish_status(self):
+        self.sync_cors()
         self.cors.poll()
         self.pub_status.publish(String(data=json.dumps(self.status(), allow_nan=False)))
 

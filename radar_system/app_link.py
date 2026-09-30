@@ -494,7 +494,9 @@ def rtk_telemetry(gnss, now):
                       **({'enabled': n['enabled']} if isinstance(n.get('enabled'), bool) else {}),
                       'error': n.get('error'), 'age_s': _num(n.get('age_s'), 1),
                       'config_revision': n.get('config_revision'), 'config_error': n.get('config_error'),
-                      'bytes': n.get('bytes', 0)}}
+                      'bytes': n.get('bytes', 0),
+                      # 车端 CORS 暂停的原因：'tablet' = 数据来自平板串口，差分由平板自己连；没暂停为 None
+                      'paused': n.get('paused') if n.get('paused') in ('tablet',) else None}}
 
 
 def line_telemetry(line, now):

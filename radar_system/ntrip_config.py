@@ -160,7 +160,25 @@ class NtripReload:
         self.configured = False
         self.enabled = False
         self.error = 'not_configured'
+        # 暂停原因（'tablet'：接收机数据来自平板串口，平板用同一账号自己连 CORS，车端再连会互相顶掉）；
+        # 暂停时照常跟踪账号文件（app 的保存 / 断开回执不受影响），只是不起客户端
+        self.paused = None
+        self.env = None
         self.poll()
+
+    def pause(self, reason):
+        if self.paused == reason:
+            return
+        self.paused = reason
+        if self.client is not None:
+            self.client.stop()
+            self.client = None
+
+    def resume(self):
+        if self.paused is None:
+            return
+        self.paused = None
+        self._start()
 
     def poll(self):
         try:
@@ -181,14 +199,19 @@ class NtripReload:
         self.applied_revision = current
         self.configured = env is not None
         self.enabled = enabled
+        self.env = env
         self.error = None if env else 'not_configured'
-        if enabled:
-            try:
-                self.client = self.client_factory(env).start()
-            except (OSError, RuntimeError):
-                self.applied_revision = None
-                self.seen = object()
-                self.error = 'client_start_failed'
+        self._start()
+
+    def _start(self):
+        if not self.enabled or self.env is None or self.paused is not None or self.client is not None:
+            return
+        try:
+            self.client = self.client_factory(self.env).start()
+        except (OSError, RuntimeError):
+            self.applied_revision = None
+            self.seen = object()
+            self.error = 'client_start_failed'
 
     def stop(self):
         if self.client is not None:

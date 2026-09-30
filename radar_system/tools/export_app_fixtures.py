@@ -57,11 +57,15 @@ def sample_snapshot(stale=False):
 
 
 def sample_gnss(now=100.0):
-    """/gnss/status 的典型样本：RTK 固定解、双天线航向有效、CORS 已连上。"""
+    """/gnss/status 的典型样本：RTK 固定解、双天线航向有效，接收机在平板串口上（差分由平板连 CORS，车端 CORS 暂停）。"""
     return {'_rx_monotonic': now - 0.3, 'receiver_ok': True, 'rtk': 'FIXED', 'sol': 'NARROW_INT',
             'sats': 32, 'diff_age': 1.0, 'sigma_h': 0.0092, 'heading_ok': True, 'heading_sol': 'L1_INT',
             'baseline_m': 0.3312, 'rates': {'fix': 20.0, 'heading': 20.0, 'vel': 20.0}, 'crc_errors': 0,
             'port_open': True, 'port_error': None,
+            # 接收机接在平板串口上（平板 app 经 TCP 转发），车上 USB 没接
+            'source': 'tablet', 'usb': {'open': False, 'error': 'FileNotFoundError: no such device'},
+            'tablet': {'listening': True, 'error': None, 'port': 48622, 'connected': True, 'peer': '192.168.2.50:40112',
+                       'connections': 1, 'bytes_in': 512000},
             'antennas': {
                 'ant1': dict(available=True, source='BESTPOS', sol='NARROW_INT', fix='FIXED',
                              sats_used=32, sats_tracked=40, age_s=0.1),
@@ -70,9 +74,9 @@ def sample_gnss(now=100.0):
             'heading': dict(sol='L1_INT', fix='FIXED', sats_used=28, sats_tracked=36, length_m=0.331,
                             pitch_deg=-0.8, sigma_deg=0.28, ref_m=0.331, valid=True,
                             yaw_deg=90.18),     # 双天线测出的车头方向（ENU，东 0 逆时针）：车头朝北
-            'ntrip': {'configured': True, 'connected': True, 'mount': 'AUTO', 'bytes': 81234,
-                      'rtcm_types': [1005, 1074, 1084, 1124], 'error': None, 'age_s': 0.4,
-                      'config_revision': 'fixture-1', 'config_error': None}}
+            # 车端 CORS 让给平板：账号已配置，但数据来自平板时不连（同一账号两处登录会互相顶掉）
+            'ntrip': {'configured': True, 'connected': False, 'enabled': True, 'error': None,
+                      'config_revision': 'fixture-1', 'config_error': None, 'paused': 'tablet'}}
 
 
 def sample_line(now=100.0):
@@ -184,8 +188,27 @@ def route_geometry_cases():
                                            [12, 9], [4, 9.5], [0, 3]]), [-2.0, 0.0, 0.0]),
         ('错误 连线 太远', path, [60.0, 0.0, 0.0]),
     ]
+
+    def bend(deg, leg=6.0):
+        a = math.radians(deg)
+        return [[0, 0], [leg, 0], [round(leg + leg * math.cos(a), 4), round(leg * math.sin(a), 4)]]
+
+    def arc(radius, deg, sag):
+        n = math.ceil(math.radians(deg) / (2 * math.acos(1 - sag / radius)))
+        return [[round(radius * math.sin(math.radians(deg) * i / n), 4),
+                 round(radius - radius * math.cos(math.radians(deg) * i / n), 4)] for i in range(n + 1)]
+    # 差速车喷头在后轴前：缓弯时后轴被喷头拖着走（第 4 项是喷头位置，不按单双号轮换）
+    cases += [
+        ('连线 缓弯 10° 拖过去', dict(path, points=bend(10.0)), [-2.0, 0.0, 0.0], 0.30),
+        ('连线 缓弯 右转 25° 拖过去', dict(path, points=bend(-25.0)), [-2.0, 0.0, 0.0], 0.30),
+        ('连线 35° 超过拖弯极限', dict(path, points=bend(35.0)), [-2.0, 0.0, 0.0], 0.30),
+        ('连线 缓弯 喷头 0.154', dict(path, points=bend(12.0)), [-2.0, 0.0, 0.0], 0.154),
+        ('连线 罚球弧折线', dict(path, points=arc(9.15, 106.0, 0.005)), [-2.0, 0.0, 0.0], 0.30),
+        ('连线 短边连续缓弯', dict(path, points=[[0, 0], [3, 0], [3.5, 0.1], [4, 0], [4.5, 0.1], [8, 0.1]]),
+         [-2.0, 0.0, 0.0], 0.30),
+    ]
     out = []
-    for name, d, car in cases:
+    for name, d, car, *fixed in cases:
         spec = route_plan.parse_spec(d)
         case = {'name': name, 'route': spec.to_dict(digits=6), 'car': car, 'min_radius': min_route_radius()}
         if spec.kind == 'path':
@@ -204,7 +227,7 @@ def route_geometry_cases():
                 case.setdefault('route_sections', None)
                 case.setdefault('cover', None)
             # 差速车（Gen5）同一条路线：喷头压线、急弯原地转向（app PivotRoute.kt 对照）；喷头在后轴前或两轮中间
-            nozzle = 0.30 if len(out) % 2 == 0 else 0.0
+            nozzle = fixed[0] if fixed else 0.30 if len(out) % 2 == 0 else 0.0
             try:
                 pivot, corners = route_plan._pivot_route_sections(spec, PIVOT_RADIUS, nozzle)
                 case['pivot'] = dict(radius=PIVOT_RADIUS, nozzle_x=nozzle, corners=corners, pivots=route_plan.pivot_count(pivot),
@@ -265,6 +288,10 @@ def fixture_messages():
         'final_bearing_deg': 18.0, 'segments': [[-1, 1.2], [1, 0.3]]})
     snap['ranges'][0] = 2.5
     snap['gnss'] = sample_gnss()
+    # IMU 定向直行正在跑（heading_hold.HeadingHold.status 的样子，作业键 = (会话, app 作业编号)）
+    snap['straight'] = {'imu_ok': True, 'yaw_deg': 30.42, 'run': ('app-1', 3), 'state': 'running', 'reason': None,
+                        'target_deg': 30.0, 'error_deg': 0.42, 'max_error_deg': 0.83, 'within_pct': 98.5,
+                        'elapsed_s': 12.3, 'speed': 0.4, 'wz': -0.021}
     tel = app_link.build_telemetry(snap, now=100.0, seq=42, sensors=PROFILE['sensors'])
     line = sample_snapshot(stale=True)
     line.update(follower_running=False, motion={'mode': 'NAVIGATION', 'healthy': True},
