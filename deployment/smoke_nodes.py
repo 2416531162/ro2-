@@ -171,6 +171,12 @@ def check_web():
     # 网页服务：构造 ROS 桥接节点，用它的状态快照编 hello / 遥测（不开 HTTP 端口、不发运动指令）
     os.environ['RK3588_NTRIP_ENV'] = '/nonexistent/ntrip.env'
     import json
+    import subprocess
+    # 先在干净的进程里按 run_web.sh 的方式导入一遍：同一进程里前面的检查已经把仓库根目录加进 sys.path，
+    # 查不出服务直接运行脚本时找不到 robot_core 这类问题（2026-10-01 网页服务就这样起不来）
+    here = os.path.join(RELEASE, 'radar_system')
+    subprocess.run([sys.executable, '-c', 'import sys; sys.path.insert(0, %r); import radar_web_server' % here],
+                   cwd=here, check=True, timeout=60)
     import radar_web_server as web
     import app_link
     node = web.WebBridgeNode()

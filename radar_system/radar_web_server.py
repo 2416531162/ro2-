@@ -30,8 +30,8 @@ from std_msgs.msg import String, Float32
 from std_srvs.srv import Trigger
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from runtime_config import PROFILE      # 先导入：它把仓库根目录加进 sys.path，下面才找得到 robot_core
 from robot_core.kinematics import ChassisGeometry, yaw_from_steer, steer_from_yaw
-from runtime_config import PROFILE
 from robot_core.service_watchdog import watchdog
 from motion_client import MotionClient
 from manual_drive import ManualDriveLatch
