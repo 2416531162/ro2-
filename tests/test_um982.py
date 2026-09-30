@@ -204,30 +204,28 @@ class TestStream(unittest.TestCase):
             out += s.feed((text + '\r\n').encode(), t0 + 0.05 * i)
         return out
 
-    def test_heading_is_checked_against_live_two_antenna_distance(self):
-        # 不写死基线：两天线固定解相距 0.28 m，测向 0.28 m 固定 → 有效（旧规则 0.33±0.03 会拒绝）
-        s = um982.Um982Stream()
-        out = self.feed_epochs(s, 0.28, 0.281)
-        hd = [m for m in out if m['kind'] == 'heading']
-        self.assertEqual([m['valid'] for m in hd][-1], True)
-        self.assertAlmostEqual(hd[-1]['baseline_ref'], 0.28, places=2)
-        st = s.status(10.3)
-        self.assertTrue(st['heading_ok'])
-        self.assertAlmostEqual(st['heading']['ref_m'], 0.28, places=2)
-        self.assertIsNone(st['antennas']['ant2']['consistent'])
-        # 样本还不够时不下结论
-        self.assertFalse(hd[0]['valid'])
+    def test_fixed_heading_needs_baseline_between_30_and_50_cm(self):
+        # 用户规则：测向整周固定、基线 0.30–0.50 m 就算有效；两端都算，范围外不算
+        for length, ok in ((0.415, True), (0.30, True), (0.50, True), (0.28, False), (0.52, False), (2.6, False)):
+            s = um982.Um982Stream()
+            out = self.feed_epochs(s, 0.415, length)
+            hd = [m for m in out if m['kind'] == 'heading']
+            self.assertEqual([m['valid'] for m in hd], [ok] * len(hd), length)   # 第一个历元就下结论
+            self.assertEqual(s.status(10.3)['heading_ok'], ok, length)
+        # 实时两天线距离照实报，但不参与判定
+        self.assertAlmostEqual(s.status(10.3)['heading']['ref_m'], 0.415, places=2)
+        self.assertIsNone(s.status(10.3)['antennas']['ant2']['consistent'])
 
-    def test_fixed_heading_is_trusted_when_both_antennas_fixed_float_is_not(self):
-        # 两根天线都固定就信：测向 0.29 m 与实时 0.34 m 不同也用（外场实测）；测向浮点不用
+    def test_fixed_heading_is_trusted_without_fixed_antenna_positions_float_is_not(self):
+        # 平板转发的接收机两根天线常是 L1_INT（车端归浮点）：测向整周固定、基线在范围内照样有效
         s = um982.Um982Stream()
-        out = self.feed_epochs(s, 0.342, 0.29, up_m=0.048)
-        self.assertTrue([m for m in out if m['kind'] == 'heading'][-1]['valid'])
-        a2 = s.status(10.3)['antennas']['ant2']
-        self.assertAlmostEqual(a2['offset_m'], 0.342, places=2)      # 平面实时距离照实报
-        self.assertIsNone(a2['consistent'])                           # 不再判"不可信"
+        for i in range(3):
+            s.feed((unicore('BESTPOSA', BESTPOS_BODY.replace('NARROW_INT', 'L1_INT'), tow=443243.7 + 0.05 * i)
+                    + '\r\n' + self.heading(0.415, 'L1_INT', 443243.7 + 0.05 * i) + '\r\n').encode(), 10.0 + 0.05 * i)
+        st = s.status(10.2)
+        self.assertEqual((st['rtk'], st['heading_ok'], st['heading']['ref_m']), ('FLOAT', True, None))
         s = um982.Um982Stream()
-        out = self.feed_epochs(s, 1.4, 2.6, up_m=2.3, sol='NARROW_FLOAT')
+        out = self.feed_epochs(s, 0.415, 0.415, sol='NARROW_FLOAT')
         self.assertFalse([m for m in out if m['kind'] == 'heading'][-1]['valid'])
 
     def test_antenna_spacing_uses_plane_coordinates_only(self):
@@ -264,9 +262,9 @@ class TestStream(unittest.TestCase):
         s.feed((BESTPOS + '\r\n' + HEADING + '\r\n').encode(), 10.0)
         h = s.status(10.1)['heading']
         self.assertEqual((h['sol'], h['fix'], h['sats_used'], h['sats_tracked']), ('L1_INT', 'FIXED', 32, 37))
-        # 没有副天线定位就没有实时基线参考：测向固定也不算有效
-        self.assertEqual((h['length_m'], h['ref_m'], h['valid']), (0.331, None, False))
-        self.assertFalse(s.status(10.1)['heading_ok'])
+        # 没有副天线定位就没有实时两天线距离；测向整周固定、基线 0.331 m 在范围内照样有效
+        self.assertEqual((h['length_m'], h['ref_m'], h['valid']), (0.331, None, True))
+        self.assertTrue(s.status(10.1)['heading_ok'])
         self.assertIsNone(s.status(12.0)['heading'])
         float_hd = HEADING.replace('L1_INT', 'NARROW_FLOAT')
         float_hd = '#%s*%08x' % (float_hd[1:].rsplit('*', 1)[0], um982.crc32(float_hd[1:].rsplit('*', 1)[0].encode()))
@@ -289,8 +287,8 @@ class TestStream(unittest.TestCase):
         self.assertEqual((fix['sol'], fix['sats'], fix['diff_age']), ('NARROW_INT', 32, 1.0))
         self.assertLess(fix['t'], fix['t_rx'])
         st = s.status(10.05)
-        # 只有主天线和测向、没有副天线定位：没有实时基线可核对，测向不算有效
-        self.assertEqual((st['rtk'], st['heading_ok'], st['receiver_ok']), ('FIXED', False, True))
+        # 只有主天线和测向、没有副天线定位：测向整周固定、基线在范围内就有效
+        self.assertEqual((st['rtk'], st['heading_ok'], st['receiver_ok']), ('FIXED', True, True))
         self.assertAlmostEqual(st['baseline_m'], 0.3312)
         self.assertIsNotNone(s.gga_report())
         self.assertFalse(s.status(12.0)['receiver_ok'])

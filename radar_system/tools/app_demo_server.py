@@ -5,7 +5,7 @@
 用 follow_sim 的真实跟随引擎实时仿真一辆车和两个走动的人,按
 docs/APP_PROTOCOL.md 提供与车端相同的接口:
 
-- ``ws://本机:8088/ws``         hello + 10Hz 遥测;摇杆、跟随、急停、复位、点选目标、RTK 走直线、走路线
+- ``ws://本机:8088/ws``         hello + 10Hz 遥测;摇杆、IMU 直行、跟随、急停、复位、点选目标、RTK 走直线、走路线
 - ``http://本机:8088/video.mjpg`` 按车上相机视角画出的合成画面(12 FPS)
 - ``POST /api/motion/stop``      急停第二通道
 - UDP 48620 发现广播
@@ -55,9 +55,12 @@ from runtime_config import PROFILE, profile_hash  # noqa: E402
 from robot_core.kinematics import ChassisGeometry  # noqa: E402
 from line_mission import LineMission  # noqa: E402
 from field_plan_service import FieldPlanService  # noqa: E402
+from heading_hold import HeadingHold  # noqa: E402
 
 CAMERA = {'width': 640, 'height': 480, 'fx': 570.3, 'cx': 319.5}
 DEMO_ANTENNA = (0.345, 0.165, 0.40)     # 演示用 ANT1 杠杆臂：前、左、离地高度，m
+DEMO_IMU_DRIFT_DEG_S = 0.056            # 演示 IMU 偏航零偏（与遥测 attitude 同一个数）
+DEMO_STRAIGHT_BIAS = 0.03               # 演示 IMU 直行：两轮不一致带来的偏转，rad/s，让纠偏看得见
 
 
 def demo_tilt(roll_deg, pitch_deg):
@@ -140,6 +143,8 @@ class DemoCar:
         self.manual = (0.0, 0.0, 0.0)       # vx, wz, steer_deg
         self.manual_at = -1e9
         self.manual_owner = None
+        self.manual_hold = None     # IMU 定向直行的作业键 (会话, 作业编号)
+        self.straight = HeadingHold(clock=lambda: self.sim.t)
         self.last_seq = {}
         self.geo = ChassisGeometry()
         self.mission = LineMission(DemoFusion(lambda: self.sim.car), samples=None)
@@ -193,7 +198,18 @@ class DemoCar:
             return
         e.pause()
         vx, wz, _ = self.manual
-        if self.mode == 'MANUAL' and t - self.manual_at <= 0.75 and (vx or wz):
+        # 演示 IMU：真值偏航 + 零偏漂移，0.01° 一格（HDA536T 分辨率）
+        imu_yaw = math.radians(round(math.degrees(car.yaw) - (self.imu_yaw0 or 0.0) + DEMO_IMU_DRIFT_DEG_S * t, 2))
+        self.straight.on_imu(imu_yaw, car.wz, t)
+        self.straight.on_odom(car.v, t)
+        active = self.mode == 'MANUAL' and t - self.manual_at <= 0.75 and (vx or wz)
+        if active and self.manual_hold is not None:
+            vx, wz = self.straight.step(self.manual_hold, t)
+            if vx:
+                wz += DEMO_STRAIGHT_BIAS
+        elif not active:
+            self.straight.end('command_timeout')
+        if active:
             car.command(t, vx, wz)
         else:
             car.command(t, 0.0, 0.0)
@@ -216,7 +232,32 @@ class DemoCar:
                 self.last_seq[session] = seq
             if moving and self.mode in ('IDLE', 'FOLLOW', 'NAVIGATION', 'MANUAL'):
                 self.mode = 'MANUAL'
+            self.straight.end('manual')         # 摇杆一来就接管直行
             self.manual = (vx, wz, deg)
+            self.manual_hold = None
+            self.manual_at = self.sim.t
+            self.manual_owner = session
+            return True, ''
+
+    def straight_command(self, cmd, session):
+        """IMU 定向直行：go 接着开（新 run 按当时偏航定目标），stop 停车。与 radar_web_server 同一套 HeadingHold。"""
+        with self.lock:
+            if cmd['action'] == 'stop':
+                self.straight.end('user')
+                self.manual, self.manual_hold = (0.0, 0.0, 0.0), None
+                return True, ''
+            if self.mode == 'ESTOP':
+                return False, '急停已锁存，请先复位'
+            seq = cmd.get('seq')
+            last = self.last_seq.get(session)
+            if seq is not None and last is not None and seq <= last:
+                return True, 'stale'
+            if seq is not None:
+                self.last_seq[session] = seq
+            if self.mode in ('IDLE', 'FOLLOW', 'NAVIGATION', 'MANUAL'):
+                self.mode = 'MANUAL'
+            self.manual = (self.straight.cfg.speed, 0.0, 0.0)
+            self.manual_hold = (session, cmd['run'])
             self.manual_at = self.sim.t
             self.manual_owner = session
             return True, ''
@@ -224,7 +265,9 @@ class DemoCar:
     def release(self, session):
         with self.lock:
             if self.manual_owner == session:
+                self.straight.end('disconnected')
                 self.manual = (0.0, 0.0, 0.0)
+                self.manual_hold = None
 
     def follow(self, enable):
         with self.lock:
@@ -243,7 +286,9 @@ class DemoCar:
     def estop(self):
         with self.lock:
             self.mode = 'ESTOP'
+            self.straight.end('estop')
             self.manual = (0.0, 0.0, 0.0)
+            self.manual_hold = None
             return True, 'ESTOP latched'
 
     def reset(self):
@@ -329,6 +374,7 @@ class DemoCar:
                            'waiting_stationary': abs(car.v) > 0.02},
                 'motion_fresh': True,
                 'manual_override': {'active': self.mode == 'MANUAL' and abs(vx) > 0, 'steer_deg': deg},
+                'straight': self.straight.status(self.sim.t),
                 'follower_running': following,
                 'follower': follow,
                 'gnss': {'_rx_monotonic': time.monotonic(), 'receiver_ok': True, 'rtk': 'FIXED', 'sats': 31,
@@ -349,7 +395,7 @@ class DemoCar:
                              # 演示用车身姿态：地面略有起伏；IMU 偏航相对启动时，按实车陀螺零偏 0.056°/s 漂
                              # （真车由 imu 组件 + line_node 给出）
                              attitude={'roll_deg': round(roll, 2), 'pitch_deg': round(pitch, 2),
-                                       'yaw_deg': round(wrap(yaw_deg - self.imu_yaw0 + 0.056 * self.sim.t), 2),
+                                       'yaw_deg': round(wrap(yaw_deg - self.imu_yaw0 + DEMO_IMU_DRIFT_DEG_S * self.sim.t), 2),
                                        'source': 'imu_madgwick'},
                              tilt=demo_tilt(roll, pitch)),
             }
@@ -517,6 +563,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if kind == 'drive':
                     ok, msg = CAR.drive(cmd, session)
                     if not ok:
+                        ack(cmd, ok, msg)
+                elif kind == 'straight':
+                    ok, msg = CAR.straight_command(cmd, session)
+                    if not ok or cmd['action'] == 'stop':
                         ack(cmd, ok, msg)
                 elif kind == 'estop':
                     ack(cmd, *CAR.estop())

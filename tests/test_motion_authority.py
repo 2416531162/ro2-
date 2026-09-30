@@ -66,6 +66,85 @@ def test_manual_release_never_resumes_follow():
     assert a.output(2.03).vx == 0
 
 
+def test_manual_stick_back_to_center_stops_without_new_epoch():
+    """摇杆回中（零速）：就地停、还在 MANUAL、代次不变，再推立刻走，不用重新等静止。"""
+    a = MotionAuthority()
+    healthy(a)
+    assert submit(a, 'manual', .2, t=2.0)
+    epoch = a.epoch
+    assert a.mode == 'MANUAL' and a.output(2.0).vx == .2
+    assert submit(a, 'manual', 0., t=2.05)
+    assert (a.mode, a.epoch) == ('MANUAL', epoch) and a.output(2.05).vx == 0
+    a.health(True, False, 2.06)                               # 还没停稳也不用等
+    assert submit(a, 'manual', .2, t=2.1)
+    assert a.output(2.1).vx == .2
+    a.output(2.46)
+    assert (a.mode, a.reason) == ('IDLE', 'command_timeout')  # 松手不再发：超时回空闲
+
+
+def test_manual_push_again_after_release_does_not_wait_for_stop():
+    """松手超时回空闲、车还在滑行时又推：直接接管，不用停死再等 0.3 s；网页端还拿着旧代次也认。"""
+    a = MotionAuthority()
+    healthy(a)
+    assert submit(a, 'manual', .5, t=2.0)
+    manual_epoch = a.epoch
+    a.health(True, False, 2.1)                               # 在走
+    a.output(2.4)
+    assert (a.mode, a.reason) == ('IDLE', 'command_timeout')  # 松手超时
+    a.health(True, False, 2.5)                               # 还在滑行
+    assert submit(a, 'manual', .5, t=2.6, epoch=manual_epoch)   # 旧代次（0.6 s 内）
+    assert a.mode == 'MANUAL' and a.output(2.6).vx == .5
+
+
+def test_manual_push_again_with_new_epoch_does_not_wait_for_stop():
+    """网页端已拿到超时后的新代次再推：同样直接接管，不等停稳（单独覆盖“不等静止”这一步）。"""
+    a = MotionAuthority()
+    healthy(a)
+    assert submit(a, 'manual', .5, t=2.0)
+    a.health(True, False, 2.1)
+    a.output(2.4)
+    assert (a.mode, a.reason) == ('IDLE', 'command_timeout')
+    a.health(True, False, 2.5)
+    assert submit(a, 'manual', .5, t=2.6)                     # 当前代次
+    assert a.mode == 'MANUAL' and a.output(2.6).vx == .5
+
+
+def test_manual_push_after_release_waits_if_chassis_was_unhealthy():
+    """松手回空闲后底盘断过链（不健康）再恢复：不算“接着开”，照旧等停稳，旧代次也不认。"""
+    a = MotionAuthority()
+    healthy(a)
+    assert submit(a, 'manual', .5, t=2.0)
+    manual_epoch = a.epoch
+    a.health(True, False, 2.1)
+    a.output(2.4)
+    assert (a.mode, a.reason) == ('IDLE', 'command_timeout')
+    a.health(False, False, 2.45)                              # 断链
+    a.health(True, False, 2.5)                                # 恢复，车状态未知
+    assert not submit(a, 'manual', .5, t=2.55, epoch=manual_epoch)
+    assert submit(a, 'manual', .5, t=2.6)
+    assert a.mode == 'MANUAL' and a.output(2.6).vx == 0
+
+
+def test_follow_takeover_still_waits_after_manual_release_logic():
+    """跟随被手动接管：照旧要等停稳（放宽只针对手动接着开）。"""
+    a = following()
+    a.health(True, False, 2.0)
+    assert submit(a, 'manual', .2, t=2.01)
+    assert a.mode == 'MANUAL' and a.output(2.02).vx == 0
+
+
+def test_manual_zero_while_idle_keeps_the_epoch():
+    """空闲时 app 摇杆在中心每 50 ms 发一次零速：不换代次，否则网页端手里的代次总是旧的、推了被丢。"""
+    a = MotionAuthority()
+    healthy(a)
+    epoch = a.epoch
+    for i in range(5):
+        assert submit(a, 'manual', 0., t=2.0 + i * .05)
+    assert (a.mode, a.epoch) == ('IDLE', epoch)
+    assert submit(a, 'manual', .2, t=2.3, epoch=epoch)
+    assert a.mode == 'MANUAL' and a.output(2.3).vx == .2     # 早就静止：接管不用再等
+
+
 def test_timeout_invalidates_epoch_and_requires_new_follow_selection():
     a = following()
     old = a.epoch

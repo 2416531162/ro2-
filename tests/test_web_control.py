@@ -11,6 +11,7 @@
 
 import http.client
 import json
+import math
 import os
 import socket
 import sys
@@ -213,11 +214,12 @@ class TestWebControl(unittest.TestCase):
         topics = {topic for topic, _ in self.bridge.subscriptions_}
         # 相机原图/内参给安卓 app 的 /video.mjpg;没人看时回调直接返回,不解码
         # /gnss/status、/line/status 是 RTK 节点和走直线节点的状态，转给 app（不是旧的 /api/cors 路由）
+        # /imu/data 的偏航角给 IMU 定向直行（heading_hold），/odom 车速给它判断轮子卡住
         self.assertEqual(topics, {'/scan', '/camera/ai_detection/targets',
                                  '/camera/ai_detection/status', '/voltage',
                                  '/follower/status', '/wheeltec/status', '/motion/status',
                                  '/camera/rgb/image_raw', '/camera/rgb/camera_info',
-                                 '/gnss/status', '/line/status'})
+                                 '/gnss/status', '/line/status', '/imu/data', '/odom'})
 
     def test_retired_map_and_rtk_routes_are_gone(self):
         for path in ('/map', '/map2d', '/api/cors', '/api/live_map/state'):
@@ -402,6 +404,109 @@ class TestAppSocket(unittest.TestCase):
         tel = self.read_json('tel')
         self.assertEqual((tel['rtk']['stale'], tel['rtk']['fix']), (False, 'FIXED'))
         self.assertEqual((tel['line']['stale'], tel['line']['points']), (False, {'A': [0, 0]}))
+
+    def imu(self, yaw_deg, rate=0.0):
+        half = math.radians(yaw_deg) / 2
+        self.bridge.imu_cb(types.SimpleNamespace(
+            orientation=types.SimpleNamespace(x=0.0, y=0.0, z=math.sin(half), w=math.cos(half)),
+            angular_velocity=types.SimpleNamespace(z=rate), orientation_covariance=[0.01] * 9))
+
+    def last_sent(self):
+        return json.loads(self.bridge.motion.publisher.sent[-1].data)
+
+    def test_imu_straight_locks_heading_corrects_and_stops_on_request(self):
+        """点开始：按当时 IMU 偏航定目标、0.8 m/s 往前，偏了往回打；点停止才停。RTK 不参与。"""
+        hello = self.read_json('hello')
+        self.assertEqual(hello['straight']['speed_mps'], 0.8)
+        self.imu(30.0)
+        self.send({'type': 'straight', 'action': 'go', 'run': 1, 'seq': 1})
+        self.assertTrue(self.wait_for(lambda: self.bridge.straight.state == 'running'
+                                      and self.bridge.straight.run == (hello['session'], 1)))
+        self.assertAlmostEqual(math.degrees(self.bridge.straight.target), 30.0, places=4)
+        self.assertEqual(self.bridge.manual_drive._hold, (hello['session'], 1))
+        self.assertGreater(self.last_sent()['vx'], 0.0)
+        self.imu(31.0)                                          # 车头往左偏了 1°
+        self.send({'type': 'straight', 'action': 'go', 'run': 1, 'seq': 2})
+        self.assertTrue(self.wait_for(lambda: self.last_sent()['wz'] < 0.0), '偏左要往右打')
+        tel = self.read_json('tel')
+        while 'run' not in tel.get('straight', {}):              # 缓冲里可能还有开始前的遥测
+            tel = self.read_json('tel')
+        self.assertEqual((tel['straight']['session'], tel['straight']['run'], tel['straight']['state']),
+                         (hello['session'], 1, 'running'))
+        self.send({'type': 'straight', 'action': 'stop', 'run': 1, 'seq': 3, 'id': 'st'})
+        ack = self.read_json('ack')
+        self.assertEqual((ack['id'], ack['ok']), ('st', True))
+        self.assertEqual((self.bridge.straight.state, self.bridge.straight.reason), ('stopped', 'user'))
+        self.assertEqual(self.bridge.manual_drive._vx, 0.0)
+        self.assertEqual((self.last_sent()['vx'], self.last_sent()['wz']), (0.0, 0.0))
+
+    def test_imu_straight_stops_on_deviation_stick_and_disconnect(self):
+        hello = self.read_json('hello')
+        self.imu(-10.0)
+        self.send({'type': 'straight', 'action': 'go', 'run': 2, 'seq': 1})
+        self.assertTrue(self.wait_for(lambda: self.bridge.straight.run == (hello['session'], 2)))
+        self.imu(-4.0)                                          # 偏了 6°，超过停车线
+        self.send({'type': 'straight', 'action': 'go', 'run': 2, 'seq': 2})
+        self.assertTrue(self.wait_for(lambda: self.bridge.straight.reason == 'deviation'),
+                        (self.bridge.straight.state, self.bridge.straight.reason))
+        self.assertEqual((self.last_sent()['vx'], self.last_sent()['wz']), (0.0, 0.0))
+        self.send({'type': 'straight', 'action': 'go', 'run': 2, 'seq': 3})    # 同一次不会自己再开
+        self.assertFalse(self.wait_for(lambda: self.bridge.straight.state == 'running', timeout=0.2))
+        self.imu(-4.0)                                          # 实车 IMU 50 Hz 一直在来
+        self.send({'type': 'straight', 'action': 'go', 'run': 3, 'seq': 4})    # 再点开始：按现在的 −4° 定目标
+        self.assertTrue(self.wait_for(lambda: self.bridge.straight.state == 'running'))
+        self.assertAlmostEqual(math.degrees(self.bridge.straight.target), -4.0, places=4)
+        self.send({'type': 'drive', 'throttle': 0.3, 'steer': 0.5, 'tier': 'low', 'seq': 5})   # 摇杆接管
+        self.assertTrue(self.wait_for(lambda: self.bridge.straight.reason == 'manual'))
+        self.imu(-4.0)
+        self.send({'type': 'straight', 'action': 'go', 'run': 4, 'seq': 6})
+        self.assertTrue(self.wait_for(lambda: self.bridge.straight.state == 'running'))
+        self.reader.close()
+        self.sock.shutdown(socket.SHUT_RDWR)
+        self.sock.close()
+        self.assertTrue(self.wait_for(lambda: self.bridge.straight.reason == 'disconnected'))
+        self.assertTrue(self.wait_for(lambda: self.bridge.manual_drive._vx == 0.0))
+
+    def test_imu_straight_times_out_when_app_goes_quiet(self):
+        hello = self.read_json('hello')
+        self.imu(0.0)
+        self.send({'type': 'straight', 'action': 'go', 'run': 5, 'seq': 1})
+        self.assertTrue(self.wait_for(lambda: self.bridge.straight.run == (hello['session'], 5)
+                                      and self.bridge.straight.state == 'running'))
+        later = web.time.monotonic() + 1.0
+        with self.bridge.motion.lock:
+            self.bridge.motion.received = later                 # 底盘状态一直在更新
+        with patch.object(web.time, 'monotonic', return_value=later):
+            self.bridge.manual_loop()                           # 0.75 s 没有新的 go
+        self.assertEqual((self.bridge.straight.state, self.bridge.straight.reason), ('stopped', 'command_timeout'))
+        self.assertEqual((self.last_sent()['vx'], self.last_sent()['wz']), (0.0, 0.0))
+
+    def test_odom_speed_reaches_heading_hold(self):
+        """/odom 车速喂给直行：车速太低（轮子卡住）时直行不累积积分。"""
+        self.bridge.odom_cb(types.SimpleNamespace(twist=types.SimpleNamespace(
+            twist=types.SimpleNamespace(linear=types.SimpleNamespace(x=0.37)))))
+        self.assertAlmostEqual(self.bridge.straight._odom[1], 0.37)
+        self.assertLessEqual(web.time.monotonic() - self.bridge.straight._odom[0], 1.0)
+
+    def test_manual_loop_skips_tick_while_control_lock_is_held(self):
+        """启动跟随、复位在别的线程拿着 control_lock 等服务应答：50 Hz 循环不能在执行器线程里干等
+        （EventsExecutor 只有一个线程，等着就没人收服务应答），这一拍直接跳过、不发。"""
+        sent = len(self.bridge.motion.publisher.sent)
+        held, release = threading.Event(), threading.Event()
+
+        def hold():
+            with self.bridge.control_lock:
+                held.set()
+                release.wait(2.0)
+        worker = threading.Thread(target=hold)
+        worker.start()
+        self.assertTrue(held.wait(1.0))
+        t0 = time.monotonic()
+        self.bridge.manual_loop()
+        self.assertLess(time.monotonic() - t0, 0.1)
+        self.assertEqual(len(self.bridge.motion.publisher.sent), sent)
+        release.set()
+        worker.join()
 
     def test_estop_zeroes_and_latches(self):
         self.read_json('hello')

@@ -18,7 +18,7 @@ class TestProfiles(unittest.TestCase):
         with open(manage.__file__, encoding='utf-8') as f:
             self.assertIn("default=DEFAULT_PROFILE", f.read())   # activate 不写 --profile 时用它
         self.assertEqual(manage.DEFAULT_PROFILE, 'rtk')
-        self.assertEqual(set(manage.PROFILES['rtk']), {'web', 'rtk', 'line'})
+        self.assertEqual(set(manage.PROFILES['rtk']), {'web', 'rtk', 'line', 'imu', 'jobrec'})
         self.assertNotIn('ai', manage.PROFILES['headless'])
 
     def test_follow_profile_still_brings_detection(self):
@@ -62,6 +62,41 @@ class TestRosDiscovery(unittest.TestCase):
             text = f.read()
         after_source = text.split('source "$CAMERA_WORKSPACE"', 1)[1].split('ros2 launch', 1)[0]
         self.assertIn('export ROS_LOCALHOST_ONLY=1', after_source)
+
+
+class TestUnits(unittest.TestCase):
+    """systemd 服务：账号可换（Jetson 是 wheeltec，正点原子 RK3588 用板子的登录账号）；Gen5 的 CAN 开机起成 500K。"""
+
+    def test_default_account_is_the_jetson_one(self):
+        u = manage.units(manage.Path('/opt/rk3588'))['rk3588-wheeltec.service']
+        self.assertIn('User=wheeltec\nGroup=wheeltec\n', u)
+        self.assertIn('Environment=HOME=/home/wheeltec\n', u)
+        self.assertIn('SupplementaryGroups=dialout\n', u)       # RTK 接收机的 USB 串口
+
+    def test_rk3588_account(self):
+        units = manage.units(manage.Path('/opt/rk3588'), 'rtk', 'atk', 'atk', '/home/atk')
+        for name in ('rk3588-wheeltec.service', 'rk3588-perception@.service'):
+            self.assertIn('User=atk\nGroup=atk\n', units[name])
+            self.assertIn('Environment=HOME=/home/atk\nEnvironment=USER=atk\n', units[name])
+            self.assertIn('After=network.target rk3588-can.service', units[name])
+            self.assertNotIn('wheeltec\n', units[name].replace('rk3588-wheeltec', ''))
+        self.assertRaises(ValueError, manage.units, manage.Path('/opt/rk3588'), 'rtk', 'bad user')
+        # 这块板一直用 root（adb shell）：--user root
+        root = manage.units(manage.Path('/opt/rk3588'), 'rtk', 'root', 'root', '/root')['rk3588-wheeltec.service']
+        self.assertIn('User=root\nGroup=root\n', root)
+        self.assertIn('Environment=HOME=/root\n', root)
+
+    def test_can_comes_up_at_500k_and_recovers_from_bus_off(self):
+        can = manage.units(manage.Path('/opt/rk3588'))['rk3588-can.service']
+        self.assertIn('ConditionPathExists=/sys/class/net/can0', can)   # 没有 CAN 的旧车跳过
+        self.assertIn('bitrate 500000 restart-ms 100', can)
+        self.assertIn('Before=rk3588-wheeltec.service', can)
+        self.assertIn('Type=oneshot', can)
+        self.assertIn('WantedBy=multi-user.target', can)
+        with open(manage.__file__, encoding='utf-8') as f:
+            text = f.read()
+        self.assertIn("systemctl('start', 'rk3588-can.service'", text)
+        self.assertIn("systemctl('enable', 'rk3588-can.service'", text)
 
 
 if __name__ == '__main__':
