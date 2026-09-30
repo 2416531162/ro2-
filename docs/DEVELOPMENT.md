@@ -34,6 +34,7 @@ adb -d pull /opt/rk3588/current/manifest.json /tmp/live.json   # 与 /tmp/rel/ma
 # 3. 推上去、校验（不影响车上运行）
 adb -d push /tmp/rel /opt/rk3588/releases/<release_id>
 adb -d shell 'cd /opt/rk3588/releases/<release_id> && python3 deployment/manage.py verify /opt/rk3588/releases/<release_id>'
+adb -d shell 'bash /opt/rk3588/releases/<release_id>/deployment/smoke.sh /opt/rk3588/releases/<release_id>'   # 冒烟：真 rclpy 构造各节点（单独 ROS 域，不开串口）
 # 4. 问用户，用户回「部署」才激活（车必须停着、没在作业）
 adb -d shell 'cd /opt/rk3588/releases/<release_id> && python3 deployment/manage.py activate --profile rtk --user root /opt/rk3588/releases/<release_id>'
 # 5. 检查：systemctl list-units 'rk3588-*'；journalctl 里新进程没有 Traceback（停旧进程时的退出异常可忽略）

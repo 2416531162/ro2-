@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""无硬件回归测试:刹车包络、阿克曼换算、驱动状态机。
+"""旧阿克曼车（Wheeltec 底盘）无硬件回归测试:转角 / 角速度换算、驱动状态机、串口帧格式。
 
 不需要 ROS、不需要串口、不需要实车。跑法:
 
-    python3 tests/test_motion_safety.py
+    python3 tests/test_wheeltec_driver.py
     # 或
     python3 -m unittest discover tests -v
 """
@@ -15,105 +15,13 @@ import sys
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "radar_system"))
+sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "wheeltec_protocol"))
 
-from motion_safety import (  # noqa: E402
-    ChassisGeometry, BrakeProfile, brake_envelope, stopping_distance,
-    yaw_from_steer, steer_from_yaw, max_yaw_at_speed,
-    AlphaBetaTracker, SlewLimiter, BreakawayKick,
+from robot_core.kinematics import (  # noqa: E402
+    ChassisGeometry, yaw_from_steer, steer_from_yaw, max_yaw_at_speed,
 )
 from wheeltec_driver import Config, ControlPolicy, build_frame, STOP_FRAME  # noqa: E402
-
-
-# =============================================================================
-# 刹车包络 —— 直接对应「没提前减速就撞上」这个 bug
-# =============================================================================
-
-class TestBrakeEnvelope(unittest.TestCase):
-
-    def setUp(self):
-        self.p = BrakeProfile(decel_mps2=1.0, latency_s=0.35,
-                              stop_m=0.70, hard_stop_m=0.40)
-
-    def test_zero_at_and_inside_stop_distance(self):
-        self.assertEqual(brake_envelope(0.70, self.p), 0.0)
-        self.assertEqual(brake_envelope(0.50, self.p), 0.0)
-        self.assertEqual(brake_envelope(0.0, self.p), 0.0)
-
-    def test_monotonic_increasing_with_distance(self):
-        """距离越远允许越快,而且必须单调 —— 不允许出现旧版那种断崖。"""
-        distances = [0.7 + 0.05 * i for i in range(40)]
-        speeds = [brake_envelope(d, self.p) for d in distances]
-        for a, b in zip(speeds, speeds[1:]):
-            self.assertLessEqual(a, b)
-
-    def test_no_speed_cliff(self):
-        """相邻 1cm 之间的速度跳变必须很小。
-
-        旧版在 0.80m 处从 0.32 m/s 直接跳到 0,这个 bug 会被这条测试抓住。
-        """
-        for i in range(200):
-            d = 0.70 + 0.01 * i
-            jump = abs(brake_envelope(d + 0.01, self.p) - brake_envelope(d, self.p))
-            self.assertLess(jump, 0.05, f"{d:.2f}m 处速度跳变 {jump:.3f} 过大")
-
-    def test_envelope_speed_actually_stops_in_time(self):
-        """核心安全性质:以包络允许的速度行驶,刹停距离不得超过可用余量。"""
-        for i in range(1, 60):
-            d = 0.70 + 0.05 * i
-            v = brake_envelope(d, self.p)
-            need = stopping_distance(v, self.p)
-            gap = d - self.p.stop_m
-            self.assertLessEqual(need, gap + 1e-6,
-                                 f"在 {d:.2f}m 以 {v:.3f}m/s 行驶需要 {need:.3f}m,只有 {gap:.3f}m")
-
-    def test_old_behaviour_would_have_crashed(self):
-        """复现旧版参数,证明它会撞进硬急停区。
-
-        旧速度律: vx = clamp(0.25 + 0.45*(z-0.65), 0.25, 0.65),z<=0.80 时直接归零。
-        关键在于 0.80m 这一刻车速可以高达 MAX_SPEED_MPS —— 人在 1.54m 外时车就
-        已经跑满 0.65 m/s,人一停步,车带着满速冲进死区边界才开始想刹车。
-        """
-        OLD_MAX_SPEED = 0.65
-        OLD_DEADBAND_MAX = 0.80
-        OLD_AEB = 0.40
-
-        stop_at = OLD_DEADBAND_MAX - stopping_distance(OLD_MAX_SPEED, self.p)
-        self.assertLess(stop_at, OLD_AEB,
-                        f"旧版应当越过 {OLD_AEB}m 硬急停线,实际停在 {stop_at:.3f}m")
-
-        # 即便只是死区边界上的最低速度,余量也只剩十几厘米,经不起标定误差
-        edge_speed = max(0.25, 0.25 + 0.45 * (OLD_DEADBAND_MAX - 0.65))
-        edge_stop = OLD_DEADBAND_MAX - stopping_distance(edge_speed, self.p)
-        self.assertLess(edge_stop - OLD_AEB, 0.25,
-                        "死区边界速度的安全余量也过小")
-
-    def test_new_envelope_never_reaches_hard_stop(self):
-        """新版:从任意距离出发,按包络行驶都不会碰到硬急停线。"""
-        for i in range(1, 80):
-            d = 0.70 + 0.05 * i
-            v = min(0.55, brake_envelope(d, self.p))    # 0.55 = 新的 max_speed_mps
-            stop_at = d - stopping_distance(v, self.p)
-            self.assertGreater(stop_at, self.p.hard_stop_m,
-                               f"从 {d:.2f}m 以 {v:.3f}m/s 出发会停在 {stop_at:.3f}m")
-
-    def test_new_behaviour_stops_clear(self):
-        """新版:在同一个 0.80m 位置,包络允许的速度能安全停在 stop_m 上。"""
-        v = brake_envelope(0.80, self.p)
-        self.assertLessEqual(0.80 - stopping_distance(v, self.p),
-                             self.p.stop_m + 1e-6)
-        self.assertGreater(0.80 - stopping_distance(v, self.p),
-                           self.p.hard_stop_m)
-
-    def test_rejects_inconsistent_profile(self):
-        with self.assertRaises(ValueError):
-            BrakeProfile(stop_m=0.30, hard_stop_m=0.60)
-        with self.assertRaises(ValueError):
-            BrakeProfile(decel_mps2=0.0)
-
-    def test_non_finite_distance_is_safe(self):
-        self.assertEqual(brake_envelope(float('nan'), self.p), 0.0)
 
 
 # =============================================================================
@@ -170,64 +78,6 @@ class TestAckermann(unittest.TestCase):
         self.assertGreater(fwd, 0)
         self.assertLess(rev, 0)
         self.assertAlmostEqual(abs(fwd), abs(rev), places=9)
-
-
-# =============================================================================
-# 滤波与限幅
-# =============================================================================
-
-class TestFilters(unittest.TestCase):
-
-    def test_alpha_beta_tracks_constant_velocity_without_lag(self):
-        """匀速接近的目标,alpha-beta 应收敛到零稳态滞后;EMA 做不到。"""
-        tracker = AlphaBetaTracker(alpha=0.45, beta=0.10)
-        dt, v_true = 0.1, -0.4          # 每秒接近 0.4m
-        z = 3.0
-        for i in range(120):
-            z += v_true * dt
-            tracker.update(z, i * dt)
-        self.assertAlmostEqual(tracker.position, z, delta=0.02)
-        self.assertAlmostEqual(tracker.velocity, v_true, delta=0.05)
-
-    def test_ema_lag_is_real(self):
-        """量化旧版 EMA 的滞后,说明它为什么会让车读到偏大的距离。"""
-        dt, v_true = 0.1, -0.4
-        z, ema = 3.0, 3.0
-        for _ in range(120):
-            z += v_true * dt
-            ema = 0.65 * ema + 0.35 * z
-        self.assertGreater(ema - z, 0.05, "EMA 读到的距离应当明显偏大")
-
-    def test_predict_extrapolates(self):
-        tracker = AlphaBetaTracker()
-        for i in range(60):
-            tracker.update(2.0 - 0.3 * i * 0.1, i * 0.1)
-        ahead = tracker.predict(0.2)
-        self.assertLess(ahead, tracker.position)
-
-    def test_slew_brakes_faster_than_it_accelerates(self):
-        s = SlewLimiter(accel_limit=0.9, decel_limit=2.5)
-        s.step(1.0, 0.05)
-        self.assertAlmostEqual(s.value, 0.045, places=6)
-        s.reset(0.5)
-        s.step(0.0, 0.05)
-        self.assertAlmostEqual(s.value, 0.375, places=6)
-
-    def test_breakaway_kick_respects_envelope(self):
-        """起步脉冲绝不允许突破刹车包络 —— 快贴到人了就不该有起步冲动。"""
-        kick = BreakawayKick(kick_mps=0.22, duration_s=0.25, creep_floor_mps=0.08)
-        out = kick.apply(desired_mps=0.20, measured_moving=False, speed_cap=0.10, now=0.0)
-        self.assertLessEqual(out, 0.10)
-
-    def test_breakaway_kick_helps_from_rest(self):
-        kick = BreakawayKick(kick_mps=0.22, duration_s=0.25, creep_floor_mps=0.08)
-        out = kick.apply(desired_mps=0.12, measured_moving=False, speed_cap=0.60, now=0.0)
-        self.assertAlmostEqual(out, 0.22, places=6)
-
-    def test_below_creep_floor_commands_zero(self):
-        """取代旧版 MIN_SPEED 地板值:太慢就干脆停,而不是硬撑 0.25m/s。"""
-        kick = BreakawayKick(creep_floor_mps=0.08)
-        self.assertEqual(kick.apply(0.03, False, 0.6, 0.0), 0.0)
 
 
 # =============================================================================

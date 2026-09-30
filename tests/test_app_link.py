@@ -97,8 +97,9 @@ class TestCommands(unittest.TestCase):
 
     def test_invalid_commands_are_rejected(self):
         for text in ('nope', '[]', '{"type":"fly"}', '{"type":"drive","throttle":"1"}',
-                     '{"type":"drive","throttle":true}', '{"type":"follow","enable":1}',
-                     '{"type":"select_target"}'):
+                     '{"type":"drive","throttle":true}',
+                     # 早期人体跟随的指令已去掉，按未知指令拒绝
+                     '{"type":"follow","enable":true}', '{"type":"select_target","bearing_rad":0.1}'):
             with self.subTest(text=text), self.assertRaises(al.CommandError):
                 al.parse_command(text)
         with self.assertRaises(al.CommandError):
@@ -106,9 +107,6 @@ class TestCommands(unittest.TestCase):
 
     def test_simple_commands(self):
         self.assertEqual(al.parse_command('{"type":"estop","id":"a"}'), {'type': 'estop', 'id': 'a'})
-        self.assertTrue(al.parse_command('{"type":"follow","enable":true}')['enable'])
-        self.assertAlmostEqual(al.parse_command('{"type":"select_target","bearing_rad":9}')['bearing_rad'],
-                               math.pi)
 
 
 class TestStraight(unittest.TestCase):
@@ -126,7 +124,7 @@ class TestStraight(unittest.TestCase):
                 al.parse_command(bad)
 
     def test_hello_advertises_fixed_speed_and_tolerance(self):
-        hello = al.build_hello(PROFILE, name='x', camera={})
+        hello = al.build_hello(PROFILE, name='x')
         self.assertEqual(hello['straight'], {'speed_mps': 0.8, 'tolerance_deg': 1.0, 'abort_deg': 5.0})
 
     def test_straight_telemetry_splits_session_and_run(self):
@@ -140,11 +138,9 @@ class TestStraight(unittest.TestCase):
         self.assertEqual(al.straight_telemetry({'imu_ok': False, 'yaw_deg': None, 'state': 'idle'}),
                          {'imu_ok': False, 'state': 'idle', 'yaw_deg': None})
         self.assertIsNone(al.straight_telemetry(None))
-        tel = al.build_telemetry(dict(fixtures.sample_snapshot(), straight=st), now=1.0, seq=1,
-                                 sensors=PROFILE['sensors'])
+        tel = al.build_telemetry(dict(fixtures.sample_snapshot(), straight=st), now=1.0, seq=1)
         self.assertEqual(tel['straight']['run'], 3)
-        self.assertNotIn('straight', al.build_telemetry(fixtures.sample_snapshot(), now=1.0, seq=1,
-                                                        sensors=PROFILE['sensors']))
+        self.assertNotIn('straight', al.build_telemetry(fixtures.sample_snapshot(), now=1.0, seq=1))
         json.dumps(tel, allow_nan=False)
 
 
@@ -180,62 +176,22 @@ class TestStick(unittest.TestCase):
 
 class TestTelemetry(unittest.TestCase):
 
-    def test_scan_roundtrip_centimetres(self):
-        r = [0.0, 1.234, float('inf'), float('nan'), 12.0, -1.0]
-        back = al.decode_scan(al.encode_scan(r))
-        self.assertEqual(back.tolist(), [0.0, 1.23, 0.0, 0.0, 12.0, 0.0])
-
-    def test_locked_person_is_matched_by_camera_bearing(self):
-        s = PROFILE['sensors']
-        target = {'in_camera_view': True, 'veh_x': s['camera_x_m'] + 2.0, 'veh_y': 0.5}
-        want = al.camera_bearing(target['veh_x'], target['veh_y'], s)
-        persons = [{'bearing': want + 0.3}, {'bearing': want + 0.02}, {'bearing': None}]
-        al.mark_locked(persons, target, s)
-        self.assertEqual([p['locked'] for p in persons], [False, True, False])
-        al.mark_locked(persons, dict(target, in_camera_view=False), s)
-        self.assertFalse(any(p['locked'] for p in persons))
-
-    def snapshot(self, stale=False):
-        return fixtures.sample_snapshot(stale)
-
     def test_telemetry_is_compact_valid_json(self):
-        tel = al.build_telemetry(self.snapshot(), now=12.3456, seq=5,
-                                 sensors=PROFILE['sensors'])
+        tel = al.build_telemetry(fixtures.sample_snapshot(), now=12.3456, seq=5)
         text = json.dumps(tel, allow_nan=False)
         self.assertLess(len(text), 4000)
-        self.assertEqual(len(tel['persons']), 1)
-        self.assertTrue(tel['persons'][0]['locked'])
-        self.assertEqual(tel['follow']['target']['id'], 3)
         self.assertEqual(tel['drive']['speed'], 0.42)
-        self.assertEqual(len(al.decode_scan(tel['scan']['r'])), 720)
-
-    def test_stale_follower_hides_target_and_tracks(self):
-        tel = al.build_telemetry(self.snapshot(stale=True), now=1.0, seq=1,
-                                 sensors=PROFILE['sensors'])
-        self.assertIsNone(tel['follow']['target'])
-        self.assertEqual(tel['follow']['tracks'], [])
-        self.assertFalse(tel['persons'][0]['locked'])
-
-    def test_video_hub_only_encodes_for_viewers(self):
-        hub = al.VideoHub(max_fps=10.0)
-        self.assertFalse(hub.wants_frame(1.0), '没人看时不解码')
-        hub.attach()
-        self.assertTrue(hub.wants_frame(1.0))
-        hub.publish(b'jpg1', 5.0, 1.0)
-        self.assertFalse(hub.wants_frame(1.05), '限帧')
-        self.assertTrue(hub.wants_frame(1.11))
-        self.assertEqual(hub.wait_next(0, 0.1), (1, b'jpg1', 5.0))
-        self.assertIsNone(hub.wait_next(1, 0.05))
-        hub.detach()
-        self.assertEqual(hub.clients, 0)
-        part = al.mjpeg_part(b'\xff\xd8x\xff\xd9', 1.5)
-        self.assertIn(b'Content-Length: 5', part)
-        self.assertIn(b'X-Stamp: 1.500', part)
+        self.assertEqual(set(tel['link']), {'chassis_age_s', 'chassis_ok'})
+        # 早期人体跟随、相机、雷达的字段已去掉
+        for gone in ('follow', 'persons', 'scan'):
+            self.assertNotIn(gone, tel)
 
     def test_hello_and_beacon(self):
-        hello = al.build_hello(PROFILE, name='car', camera={'width': 640, 'height': 480,
-                                                            'fx': 570.3, 'cx': 319.5})
+        hello = al.build_hello(PROFILE, name='car')
         self.assertEqual(hello['v'], al.PROTOCOL_VERSION)
+        for gone in ('camera', 'video'):
+            self.assertNotIn(gone, hello)
+        self.assertFalse({'lidar_x_m', 'camera_x_m', 'camera_yaw_rad'} & set(hello['car']))
         self.assertAlmostEqual(hello['car']['min_turn_radius_m'], ChassisGeometry().min_turn_radius_m, places=3)
         b = json.loads(al.beacon('car', 8088, 'abc'))
         self.assertEqual((b['magic'], b['port']), (al.DISCOVERY_MAGIC, 8088))

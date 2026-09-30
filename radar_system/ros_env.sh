@@ -6,8 +6,7 @@ robot_load_environment() {
   dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)" || return 1
   if [ "${RK3588_RUNTIME_RESOLVED:-}" != 1 ] || [ -z "${RK3588_RUNTIME_ENV_SOURCE:-}" ] ||
       [ -z "${RK3588_ROS_ROOT:-}" ] || [ -z "${RK3588_PYTHON:-}" ] ||
-      [ -z "${RK3588_POSE_MODEL:-}" ] || [ -z "${RK3588_ROBOT_CONFIG:-}" ] ||
-      [ -z "${RK3588_DEPTH_PATH_CONFIG:-}" ]; then
+      [ -z "${RK3588_ROBOT_CONFIG:-}" ]; then
     exports="$(/usr/bin/python3 "$dir/runtime_env_file.py")" || return 1
     eval "$exports"
   fi
@@ -52,8 +51,8 @@ robot_load_environment() {
   if [ "$ROS_DISTRO" = humble ]; then export ROS_LOCALHOST_ONLY=1; fi
   _ROBOT_ENV_LOADED=1
   export RK3588_RUNTIME_RESOLVED=1
-  printf 'runtime: config=%s (%s) ROS=%s [%s] Python=%s model=%s robot_config=%s depth_config=%s\n' \
+  printf 'runtime: config=%s (%s) ROS=%s [%s] Python=%s robot_config=%s\n' \
     "$ROBOT_RUNTIME_ENV" "$RK3588_RUNTIME_ENV_SOURCE" "$ROS_DISTRO" "$setup" \
-    "$RK3588_PYTHON" "$RK3588_POSE_MODEL" "$RK3588_ROBOT_CONFIG" "$RK3588_DEPTH_PATH_CONFIG" >&2
+    "$RK3588_PYTHON" "$RK3588_ROBOT_CONFIG" >&2
 }
 robot_load_environment

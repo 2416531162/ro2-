@@ -33,7 +33,7 @@ class TestFieldHttp(unittest.TestCase):
                 return response.status,json.loads(response.read())
         finally:conn.close()
     def test_real_post_prepares_without_motion_and_forwarding_uses_only_cached_motions(self):
-        bridge=web.TrackingBridgeNode();before=len(bridge.pub_line.sent)
+        bridge=web.WebBridgeNode();before=len(bridge.pub_line.sent)
         status,data=self.request()
         self.assertEqual(200,status,data);self.assertTrue(data['ok'])
         self.assertEqual(before,len(bridge.pub_line.sent));self.assertNotIn('motions',data['plan'])
@@ -53,7 +53,7 @@ class TestFieldHttp(unittest.TestCase):
         status,data=self.request({'Origin':'https://example.invalid','Content-Type':'application/json'})
         self.assertEqual(403,status);self.assertFalse(data['ok'])
     def test_missing_token_never_publishes_motion(self):
-        bridge=web.TrackingBridgeNode();before=len(bridge.pub_line.sent)
+        bridge=web.WebBridgeNode();before=len(bridge.pub_line.sent)
         with self.assertRaises(ValueError):bridge.route_command(dict(action='field_start',preview_token='missing'))
         self.assertEqual(before,len(bridge.pub_line.sent))
     def test_http_selection_is_preserved_in_cached_start(self):

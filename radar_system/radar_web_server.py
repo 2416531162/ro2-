@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-RK3588 雷达与摄像头人体跟踪控制台
-- 运行端口: 8088
-- 汇聚: /scan、人体姿态检测、跟随状态与底盘遥测
+Gen5 RTK 划线车的网页服务（端口 8088）
+- 平板 app：/ws 长连接（hello + 10 Hz 遥测，摇杆 / IMU 直行 / 急停 / 直线、路线、场地作业）、UDP 发现广播
+- 车载屏幕只读显示 /display、网页手动遥控 /、CORS 账号、场地规划 HTTP 接口
+- 汇聚底盘、RTK、走直线节点的状态；手动指令 50 Hz 发给底盘控制权仲裁
 """
 
 import http.server
@@ -22,17 +23,14 @@ import rclpy
 from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
-from rclpy.qos import QoSProfile, ReliabilityPolicy
 
-import numpy as np
-from sensor_msgs.msg import LaserScan, Image, CameraInfo, Imu
+from sensor_msgs.msg import Imu
 from nav_msgs.msg import Odometry
 from std_msgs.msg import String, Float32
-from std_srvs.srv import SetBool, Trigger
+from std_srvs.srv import Trigger
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from motion_safety import ChassisGeometry, yaw_from_steer, steer_from_yaw, clamp
-from scan_utils import clean_ranges, sector_min
+from robot_core.kinematics import ChassisGeometry, yaw_from_steer, steer_from_yaw
 from runtime_config import PROFILE
 from robot_core.service_watchdog import watchdog
 from motion_client import MotionClient
@@ -42,19 +40,10 @@ import app_link
 import car_display
 from display_control import ScreenControl
 from ntrip_config import CorsConfigStore, configuration_allowed
-from depth_measurement import decode_rgb
 from runtime_config import profile_hash
-
-try:
-    import cv2
-except ImportError:          # 没有 OpenCV 时 app 仍可用,只是没有视频
-    cv2 = None
 
 PORT = 8088
 CAR_NAME = os.environ.get('RK3588_CAR_NAME') or socket.gethostname()
-VIDEO_HUB = app_link.VideoHub(max_fps=float(os.environ.get('RK3588_APP_VIDEO_FPS', '12')))
-# 相机分辨率与内参;收到 camera_info / 图像后更新。app 用它把方位角和画面像素互换。
-CAMERA = {'width': 640, 'height': 480, 'fx': 570.3, 'cx': 319.5}
 APP_TELEMETRY_PERIOD_S = 0.10
 APP_RECV_TIMEOUT_S = 3.0     # app 每秒 ping 一次;3 秒没有任何消息视为断线
 # 车载屏幕只读显示（/display）：连着几台平板、车的网络
@@ -81,6 +70,10 @@ MANUAL_HEARTBEAT_TIMEOUT_S = 0.75
 # 现在速度和转角是两个独立维度:UI 指定「开多快」和「方向盘打多少度」,
 # 角速度由后端按当前车速实时换算,换速度档不会改变转弯半径。
 CHASSIS = ChassisGeometry()
+
+
+def clamp(value, low, high):
+    return low if value < low else (high if value > high else value)
 
 # 与页面按钮的标称保持一致；高档仍低于驱动层 1.30m/s 硬上限。
 SPEED_TIERS_MPS = {tier: PROFILE['manual'][tier + '_mps'] for tier in ('low', 'med', 'high')}
@@ -121,151 +114,18 @@ TEMPLATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'templa
 
 data_lock = threading.Lock()
 state = {
-    'connected': True,
-    'hz': 10.0,
-    'points_count': 360,
-    'front_dist': 2.5,
-    'left_dist': 2.0,
-    'back_dist': 2.5,
-    'right_dist': 2.0,
-    'min_dist': 1.8,
-    'ranges': [],
-    'ai_targets': [],
-    'ai_status': {},
     # 动力电池状态
     'voltage': 0.0,
     'battery_pct': 0,
-    # 电子跟屁虫状态与运行标识
-    'follower': {'state': 'OFFLINE'},
-    'follower_running': False,
     'manual_override': {'active': False, 'action': 'none', 'vx': 0.0, 'wz': 0.0}
 }
 
-frame_count = 0
-last_hz_calc = time.time()
-
 bridge_node = None
-follower_proc = None
-last_check_proc = 0.0
-cached_proc_running = False
-
-FOLLOWER_STALE_S = 1.5      # 跟随节点 20Hz 发状态,1.5 秒没消息即判为已停
-AI_STALE_S = 3.0            # 人体识别每帧发一次状态(约 19 fps),3 秒没消息就当没在运行(默认关闭或已挂)
-
-
-def ai_online(status, now=None):
-    """人体识别节点最近 AI_STALE_S 秒内发过状态。"""
-    rx = (status or {}).get('_rx_monotonic')
-    now = time.monotonic() if now is None else now
-    return rx is not None and 0 <= now - rx <= AI_STALE_S
-
-
-def mark_follower_staleness(payload):
-    """给跟随状态打上 stale 标记,陈旧时清掉会误导人的字段。
-
-    没有这道处理,节点挂掉后界面会一直显示它最后那一刻的 AEB 状态与测距,
-    看起来就像"雷达一直在报前方有障碍物",实际上节点早就不在了。
-    """
-    if not payload:
-        return payload
-    rx = payload.get('_rx_monotonic')
-    age = (time.monotonic() - rx) if rx else None
-    stale = (age is None) or (age > FOLLOWER_STALE_S)
-    payload['stale'] = stale
-    payload['age_s'] = round(age, 2) if age is not None else None
-    if stale:
-        # 这些值只在节点活着时才有意义,陈旧时必须清掉而不是接着显示
-        payload['aeb_active'] = False
-        payload['aeb_min_scan_m'] = None
-        payload['path_clearance_m'] = None
-        payload['target'] = None
-        payload['state'] = 'OFFLINE'
-    return payload
-
-
-def is_follower_running():
-    global follower_proc
-    if follower_proc is not None and follower_proc.poll() is None:
-        return True
-    try:
-        out = subprocess.check_output(['pgrep', '-f', 'person_follower.py']).decode().strip()
-        return len(out) > 0
-    except Exception:
-        return False
-
-def check_follower_running_cached():
-    global last_check_proc, cached_proc_running
-    now = time.time()
-    if now - last_check_proc > 0.5:
-        last_check_proc = now
-        cached_proc_running = is_follower_running()
-    return cached_proc_running
-
-def is_follow_active():
-    return bool(bridge_node and bridge_node.motion.fresh()
-                and bridge_node.motion.state.get('mode') == 'FOLLOW')
-
-
-def start_follower():
-    global follower_proc
-    if bridge_node is None:
-        return False, 'motion bridge unavailable'
-    with data_lock:
-        ai_status = state.get('ai_status')
-    if not ai_online(ai_status):
-        # 人体识别默认关闭(省内存)。没有它就认不出人,跟随只会停在"人丢了,正在找"
-        return False, '人体识别没在运行，跟随用不了'
-    with bridge_node.control_lock:
-        ok, message = bridge_node.recover_latched_fault()
-        if not ok:
-            return False, message
-        if os.environ.get('RK3588_MANAGED_FOLLOWER') == '1':
-            try:
-                unit = 'rk3588-perception@follower.service'
-                active = subprocess.run(['systemctl', 'is-active', '--quiet', unit],
-                                        check=False, timeout=2, capture_output=True)
-                if active.returncode != 0:
-                    command = ['systemctl', 'start', unit]
-                    if os.geteuid() != 0:
-                        command = ['sudo', '-n', *command]
-                    subprocess.run(command, check=True, timeout=10,
-                                   capture_output=True, text=True)
-            except subprocess.CalledProcessError as exc:
-                return False, (exc.stderr or str(exc)).strip()
-            except Exception as exc:
-                return False, str(exc)
-        elif not is_follower_running():
-            script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'person_follower.py')
-            try:
-                # The web-selected mode, not the child, controls takeover.
-                follower_proc = subprocess.Popen(
-                    [sys.executable, '-u', script_path, '--passive'],
-                    cwd=os.path.dirname(script_path), start_new_session=True)
-            except Exception as exc:
-                return False, str(exc)
-        bridge_node.manual_drive.set(0.0, 0.0)
-        bridge_node.manual_drive.sample()  # discard the old manual zero
-        return bridge_node.select_follow(True)
-
-
-def stop_follower():
-    if bridge_node is None:
-        return False, 'motion bridge unavailable'
-    with bridge_node.control_lock:
-        return bridge_node.select_follow(False)
-
 
 def snapshot_state():
-    """一份给前端/app 用的状态快照(跟随状态已做陈旧标记)。"""
-    running = is_follow_active()   # 不在 data_lock 里调用,避免卡住 ROS 回调
+    """一份给网页 / app / 车载屏幕用的状态快照。"""
     with data_lock:
-        state['follower_running'] = running
         snapshot = dict(state)
-        if not ai_online(snapshot.get('ai_status')):
-            # 识别停了就不再给出它最后那一刻的人框和帧率,否则画面上会一直挂着旧框
-            snapshot['ai_status'] = {}
-            snapshot['ai_targets'] = []
-        snapshot['follower'] = mark_follower_staleness(dict(snapshot.get('follower', {})))
         wheeltec_rx = snapshot.get('wheeltec', {}).get('_rx_monotonic')
         snapshot['wheeltec_status_age_s'] = (
             round(time.monotonic() - wheeltec_rx, 2) if wheeltec_rx else None)
@@ -279,7 +139,7 @@ def snapshot_state():
 
 
 def emergency_stop():
-    """急停:先清零手动指令,再锁存 ESTOP。不等 control_lock —— 启动跟随可能持锁十几秒。"""
+    """急停:先清零手动指令,再锁存 ESTOP。不等 control_lock —— 复位可能拿着锁等服务应答。"""
     if bridge_node is None:
         return False, 'motion bridge unavailable'
     bridge_node.straight.end('estop')
@@ -316,7 +176,7 @@ def apply_manual(vx, wz, steer_deg, action, client_id, seq, hold=None):
         if not ok:
             return 409, {'ok': False, 'error': message}
     else:
-        # First zero goes out before any follow/reset service holding
+        # First zero goes out before a reset service call holding
         # control_lock can delay the request. The second zero
         # below wins over a command already in that critical section.
         bridge_node.manual_drive.accept(client_id, seq, 0.0, 0.0)
@@ -368,18 +228,13 @@ def discovery_beacon():
         time.sleep(1.0)
 
 
-class TrackingBridgeNode(Node):
+class WebBridgeNode(Node):
     def __init__(self):
-        super().__init__('radar_tracking_web_bridge')
-        self.sub_scan = self.create_subscription(LaserScan, '/scan', self.scan_cb, 10)
-        self.sub_ai = self.create_subscription(String, '/camera/ai_detection/targets', self.ai_cb, 10)
-        self.sub_ai_status = self.create_subscription(String, '/camera/ai_detection/status', self.ai_status_cb, 1)
+        super().__init__('web_bridge')
         self.sub_voltage = self.create_subscription(Float32, '/voltage', self.voltage_cb, 10)
-        self.sub_follower = self.create_subscription(String, '/follower/status', self.follower_cb, 10)
         self.sub_wheeltec = self.create_subscription(String, '/wheeltec/status', self.wheeltec_cb, 10)
 
         self.motion = MotionClient(self, 'manual', timeout_s=1.0)
-        self.follow_selector = self.create_client(SetBool, '/motion/follow')
         self.cli_reset = self.create_client(Trigger, '/motion/reset')
         self.cli_stop = self.create_client(Trigger, '/motion/stop')
         self.control_lock = threading.RLock()
@@ -405,22 +260,12 @@ class TrackingBridgeNode(Node):
         self._manual_loop_at = None
         self.manual_timer = self.create_timer(MANUAL_PUBLISH_PERIOD_S, self.manual_loop,
                                               callback_group=self.manual_group)
-
-        # 手机 app:相机画面只在有人看时才解码压缩,独立回调组不拖慢雷达/状态回调
-        self.video_group = MutuallyExclusiveCallbackGroup()
-        video_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT)
-        self.sub_rgb = self.create_subscription(Image, '/camera/rgb/image_raw', self.rgb_cb,
-                                                video_qos, callback_group=self.video_group)
-        self.sub_cam_info = self.create_subscription(CameraInfo, '/camera/rgb/camera_info',
-                                                     self.cam_info_cb, video_qos,
-                                                     callback_group=self.video_group)
-        self.pub_select = self.create_publisher(String, '/follower/select_target', 1)
         # RTK 走直线：状态转给 app，app 的操作指令转给 line_node
         self.sub_gnss = self.create_subscription(String, '/gnss/status', self.gnss_status_cb, 1)
         self.sub_line = self.create_subscription(String, '/line/status', self.line_status_cb, 1)
         self.pub_line = self.create_publisher(String, '/line/command', 10)
 
-        self.get_logger().info('>>> 雷达、人体姿态、跟随与底盘遥测已连接')
+        self.get_logger().info('>>> 底盘、RTK、走直线节点状态已连接')
 
     def wheeltec_cb(self, msg):
         global state
@@ -450,15 +295,12 @@ class TrackingBridgeNode(Node):
         except Exception as exc:
             return False, str(exc)
 
-    def select_follow(self, enable):
-        return self.call_motion_service(self.follow_selector, SetBool.Request(data=enable))
-
     def recover_latched_fault(self):
         """Reset a recovered, stationary FAULT before an explicit new command.
 
         MotionAuthority deliberately latches FAULT after a transient sensor/driver
         outage. Keeping that latch is important, but the web UI previously had no
-        recovery path: every later manual/follow request was rejected even after all
+        recovery path: every later manual request was rejected even after all
         sensors were healthy again. A fresh user command is explicit intent to
         continue, so let the driver's /motion/reset service perform its own health
         and stationary checks, then retry the command.
@@ -489,7 +331,7 @@ class TrackingBridgeNode(Node):
         last, self._manual_loop_at = self._manual_loop_at, tick
         if last is not None and tick - last > STALL_LOG_S:
             print(f'web_stall seconds={tick - last:.3f}', file=sys.stderr, flush=True)
-        # 启动跟随、复位在 HTTP 线程里拿着 control_lock 等服务应答：这一拍不发（原来也是等锁、不发），
+        # 复位在 HTTP 线程里拿着 control_lock 等服务应答：这一拍不发（原来也是等锁、不发），
         # 不能在执行器线程里干等——单线程执行器等着就没人收那个服务应答了
         if not self.control_lock.acquire(blocking=False):
             return
@@ -525,26 +367,6 @@ class TrackingBridgeNode(Node):
 
     def odom_cb(self, msg):
         self.straight.on_odom(msg.twist.twist.linear.x, time.monotonic())
-
-    def rgb_cb(self, msg):
-        now = time.monotonic()
-        if cv2 is None or not VIDEO_HUB.wants_frame(now):
-            return
-        try:
-            bgr = cv2.cvtColor(decode_rgb(msg), cv2.COLOR_RGB2BGR)
-            ok, buf = cv2.imencode('.jpg', bgr, [cv2.IMWRITE_JPEG_QUALITY, 70])
-        except Exception:
-            return
-        if ok:
-            CAMERA['width'], CAMERA['height'] = msg.width, msg.height
-            VIDEO_HUB.publish(buf.tobytes(), msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9, now)
-
-    def cam_info_cb(self, msg):
-        if msg.k[0] > 0:
-            CAMERA.update(width=msg.width, height=msg.height, fx=msg.k[0], cx=msg.k[2])
-
-    def select_target(self, bearing_rad):
-        self.pub_select.publish(String(data=json.dumps({'bearing_rad': bearing_rad})))
 
     def _store_status(self, key, msg):
         try:
@@ -582,19 +404,6 @@ class TrackingBridgeNode(Node):
                 payload[key] = cmd[key]
         self.pub_line.publish(String(data=json.dumps(payload)))
 
-    def follower_cb(self, msg):
-        global state
-        try:
-            d = json.loads(msg.data)
-            # 记录收到时刻。跟随节点被 Ctrl-C 或崩溃时不会发"我停了",
-            # 最后一条消息会永远冻在界面上 —— AEB 横幅一直亮、正前测距
-            # 一直显示那个旧值,哪怕雷达实时看到的是 2 米开外。
-            d['_rx_monotonic'] = time.monotonic()
-            with data_lock:
-                state['follower'] = d
-        except Exception:
-            pass
-
     def voltage_cb(self, msg):
         global state
         try:
@@ -605,69 +414,6 @@ class TrackingBridgeNode(Node):
                 state['battery_pct'] = pct
         except Exception:
             pass
-
-
-    def ai_cb(self, msg):
-        global state
-        try:
-            items = json.loads(msg.data)
-            with data_lock:
-                state['ai_targets'] = items
-        except Exception:
-            pass
-
-
-    def ai_status_cb(self, msg):
-        try:
-            status = json.loads(msg.data)
-            status['_rx_monotonic'] = time.monotonic()
-            with data_lock:
-                state['ai_status'] = status
-        except (TypeError, ValueError):
-            pass
-
-    def scan_cb(self, msg):
-        global state, frame_count, last_hz_calc
-        frame_count += 1
-        now = time.time()
-        if now - last_hz_calc >= 1.0:
-            hz = round(frame_count / (now - last_hz_calc), 1)
-            frame_count = 0
-            last_hz_calc = now
-        else:
-            hz = state['hz']
-
-        n = len(msg.ranges)
-        if n == 0: return
-
-        # 一次转换、一个掩码,四个方位与整体最小值都从同一份数组上取,
-        # 避免原来每个方位各跑一遍 Python 循环、再多跑两遍全量遍历。
-        clean, ok = clean_ranges(msg.ranges, msg.range_min, msg.range_max)
-        # 必须把 angle_min 传进去。LaserScan 第 0 个光束指向 msg.angle_min
-        # 而不是 0°,N10P 发布 -π,不传的话「正前方测距」读的其实是车尾 ——
-        # 雷达扫到车自己的车身,会被当成正前方 0.17m 的障碍物。
-        amin_deg = math.degrees(msg.angle_min)
-        front_d = sector_min(clean, 345, 15, angle_min_deg=amin_deg)
-        left_d = sector_min(clean, 75, 105, angle_min_deg=amin_deg)
-        back_d = sector_min(clean, 165, 195, angle_min_deg=amin_deg)
-        right_d = sector_min(clean, 255, 285, angle_min_deg=amin_deg)
-        overall_min = float(np.nanmin(clean)) if bool(np.any(ok)) else 99.0
-        # Round after widening: float32.tolist() otherwise expands 2.15 into
-        # 2.1500000953674316 in every SSE frame sent to a phone.
-        ranges_out = np.round(np.where(ok, clean, 0.0).astype(np.float64), 2).tolist()
-
-        with data_lock:
-            state['hz'] = hz
-            state['points_count'] = n
-            state['front_dist'] = round(front_d, 2)
-            state['left_dist'] = round(left_d, 2)
-            state['back_dist'] = round(back_d, 2)
-            state['right_dist'] = round(right_d, 2)
-            state['min_dist'] = round(overall_min, 2)
-            state['ranges'] = ranges_out
-            state['angle_min'] = msg.angle_min
-            state['angle_increment'] = msg.angle_increment
-
 
 
 def tune_gc():
@@ -713,7 +459,7 @@ def ros_worker():
     from rclpy.signals import SignalHandlerOptions
     from rclpy.executors import ExternalShutdownException
     rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
-    node = TrackingBridgeNode()
+    node = WebBridgeNode()
     bridge_node = node
     executor = make_executor()
     executor.add_node(node)
@@ -800,13 +546,6 @@ class RadarHTTPHandler(http.server.BaseHTTPRequestHandler):
                 self.send_error(404)
                 return
 
-        elif self.path == '/api/follower/status':
-            with data_lock:
-                f_data = dict(state.get('follower', {}))
-            f_data = mark_follower_staleness(f_data)
-            f_data['running'] = is_follow_active()
-            self._send_json(f_data)
-
         elif self.path == '/api/rtk/cors':
             if self.headers.get('Origin'):
                 self._send_json({'ok': False, 'error': 'origin_not_allowed'}, status=403)
@@ -828,9 +567,6 @@ class RadarHTTPHandler(http.server.BaseHTTPRequestHandler):
         elif self.path == '/ws':
             self._serve_app_socket()
 
-        elif self.path.split('?')[0] == '/video.mjpg':
-            self._serve_mjpeg()
-
         elif self.path == '/api/stream':
             # 事件流没有长度,靠断开连接结束;明确声明,不让这条连接被当作可复用的长连接
             self.close_connection = True
@@ -845,14 +581,14 @@ class RadarHTTPHandler(http.server.BaseHTTPRequestHandler):
                     payload = json.dumps(snapshot_state())
                     self.wfile.write(f"data: {payload}\n\n".encode('utf-8'))
                     self.wfile.flush()
-                    time.sleep(0.10) # LiDAR updates at ~10 Hz; avoid redundant mobile JSON work.
+                    time.sleep(0.10)     # 10 Hz 够网页显示，别让手机浏览器解析太多 JSON
             except Exception:
                 pass
         else:
             self.send_error(404)
 
     def _serve_app_socket(self):
-        """安卓 app 长连接:下行 hello + 10Hz 遥测,上行摇杆/跟随/急停/点选。"""
+        """平板 app 长连接:下行 hello + 10Hz 遥测,上行摇杆/直行/急停/作业指令。"""
         key = self.headers.get('Sec-WebSocket-Key')
         if not key or 'websocket' not in (self.headers.get('Upgrade') or '').lower():
             self.send_error(400, 'WebSocket upgrade required')
@@ -874,13 +610,10 @@ class RadarHTTPHandler(http.server.BaseHTTPRequestHandler):
         def pump():
             seq = 0
             try:
-                ws.send_json(app_link.build_hello(PROFILE, name=CAR_NAME, camera=dict(CAMERA),
-                                                  session=session))
+                ws.send_json(app_link.build_hello(PROFILE, name=CAR_NAME, session=session))
                 while not done.is_set():
                     seq += 1
-                    ws.send_json(app_link.build_telemetry(
-                        snapshot_state(), now=time.monotonic(), seq=seq,
-                        sensors=PROFILE['sensors']))
+                    ws.send_json(app_link.build_telemetry(snapshot_state(), now=time.monotonic(), seq=seq))
                     done.wait(APP_TELEMETRY_PERIOD_S)
             except Exception:
                 pass
@@ -895,7 +628,7 @@ class RadarHTTPHandler(http.server.BaseHTTPRequestHandler):
                 pass
 
         def slow(cmd, fn):
-            # 启动跟随/复位可能等十几秒服务应答,不能堵住摇杆和急停的接收
+            # 复位要等服务应答(最多 2 s),不能堵住摇杆和急停的接收
             threading.Thread(target=lambda: reply(cmd, *fn()), daemon=True).start()
 
         threading.Thread(target=pump, daemon=True).start()
@@ -934,14 +667,6 @@ class RadarHTTPHandler(http.server.BaseHTTPRequestHandler):
                     reply(cmd, *emergency_stop())
                 elif kind == 'reset':
                     slow(cmd, motion_reset)
-                elif kind == 'follow':
-                    slow(cmd, start_follower if cmd['enable'] else stop_follower)
-                elif kind == 'select_target':
-                    if bridge_node is None:
-                        reply(cmd, False, 'motion bridge unavailable')
-                    else:
-                        bridge_node.select_target(cmd['bearing_rad'])
-                        reply(cmd, True)
                 elif kind == 'line':
                     if bridge_node is None:
                         reply(cmd, False, 'motion bridge unavailable')
@@ -975,30 +700,6 @@ class RadarHTTPHandler(http.server.BaseHTTPRequestHandler):
                     bridge_node.straight.end('disconnected')
                 bridge_node.send_manual_twist(0.0, 0.0)
             ws.close()
-
-    def _serve_mjpeg(self):
-        self.close_connection = True
-        self.send_response(200)
-        self.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=frame')
-        self.send_header('Cache-Control', 'no-cache, no-store')
-        self.send_header('Connection', 'close')
-        self.end_headers()
-        if cv2 is None:
-            return
-        VIDEO_HUB.attach()
-        try:
-            seq = 0
-            while True:
-                frame = VIDEO_HUB.wait_next(seq, timeout=2.0)
-                if frame is None:
-                    continue
-                seq, jpeg, stamp = frame
-                self.wfile.write(app_link.mjpeg_part(jpeg, stamp))
-                self.wfile.flush()
-        except (OSError, ValueError):
-            pass
-        finally:
-            VIDEO_HUB.detach()
 
     def _send_json(self, data, status=200):
         body = json.dumps(data, ensure_ascii=False).encode('utf-8')
@@ -1081,32 +782,6 @@ class RadarHTTPHandler(http.server.BaseHTTPRequestHandler):
                 'max_steer_deg': round(math.degrees(CHASSIS.max_steer_rad), 1),
             })
 
-        elif self.path == '/api/follower/start':
-            ok, msg = start_follower()
-            self._log_follow_request('start', ok, msg)
-            with data_lock:
-                f_data = mark_follower_staleness(dict(state.get('follower', {})))
-            self._send_json({'ok': ok, 'message': msg, 'running': (msg.startswith('FOLLOW:') if ok else is_follow_active()), 'follower': f_data})
-
-        elif self.path == '/api/follower/stop':
-            ok, msg = stop_follower()
-            self._log_follow_request('stop', ok, msg)
-            with data_lock:
-                f_data = mark_follower_staleness(dict(state.get('follower', {})))
-            self._send_json({'ok': ok, 'message': msg, 'running': (msg.startswith('FOLLOW:') if ok else is_follow_active()), 'follower': f_data})
-
-        elif self.path == '/api/follower/toggle':
-            if is_follow_active():
-                action = 'toggle_stop'
-                ok, msg = stop_follower()
-            else:
-                action = 'toggle_start'
-                ok, msg = start_follower()
-            self._log_follow_request(action, ok, msg)
-            with data_lock:
-                f_data = mark_follower_staleness(dict(state.get('follower', {})))
-            self._send_json({'ok': ok, 'message': msg, 'running': (msg.startswith('FOLLOW:') if ok else is_follow_active()), 'follower': f_data})
-
         elif self.path in ('/api/motion/stop', '/api/motion/reset'):
             if bridge_node is None:
                 self._send_json({'ok': False, 'message': 'motion bridge unavailable'}, status=503)
@@ -1153,12 +828,6 @@ class RadarHTTPHandler(http.server.BaseHTTPRequestHandler):
         else:
             self.send_error(404)
 
-    def _log_follow_request(self, action, ok, message):
-        event = {'peer': self.client_address[0], 'action': action,
-                 'ok': ok, 'message': message}
-        print('follow_request ' + json.dumps(event, ensure_ascii=False),
-              file=sys.stderr, flush=True)
-
     def log_message(self, format, *args):
         return
 
@@ -1178,7 +847,7 @@ def main():
     threading.Thread(target=discovery_beacon, daemon=True).start()
     NETWORK.start()
     try:
-        print(f"雷达 / 摄像头跟踪服务: http://0.0.0.0:{PORT}")
+        print(f"网页服务: http://0.0.0.0:{PORT}")
         while not stopping.is_set():
             if not t.is_alive():
                 raise RuntimeError('ROS worker exited while HTTP server was running')

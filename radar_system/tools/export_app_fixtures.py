@@ -31,28 +31,14 @@ BODY = (PROFILE['geometry']['front_m'], PROFILE['geometry']['rear_m'], PROFILE['
 PIVOT_RADIUS = PROFILE['drive']['min_radius_m'] / PathConfig().kappa_margin
 
 
-def sample_snapshot(stale=False):
-    """radar_web_server 状态快照的一个典型样本:正前方 1.8m 有一个被相机和雷达同时看到的人。"""
-    s = PROFILE['sensors']
+def sample_snapshot():
+    """radar_web_server 状态快照的一个典型样本：底盘在线、手动控制中、车速 0.42 m/s。"""
     return {
-        'hz': 10.0, 'voltage': 24.1, 'battery_pct': 82, 'follower_running': True,
-        'ranges': [1.0] * 720, 'angle_min': 0.0, 'angle_increment': 2 * math.pi / 720,
-        'ai_status': {'fps': 29.7},
-        'ai_targets': [{'label': 'person', 'conf': 0.9, 'x1': 200, 'y1': 80, 'x2': 300,
-                        'y2': 420, 'distance': 1.8, 'bearing_rad': 0.0},
-                       {'label': 'chair', 'x1': 1}],
+        'voltage': 24.1, 'battery_pct': 82,
         'wheeltec': {'connected': True, 'telemetry': {'velocity': [0.42, 0.0, 0.1]}},
         'wheeltec_status_age_s': 0.05,
-        'motion': {'mode': 'FOLLOW', 'healthy': True},
+        'motion': {'mode': 'MANUAL', 'healthy': True},
         'manual_override': {'active': False},
-        'follower': {'stale': stale, 'state': 'TRACKING', 'limit_reason': 'follow',
-                     'turnaround_phase': 'IDLE', 'turnaround_plan': None,
-                     'aim_point': [2.1, 0.0], 'speed_cap_mps': 0.8,
-                     'path_clearance_m': 1.6, 'aeb_active': False,
-                     'tracks': [{'id': 3, 'x': 2.3, 'y': 0.0, 'confirmed': True, 'target': True}],
-                     'target': {'track_id': 3, 'veh_x': s['camera_x_m'] + 1.8, 'veh_y': 0.0,
-                                'gap_used': 1.2, 'bearing_deg': 0.0, 'ground_speed': 0.9,
-                                'in_camera_view': True, 'coasting': False}},
     }
 
 
@@ -280,33 +266,24 @@ def route_geometry_cases():
 
 
 def fixture_messages():
-    """文件名 -> 消息。tel_sample 是跟随掉头中（覆盖 plan/segments），tel_line_sample 是 RTK 走直线中，
+    """文件名 -> 消息。tel_sample 是 IMU 定向直行中，tel_line_sample 是 RTK 走直线中，
     tel_route_sample 是走路线中，route_geometry_sample 是路线几何对照样例。"""
     snap = sample_snapshot()
-    snap['follower'].update(state='TURNAROUND', turnaround_phase='REVERSE', turnaround_plan={
-        'direction': -1, 'turn_dir': 1, 'stroke_m': 1.2, 'eta_s': 2.4, 'reached': True,
-        'final_bearing_deg': 18.0, 'segments': [[-1, 1.2], [1, 0.3]]})
-    snap['ranges'][0] = 2.5
     snap['gnss'] = sample_gnss()
     # IMU 定向直行正在跑（heading_hold.HeadingHold.status 的样子，作业键 = (会话, app 作业编号)）
     snap['straight'] = {'imu_ok': True, 'yaw_deg': 30.42, 'run': ('app-1', 3), 'state': 'running', 'reason': None,
                         'target_deg': 30.0, 'error_deg': 0.42, 'max_error_deg': 0.83, 'within_pct': 98.5,
                         'elapsed_s': 12.3, 'speed': 0.4, 'wz': -0.021}
-    tel = app_link.build_telemetry(snap, now=100.0, seq=42, sensors=PROFILE['sensors'])
-    line = sample_snapshot(stale=True)
-    line.update(follower_running=False, motion={'mode': 'NAVIGATION', 'healthy': True},
-                gnss=sample_gnss(), line=sample_line())
-    tel_line = app_link.build_telemetry(line, now=100.0, seq=43, sensors=PROFILE['sensors'],
-                                        include_scan=False)
-    hello = app_link.build_hello(PROFILE, name='测试车', camera={'width': 640, 'height': 480,
-                                                              'fx': 570.3, 'cx': 319.5},
-                                 session='app-1')
-    route = sample_snapshot(stale=True)
-    route.update(follower_running=False, motion={'mode': 'NAVIGATION', 'healthy': True},
-                 gnss=sample_bad_heading_gnss(), line=sample_route_line())
+    tel = app_link.build_telemetry(snap, now=100.0, seq=42)
+    line = sample_snapshot()
+    line.update(motion={'mode': 'NAVIGATION', 'healthy': True}, gnss=sample_gnss(), line=sample_line())
+    tel_line = app_link.build_telemetry(line, now=100.0, seq=43)
+    hello = app_link.build_hello(PROFILE, name='测试车', session='app-1')
+    route = sample_snapshot()
+    route.update(motion={'mode': 'NAVIGATION', 'healthy': True}, gnss=sample_bad_heading_gnss(),
+                 line=sample_route_line())
     route['wheeltec'] = dict(route['wheeltec'], guard={'navigation_uses_lidar': False, 'bypassed': True})
-    tel_route = app_link.build_telemetry(route, now=100.0, seq=44, sensors=PROFILE['sensors'],
-                                         include_scan=False)
+    tel_route = app_link.build_telemetry(route, now=100.0, seq=44)
     return {'tel_sample.json': tel, 'tel_line_sample.json': tel_line, 'tel_route_sample.json': tel_route,
             'route_geometry_sample.json': route_geometry_cases(), 'hello_sample.json': hello}
 

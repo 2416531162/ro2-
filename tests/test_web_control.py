@@ -72,8 +72,7 @@ class TestWebControl(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        web.check_follower_running_cached = lambda: False
-        cls.bridge = web.TrackingBridgeNode()
+        cls.bridge = web.WebBridgeNode()
         web.bridge_node = cls.bridge
         cls.server = web.ThreadedHTTPServer(('127.0.0.1', 0), web.RadarHTTPHandler)
         cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
@@ -210,20 +209,23 @@ class TestWebControl(unittest.TestCase):
         self.assertTrue(data['ok'])
         self.assertEqual(reset.calls, 0)
 
-    def test_tracking_bridge_has_no_retired_subscriptions(self):
+    def test_bridge_subscribes_only_current_topics(self):
         topics = {topic for topic, _ in self.bridge.subscriptions_}
-        # 相机原图/内参给安卓 app 的 /video.mjpg;没人看时回调直接返回,不解码
-        # /gnss/status、/line/status 是 RTK 节点和走直线节点的状态，转给 app（不是旧的 /api/cors 路由）
+        # /gnss/status、/line/status 是 RTK 节点和走直线节点的状态，转给 app
         # /imu/data 的偏航角给 IMU 定向直行（heading_hold），/odom 车速给它判断轮子卡住
-        self.assertEqual(topics, {'/scan', '/camera/ai_detection/targets',
-                                 '/camera/ai_detection/status', '/voltage',
-                                 '/follower/status', '/wheeltec/status', '/motion/status',
-                                 '/camera/rgb/image_raw', '/camera/rgb/camera_info',
+        # 没有雷达 /scan、相机、人体识别、跟随节点的订阅（早期 Jetson 人体跟随已去掉）
+        self.assertEqual(topics, {'/voltage', '/wheeltec/status', '/motion/status',
                                  '/gnss/status', '/line/status', '/imu/data', '/odom'})
 
-    def test_retired_map_and_rtk_routes_are_gone(self):
-        for path in ('/map', '/map2d', '/api/cors', '/api/live_map/state'):
+    def test_retired_routes_are_gone(self):
+        for path in ('/map', '/map2d', '/api/cors', '/api/live_map/state', '/video.mjpg',
+                     '/api/follower/status'):
             self.conn.request('GET', path)
+            resp = self.conn.getresponse()
+            self.assertEqual(resp.status, 404, path)
+            resp.read()
+        for path in ('/api/follower/start', '/api/follower/stop', '/api/follower/toggle'):
+            self.conn.request('POST', path, '')
             resp = self.conn.getresponse()
             self.assertEqual(resp.status, 404, path)
             resp.read()
@@ -240,36 +242,6 @@ class TestWebControl(unittest.TestCase):
         self.assertIn('急停已锁存', body)
         self.assertNotIn('运动卡滞已锁存', body)
         self.assertNotIn('motion_stall_latched', body)
-
-
-class TestAiStaleness(unittest.TestCase):
-    """人体识别停了(默认关闭或挂了)以后,不能再给出它最后那一刻的人框和帧率。"""
-
-    def snapshot_with(self, age_s):
-        status = {} if age_s is None else {'fps': 19.0, '_rx_monotonic': time.monotonic() - age_s}
-        box = [{'label': 'person', 'x1': 1, 'y1': 2, 'x2': 3, 'y2': 4}]
-        with patch.dict(web.state, {'ai_status': status, 'ai_targets': box}):
-            return web.snapshot_state()
-
-    def test_running_detection_passes_through(self):
-        snap = self.snapshot_with(0.5)
-        self.assertEqual(snap['ai_status']['fps'], 19.0)
-        self.assertEqual(len(snap['ai_targets']), 1)
-
-    def test_stopped_detection_is_blanked(self):
-        for age in (None, web.AI_STALE_S + 0.5):
-            with self.subTest(age=age):
-                snap = self.snapshot_with(age)
-                self.assertEqual(snap['ai_status'], {})
-                self.assertEqual(snap['ai_targets'], [])
-
-    def test_status_callback_stamps_receipt_time(self):
-        with patch.dict(web.state, {'ai_status': {}}):
-            web.TrackingBridgeNode.ai_status_cb(None, types.SimpleNamespace(data='{"fps": 18.7}'))
-            self.assertTrue(web.ai_online(web.state['ai_status']))
-            self.assertFalse(web.ai_online(web.state['ai_status'], now=time.monotonic() + web.AI_STALE_S + 1))
-            web.TrackingBridgeNode.ai_status_cb(None, types.SimpleNamespace(data='[1, 2]'))  # 不是对象:忽略
-            self.assertEqual(web.state['ai_status']['fps'], 18.7)
 
 
 if __name__ == '__main__':
@@ -347,9 +319,12 @@ class TestAppSocket(unittest.TestCase):
         hello = self.read_json('hello')
         self.assertEqual(hello['v'], self.al.PROTOCOL_VERSION)
         self.assertGreater(hello['car']['min_turn_radius_m'], 1.0)
+        self.assertNotIn('camera', hello)
+        self.assertNotIn('video', hello)
         tel = self.read_json('tel')
         self.assertEqual(tel['motion']['mode'], 'IDLE')
-        self.assertIn('follow', tel)
+        for gone in ('follow', 'persons', 'scan'):
+            self.assertNotIn(gone, tel)
 
     def test_stick_drives_and_disconnect_stops_immediately(self):
         self.read_json('hello')
@@ -362,17 +337,15 @@ class TestAppSocket(unittest.TestCase):
         self.assertTrue(self.wait_for(lambda: self.bridge.manual_drive._vx == 0.0),
                         '断线后车端必须立即清零,不等心跳超时')
 
-    def test_ping_invalid_and_select(self):
+    def test_ping_invalid_and_retired_commands(self):
         self.read_json('hello')
         self.send({'type': 'ping', 't': 42})
         self.assertEqual(self.read_json('pong')['t'], 42)
         self.send({'type': 'drive', 'throttle': 'full'})
         self.assertFalse(self.read_json('ack')['ok'])
-        self.send({'type': 'select_target', 'bearing_rad': 0.2, 'id': 's1'})
-        ack = self.read_json('ack')
-        self.assertTrue(ack['ok'])
-        sent = self.bridge.pub_select.sent[-1]
-        self.assertAlmostEqual(json.loads(sent.data)['bearing_rad'], 0.2)
+        for retired in ({'type': 'select_target', 'bearing_rad': 0.2}, {'type': 'follow', 'enable': True}):
+            self.send(retired)
+            self.assertFalse(self.read_json('ack')['ok'], retired)
 
     def test_route_operation_identity_and_ranges_cross_real_websocket(self):
         self.read_json('hello')

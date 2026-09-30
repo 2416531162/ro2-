@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""手机 app 与车之间的连接层(纯 Python 标准库 + numpy,不依赖 ROS)。
+"""平板 app 与车之间的连接层(纯 Python 标准库,不依赖 ROS)。
 
-radar_web_server.py 用它给安卓 app 提供三样东西:
+radar_web_server.py 用它给平板 app 提供两样东西:
 
 1. ``/ws`` WebSocket 长连接(RFC 6455,标准库实现,板端不用装新包)
-   - 车 -> 手机:``hello``(车体尺寸、相机参数)一次,之后 ``tel`` 遥测 10Hz;
-   - 手机 -> 车:摇杆、跟随开关、急停/复位、点选目标、ping;
-   - 连接断开或摇杆心跳超时,车端自己停车,不依赖手机。
-2. ``/video.mjpg`` 相机 MJPEG(见 radar_web_server.VideoHub);
-3. UDP 广播 ``DISCOVERY_PORT``,app 在路由器 WiFi 或车载热点下都能自动找到车。
+   - 车 -> 平板:``hello``(车体尺寸、手动档位、直行参数)一次,之后 ``tel`` 遥测 10Hz;
+   - 平板 -> 车:摇杆、IMU 直行、急停/复位、直线 / 路线 / 场地作业、ping;
+   - 连接断开或摇杆心跳超时,车端自己停车,不依赖平板。
+2. UDP 广播 ``DISCOVERY_PORT``,app 在路由器 WiFi 或车载热点下都能自动找到车。
 
 协议字段见 docs/APP_PROTOCOL.md。这里只做编码、校验和几何换算,
 真正的运动指令仍走 MotionClient / ManualDriveLatch / MotionAuthority 那一套。
@@ -21,15 +20,13 @@ import math
 import struct
 import threading
 
-import numpy as np
-
 from heading_hold import HoldConfig
 
 STRAIGHT = HoldConfig()     # IMU 定向直行的参数（hello 里告诉 app）
 
 PROTOCOL_VERSION = 1
 DISCOVERY_PORT = 48620
-DISCOVERY_MAGIC = 'rk3588-follow'
+DISCOVERY_MAGIC = 'rk3588-follow'      # 早期名字，平板 app 按它认车，不改
 WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
 
 OP_CONT, OP_TEXT, OP_BINARY, OP_CLOSE, OP_PING, OP_PONG = 0x0, 0x1, 0x2, 0x8, 0x9, 0xA
@@ -229,12 +226,6 @@ def parse_command(text):
         out['run'] = run
         seq = msg.get('seq')
         out['seq'] = int(seq) if isinstance(seq, int) and not isinstance(seq, bool) else None
-    elif kind == 'follow':
-        if not isinstance(msg.get('enable'), bool):
-            raise CommandError('follow.enable 必须是 true/false')
-        out['enable'] = msg['enable']
-    elif kind == 'select_target':
-        out['bearing_rad'] = _finite(msg.get('bearing_rad'), 'bearing_rad', -math.pi, math.pi)
     elif kind == 'ping':
         out['t'] = msg.get('t')
     elif kind == 'line':
@@ -388,56 +379,18 @@ def _differential_stick(throttle, steer, tier, tiers_mps, reverse_scale, geometr
 # 车 -> 手机:遥测
 # =============================================================================
 
-def encode_scan(ranges):
-    """距离(米,0/非有限=无效) -> uint16 厘米小端 base64。720 束约 1.9KB。"""
-    arr = np.asarray(ranges, dtype=np.float64)
-    cm = np.where(np.isfinite(arr) & (arr > 0), np.round(arr * 100.0), 0.0)
-    return base64.b64encode(np.clip(cm, 0, 65535).astype('<u2').tobytes()).decode('ascii')
-
-
-def decode_scan(text):
-    return (np.frombuffer(base64.b64decode(text), dtype='<u2').astype(np.float64) / 100.0)
-
-
-def camera_bearing(vx, vy, sensors):
-    """车体系点 -> 相机水平方位(左正),与检测框的 bearing_rad 同一约定。"""
-    rel = math.atan2(vy - sensors['camera_y_m'], vx - sensors['camera_x_m']) - sensors['camera_yaw_rad']
-    return math.atan2(math.sin(rel), math.cos(rel))
-
-
-def mark_locked(persons, target, sensors, tolerance_rad=math.radians(6.0)):
-    """在检测框里找跟随目标那一个,置 locked=True;目标不在画面里时都不标。"""
-    for p in persons:
-        p['locked'] = False
-    if not target or not target.get('in_camera_view') or target.get('veh_x') is None:
-        return persons
-    want = camera_bearing(target['veh_x'], target['veh_y'], sensors)
-    best, best_err = None, tolerance_rad
-    for p in persons:
-        b = p.get('bearing')
-        if b is None:
-            continue
-        err = abs(math.atan2(math.sin(b - want), math.cos(b - want)))
-        if err <= best_err:
-            best, best_err = p, err
-    if best is not None:
-        best['locked'] = True
-    return persons
-
-
 def _num(value, digits=2):
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
         return None
     return round(float(value), digits)
 
 
-def build_hello(profile, *, name, camera, video_path='/video.mjpg', session=None):
-    g, s, drive = profile['geometry'], profile['sensors'], profile['drive']
+def build_hello(profile, *, name, session=None):
+    g, drive = profile['geometry'], profile['drive']
     tan = math.tan(g['max_steer_rad'])
     differential = drive['type'] == 'differential'
     return {
         'type': 'hello', 'v': PROTOCOL_VERSION, 'name': name, 'session': session,
-        'video': video_path,
         'car': {
             'front_m': g['front_m'], 'rear_m': g['rear_m'], 'half_width_m': g['half_width_m'],
             'wheelbase_m': g['wheelbase_m'], 'track_m': g['track_m'],
@@ -445,11 +398,7 @@ def build_hello(profile, *, name, camera, video_path='/video.mjpg', session=None
             'min_turn_radius_m': round(drive['min_radius_m'] if differential else g['wheelbase_m'] / tan + 0.5 * g['track_m'], 3),
             # 差速车能原地转，没有前轮转角；nozzle_x_m 是喷头（差速车连线路线的压线点）在后轴前多少米
             'drive': drive['type'], 'nozzle_x_m': drive['nozzle_x_m'],
-            'lidar_x_m': s['lidar_x_m'], 'lidar_y_m': s['lidar_y_m'],
-            'camera_x_m': s['camera_x_m'], 'camera_y_m': s['camera_y_m'],
-            'camera_yaw_rad': s['camera_yaw_rad'],
         },
-        'camera': camera,
         'speed_tiers': {k: profile['manual'][k + '_mps'] for k in SPEED_TIERS},
         # IMU 定向直行（只用 IMU 偏航，不用 RTK）：固定车速、目标精度、偏差超过 abort_deg 停车
         'straight': {'speed_mps': STRAIGHT.speed, 'tolerance_deg': STRAIGHT.tolerance_deg,
@@ -594,31 +543,16 @@ def straight_telemetry(st):
     return out
 
 
-def build_telemetry(snap, *, now, seq, sensors, include_scan=True):
-    """radar_web_server 的 state 快照 -> 紧凑遥测。follower 需已做过陈旧标记。"""
-    f = snap.get('follower') or {}
-    stale = bool(f.get('stale', True))
-    target = None if stale else f.get('target')
+def build_telemetry(snap, *, now, seq):
+    """radar_web_server 的 state 快照 -> 紧凑遥测。"""
     wt = snap.get('wheeltec') or {}
     vel = (wt.get('telemetry') or {}).get('velocity') or [None, None, None]
     motion = snap.get('motion') or {}
-    ai = snap.get('ai_status') or {}
     manual = snap.get('manual_override') or {}
-
-    persons = []
-    for d in snap.get('ai_targets') or []:
-        if not isinstance(d, dict) or str(d.get('label', '')).lower() != 'person':
-            continue
-        persons.append({'box': [d.get('x1'), d.get('y1'), d.get('x2'), d.get('y2')],
-                        'conf': _num(d.get('conf')), 'dist': _num(d.get('distance')),
-                        'bearing': _num(d.get('bearing_rad'), 4)})
-    mark_locked(persons, target, sensors)
 
     out = {
         'type': 'tel', 'seq': seq, 't': round(now, 3),
-        'link': {'lidar_hz': _num(snap.get('hz'), 1),
-                 'cam_fps': _num(ai.get('fps'), 1),
-                 'chassis_age_s': _num(snap.get('wheeltec_status_age_s')),
+        'link': {'chassis_age_s': _num(snap.get('wheeltec_status_age_s')),
                  'chassis_ok': bool(wt.get('connected')) and not wt.get('holding', False)},
         'battery': {'v': _num(snap.get('voltage')), 'pct': snap.get('battery_pct')},
         'motion': {'mode': motion.get('mode', 'UNKNOWN'), 'healthy': bool(motion.get('healthy')),
@@ -626,97 +560,18 @@ def build_telemetry(snap, *, now, seq, sensors, include_scan=True):
                    'reason': motion.get('reason'),
                    'faults': motion.get('health_faults') or [],
                    'waiting_stationary': bool(motion.get('waiting_stationary')),
-                   # RTK 路线/直线（NAVIGATION）是否经过雷达防撞；旧版底盘驱动没有这项为 None
+                   # RTK 路线/直线（NAVIGATION）是否经过雷达防撞（旧阿克曼车的底盘防撞层）；Gen5 / 旧版驱动为 None
                    'nav_lidar': (wt.get('guard') or {}).get('navigation_uses_lidar')},
         'drive': {'speed': _num(vel[0]), 'yaw_rate': _num(vel[2]),
                   'manual': bool(manual.get('active')),
                   'steer_deg': _num(manual.get('steer_deg'), 1)},
-        'follow': {
-            'running': bool(snap.get('follower_running')), 'stale': stale,
-            'state': f.get('state', 'OFFLINE'), 'reason': f.get('limit_reason'),
-            'phase': f.get('turnaround_phase'), 'plan': None if stale else f.get('turnaround_plan'),
-            'aim': None if stale else f.get('aim_point'),
-            'cap': _num(f.get('speed_cap_mps')), 'clearance': _num(f.get('path_clearance_m')),
-            'aeb': bool(f.get('aeb_active')),
-            'tracks': [] if stale else [
-                {'id': t.get('id'), 'x': t.get('x'), 'y': t.get('y'),
-                 'confirmed': t.get('confirmed'), 'target': t.get('target')}
-                for t in (f.get('tracks') or []) if isinstance(t, dict)],
-            'target': None if not target else {
-                'id': target.get('track_id'), 'x': target.get('veh_x'), 'y': target.get('veh_y'),
-                'gap': _num(target.get('gap_used')), 'bearing_deg': target.get('bearing_deg'),
-                'speed': target.get('ground_speed'), 'in_camera': bool(target.get('in_camera_view')),
-                'coasting': bool(target.get('coasting'))},
-        },
-        'persons': persons,
         'rtk': rtk_telemetry(snap.get('gnss'), now),
         'line': line_telemetry(snap.get('line'), now),
     }
     straight = straight_telemetry(snap.get('straight'))
     if straight is not None:
         out['straight'] = straight
-    ranges = snap.get('ranges')
-    if include_scan and ranges:
-        out['scan'] = {'a0': _num(snap.get('angle_min', 0.0), 5),
-                       'da': _num(snap.get('angle_increment', 2 * math.pi / len(ranges)), 6),
-                       'r': encode_scan(ranges)}
     return out
-
-
-# =============================================================================
-# 视频:只在有人看时才编码,每个观看者拿最新一帧
-# =============================================================================
-
-class VideoHub:
-    """相机帧 -> 最新 JPEG。ROS 回调先问 wants_frame(),没人看就连解码都省掉。"""
-
-    def __init__(self, max_fps=12.0):
-        self.period = 1.0 / max_fps
-        self._cond = threading.Condition()
-        self._clients = 0
-        self._seq = 0
-        self._jpeg = None
-        self._stamp = None
-        self._last = -1e9
-
-    @property
-    def clients(self):
-        with self._cond:
-            return self._clients
-
-    def attach(self):
-        with self._cond:
-            self._clients += 1
-
-    def detach(self):
-        with self._cond:
-            self._clients = max(0, self._clients - 1)
-
-    def wants_frame(self, now):
-        with self._cond:
-            return self._clients > 0 and now - self._last >= self.period
-
-    def publish(self, jpeg, stamp, now):
-        with self._cond:
-            self._seq += 1
-            self._jpeg, self._stamp, self._last = jpeg, stamp, now
-            self._cond.notify_all()
-
-    def wait_next(self, after_seq, timeout):
-        """等比 after_seq 新的一帧 -> (seq, jpeg, stamp);超时返回 None。"""
-        with self._cond:
-            if not self._cond.wait_for(lambda: self._seq > after_seq and self._jpeg is not None,
-                                       timeout):
-                return None
-            return self._seq, self._jpeg, self._stamp
-
-
-def mjpeg_part(jpeg, stamp, boundary=b'frame'):
-    head = (b'--' + boundary + b'\r\nContent-Type: image/jpeg\r\nContent-Length: '
-            + str(len(jpeg)).encode() + b'\r\n')
-    if stamp is not None:
-        head += b'X-Stamp: ' + ('%.3f' % stamp).encode() + b'\r\n'
-    return head + b'\r\n' + jpeg + b'\r\n'
 
 
 # =============================================================================

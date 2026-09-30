@@ -37,7 +37,7 @@ class TestRosDiscovery(unittest.TestCase):
                 f.write('export ROS_DISTRO=%s\nexport ROS_LOCALHOST_ONLY=0\n' % distro)
             env = dict(os.environ, RK3588_RUNTIME_RESOLVED='1', RK3588_RUNTIME_ENV_SOURCE='test',
                        ROBOT_RUNTIME_ENV='test', RK3588_ROS_ROOT=ros_root, RK3588_PYTHON=sys.executable,
-                       RK3588_POSE_MODEL='x', RK3588_ROBOT_CONFIG='x', RK3588_DEPTH_PATH_CONFIG='x',
+                       RK3588_ROBOT_CONFIG='x',
                        ROS_DISTRO=distro)
             env.pop('ROS_LOCALHOST_ONLY', None)
             out = subprocess.run(['bash', '-c', 'source radar_system/ros_env.sh && echo "$ROS_LOCALHOST_ONLY"'],

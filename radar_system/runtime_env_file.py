@@ -89,8 +89,6 @@ def resolve(environ, project):
         'RK3588_PYTHON': '/usr/bin/python3',
         'RK3588_ROS_ROOT': '/opt/ros',
         'RK3588_ROBOT_CONFIG': str(project / 'robot_core/robot.json'),
-        'RK3588_DEPTH_PATH_CONFIG': '/etc/rk3588/depth_path.json',
-        'RK3588_POSE_MODEL': str(project / 'radar_system/models/yolo26s.pt'),
     }
     for key, default in defaults.items():
         values.setdefault(key, default)
@@ -102,9 +100,7 @@ def resolve(environ, project):
     if not python.is_absolute() or not python.is_file() or not os.access(python, os.X_OK):
         raise ValueError(f'invalid RK3588_PYTHON (absolute executable required): {python}')
     for key, base in (('RK3588_ROS_ROOT', project),
-                      ('RK3588_ROBOT_CONFIG', project),
-                      ('RK3588_DEPTH_PATH_CONFIG', project),
-                      ('RK3588_POSE_MODEL', project / 'radar_system')):
+                      ('RK3588_ROBOT_CONFIG', project)):
         values[key] = str((base / values[key]).absolute())
     values['ROBOT_RUNTIME_ENV'] = str(path)
     values['RK3588_RUNTIME_ENV_SOURCE'] = source

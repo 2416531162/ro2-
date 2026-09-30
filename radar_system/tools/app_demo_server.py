@@ -400,12 +400,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         def pump():
             seq = 0
             try:
-                ws.send_json(app_link.build_hello(PROFILE, name='演示车 (仿真)', camera={},
-                                                  session=session))
+                ws.send_json(app_link.build_hello(PROFILE, name='演示车 (仿真)', session=session))
                 while not done.is_set():
                     seq += 1
-                    ws.send_json(app_link.build_telemetry(CAR.snapshot(), now=time.monotonic(),
-                                                          seq=seq, sensors=PROFILE['sensors']))
+                    ws.send_json(app_link.build_telemetry(CAR.snapshot(), now=time.monotonic(), seq=seq))
                     done.wait(0.1)
             except Exception:
                 pass

@@ -147,7 +147,7 @@ def configuration_allowed(snapshot, now):
         return False
     if not isinstance(rx, (int, float)) or not 0 <= now - rx <= 1.0:
         return False
-    return not snapshot.get('follower_running') and (snapshot.get('line') or {}).get('phase', 'IDLE') == 'IDLE'
+    return (snapshot.get('line') or {}).get('phase', 'IDLE') == 'IDLE'
 
 
 class NtripReload:

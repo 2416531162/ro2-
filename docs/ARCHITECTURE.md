@@ -13,7 +13,7 @@
 | `rk3588-perception@rtk` | `radar_system/rtk_node.py` | UM982 串口或平板串口转发（TCP 48622，`gnss_bridge.py`）→ `/gnss/raw`（JSON）、`/gnss/fix`、`/gnss/heading`；车端 CORS（`ntrip_config.py`） |
 | `rk3588-perception@imu` | `rion_protocol/hda536t_imu.py` | CAN 上的 HDA536T → `/imu`、`/imu/data`（航向角、横滚俯仰） |
 | `rk3588-perception@line` | `radar_system/line_node.py` | 融合（`gnss_fusion.py`）+ 作业状态机（`line_mission.py`）→ `/navigation/command`、`/line/status` |
-| `rk3588-perception@web` | `radar_system/radar_web_server.py` | 网页 + app 的 WebSocket（`/ws`，协议 `app_link.py`、[APP_PROTOCOL.md](APP_PROTOCOL.md)）；手动、IMU 定向直行（`heading_hold.py`）；转发 `/line/command` |
+| `rk3588-perception@web` | `radar_system/radar_web_server.py` | 平板 app 的 WebSocket（`/ws`，协议 `app_link.py`、[APP_PROTOCOL.md](APP_PROTOCOL.md)）；手动、IMU 定向直行（`heading_hold.py`）；转发 `/line/command`；车载屏幕 `/display`；网页手动遥控兜底页 `/`（`templates/index.html`：方向键、急停、状态） |
 | `rk3588-perception@jobrec` | `radar_system/job_recorder.py` | 点开始作业就把原始话题录成 mcap（`~/rtk/jobs`，见 [JOB_RECORDS.md](JOB_RECORDS.md)） |
 
 ```

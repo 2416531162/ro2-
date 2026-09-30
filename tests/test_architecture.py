@@ -12,7 +12,7 @@ sys.path.insert(0, str(ROOT/'radar_system'))
 sys.path.insert(0, str(ROOT/'wheeltec_protocol'))
 sys.path.insert(0, str(ROOT))
 from robot_core.config import PROFILE, load_profile, profile_hash
-from motion_safety import ChassisGeometry
+from robot_core.kinematics import ChassisGeometry
 from deployment.manage import stage, verify, activate, units
 
 

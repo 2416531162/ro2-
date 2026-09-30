@@ -220,7 +220,7 @@ def rollback(base, unit_dir):
         else:
             path.write_text(content)
     systemctl('daemon-reload')
-    # Leave stopped: an older follower might auto-select motion on startup.
+    # 回滚后服务留着停止状态，由调用方决定何时启动（旧版本的节点启动时可能自己选运动模式）。
 
 
 def service_account(user):

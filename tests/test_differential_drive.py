@@ -155,9 +155,9 @@ class TestManualStick(unittest.TestCase):
         self.assertEqual(al.resolve_stick(0.0, 1.0, 'med', self.TIERS, 0.6, ChassisGeometry()), (0.0, 0.0, 0.0))
 
     def test_hello_reports_drive_and_nozzle(self):
-        car = al.build_hello(load_profile(GEN5), name='gen5', camera={})['car']
+        car = al.build_hello(load_profile(GEN5), name='gen5')['car']
         self.assertEqual((car['drive'], car['nozzle_x_m'], car['min_turn_radius_m']), ('differential', 0.30, 0.5))
-        self.assertEqual(al.build_hello(load_profile(), name='old', camera={})['car']['drive'], 'ackermann')
+        self.assertEqual(al.build_hello(load_profile(), name='old')['car']['drive'], 'ackermann')
 
 
 class TestMotionAuthorityPivot(unittest.TestCase):

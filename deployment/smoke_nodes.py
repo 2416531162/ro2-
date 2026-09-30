@@ -7,7 +7,7 @@
 robot_core）。这里按 systemd 直接运行 radar_system/xxx_node.py 的方式设置 sys.path；不打开串口、
 不连 CORS、不 spin。由 smoke.sh 换到单独的 ROS 域，不和正在运行的服务互相看见。
 
-    bash deployment/smoke.sh <发布目录> [rtk line imu oid jobrec]      # activate 之前在车上跑，失败就不要激活
+    bash deployment/smoke.sh <发布目录> [rtk line imu oid jobrec web]  # activate 之前在车上跑，失败就不要激活
 
 imu（Gen5 的 HDA536T 驱动）用假 CAN 总线喂一个周期，查真 sensor_msgs/Imu 能填好、发出去；oid（Gen5 底盘驱动）
 只在共享配置是差速车时查，默认只收不发，没有 can0 也能构造、发状态。换到正点原子 RK3588（ROS 2 Jazzy）后第一次
@@ -167,7 +167,28 @@ def check_jobrec():
         shutil.rmtree(root, ignore_errors=True)
 
 
-CHECKS = {'rtk': check_rtk, 'line': check_line, 'imu': check_imu, 'oid': check_oid, 'jobrec': check_jobrec}
+def check_web():
+    # 网页服务：构造 ROS 桥接节点，用它的状态快照编 hello / 遥测（不开 HTTP 端口、不发运动指令）
+    os.environ['RK3588_NTRIP_ENV'] = '/nonexistent/ntrip.env'
+    import json
+    import radar_web_server as web
+    import app_link
+    node = web.WebBridgeNode()
+    try:
+        web.bridge_node = node
+        snap = web.snapshot_state()
+        hello = app_link.build_hello(web.PROFILE, name='smoke', session='smoke')
+        tel = app_link.build_telemetry(snap, now=time.monotonic(), seq=1)
+        json.dumps(hello, allow_nan=False)
+        json.dumps(tel, allow_nan=False)
+        assert 'follow' not in tel and 'camera' not in hello, (hello, tel)
+    finally:
+        web.bridge_node = None
+        node.destroy_node()
+
+
+CHECKS = {'rtk': check_rtk, 'line': check_line, 'imu': check_imu, 'oid': check_oid, 'jobrec': check_jobrec,
+          'web': check_web}
 
 
 def main(names=None):

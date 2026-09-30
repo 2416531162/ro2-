@@ -7,7 +7,6 @@ source "$ROOT/radar_system/ros_env.sh"
 set -u
 export ROS_AUTOMATIC_DISCOVERY_RANGE="${ROS_AUTOMATIC_DISCOVERY_RANGE:-LOCALHOST}"
 export RK3588_ROBOT_CONFIG="${RK3588_ROBOT_CONFIG:-$ROOT/robot_core/robot.json}"
-export RK3588_MANAGED_FOLLOWER=1
 case "${1:-}" in
   # 底盘驱动按共享配置的驱动方式选：differential（Gen5 两后轮差速）用欧艾迪双驱驱动器，其余是 Wheeltec
   chassis)

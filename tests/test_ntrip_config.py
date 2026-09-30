@@ -19,7 +19,7 @@ PROFILE = dict(host='127.0.0.1', port=2101, mount='AUTO', user='u', password='p'
 
 
 def idle(now):
-    return dict(motion_fresh=True, motion={'mode': 'IDLE'}, follower_running=False, line={'phase': 'IDLE'},
+    return dict(motion_fresh=True, motion={'mode': 'IDLE'}, line={'phase': 'IDLE'},
                 wheeltec={'connected': True, '_rx_monotonic': now, 'telemetry': {'velocity': [0.0, 0.0, 0.0]}})
 
 
@@ -257,7 +257,7 @@ def test_http_save_reload_and_receive_corrections(tmp_path, monkeypatch):
         status, data = request('POST', PROFILE, {'Origin': 'http://untrusted.example'})
         assert status == 403
         bad = idle(time.monotonic())
-        bad['motion']['mode'] = 'FOLLOW'
+        bad['motion']['mode'] = 'NAVIGATION'
         monkeypatch.setattr(web, 'snapshot_state', lambda: bad)
         assert request('POST', PROFILE)[0] == 409
         assert request('POST', {'action': 'disconnect'})[0] == 409

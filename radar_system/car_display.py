@@ -247,7 +247,6 @@ class Feed:
         g = profile['geometry']
         self.car = {'name': name, 'front_m': g['front_m'], 'rear_m': g['rear_m'],
                     'half_width_m': g['half_width_m'], 'wheelbase_m': g['wheelbase_m']}
-        self.sensors = profile['sensors']
         self.sessions, self.network, self.view = sessions, network, view
         self.release = release_id()
         self.seq = 0
@@ -268,9 +267,7 @@ class Feed:
 
     def message(self, snapshot, now):
         self.seq += 1
-        tel = app_link.build_telemetry(snapshot, now=now, seq=self.seq, sensors=self.sensors, include_scan=False)
-        tel.pop('persons', None)
-        tel.pop('follow', None)
+        tel = app_link.build_telemetry(snapshot, now=now, seq=self.seq)
         out = {'type': 'display', 'seq': self.seq, 'release': self.release, 'car': self.car, 'tel': tel,
                'apps': self.sessions.count(), 'net': self.network.value()}
         line = tel.get('line') or {}
