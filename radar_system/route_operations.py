@@ -529,8 +529,12 @@ class RouteOperations:
         if self.record:
             out['job'] = {k: v for k, v in self.record.items() if k not in ('plan', 'profile', 'route_hash', 'field_context')}
             if self.record.get('field_plan') and isinstance(self.m.tracker,SectionTracker):
-                sec=self.m.tracker.sections[self.m.tracker.index]
-                out['job']['current_role']=getattr(sec,'field_role',None)
+                t=self.m.tracker
+                role=getattr(t.sections[t.index],'field_role',None)
+                # 一条线画完后停车、原地转向、等停稳（switching）时段号还停在这条线上，车并没在压线：报 transit。
+                # painting 是喷头该不该喷的唯一依据：刷线段、行驶中、正在跟线（不在换段 / 原地转、没暂停）
+                out['job']['current_role']='transit' if t.switching and role=='paint' else role
+                out['job']['painting']=role=='paint' and not t.switching and t.st.state=='RUNNING' and self.m.phase=='RUNNING'
             out['job']['can_resume'] = self.held and self.record['route_hash'] == self.fingerprint()
             out['job']['parent_id'] = self.parent['id'] if self.parent else None
         try:

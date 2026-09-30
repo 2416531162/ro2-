@@ -272,6 +272,27 @@ class TestFieldExecution(unittest.TestCase):
             if restored.phase=='IDLE':break
         self.assertEqual('DONE',restored.operations.record['state'])
         restored._close_log()
+    def test_stop_and_turn_after_a_line_is_not_painting(self):
+        # 一条线画完后停车、原地转、等停稳时段号还在这条线上：不能报 paint，喷头也不能喷（转向时喷头甩出去几十厘米）
+        p=self.prepare([dict(LINE,points=[[5,5],[10,5]]),dict(LINE,id='line2',points=[[10,8],[5,8]])])
+        value=self.cache.get(p['token'],.1)
+        ok,msg=self.m.command(dict(cmd='route_field_start',field_plan=value,allow_outside=not value['inside']),.1)
+        self.assertTrue(ok,msg)
+        seen=set()
+        for i in range(1,20000):
+            v,w,_=self.m.tick(.1+i*.02,'NAVIGATION')
+            t=self.m.tracker;job=self.m.operations.status()['job']
+            if job['painting']:
+                seen.add('painting');self.assertEqual('paint',job['current_role'])
+                self.assertFalse(t.switching);self.assertIsNone(t._pivot)
+            if t.sections[t.index].field_role=='paint' and t.switching:
+                seen.add('turn' if t._pivot is not None else 'stop')
+                self.assertEqual('transit',job['current_role']);self.assertFalse(job['painting'])
+            p=self.f.current;h=p.yaw+w*.02
+            self.f.current=FakeFusion.make(p.x+v*math.cos(h)*.02,p.y+v*math.sin(h)*.02,math.degrees(h),speed=v)
+            if self.m.phase=='IDLE':break
+        self.assertEqual('DONE',self.m.operations.record['state'])
+        self.assertEqual({'painting','stop','turn'},seen)
 
 
 if __name__=='__main__':unittest.main()
