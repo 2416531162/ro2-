@@ -3,6 +3,9 @@
 
 stage/verify operate without root or hardware. activate/rollback run on the board,
 stop the stack before switching the release symlink, and only start passive tasks.
+
+发布包从 git 提交打（stage --git REV）：只含那个提交里的文件，清单记下 source_commit，车上跑的代码
+随时能对回仓库（info 查）。不带 --git 从工作区打包只为兼容旧做法，会提示没有对应提交。
 """
 import argparse
 import hashlib
@@ -13,6 +16,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 TREES = ('robot_core', 'radar_system', 'wheeltec_protocol', 'oid_protocol', 'rion_protocol', 'deployment', 'docs')
@@ -63,7 +67,27 @@ def verify(release):
     return manifest
 
 
-def stage(source, destination):
+def git_export(repo, rev, workdir):
+    """把 git 提交 rev 里发布要的目录（TREES 和 README.md）导出到 workdir，只含已提交的内容；返回完整提交号。"""
+    def git(*args, **kw):
+        return subprocess.run(['git', '-C', str(repo), *args], check=True, **kw)
+    commit = git('rev-parse', '--verify', rev + '^{commit}', capture_output=True, text=True).stdout.strip()
+    paths = [p for p in (*TREES, 'README.md')
+             if subprocess.run(['git', '-C', str(repo), 'cat-file', '-e', commit + ':' + p],
+                               capture_output=True).returncode == 0]
+    archive = git('archive', '--format=tar', commit, *paths, capture_output=True).stdout
+    subprocess.run(['tar', '-x', '-C', str(workdir)], input=archive, check=True)
+    return commit
+
+
+def stage_commit(repo, rev, destination):
+    """从 git 提交打发布包：(release_id, 完整提交号)。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        commit = git_export(repo, rev, Path(tmp))
+        return stage(Path(tmp), destination, source_commit=commit), commit
+
+
+def stage(source, destination, source_commit=None):
     if any(destination.resolve().is_relative_to((source/tree).resolve()) for tree in TREES):
         raise ValueError('destination must be outside source component trees')
     if destination.exists():
@@ -88,7 +112,10 @@ def stage(source, destination):
         shutil.copy2(source/'README.md', destination/'README.md')
         files['README.md'] = sha(destination/'README.md')
     release_id = hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest()[:16]
-    (destination/'manifest.json').write_text(json.dumps(dict(release_id=release_id, files=files), indent=2)+'\n')
+    manifest = dict(release_id=release_id, files=files)
+    if source_commit:
+        manifest['source_commit'] = source_commit      # 不参与 release_id：同样的文件就是同一个发布
+    (destination/'manifest.json').write_text(json.dumps(manifest, indent=2)+'\n')
     verify(destination)
     return release_id
 
@@ -217,15 +244,26 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     sub = p.add_subparsers(dest='action', required=True)
     s = sub.add_parser('stage'); s.add_argument('destination', type=Path); s.add_argument('--source', type=Path, default=ROOT)
+    s.add_argument('--git', metavar='REV', help='从这个 git 提交打包（如 HEAD），只含已提交的内容，清单记下提交号')
     v = sub.add_parser('verify'); v.add_argument('release', type=Path)
+    i = sub.add_parser('info', help='发布包的 release_id 和来自哪个 git 提交'); i.add_argument('release', type=Path)
     a = sub.add_parser('activate'); a.add_argument('release', type=Path); a.add_argument('--profile', choices=PROFILES, default=DEFAULT_PROFILE)
     a.add_argument('--user', help='服务用哪个账号跑（默认执行 sudo 的账号；没有 sudo 时 %s）' % DEFAULT_USER)
     sub.add_parser('rollback')
     args = p.parse_args()
     if args.action == 'stage':
-        print(stage(args.source.resolve(), args.destination.resolve()))
+        if args.git:
+            release_id, commit = stage_commit(args.source.resolve(), args.git, args.destination.resolve())
+            print(release_id)
+            print('source_commit', commit, file=sys.stderr)
+        else:
+            print('注意：从工作区打包，发布包没有对应的 git 提交（建议先提交，再用 --git HEAD）', file=sys.stderr)
+            print(stage(args.source.resolve(), args.destination.resolve()))
     elif args.action == 'verify':
         print(verify(args.release.resolve())['release_id'])
+    elif args.action == 'info':
+        manifest = verify(args.release.resolve())
+        print(manifest['release_id'], manifest.get('source_commit') or '无（从工作区打包，没有对应提交）')
     else:
         if sys.platform != 'linux' or os.geteuid() != 0:
             p.error('activate/rollback require root on the Linux board')

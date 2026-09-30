@@ -162,6 +162,37 @@ def test_release_stage_and_tamper_detection(tmp_path):
         verify(release)
 
 
+def test_release_from_git_commit_ignores_uncommitted_edits(tmp_path):
+    """stage --git：只打那个提交里的文件（工作区没提交的改动不带），清单记下提交号，release_id 只看文件。"""
+    import shutil
+    from deployment.manage import stage_commit
+    if shutil.which('git') is None:
+        pytest.skip('没有 git')
+    repo = tmp_path/'repo'
+    for tree in ('robot_core', 'radar_system', 'deployment'):
+        (repo/tree).mkdir(parents=True)
+    shutil.copytree(ROOT/'robot_core', repo/'robot_core', dirs_exist_ok=True,
+                    ignore=shutil.ignore_patterns('__pycache__'))
+    (repo/'radar_system/test.py').write_text('a = 1\n')
+    git = lambda *a: subprocess.run(['git', '-C', str(repo), *a], check=True, capture_output=True, text=True)  # noqa: E731
+    git('init', '-q')
+    git('-c', 'user.name=t', '-c', 'user.email=t@t', 'add', '.')
+    git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', 'x')
+    head = git('rev-parse', 'HEAD').stdout.strip()
+    (repo/'radar_system/test.py').write_text('a = 2\n')          # 工作区改了没提交
+    (repo/'radar_system/extra.py').write_text('b = 1\n')         # 没加进仓库的新文件
+    release_id, commit = stage_commit(repo, 'HEAD', tmp_path/'release')
+    assert commit == head
+    manifest = verify(tmp_path/'release')
+    assert (manifest['release_id'], manifest['source_commit']) == (release_id, head)
+    assert (tmp_path/'release/radar_system/test.py').read_text() == 'a = 1\n'
+    assert not (tmp_path/'release/radar_system/extra.py').exists()
+    # 同一个提交从工作区（已恢复成提交内容）打包，release_id 一样
+    (repo/'radar_system/test.py').write_text('a = 1\n')
+    (repo/'radar_system/extra.py').unlink()
+    assert stage(repo, tmp_path/'release2') == release_id
+
+
 def test_service_runner_is_passive_and_release_rooted():
     rendered = units(Path('/opt/rk3588'))
     assert '/current/deployment/run_component.sh' in rendered['rk3588-wheeltec.service']
