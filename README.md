@@ -1,46 +1,22 @@
-# Jetson 摄像头与雷达人体跟随
+# Gen5 RTK 划线车（车端）
 
-当前链路：**Astra RGB-D → YOLO26s 人物检测＋N10P 雷达 → 人体锁定与局部跟随 → 控制权仲裁 → 驱动防撞 → 底盘**。
+正点原子 ATK-DLRK3588（Ubuntu 24.04、ROS 2 Jazzy）上的车端程序：两后轮差速（欧艾迪轮毂电机驱动器）+ 前万向轮，
+UM982 双天线 RTK + RION HDA536T IMU 定位，按平板 app 下发的路线、定点直线、足球场规划画线。
+平板 app 是独立工程（本机 `~/Desktop/app/follow-cockpit`），协议见 [APP_PROTOCOL.md](docs/APP_PROTOCOL.md)。
 
-正式跟随入口默认使用 **MPPI＋PyTorch CUDA**，1024 条采样、40 步预测、20 Hz 控制。
-CUDA 不可用时启动报错；服务启动后等待显式选择 FOLLOW。启用、性能检查和纯追踪回退配置见
-[Jetson MPPI](docs/MPPI_JETSON.md)。服务名和配置路径中的 `rk3588` 保留兼容旧部署。
-ROS 启动入口统一读取 `/etc/rk3588/runtime.env`，可用 `ROBOT_RUNTIME_ENV=/绝对路径/其他.env`
-选择文件；当前进程环境变量优先于文件，文件优先于默认值。默认文件缺失时用默认值，显式
-指定的文件缺失、不可读或格式错误则退出。文件遵循 `EnvironmentFile` 赋值/引号规则，不是
-Shell 脚本；服务单元不再单独解析它。启动日志列出最终 ROS、Python、模型和标定路径。
-完整键名和板端路径示例见 [环境模板](deployment/runtime-jetson.env.example)。
-视觉默认加载已随项目提供的官方 `radar_system/models/yolo26s.pt`，只检测 COCO `person`，
-以 512 像素输入和 CUDA FP16 推理；处理上限 30 FPS，实际帧率须在板端测量。
-可在目标 Jetson 上导出 TensorRT `.engine` 后显式设置 `RK3588_POSE_MODEL`，不再需要自定义
-`libtrt_engine_wrapper.so`。运行环境还须安装 Ultralytics，不能因此替换板端匹配的 CUDA PyTorch。
-
-- `robot_core`：统一机器人标定、运动学、观测契约和本地位姿历史。
-- `radar_system`：ROS 适配与纯跟随引擎分离；相机/雷达关联、扫掠检查、有限脱困、网页及板载显示。
-- `wheeltec_protocol`：唯一串口出口，统一手动/跟随/导航控制权、时效检查与故障停车。
-- `deployment`：整套版本打包、内容校验、服务切换及回滚；服务启动后等待显式选择跟随。
-- 安卓 app「跟随座舱」是独立工程，不在本仓库里（本机路径 `~/Desktop/app/follow-cockpit`）。可以连车看相机与俯视图、开关跟随、换人、手动、急停；不用车时可先连 `radar_system/tools/app_demo_server.py`。
-
-当前跟随使用统一 `/odom`。RTK 走直线的链路已接好但还没有实车验证：`rtk_node`（UM982 双天线接收机，有 `~/rtk/ntrip.env` 时连 CORS 差分）→ `gnss_fusion`（RTK/双天线/陀螺/轮速融合，见 [GNSS 融合](docs/GNSS_FUSION.md)）→ `line_node`（A→B 直线跟踪，经 NAVIGATION 控制权），在 app 的「直线」模式里操作。弯道路径跟踪（`radar_system/path_tracker.py`，小圆、8 字）只在仿真里验证过（`radar_system/tools/path_sim.py`），还没有接到车上。之前移除的 SLAM、点云累积、地图管理不在当前运行链路中。
+- `radar_system`：RTK 接收（`rtk_node`）、定位融合（`gnss_fusion`）、作业与跟踪（`line_node`、`line_mission`、
+  `path_tracker`、`route_plan`、`field_planner`）、网页和 app 链路（`radar_web_server`、`app_link`）、作业记录。
+- `oid_protocol`：欧艾迪驱动器（RS485 / CAN）；`rion_protocol`：HDA536T IMU（CAN）。
+- `wheeltec_protocol`：控制权仲裁（手动 / 导航 / 急停）和底盘驱动公共部分。
+- `robot_core`：车型配置（`robot_gen5.json`）、运动学。
+- `deployment`：发布包（从 git 提交打包）、校验、systemd 服务激活与回滚。
 
 ```bash
-# 本机：测试、生成发布包
-python3 -m pytest tests -q
-python3 deployment/manage.py stage artifacts/follow-release
-python3 deployment/manage.py verify artifacts/follow-release
-
-# 开发板：安装发布包后启动已有服务（默认 rtk 配置：网页＋RTK＋走线）
-bash radar_system/start_all.sh
+# Mac：跑相关测试、从提交打发布包
+python3 -m pytest -q tests/test_path_tracking.py tests/test_line_mission.py
+python3 deployment/manage.py stage --git HEAD /tmp/rel
 ```
 
-网页默认端口 `8088`，主页 `/`；安卓 app 走同一端口的 `/ws` 与 `/video.mjpg`，协议见 [app 连接协议](docs/APP_PROTOCOL.md)。完整部署命令、控制接口和 GNSS 接入约束见 [架构说明](docs/ARCHITECTURE_ROADMAP.md)。不能只替换一个目录；新栈需要整套发布。
-
-默认配置（`rtk`）只有 RTK 自动驾驶和手动开车，不部署相机、雷达、人体识别、跟随；要跟人时按 `follow` 配置激活，见架构说明里的启动配置。
-
-- [视觉模型与跟踪说明](docs/TRACKING.md)
-- [统一配置与标定](docs/TUNING.md)
-- [跟随脱困行为](docs/FOLLOWER_RECOVERY.md)
-- [RTK / IMU / 轮速融合](docs/GNSS_FUSION.md)
-- [驱动接口](wheeltec_protocol/README.md)
-
-本轮视觉模型变更未在 Jetson 上验证，不能将 30 FPS 目标视为已达成或实车验收通过。
+架构和数据流见 [ARCHITECTURE.md](docs/ARCHITECTURE.md)，开发、测试、部署规则见 [DEVELOPMENT.md](docs/DEVELOPMENT.md)，
+板子与硬件接线见 [RK3588_GEN5.md](docs/RK3588_GEN5.md)，差速底盘见 [DIFFERENTIAL_DRIVE.md](docs/DIFFERENTIAL_DRIVE.md)，
+定位融合见 [GNSS_FUSION.md](docs/GNSS_FUSION.md)，作业记录见 [JOB_RECORDS.md](docs/JOB_RECORDS.md)。

@@ -1,4 +1,4 @@
-"""部署配置：默认不开人体识别；ROS 只在本机回环上做发现（换 WiFi 后再启动的节点仍能找到其他节点）。"""
+"""部署配置：只有 rtk 一套服务；ROS 只在本机回环上做发现（换 WiFi 后再启动的节点仍能找到其他节点）。"""
 import os
 import subprocess
 import sys
@@ -13,24 +13,18 @@ import manage  # noqa: E402
 
 class TestProfiles(unittest.TestCase):
 
-    def test_default_profile_is_rtk_autonomy_only(self):
-        # 默认只部署 RTK 自动驾驶和手动：网页/app 链路、RTK 接收机、走线；不部署相机、雷达、人体识别、跟随、板载 GUI
+    def test_only_the_rtk_profile(self):
+        # 只部署网页/app 链路、RTK 接收机、走线、IMU、作业记录（底盘驱动另起）
         with open(manage.__file__, encoding='utf-8') as f:
             self.assertIn("default=DEFAULT_PROFILE", f.read())   # activate 不写 --profile 时用它
         self.assertEqual(manage.DEFAULT_PROFILE, 'rtk')
+        self.assertEqual(set(manage.PROFILES), {'rtk'})
         self.assertEqual(set(manage.PROFILES['rtk']), {'web', 'rtk', 'line', 'imu', 'jobrec'})
-        self.assertNotIn('ai', manage.PROFILES['headless'])
 
-    def test_follow_profile_still_brings_detection(self):
-        self.assertIn('ai', manage.PROFILES['follow'])
-
-    def test_start_all_matches_deploy_profiles(self):
+    def test_start_all_matches_deploy_profile(self):
         with open(os.path.join(ROOT, 'radar_system', 'start_all.sh'), encoding='utf-8') as f:
-            lines = f.read().splitlines()
-        for name, components in manage.PROFILES.items():
-            line = next(l for l in lines if l.strip().startswith(name + ')'))
-            listed = line.split('(', 1)[1].split(')', 1)[0].split()
-            self.assertEqual(set(listed), set(components), name)
+            line = next(l for l in f.read().splitlines() if l.startswith('COMPONENTS=('))
+        self.assertEqual(set(line.split('(', 1)[1].split(')', 1)[0].split()), set(manage.PROFILES['rtk']))
 
 
 class TestRosDiscovery(unittest.TestCase):
@@ -56,12 +50,6 @@ class TestRosDiscovery(unittest.TestCase):
     def test_other_distros_are_left_to_discovery_range(self):
         # Jazzy 用 ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST（各启动脚本已设），不再碰已弃用的变量
         self.assertEqual(self.loaded_env('jazzy'), '0')
-
-    def test_camera_workspace_does_not_undo_it(self):
-        with open(os.path.join(ROOT, 'radar_system', 'run_camera.sh'), encoding='utf-8') as f:
-            text = f.read()
-        after_source = text.split('source "$CAMERA_WORKSPACE"', 1)[1].split('ros2 launch', 1)[0]
-        self.assertIn('export ROS_LOCALHOST_ONLY=1', after_source)
 
 
 class TestUnits(unittest.TestCase):

@@ -1,65 +1,19 @@
-"""Production pose/configuration contracts, independent engine and deployment checks."""
+"""配置契约、发布与部署、底盘驱动的检查（与 ROS、硬件无关）。"""
 import copy
 import json
-import math
 import os
 from pathlib import Path
 import subprocess
 import sys
-from types import SimpleNamespace as NS
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT/'radar_system'))
+sys.path.insert(0, str(ROOT/'wheeltec_protocol'))
 sys.path.insert(0, str(ROOT))
 from robot_core.config import PROFILE, load_profile, profile_hash
-from robot_core.odometry import PoseHistory
-from robot_core.contracts import LocalPose, ScanFrame
-from follower_engine import FollowerEngine
-from follower_config import FollowerConfig, build_config
-from follower_recovery import LocalRecovery
-from motion_safety import ChassisGeometry, BrakeProfile
-from footprint import VehicleFootprint
-from deployment.manage import stage, verify, activate, rollback, units
-
-
-def engine():
-    clock = NS(t=100.)
-    core = FollowerEngine(FollowerConfig(), now=lambda: clock.t, ros_time=lambda: clock.t, dry_run=True)
-    core.print_dashboard = lambda _: None
-    return core, clock
-
-
-def test_engine_imports_without_ros():
-    env = dict(os.environ, PYTHONPATH=str(ROOT/'radar_system'))
-    subprocess.run([sys.executable, '-c',
-        "import follower_engine,sys; assert 'rclpy' not in sys.modules; assert 'sensor_msgs' not in sys.modules"],
-        check=True, cwd=ROOT, env=env)
-
-
-def test_shared_geometry_and_sensor_defaults():
-    sys.path.insert(0, str(ROOT/'wheeltec_protocol'))
-    from scan_guard import GuardConfig
-    f, g, geom = FollowerConfig(), GuardConfig(), ChassisGeometry()
-    assert f.footprint_front_m == g.front_m == PROFILE['geometry']['front_m']
-    assert f.lidar_offset_x_m == g.lidar_x_m == PROFILE['sensors']['lidar_x_m']
-    assert f.geometry.wheelbase_m == geom.wheelbase_m == PROFILE['geometry']['wheelbase_m']
-    assert f.max_steer_rad == geom.max_steer_rad
-
-
-def test_lidar_defaults_to_standard_protocol_directions():
-    """默认不得再把整圈点云额外旋转 140.7°。"""
-    from n10p_pipeline import scan_payload
-
-    assert PROFILE['sensors']['raw_lidar_yaw_deg'] == 0.0
-    ranges = [math.inf] * 720
-    ranges[0] = 1.0       # 前 0°
-    ranges[180] = 2.0     # 左 90°
-    ranges[360] = 3.0     # 后 180°
-    ranges[540] = 4.0     # 右 270°
-    scan = scan_payload(ranges, .15, 12.0,
-                        angle_min=0.0, angle_increment=math.pi / 360)
-    assert (scan['front'], scan['left'], scan['back'], scan['right']) == (1.0, 2.0, 3.0, 4.0)
+from motion_safety import ChassisGeometry
+from deployment.manage import stage, verify, activate, units
 
 
 @pytest.mark.parametrize('section,key,value', [
@@ -74,76 +28,9 @@ def test_invalid_profile_fails_before_device_start(tmp_path, section, key, value
         load_profile(path)
 
 
-def test_profile_hash_changes_and_cli_cannot_silently_diverge():
+def test_profile_hash_changes():
     changed = copy.deepcopy(PROFILE); changed['geometry']['wheelbase_m'] += .01
     assert profile_hash(changed) != profile_hash(PROFILE)
-    with pytest.raises(ValueError, match='RK3588_ROBOT_CONFIG'):
-        build_config(NS(max_steer_deg=30))
-
-
-def test_external_pose_is_authoritative_never_double_integrated():
-    core, clock = engine()
-    assert core.observe_pose(LocalPose(100., 5., -2., .3))
-    core.observe_driver(dict(armed=True, ready='ready', connected=True, holding=False,
-                             age_ms=0, telemetry=dict(velocity=[.4, 0., .2])))
-    core.step()
-    assert core.people.odom.current() == (5., -2., .3)
-    clock.t += .05
-    core.step()
-    assert core.people.odom.current() == (5., -2., .3)
-    clock.t += .2
-    core.step()
-    assert core.cmd_vx == 0 and not core.diag['healthy']
-
-
-def test_pose_frame_reset_discards_target_and_recovery_memory():
-    core, clock = engine()
-    core.observe_pose(LocalPose(100., 1., 0., 0.))
-    core.recovery.history.append((100.,1.,0.,0.,0.))
-    core.turnaround_phase = 'REVERSE'
-    clock.t += .05
-    core.observe_pose(LocalPose(100.05, 20., 0., 0.))
-    assert not core.recovery.history
-    assert core.turnaround_phase == 'IDLE'
-    assert core.people.odom.current() == (20.,0.,0.)
-    assert not core.observe_pose(LocalPose(100.05, 0., 0., 0., 'map'))
-    assert core.people.odom.t is None
-
-
-def test_pose_history_interpolates_wrap_and_rejects_unknown_history():
-    b = PoseHistory(strict=True)
-    assert b.pose_at(1) is None
-    b.add(1, 0, 0, math.radians(179))
-    b.add(1.1, .1, 0, math.radians(-179))
-    x, y, yaw = b.pose_at(1.05)
-    assert x == pytest.approx(.05)
-    assert abs(abs(yaw)-math.pi) < .001
-    assert b.pose_at(.99) is None and b.pose_at(1.3) is None
-    assert not b.add(1.05, .1,0,0)
-
-
-def test_recovery_uses_same_external_pose_and_measured_distance():
-    r = LocalRecovery(VehicleFootprint(), ChassisGeometry(), BrakeProfile())
-    r._observe(1., 1., 0., True, local_pose=(10.,5.,.1))
-    assert r.pose == (10.,5.,.1)
-    r.active = True
-    r._observe(1.1, 1., 0., True, local_pose=(10.02,5.,.1))
-    assert r.pose == (10.02,5.,.1)
-    assert r.leg_distance == pytest.approx(.02)  # not speed*dt == .1
-
-
-def test_odom_epoch_restarts_tracking_without_coordinate_mix():
-    core, _ = engine()
-    core.observe_pose(LocalPose(100.,1.,0.,0.))
-    core.observe_driver(dict(odometry_epoch='new', telemetry={}, armed=False))
-    assert core.people.odom.t is None
-
-
-def test_camera_old_timestamp_is_not_freshened():
-    core, _ = engine()
-    assert core._meas_time(90., 100.) is None
-    core.observe_targets([dict(label='person', conf=.9, x=0., y=0., z=2., stamp=90.)])
-    assert core.people.target_id is None
 
 
 def test_release_stage_and_tamper_detection(tmp_path):
@@ -193,57 +80,13 @@ def test_release_from_git_commit_ignores_uncommitted_edits(tmp_path):
     assert stage(repo, tmp_path/'release2') == release_id
 
 
-def test_service_runner_is_passive_and_release_rooted():
+def test_service_runner_is_release_rooted_and_has_only_current_components():
     rendered = units(Path('/opt/rk3588'))
     assert '/current/deployment/run_component.sh' in rendered['rk3588-wheeltec.service']
     runner = (ROOT/'deployment/run_component.sh').read_text()
-    assert 'person_follower.py" --passive' in runner
-
-
-def test_production_follow_stops_on_pose_loss_then_reacquires():
-    from test_follower_node import n10p_scan, camera_person, person_legs
-    core, clock = engine()
-    def cycle(with_pose=True):
-        clock.t += .05
-        if with_pose:
-            assert core.observe_pose(LocalPose(clock.t, 0., 0., 0.))
-        core.observe_driver(dict(armed=True, ready='ready', connected=True, holding=False,
-                                 age_ms=0, telemetry=dict(velocity=[0., 0., 0.])))
-        scan = n10p_scan(extra=person_legs(2., 0.))
-        core.observe_scan(ScanFrame(scan.ranges, scan.angle_min, scan.angle_increment,
-                                   scan.range_min, scan.range_max, clock.t))
-        targets = camera_person(2., 0.)
-        targets[0]['stamp'] = clock.t
-        core.observe_targets(targets)
-        core.step()
-    for _ in range(8):
-        cycle()
-    assert core.cmd_vx > 0 and core.diag['healthy']
-    for _ in range(8):
-        cycle(with_pose=False)
-    assert core.cmd_vx == core.cmd_wz == 0 and not core.diag['healthy']
-    # A long localization gap invalidates the previous target and manoeuvre.
-    clock.t += .2
-    core.turnaround_phase = 'REVERSE'
-    for _ in range(8):
-        cycle()
-    assert core.turnaround_phase == 'IDLE'
-    assert core.cmd_vx > 0 and core.diag['healthy']
-    assert core.people.odom.current() == (0., 0., 0.)
-
-
-def test_production_measurement_deadlines_use_capture_time():
-    from test_follower_node import n10p_scan
-    core, clock = engine()
-    assert core._meas_time(None, clock.t) is None
-    assert core._meas_time(float('nan'), clock.t) is None
-    scan = n10p_scan()
-    core.observe_scan(ScanFrame(scan.ranges, scan.angle_min, scan.angle_increment,
-                               scan.range_min, scan.range_max, clock.t-.4))
-    assert core.scan_stamp == pytest.approx(clock.t-.4)
-    core.observe_scan(ScanFrame(scan.ranges, scan.angle_min, scan.angle_increment,
-                               scan.range_min, scan.range_max, clock.t-.6))
-    assert core.scan_stamp == 0
+    assert 'radar_system/run_web.sh' in runner
+    for gone in ('person_follower', 'camera', 'lidar)', 'start_component'):
+        assert gone not in runner, gone
 
 
 @pytest.mark.parametrize('protocol', ['twist', 'steering_angle'])
@@ -303,7 +146,7 @@ def test_failed_activation_restores_previous_release_and_units(tmp_path, monkeyp
             raise RuntimeError('injected start failure')
     monkeypatch.setattr(deploy, 'systemctl', ctl)
     with pytest.raises(RuntimeError, match='injected'):
-        activate(new, base, unit_dir, 'headless')
+        activate(new, base, unit_dir, 'rtk')
     assert (base/'current').resolve() == old
     assert unit.read_text() == 'old verified unit\n'
     assert not (unit_dir/'rk3588-perception@.service').exists()
@@ -311,28 +154,9 @@ def test_failed_activation_restores_previous_release_and_units(tmp_path, monkeyp
     assert len([c for c in calls if c[0]=='start']) == 1  # rollback stays stopped
 
 
-def test_activation_enables_profile_for_boot(tmp_path, monkeypatch):
-    # 断电重启后要自动起来的就是刚启用的这一套（rtk、line 曾经只 start 没 enable，重启后不起）
-    import deployment.manage as deploy
-    base, unit_dir, new = tmp_path/'opt', tmp_path/'units', tmp_path/'new'
-    for path in (base, unit_dir, new):
-        path.mkdir()
-    calls = []
-    monkeypatch.setattr(deploy, 'verify', lambda _: {})
-    monkeypatch.setattr(deploy, 'stop_stack', lambda: None)
-    monkeypatch.setattr(deploy, 'systemctl', lambda *args: calls.append(args))
-    activate(new, base, unit_dir, 'headless')
-    enabled = [c for c in calls if c[0] == 'enable'][0]
-    assert 'rk3588-perception@rtk.service' in enabled and 'rk3588-perception@line.service' in enabled
-    assert 'rk3588-wheeltec.service' in enabled
-    # 不在这个配置里的 ai、gui 都要取消开机自启；配置里有雷达，底盘就要求雷达
-    assert [c for c in calls if c[0] == 'disable'][0] == (
-        'disable', 'rk3588-perception@ai.service', 'rk3588-perception@gui.service')
-    assert 'Environment=RK3588_LIDAR_INSTALLED=1\n' in (unit_dir/'rk3588-wheeltec.service').read_text()
-
-
-def test_default_rtk_profile_deploys_no_camera_lidar_or_follower(tmp_path, monkeypatch):
-    # 默认只部署 RTK 自动驾驶和手动（网页/app 链路、RTK 接收机、走线）；相机、雷达、人体识别、跟随都不起、取消开机自启
+def test_activation_starts_and_enables_the_rtk_services(tmp_path, monkeypatch):
+    # 断电重启后要自动起来的就是刚启用的这一套（rtk、line 曾经只 start 没 enable，重启后不起）；
+    # 车上没有雷达，底盘驱动不能等雷达数据
     import deployment.manage as deploy
     base, unit_dir, new = tmp_path/'opt', tmp_path/'units', tmp_path/'new'
     for path in (base, unit_dir, new):
@@ -342,156 +166,14 @@ def test_default_rtk_profile_deploys_no_camera_lidar_or_follower(tmp_path, monke
     monkeypatch.setattr(deploy, 'stop_stack', lambda: None)
     monkeypatch.setattr(deploy, 'systemctl', lambda *args: calls.append(args))
     activate(new, base, unit_dir, deploy.DEFAULT_PROFILE)
-    started = [c for c in calls if c[0] == 'start'][0]
-    assert {'rk3588-perception@web.service', 'rk3588-perception@rtk.service',
-            'rk3588-perception@line.service'} <= set(started)
-    assert not any(('@' + c + '.') in name for name in started for c in ('camera', 'lidar', 'ai', 'follower', 'gui'))
-    disabled = set([c for c in calls if c[0] == 'disable'][0][1:])
-    assert disabled == {'rk3588-perception@' + c + '.service' for c in ('camera', 'lidar', 'ai', 'gui', 'follower')}
-    # 没部署雷达：底盘驱动据此不要求雷达，跟随直接拒绝
+    want = {'rk3588-can.service', 'rk3588-wheeltec.service', 'rk3588-perception.target',
+            *('rk3588-perception@' + c + '.service' for c in ('web', 'rtk', 'line', 'imu', 'jobrec'))}
+    for action in ('start', 'enable'):
+        assert set([c for c in calls if c[0] == action][0][1:]) == want, action
+    assert not [c for c in calls if c[0] == 'disable']
     assert 'Environment=RK3588_LIDAR_INSTALLED=0\n' in (unit_dir/'rk3588-wheeltec.service').read_text()
 
 
 def test_release_cannot_stage_itself_recursively(tmp_path):
     with pytest.raises(ValueError, match='outside source'):
         stage(tmp_path, tmp_path/'radar_system/release')
-
-
-def test_lidar_calibration_adds_residual_to_shared_raw_zero(tmp_path, monkeypatch):
-    import calibrate_lidar as calibration
-    path = tmp_path/'robot.json'
-    path.write_text(json.dumps(PROFILE))
-    monkeypatch.setattr(calibration, 'CALIB_FILE', str(path))
-    calibration.update_config_file(2.)
-    changed = load_profile(path)
-    assert changed['sensors']['raw_lidar_yaw_deg'] == pytest.approx(2.0)
-    assert changed['sensors']['lidar_yaw_rad'] == PROFILE['sensors']['lidar_yaw_rad']
-    before = path.read_text()
-    with pytest.raises(ValueError):
-        calibration.update_config_file(float('nan'))
-    assert path.read_text() == before
-
-
-@pytest.mark.parametrize('pose', [(0., 0., 0.), (10., -3., math.pi),
-                                  (-10., 4., math.pi / 2)])
-@pytest.mark.parametrize('front_return', [True, False])
-def test_rear_object_cannot_teleport_confirmed_front_target(pose, front_return):
-    from person_tracker import PersonTracker
-    tracker = PersonTracker(confirm_hits=1, reacquire_after_s=.1, reacquire_radius_m=4.)
-    tracker.odom.add(0., *pose)
-    tracker.add_camera([{'x': 1.8, 'y': 0., 'conf': .95}], 0., 0.)
-    original_id = tracker.target_id
-    tracker.odom.add(.2, *pose)
-    clusters = [(1.8, 0.), (-1., .1)] if front_return else [(-1., .1)]
-    tracker.add_lidar(clusters, .2, .2)
-    view = tracker.target_view(.2)
-    assert view['id'] == original_id
-    assert view['x'] == pytest.approx(1.8)
-    assert tracker.reacquires == 0
-    assert view['lidar_hits'] == int(front_return)
-
-
-def rear_tracker(pose=(0., 0., 0.)):
-    """Observe a continuous 0.9 m/s semicircle, not a 2.8m/0.2s teleport."""
-    from person_tracker import PersonTracker
-    tracker = PersonTracker(confirm_hits=1)
-    tracker.odom.add(0., *pose)
-    in_view = lambda x, y: x > 0. and abs(y) < .3
-    tracker.add_camera([{'x': 1.8, 'y': 0., 'conf': .95}], 0., 0., in_view=in_view)
-    original_id = tracker.target_id
-    for i in range(1, 127):
-        now, angle = i * .05, math.pi * i / 126
-        point = (1.8 * math.cos(angle), 1.8 * math.sin(angle))
-        tracker.odom.add(now, *pose)
-        tracker.add_camera([], now, now, in_view=in_view)
-        tracker.add_lidar([point], now, now)
-        view = tracker.target_view(now)
-        assert view is not None and view['id'] == original_id
-        assert math.hypot(view['x'] - point[0], view['y'] - point[1]) < .12
-    return tracker, now
-
-
-@pytest.mark.parametrize('pose', [(0., 0., 0.), (10., -3., math.pi),
-                                  (-10., 4., math.pi / 2)])
-def test_continuous_rear_tracking_then_stationary_with_clutter(pose):
-    tracker, start = rear_tracker(pose)
-    original_id = tracker.target_id
-    for i in range(1, 301):
-        now = start + i * .1
-        tracker.odom.add(now, *pose)
-        clusters = [(-1.8, 0.)]
-        if i >= 20:
-            clusters.append((-1.8, .65))
-        tracker.add_lidar(clusters, now, now)
-        view = tracker.target_view(now)
-        assert view is not None and view['id'] == original_id
-        assert abs(view['x'] + 1.8) < .12 and abs(view['y']) < .12
-    assert math.hypot(view['v_fwd'], view['v_lat']) < .01
-    assert tracker.dropped_unseen == 0
-    tracker.add_lidar([], now + 2., now + 2.)
-    assert tracker.target_view(now + 2.) is None
-
-
-def test_ambiguous_rear_returns_do_not_change_position_or_refresh_age():
-    tracker, now = rear_tracker()
-    for i in range(1, 21):
-        tracker.add_lidar([(-1.8, 0.)], now + i * .1, now + i * .1)
-    now += 2.
-    tr = tracker._get(tracker.target_id)
-    before = tr.last_update
-    tracker.add_lidar([(-1.8, -.08), (-1.8, .08)], now + .1, now + .1)
-    assert tr.last_update == before
-    assert tracker.lidar_ambiguous_frames == 1
-    assert abs(tr.pos[1]) < .01
-    for i in range(2, 31):
-        tracker.add_lidar([(-1.8, -.08), (-1.8, .08)], now + i * .1, now + i * .1)
-    assert tracker.target_view(now + 3.) is None
-
-
-def test_visible_bystander_does_not_replace_lidar_target():
-    from person_tracker import PersonTracker
-    tracker = PersonTracker(confirm_hits=1, reacquire_after_s=.1, reacquire_radius_m=4.)
-    tracker.add_camera([{'x': 1.8, 'y': 0., 'conf': .95}], 0., 0.)
-    original_id = tracker.target_id
-    tracker.add_lidar([(1.8, 0.)], .2, .2)
-    tracker.add_camera([{'x': 1.8, 'y': 2., 'conf': .95}], .2, .2)
-    assert tracker.target_id == original_id
-    assert tracker.switches == 0
-    for i in range(3, 31):
-        now = i * .1
-        tracker.add_lidar([(1.8, 0.), (1.8, 2.)], now, now)
-    assert len(tracker.tracks) == 1
-    assert tracker.target_id == original_id
-
-
-def test_lost_target_does_not_switch_to_distant_visible_person():
-    from person_tracker import PersonTracker
-    tracker = PersonTracker(confirm_hits=1, reacquire_radius_m=4.)
-    tracker.add_camera([{'x': 1.8, 'y': 0., 'conf': .95}], 0., 0.)
-    original_id = tracker.target_id
-    for i in range(1, 61):
-        now = i * .1
-        tracker.add_camera([{'x': 1.8, 'y': 2., 'conf': .95}], now, now)
-    assert tracker.target_id == original_id
-    assert tracker.target_view(6.) is None
-
-
-def test_front_radar_clutter_still_expires_with_camera_negative_evidence():
-    from person_tracker import PersonTracker
-    tracker = PersonTracker(confirm_hits=1)
-    tracker.add_camera([{'x': 1.8, 'y': 0., 'conf': .95}], 0., 0.,
-                       in_view=lambda x, y: x > 0.)
-    for i in range(1, 21):
-        now = i / 10.
-        tracker.add_camera([], now, now, in_view=lambda x, y: x > 0.)
-        tracker.add_lidar([(1.8, 0.)], now, now)
-    assert tracker.target_view(2.) is None
-    assert tracker.dropped_unseen == 1
-
-
-def test_late_radar_return_does_not_revive_expired_identity():
-    from person_tracker import PersonTracker
-    tracker = PersonTracker(confirm_hits=1)
-    tracker.add_camera([{'x': 1.8, 'y': 0., 'conf': .95}], 0., 0.)
-    tracker.add_lidar([(1.8, 0.)], 3., 3.)
-    assert tracker.target_view(3.) is None

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""RTK 走直线闭环仿真：真实 LineTracker + 跟随仿真同一个底盘模型。
+"""RTK 走直线闭环仿真：真实 LineTracker + 阿克曼底盘模型（Chassis）。
 
 只用于离线调参和回归，不代表实车验收。定位有两种来源：
 
@@ -34,11 +34,77 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 sys.path.insert(0, os.path.dirname(os.path.dirname(HERE)))
 
-from follow_sim import Chassis  # noqa: E402
 from line_tracker import LineConfig, LineTracker  # noqa: E402
+from robot_core.kinematics import ChassisGeometry, steer_from_yaw, yaw_from_steer  # noqa: E402
+from runtime_config import PROFILE  # noqa: E402
 
 DT = 0.01
 CONTROL_DT = 0.05
+
+
+class Chassis:
+    """阿克曼底盘模型：指令延迟、驱动加速斜坡、舵机限速、电机一阶响应、舵机零位偏差与分辨率。"""
+
+    def __init__(self, delay_s=0.06, accel=PROFILE['driver']['acceleration_m_s2'],
+                 decel=1.5, servo_radps=3.0, tau_s=0.10, trim_rad=0.0, steer_quant_rad=0.0):
+        self.geo = ChassisGeometry()
+        # 舵机零位偏差（打直时车轮实际偏的角度）和舵机分辨率，走直线仿真用
+        self.trim, self.quant = trim_rad, steer_quant_rad
+        self.x = self.y = self.yaw = 0.0
+        self.v = 0.0
+        self.steer = 0.0
+        self.delay_s, self.accel, self.decel = delay_s, accel, decel
+        self.servo, self.tau = servo_radps, tau_s
+        self.queue = deque()
+        self.cmd = (0.0, 0.0)
+        self.driver_v = 0.0
+        self.wz = 0.0
+
+    def command(self, t, vx, wz):
+        self.queue.append((t + self.delay_s, vx, wz))
+
+    def step(self, t, dt):
+        while self.queue and self.queue[0][0] <= t:
+            _, vx, wz = self.queue.popleft()
+            self.cmd = (vx, wz)
+        vx, wz = self.cmd
+        # 驱动:零/换向立即清零,否则按加速度斜坡
+        if vx == 0 or self.driver_v * vx < 0:
+            self.driver_v = 0.0
+        else:
+            step = PROFILE['driver']['acceleration_m_s2'] * dt
+            self.driver_v += max(-step, min(step, vx - self.driver_v))
+        if abs(self.driver_v) > 0.02:
+            target_steer = steer_from_yaw(self.driver_v, wz, self.geo)
+        else:
+            # 速度为 0 时 Twist 协议无法表达转角,固件保持当前舵角
+            target_steer = self.steer
+        ds = self.servo * dt
+        self.steer += max(-ds, min(ds, target_steer - self.steer))
+        # 电机:一阶响应,加速/刹车能力分别受限
+        want = self.driver_v
+        dv = (want - self.v) * min(1.0, dt / self.tau)
+        speeding_up = abs(want) > abs(self.v) and want * self.v >= 0
+        lim = (self.accel if speeding_up else self.decel) * dt
+        self.v += max(-lim, min(lim, dv))
+        if abs(self.v) < 1e-4 and want == 0:
+            self.v = 0.0
+        wheel = self.steer
+        if self.quant > 0:
+            wheel = round(wheel / self.quant) * self.quant
+        self.wz = yaw_from_steer(self.v, wheel + self.trim, self.geo)
+        self.x += self.v * dt * math.cos(self.yaw + self.wz * dt / 2)
+        self.y += self.v * dt * math.sin(self.yaw + self.wz * dt / 2)
+        self.yaw += self.wz * dt
+
+    def to_body(self, wx, wy):
+        c, s = math.cos(self.yaw), math.sin(self.yaw)
+        dx, dy = wx - self.x, wy - self.y
+        return c * dx + s * dy, -s * dx + c * dy
+
+    def to_world(self, bx, by):
+        c, s = math.cos(self.yaw), math.sin(self.yaw)
+        return self.x + c * bx - s * by, self.y + s * bx + c * by
 
 
 class GaussMarkov:

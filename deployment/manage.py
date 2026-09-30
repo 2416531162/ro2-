@@ -20,18 +20,12 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 TREES = ('robot_core', 'radar_system', 'wheeltec_protocol', 'oid_protocol', 'rion_protocol', 'deployment', 'docs')
-COMPONENTS = ('camera', 'lidar', 'ai', 'web', 'gui', 'follower', 'rtk', 'line', 'imu', 'jobrec')
-# rtk 只读接收机、发状态；line（RTK 走直线）启动后空闲，只有操作员在 app 上点「开始」才申请 NAVIGATION
-# 默认配置 rtk 只有 RTK 自动驾驶（路线、A—B 直线）和手动开车（2026-09-25 用户要求）：不部署相机、雷达、
-# 人体识别、跟随。人体识别一个进程在 8GB 的 Orin Nano 上约占 2.4 GB、跟随约 1.6 GB，内存吃紧时整机会卡死。
-# 要跟人时按 follow 配置激活（全套）；底盘驱动按配置里有没有雷达决定要不要雷达（见 units()）。
-PROFILES = {'perception': ('camera', 'lidar', 'ai', 'web'),
-            'follow': COMPONENTS,
-            'headless': ('camera', 'lidar', 'web', 'follower', 'rtk', 'line', 'imu', 'jobrec'),
-            # imu：车身横滚俯仰（app 显示；以后 RTK 天线杆臂补偿也要用）。旧车是 imu_filter_madgwick；
-            # Gen5 是 HDA536T 驱动，它还发融合要的 /imu，所以 Gen5 跑 line 必须有 imu
-            # jobrec：作业自动记录（radar_system/job_recorder.py），点开始作业就把原始数据存到 ~/rtk/jobs，排查问题用
-            'rtk': ('web', 'rtk', 'line', 'imu', 'jobrec')}
+# rtk：接收机、发状态；line：融合 + 作业（路线、定点画线、场地），只有操作员在 app 上点「开始」才申请 NAVIGATION；
+# imu：Gen5 是 HDA536T 驱动（发融合要的 /imu 和姿态 /imu/data），旧车是 imu_filter_madgwick；
+# jobrec：作业自动记录（radar_system/job_recorder.py），点开始作业就把原始数据存到 ~/rtk/jobs，排查问题用；
+# web：网页 + 平板 app 的 WebSocket。底盘驱动（rk3588-wheeltec）另起。
+COMPONENTS = ('web', 'rtk', 'line', 'imu', 'jobrec')
+PROFILES = {'rtk': COMPONENTS}
 DEFAULT_PROFILE = 'rtk'
 # 服务用哪个账号跑：activate 默认用执行 sudo 的账号（Jetson 车上就是 wheeltec，正点原子 RK3588 上是板子的登录账号）
 DEFAULT_USER = 'wheeltec'
@@ -137,8 +131,8 @@ def units(base, profile=DEFAULT_PROFILE, user=DEFAULT_USER, group=None, home=Non
     # components (e.g. imu_filter_madgwick) retain their existing restart policy.
     common += 'NotifyAccess=main\nEnvironment=RK3588_WATCHDOG_SEC=20\nTimeoutAbortSec=3\n'
     end = '\n[Install]\nWantedBy=multi-user.target\n'
-    # 底盘驱动据此决定要不要雷达：没部署雷达时待命、急停复位不要求雷达，跟随直接拒绝
-    lidar = 'Environment=RK3588_LIDAR_INSTALLED=' + ('1' if 'lidar' in PROFILES[profile] else '0') + '\n'
+    # 车上没有雷达：底盘驱动不设这个时按装了雷达算，待命、急停复位会卡在等雷达数据
+    lidar = 'Environment=RK3588_LIDAR_INSTALLED=0\n'
     # CAN 口开机起成 500K；restart-ms：总线出错（bus-off）后 0.1 s 自动恢复，不然要人重起接口。
     # 没有 can0 的车（旧车 Wheeltec 走串口）条件不满足，直接跳过，不算失败
     can = ('[Unit]\nDescription=RK3588 CAN bus for Gen5 drivers and IMU\nConditionPathExists=/sys/class/net/can0\n'

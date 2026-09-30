@@ -17,4 +17,4 @@ bash wheeltec_protocol/run_control.sh reset
 
 默认底盘发布 `/odom` 及 `odom → base_link`，base_link 为后轴中心。融合定位接管该 TF 时需关闭 `publish_tf`，并配置行为消费的本地位姿话题；原始与融合话题可分开。
 
-完整服务安装、回滚、模式契约与测试说明见 [架构说明](../docs/ARCHITECTURE_ROADMAP.md)。历史协议资料见 [PROTOCOL.md](PROTOCOL.md)，其中参考固件公式不代替当前实车左右转向和倒车验证。本次没有发实车运动指令。
+完整服务安装、回滚、模式契约与测试说明见 [架构说明](../docs/ARCHITECTURE.md)。历史协议资料见 [PROTOCOL.md](PROTOCOL.md)，其中参考固件公式不代替当前实车左右转向和倒车验证。本次没有发实车运动指令。

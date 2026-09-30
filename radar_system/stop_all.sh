@@ -1,11 +1,7 @@
 #!/bin/bash
 set -e
-# Stop follower sources; the driver command watchdog also clears motion on expiry.
-# Stop services first, otherwise systemd may restart killed processes.
+# 停车上的服务：先停服务单元，不然 systemd 会把杀掉的进程再拉起来；底盘驱动的指令超时也会把车停住。
 systemctl stop rk3588-perception.target 2>/dev/null || true
-systemctl stop rk3588-perception@{camera,lidar,ai,web,gui,follower}.service 2>/dev/null || true
-pkill -INT -f '[p]erson_follower.py' || true
-for process in person_pose_node.py real_lidar_node.py radar_web_server.py board_radar_gui.py; do
-  pkill -INT -f "[p]ython.*${process}" || true
-done
-echo '雷达与摄像头跟踪系统已停止。'
+systemctl stop rk3588-perception@{web,rtk,line,imu,jobrec}.service 2>/dev/null || true
+systemctl stop rk3588-wheeltec.service 2>/dev/null || true
+echo '车上服务已停止。'

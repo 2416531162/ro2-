@@ -6,7 +6,7 @@ SimOidBus   两台驱动器的 CAN 总线替身（send / recv 与 SocketCan 相�
             位置累加（0.01°）、查询回复、故障、断电。测试和演示服务器都用它。
 SimModbusPort  485 总线上的驱动器替身（transact 与 SerialPort 相同），按 RS485 编程手册的寄存器：心跳要变值才算、
             先写目标再切转速模式、电流 0 放空、一帧读全状态、非法地址回异常码。
-OidSimCar   follow_sim 的底盘接口（x, y, yaw, v, wz, steer, command, step, to_body, to_world）：
+OidSimCar   与 line_sim.Chassis 相同的底盘仿真接口（x, y, yaw, v, wz, steer, command, step, to_body, to_world）：
             下发的 (车速, 角速度) 经真正的 OidChassis / CanLink 编成 CAN 帧发给 SimOidBus，
             车按两台驱动器实际转出来的轮速走（前面万向轮随动，不影响运动）。
 """
@@ -172,7 +172,7 @@ class SimModbusPort:
 
 
 class OidSimCar:
-    """用两台模拟驱动器开的 Gen5（follow_sim 底盘接口）。车体原点是后轴中点。
+    """用两台模拟驱动器开的 Gen5（底盘仿真接口同 line_sim.Chassis）。车体原点是后轴中点。
 
     wheels 默认：Gen5 CAD 轮距 0.675 m、轮半径 0.2046 m，磁极对数按 15 模拟，右轮电机镜像安装。
     control_s：驱动程序下发、查询的周期（与 oid.yaml 的 tx_hz 25 相同）。

@@ -16,7 +16,6 @@ case "${1:-}" in
       exec "$RK3588_PYTHON" -u "$ROOT/oid_protocol/oid_driver.py" --ros-args --params-file "$ROOT/oid_protocol/oid.yaml"
     fi
     exec "$RK3588_PYTHON" -u "$ROOT/wheeltec_protocol/wheeltec_driver.py" --ros-args --params-file "$ROOT/wheeltec_protocol/wheeltec.yaml" ;;
-  follower) exec "$RK3588_PYTHON" -u "$ROOT/radar_system/person_follower.py" --passive ;;
   rtk) exec "$RK3588_PYTHON" -u "$ROOT/radar_system/rtk_node.py" ;;
   line) exec "$RK3588_PYTHON" -u "$ROOT/radar_system/line_node.py" ;;
   # 作业自动记录（排查问题用）：点「开始作业」就把这次作业的原始数据存到 ~/rtk/jobs，只订阅、不控制
@@ -35,6 +34,7 @@ case "${1:-}" in
     exec "/opt/ros/$ROS_DISTRO/lib/imu_filter_madgwick/imu_filter_madgwick_node" --ros-args \
          -p use_mag:=false -p publish_tf:=false -p world_frame:=enu -p gain:=0.01 \
          -r imu/data_raw:=/imu -r imu/data:=/imu/data ;;
-  camera|lidar|ai|web|gui) exec bash "$ROOT/radar_system/start_component.sh" "$@" ;;
-  *) echo 'Expected chassis|follower|rtk|line|jobrec|imu|camera|lidar|ai|web|gui' >&2; exit 2 ;;
+  # 网页 + 平板 app 的 WebSocket
+  web) exec bash "$ROOT/radar_system/run_web.sh" ;;
+  *) echo 'Expected chassis|rtk|line|jobrec|imu|web' >&2; exit 2 ;;
 esac
