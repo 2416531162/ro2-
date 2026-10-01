@@ -488,7 +488,7 @@ class TestMission(unittest.TestCase):
 
     def test_start_current_at_last_marked_point_runs_back_to_the_first(self):
         """2026-10-01 用户：标 A、B 两点后车停在 B 上点「从当前位置开始」：原地掉头、倒车，
-        喷头从 B 一路画到 A。车按 0.44 s 执行延迟执行。"""
+        喷头从 B 一路画到 A。车按跟踪器设的执行延迟执行。"""
         from test_line_mission import FakeFusion
         route = dict(kind='path', points=[[0, 0], [6, 0]], closed=False, cruise=0.5)
         self.fusion.current = FakeFusion.make(6.0 - NOZZLE, 0.0, 0.0)  # 从 A 开过来，喷头停在 B
@@ -530,10 +530,10 @@ class TestMission(unittest.TestCase):
         self.assertTrue(ok, msg)
         self.assertIn('原地转向', msg)
         self.assertEqual(self.m.tracker.pivot_rate, DIFF.pivot_rate_rad_s)
-        self.assertEqual(self.m.path_cfg.delay_s, 0.44)            # 2026-09-30 实车辨识
+        self.assertEqual(self.m.path_cfg.delay_s, 0.30)            # 2026-10-01 驱动器 Kp 2.7 / Ki 45 后实测 0.28 s
         self.assertEqual(self.m.path_cfg.lat_accel_mps2, 0.20)       # 用户嫌转弯慢：09-30 0.08 → 0.12，10-01 → 0.20
         t, turned = 0.0, False
-        sent, vx, wz = [], 0.0, 0.0                 # 车按跟踪器设的执行延迟（实测 0.44 s）执行指令
+        sent, vx, wz = [], 0.0, 0.0                 # 车按跟踪器设的执行延迟执行指令
         while t < 200.0:
             out = self.m.tick(t, 'NAVIGATION')
             p = self.fusion.current
@@ -552,7 +552,7 @@ class TestMission(unittest.TestCase):
                 break
         self.assertTrue(turned)
         self.assertEqual(self.m.message, '路线完成')
-        # 喷头停在终点后 5 cm 附近：按 0.44 s 执行延迟预估，预估位置离终点 stop_tol_m 就停，
+        # 喷头停在终点后 5 cm 附近：按执行延迟预估，预估位置离终点 stop_tol_m 就停，
         # 实际停在线头前约 1.4 cm（离「线头后 5 cm」约 6.4 cm；原来按 0.1 s、车没延迟时约 4 cm）
         p = self.fusion.current
         self.assertLess(math.hypot(p.x + NOZZLE * math.cos(p.yaw) - 6.0, p.y + NOZZLE * math.sin(p.yaw) - 5.05), 0.07)

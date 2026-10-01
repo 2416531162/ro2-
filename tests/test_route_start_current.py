@@ -219,7 +219,7 @@ class Tracking(unittest.TestCase):
 
     def test_differential_parameters(self):
         cfg = differential_config(PathConfig())
-        self.assertEqual((.44, .33, .5, .15, .15), (cfg.delay_s, cfg.stop_delay_s, cfg.reverse_creep_m,
+        self.assertEqual((.30, None, .5, .15, .15), (cfg.delay_s, cfg.stop_delay_s, cfg.reverse_creep_m,
                                                   cfg.reverse_creep_mps, cfg.reverse_section_creep_m))
         self.assertEqual(.8, rp.PIVOT_REVERSE_MIN_M)
 

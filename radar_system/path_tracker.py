@@ -214,13 +214,19 @@ def differential_config(config=PathConfig()):
     R 2.2 m 圆 0.51 m/s p95 1.5–1.8 cm，余量大；仿真 0.20 时 R 2.2 m p95 2.3 cm，比 0.12 多约 0.5 cm）：
     R 2.2 m 约 0.66 m/s，R 3.7 m 及以上按 0.8 m/s，角球弧 R 1 m 约 0.44 m/s；
     场地规划经 route_limits 用同一个值。起步先按 0.1 m/s 慢走 0.3 m（万向轮回正），倒车段只慢走 0.15 m，
-    倒车后往前起步按 0.15 m/s 慢走 0.5 m（整段倒车助跑），起步 0.6 m 内锁车头；段尾停车按 0.33 s 预估（见 stop_delay_s）。
+    倒车后往前起步按 0.15 m/s 慢走 0.5 m（整段倒车助跑），起步 0.6 m 内锁车头；段尾停车与转向同一个延迟预估。
+    执行延迟 0.44 → 0.30 s（2026-10-01 下午用户把两台驱动器速度环 Kp 1.8 / Ki 30 改成 2.7 / 45）：巡航时指令→陀螺的
+    延迟从 0.38 s 降到 0.28 s，车身左右摆从 0.64 Hz 变成 1.0 Hz；按 0.44 s 预估补过头，1 Hz 处环路增益 0.99、相位 −179°
+    （已部署代码实测控制器频响 × 摆得最厉害两趟实测的底盘 1.7∠−100°），6 趟里 2 趟摆幅越来越大到 ±7°、角速度 ±0.5 rad/s。
+    按 0.30 s：同一底盘增益裕度 1.6；仿真（二阶 + 延迟、过 1 Hz 实测点）30 m 直线喷头 p95 1.79 → 1.68 cm。
+    **延迟与驱动器参数是一对**：驱动器改回 1.8 / 30 要把这里改回 0.44（按 0.30 时旧驱动器相位裕度只剩约 20°）；
+    驱动器再加增益前先实测。这时 ω 2.5 的增益裕度只剩约 1.27，不用。
     拐角提速（2026-10-01 用户：矩形每个拐角都要倒车太慢，不改硬件、把走法调快）：实车一个拐角约 13.5 s（停稳、原地转
     3 s、倒车 3.4 s、停稳、助跑 0.1 m/s 约 4 s）；原地转不提速（1.0 rad/s 时驱动器速度环冲过头，见 robot_gen5.json），
     改倒车段慢走 0.3 → 0.15 m、倒车 0.3 → 0.5 m/s（DIFF_REVERSE_MPS）、停稳 0.3 → 0.2 s（DIFF_SETTLE_S）、
     助跑慢走 0.1 → 0.15 m/s。"""
-    return replace(config, delay_s=0.44, steer_gain=1.0, lat_accel_mps2=0.20, start_creep_mps=0.1, start_hold_m=0.6,
-                   reverse_creep_m=0.5, reverse_creep_mps=0.15, reverse_section_creep_m=0.15, stop_delay_s=0.33)
+    return replace(config, delay_s=0.30, steer_gain=1.0, lat_accel_mps2=0.20, start_creep_mps=0.1, start_hold_m=0.6,
+                   reverse_creep_m=0.5, reverse_creep_mps=0.15, reverse_section_creep_m=0.15, stop_delay_s=None)
 
 
 DIFF_REVERSE_MPS = 0.5      # 差速车倒车段限速（SectionTracker reverse_mps；阿克曼车 0.3）

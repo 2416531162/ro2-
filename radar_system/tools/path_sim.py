@@ -10,8 +10,8 @@ app 默认的连线路线（急弯开出去倒车掉头、前进倒车交替）�
            ideal=True 时把传感器噪声、延迟都关掉，只剩控制器和底盘本身的误差。
     truth  直接用底盘真值当位姿（无噪声、无延迟），看控制律和底盘动态的下限。
 底盘（chassis）：
-    differential  Gen5 差速底盘（两后轮毂电机 + 前自由万向轮，能原地转）：指令延迟 0.44 s（2026-09-30 实车 IMU
-              直行辨识：陀螺 ≈ 0.44 s 前的角速度指令 × 1.02–1.04）后换成左右轮目标速度，
+    differential  Gen5 差速底盘（两后轮毂电机 + 前自由万向轮，能原地转）：指令延迟 0.28 s（2026-10-01 驱动器速度环
+              改 Kp 2.7 / Ki 45 后实车巡航辨识；原 1.8 / 30 时 0.44 s）后换成左右轮目标速度，
               每个轮按 0.6 m/s² 限加速度、不超过 1.2 m/s；
               run_route 按喷头压线、急弯原地转向规划，融合打开 drive_differential。
     measured  实车辨识（默认，2026-09-26 两趟连线路线记录）：指令到曲率的纯延迟 前进 0.35 s / 倒车 0.30 s，
@@ -104,7 +104,7 @@ class DifferentialChassis:
     TRACK_M = 0.675                 # Gen5 CAD 后轮轮距
     NOZZLE_X_M = 0.30               # 喷头在后轴前（天线版总装图的横移臂）
 
-    def __init__(self, delay_s=0.44, max_wheel=1.2, wheel_accel=0.6, **_ackermann_only):
+    def __init__(self, delay_s=0.28, max_wheel=1.2, wheel_accel=0.6, **_ackermann_only):
         self.x = self.y = self.yaw = 0.0
         self.v = self.wz = self.steer = 0.0
         self.left = self.right = 0.0
