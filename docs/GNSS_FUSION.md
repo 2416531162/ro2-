@@ -236,7 +236,7 @@ BESTVEL 的 `sol` 接受常用位置解类型、`DOPPLER_VELOCITY` 或驱动已�
 
 以下任何一项都会令 `usable_for_control=False`：
 
-- 连续 0.5 s 没有接受到测量时间足够新的 RTK 固定解，`rtk_fixed_timeout`。
+- 连续 0.5 s 没有接受到测量时间足够新的 RTK 固定解，`rtk_fixed_timeout`。Gen5（`rtk_hold_s` 5 s）只有「固定解照样在来、只是双天线互检不过」才按推算维持（`rtk_hold`，超时 `rtk_hold_timeout`）；掉信号（断流、浮点、没解）照样 0.5 s 就不可控、原地停，恢复后自动继续（2026-10-01 用户规则）。中转卡顿后积压的数据由 `um982.GnssClock` 按真实测量时刻标注，比当前状态早 `history_s`（1 s）以上的直接丢掉，不会被当成当前位置。
 - 最大坐标轴的水平 1σ 超过 0.03 m，`position_uncertain`。
 - 航向 1σ 超过 0.5°，`heading_uncertain`。双天线测向有效时放宽到 2°。
 - 轮速过期，`wheel_stale`。

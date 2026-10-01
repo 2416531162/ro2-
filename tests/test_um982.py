@@ -148,6 +148,41 @@ class TestClock(unittest.TestCase):
         t = clock.measurement_time(2437, 900.0, 5003.0)     # GPS 时间突然跳了 800 s
         self.assertAlmostEqual(t, 5003.0 - clock.latency, places=6)
 
+    def _stall(self, stall_s):
+        """20 Hz 正常收 30 s，中转卡 stall_s 秒，积压的数据 0.2 s 内一下子到，之后恢复正常；返回各条的测量时刻误差。"""
+        clock = um982.GnssClock(solution_latency_s=0.02)
+        delay = 0.025                                       # 解算 20 ms + 正常传输 5 ms
+        errs = {}
+        burst_at = 30.0 + stall_s
+        backlog = [k for k in range(int(80 / 0.05)) if 30.0 <= k * 0.05 < burst_at]
+        for k in range(int(80 / 0.05)):
+            tow = k * 0.05
+            if tow in [b * 0.05 for b in backlog]:
+                t_rx = burst_at + delay + 0.2 * backlog.index(k) / len(backlog)
+            else:
+                t_rx = tow + delay
+            errs[k] = clock.measurement_time(2437, 1000.0 + tow, 5000.0 + t_rx) - (5000.0 + tow)
+        return errs, backlog
+
+    def test_relay_stall_burst_keeps_true_times(self):
+        # 2026-10-01 实车：平板中转断流 3.85 s 后积压的数据一下子到，旧做法全标成「刚测到」
+        errs, backlog = self._stall(3.85)
+        self.assertLess(max(abs(errs[k]) for k in backlog), 0.01)
+        self.assertLess(max(abs(e) for e in errs.values()), 0.01)
+
+    def test_stall_longer_than_window_keeps_true_times(self):
+        errs, backlog = self._stall(15.0)                   # 比估计窗口（10 s）还长
+        self.assertLess(max(abs(errs[k]) for k in backlog), 0.01)
+        after = [k for k in errs if k * 0.05 > 45.5]
+        self.assertLess(max(abs(errs[k]) for k in after), 0.01)
+
+    def test_gps_time_far_behind_resets_estimate(self):
+        clock = um982.GnssClock()
+        for k in range(50):
+            clock.measurement_time(2437, 1000 + k * 0.05, 5000 + k * 0.05)
+        t = clock.measurement_time(2437, 800.0, 5003.0)     # GPS 时间往回跳了 200 s（远超迟到上限）
+        self.assertAlmostEqual(t, 5003.0 - clock.latency, places=6)
+
 
 class TestNtripEnv(unittest.TestCase):
 
@@ -250,9 +285,10 @@ class TestStream(unittest.TestCase):
         self.feed_epochs(s, 0.33, 0.33)
         self.assertAlmostEqual(s.status(10.3)['antennas']['ant2']['offset_m'], 0.33, places=2)
         # 主天线只有单点解时没法判断（外场差分重连时实测单点对固定"相距 7.3 m"）
+        # 2 s 后（GPS 时刻也晚 2 s）的一个历元：主天线单点、副天线照旧固定
         single = unicore('BESTPOSA', 'SOL_COMPUTED,SINGLE,30.00000012345,120.00000067890,12.3456,8.5000,'
-                                     'WGS84,1.2,1.3,2.5,"0",0.000,0.000,40,17,17,0,1,12,11,51')
-        s.feed((single + '\r\n' + self.secondary(0.33) + '\r\n').encode(), 12.0)
+                                     'WGS84,1.2,1.3,2.5,"0",0.000,0.000,40,17,17,0,1,12,11,51', tow=443245.7)
+        s.feed((single + '\r\n' + secondary_at(0.33, tow=443245.7) + '\r\n').encode(), 12.0)
         self.assertEqual(s.status(12.1)['antennas']['ant1']['fix'], 'SINGLE')   # 确实喂进去了单点解
         a2 = s.status(12.1)['antennas']['ant2']
         self.assertEqual((a2['offset_m'], a2['consistent']), (None, None))

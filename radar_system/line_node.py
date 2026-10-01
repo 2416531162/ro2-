@@ -197,8 +197,8 @@ def load_fusion_config(gnss_fusion, path):
         overrides.setdefault('yaw_scale_sigma', 0.03)
         overrides.setdefault('heading_sync_s', 0.02)
         overrides.setdefault('yaw_walk_deg_sqrt_s', 0.1)
-        # 卫星位置不可信（固定解与推算对不上、双天线位置互检不过、没有固定解）时只靠推算走，最多 5 s 再停车
-        # （同日用户规则：IMU 航向 5 秒内肯定没问题，卫星定位出问题不要信卫星）
+        # 卫星位置不可信（双天线位置互检不过）时只靠推算走，最多 5 s 再停车（同日用户规则：IMU 航向 5 秒内肯定
+        # 没问题，卫星定位出问题不要信卫星）；掉信号（没有固定解）不推算，原地停（2026-10-01 用户规则）
         overrides.setdefault('rtk_hold_s', 5.0)
     return gnss_fusion.FusionConfig(**overrides)
 

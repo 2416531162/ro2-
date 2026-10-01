@@ -420,6 +420,23 @@ class TestRoute(Base):
         self.assertEqual(self.m.message, '定位恢复，自动继续')
         self.assertGreater(self.m.tracker.st.s, s0 + 1.0)
 
+    def test_signal_loss_stops_in_place_with_notice_then_resumes(self):
+        # 2026-10-01 用户规则：掉信号（融合报 rtk_fixed_timeout）不要瞎动，原地停；恢复后自动继续
+        from line_mission import RTK_NOTICE_LOST
+        self.running_rect()
+        p = self.fusion.current
+        lost = FakeFusion.make(p.x, p.y, math.degrees(p.yaw), quality='DEAD_RECKONING', usable=False)
+        lost.reasons = ('heading_unavailable', 'gyro_only', 'rtk_fixed_timeout')
+        self.fusion.current = lost
+        self.assertEqual(self.m.tick(5.0, 'NAVIGATION')[:2], (0.0, 0.0))
+        self.assertEqual(self.m.tracker.st.state, 'PAUSED')
+        self.assertEqual(self.m.message, RTK_NOTICE_LOST)
+        self.assertEqual(self.m.phase, 'RUNNING')                            # 作业没结束，只是停着等信号
+        self.fusion.current = FakeFusion.make(p.x, p.y, math.degrees(p.yaw))
+        self.drive(5.05, 10.0)
+        self.assertEqual(self.m.tracker.st.state, 'RUNNING')
+        self.assertEqual(self.m.message, '定位恢复，自动继续')
+
     def test_route_start_uses_learned_trim(self):
         self.m.integral0 = 0.05
         self.fusion.current = FakeFusion.make(-1.0, 0.0, 0.0)

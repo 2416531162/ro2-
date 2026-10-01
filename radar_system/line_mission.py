@@ -54,6 +54,8 @@ LINE_CRUISE_MPS = 0.8
 # 卫星位置不可信、按推算维持（融合 rtk_hold_s，Gen5 5 s）时给操作员的话；恢复后改回「行驶中」
 RTK_NOTICE_HOLD = '卫星定位不可信，按 IMU 推算行驶'
 RTK_NOTICE_TIMEOUT = '卫星定位不可信超过 5 s，已停车，定位恢复后自动继续'
+# 掉信号（固定解没来）原地停（2026-10-01 用户规则），恢复后自动继续
+RTK_NOTICE_LOST = '卫星信号中断，已原地停车，恢复后自动继续'
 
 
 def pose_problem(pose):
@@ -541,11 +543,13 @@ class LineMission:
         reasons = getattr(pose, 'reasons', ()) or ()
         if not text and 'rtk_hold_timeout' in reasons:
             text = RTK_NOTICE_TIMEOUT
+        elif not text and 'rtk_fixed_timeout' in reasons:
+            text = RTK_NOTICE_LOST
         elif not text and 'rtk_hold' in reasons:
             text = RTK_NOTICE_HOLD
         if text:
             self.message = text
-        elif self.message in CASCADE_NOTICES + (RTK_NOTICE_HOLD, RTK_NOTICE_TIMEOUT):
+        elif self.message in CASCADE_NOTICES + (RTK_NOTICE_HOLD, RTK_NOTICE_TIMEOUT, RTK_NOTICE_LOST):
             self.message = '行驶中'
         self._write_log(now, pose, vx)
         try:

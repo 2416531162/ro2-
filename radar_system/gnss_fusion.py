@@ -117,8 +117,11 @@ class FusionConfig:
     # 卫星位置不可信时只靠推算维持（2026-09-30 用户规则：「IMU 航向 5 秒内肯定没问题」「卫星定位的问题，为什么要信卫星，
     # 此时应立马无缝衔接 IMU 继续走 5 秒」）。0 = 旧做法：固定解中断 fixed_timeout_s 就不可控，持续离群
     # outlier_reset_s 后对齐到 RTK 并暂停。> 0：
-    # - 双天线位置互检不过（卫星位置错了）、没有固定解：位置只按轮速 + 航向推算，不用 RTK、不停车，最多这么久；
+    # - 双天线位置互检不过（卫星位置错了，固定解照样在来）：位置只按轮速 + 航向推算，不用 RTK、不停车，最多这么久；
     #   超时才不可控（停车）。又有可信的固定解（互检过或比不了）就按 RTK 对齐接回，不停车
+    # - 没有固定解（掉信号：中转断流、浮点、没解）不推算：与旧做法一样断 fixed_timeout_s 就不可控、原地停，
+    #   恢复后按 RTK 对齐接回（2026-10-01 用户规则：「掉信号不要瞎动，应该原地停」；当天中转断流 3.85 s 推算着走，
+    #   积压的旧数据到了被当成当前位置，车跑偏）
     # - 固定解与推算对不上但互检过了：照旧按软门限用（离得远降权，推算有轮速刻度误差，不能完全不用）；持续对不上
     #   是推算走偏了，按 RTK 对齐但不停车。互检比不了（没有副天线）时照旧对齐并暂停
     # 2026-09-30 19:37 实车：主天线固定解错了 20–100 cm（接收机照报 NARROW_INT，两根天线位置之差对不上测向基线），
@@ -408,8 +411,8 @@ class _State:
         self.heading_resets = 0
         self.roll = self.pitch = 0.0        # 最近一帧 IMU 姿态（倾斜补偿），tilt_t 是它的时刻
         self.tilt_t = -math.inf
-        # 推算维持（rtk_hold_s > 0）：最近一次按 RTK 对齐接回的时刻、次数；互检不过丢掉的固定解帧数
-        self.rejoin_t = -math.inf
+        # 推算维持（rtk_hold_s > 0）：最近一次按 RTK 对齐接回的时刻、次数；互检不过丢掉的固定解帧数、最近一帧的时刻
+        self.rejoin_t = self.suspect_t = -math.inf
         self.rejoins = self.fix_suspect = 0
 
 
@@ -864,6 +867,7 @@ class GnssFusion:
             # 卫星位置错了（两根天线的固定解对不上测向基线）：这帧不用，位置靠推算；维持多久由 _pose 按 rtk_hold_s 判
             s.fix_suspect += 1
             s.fix_reason = 'rtk_suspect'
+            s.suspect_t = sample.t
             return
         if not fixed:
             s.outlier_since = None
@@ -1060,14 +1064,21 @@ class GnssFusion:
                 reasons.append('gyro_only')
         holding = False
         if cfg.rtk_hold_s > 0:
-            # 推算维持：多久没有可信的固定解。不超过 rtk_hold_s 照常能开（位置靠轮速 + 航向推算），超过才不可控
+            # 推算维持只给「卫星位置错了」：固定解还在来、只是双天线互检不过被丢掉，多久没有可信的固定解不超过
+            # rtk_hold_s 照常能开（位置靠轮速 + 航向推算），超过才不可控。
+            # 掉信号（固定解没来：中转断流、浮点、没解）不推算着走，固定解断 fixed_timeout_s 就不可控、原地停，
+            # 恢复后自动继续（2026-10-01 用户规则：「掉信号不要瞎动，应该原地停」）
             since = s.t - s.fixed_t
             if since >= cfg.fixed_timeout_s - 1e-9:
-                if since <= cfg.rtk_hold_s + 1e-9:
+                suspect = s.t - s.suspect_t < cfg.fixed_timeout_s - 1e-9
+                if suspect and since <= cfg.rtk_hold_s + 1e-9:
                     holding = True
                     reasons.append('rtk_hold')
-                else:
+                elif suspect:
                     reasons.append('rtk_hold_timeout')
+                    usable = False
+                else:
+                    reasons.append('rtk_fixed_timeout')
                     usable = False
             if s.t - s.rejoin_t <= cfg.reset_hold_s:
                 reasons.append('rtk_rejoin')        # 刚按 RTK 对齐接回：只提示，不停车

@@ -204,26 +204,43 @@ class GnssClock:
 
     串口传输只会让数据晚到、不会早到，所以窗口内 (收到时刻 - GPS 时间) 的最小值最接近真实钟差；
     再减去接收机解算输出本身的延迟。窗口保持几秒，跟得上两个时钟之间的 ppm 级漂移。
+
+    晚到超过 max_jump_s 的（平板中转卡了几秒、积压的数据一下子到）按原钟差算，如实标成旧数据，也不进窗口：
+    2026-10-01 实车中转断流 3.85 s，旧做法把它当成接收机重启、钟差重估成「刚测到」，融合按 RTK 对齐到
+    3.85 s 前的位置（往回跳 2.5 m），车按错的位置猛打方向跑偏。比钟差早到 max_jump_s 以上（时钟跳了）、
+    或晚到 max_late_s 以上（接收机重启、GPS 时间变了）才丢掉旧窗口重新估计。
     """
 
-    def __init__(self, window_s=10.0, solution_latency_s=0.02, max_jump_s=1.0):
+    def __init__(self, window_s=10.0, solution_latency_s=0.02, max_jump_s=1.0, max_late_s=60.0, max_drift=2e-4):
         self.window_s, self.latency, self.max_jump = window_s, solution_latency_s, max_jump_s
+        self.max_late, self.max_drift = max_late_s, max_drift
         self.samples = deque()
-        self.offset = None
+        self.offset = self.offset_t = None
 
     def measurement_time(self, week, tow, t_rx):
         gps = week * GPS_WEEK_S + tow
         diff = t_rx - gps
-        if self.offset is not None and abs(diff - self.offset) > self.max_jump:
-            # 接收机重启或时间跳变：丢掉旧窗口重新估计
+        if self.offset is not None and (diff < self.offset - self.max_jump or diff > self.offset + self.max_late):
+            # 时钟跳变或接收机重启：丢掉旧窗口重新估计
             self.samples.clear()
+            self.offset = None
+        elif self.offset is not None and diff > self.offset + self.max_jump:
+            # 迟到的数据：测量时刻照旧按原钟差算（融合按时刻丢掉太旧的、回放还在历史里的）
+            return gps + self.offset - self.latency
         while self.samples and self.samples[0][0] < t_rx - self.window_s:
             self.samples.popleft()
         # 单调队列维护窗口最小值
         while self.samples and self.samples[-1][1] >= diff:
             self.samples.pop()
         self.samples.append((t_rx, diff))
-        self.offset = self.samples[0][1]
+        low = self.samples[0][1]
+        if self.offset is None or low <= self.offset:
+            self.offset = low
+        else:
+            # 窗口里早到的样本过期、最小值变大：只按时钟漂移的速度往上跟（max_drift 秒/秒 = 200 ppm，是晶振实际漂移的几倍），
+            # 断流比窗口还长时，积压数据里最先进窗口的那条（晚到近 max_jump_s）不会把钟差抬高
+            self.offset = min(low, self.offset + self.max_drift * max(0.0, t_rx - self.offset_t))
+        self.offset_t = t_rx
         return gps + self.offset - self.latency
 
 

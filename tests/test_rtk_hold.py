@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""卫星位置不可信时按推算维持（gnss_fusion rtk_hold_s，Gen5 5 s）与双天线位置互检（DualAntennaCheck）。
+"""卫星位置不可信时按推算维持（gnss_fusion rtk_hold_s，Gen5 5 s）、掉信号原地停与双天线位置互检（DualAntennaCheck）。
 
 2026-09-30 19:37 实车：主天线固定解错了 20–100 cm，接收机照报 NARROW_INT；两根天线（车上相距约 0.40 m）的固定解位置之差
 对不上测向基线。旧做法离群 2 s 后对齐到错的位置（横偏一下跳 14 cm，车拐过去追，5 s 一次）。用户规则：卫星定位出问题
@@ -163,14 +163,27 @@ class TestRtkHold(unittest.TestCase):
         self.assertTrue(rows[-1][3].usable_for_control)
         self.assertEqual(f.calibration()['position_resets'], 0)
 
-    def test_fix_outage_is_bridged_for_five_seconds(self):
-        for gap, stops in ((3.0, False), (7.0, True)):
+    def test_signal_loss_stops_at_once_and_resumes(self):
+        """掉信号（固定解没来）不推算着走：断 0.5 s 就不可控（原地停），恢复后接回、能开（2026-10-01 用户规则）。"""
+        for gap in (1.0, 3.0, 7.0):
             f, rows = simulate(GEN5, fixes_on=lambda t, g=gap: not 10.0 <= t < 10.0 + g)
             with self.subTest(gap=gap):
-                self.assertEqual(any(not r[3].usable_for_control for r in rows if r[0] > 1.0), stops)
-                self.assertTrue(any('rtk_hold' in r[3].reasons for r in rows))
+                blocked = [r[0] for r in rows if not r[3].usable_for_control and r[0] > 1.0]
+                self.assertTrue(blocked)
+                self.assertLess(min(blocked), 10.0 + 0.5 + 0.06)
+                self.assertIn('rtk_fixed_timeout', next(r for r in rows if r[0] == min(blocked))[3].reasons)
+                self.assertFalse(any('rtk_hold' in r[3].reasons for r in rows))
+                self.assertLess(max(blocked), 10.0 + gap + 1.0)
                 self.assertTrue(rows[-1][3].usable_for_control)
                 self.assertLess(abs(lateral(rows[-1])), 0.02)
+
+    def test_signal_loss_during_satellite_error_hold_stops(self):
+        """卫星位置错了、正在推算维持，信号又断了：不再维持，固定解停来 0.5 s 就原地停。"""
+        f, rows = simulate(GEN5, primary_err=ramp(10.0, 20.0, rate=0.06), fixes_on=lambda t: not 13.0 <= t < 16.0)
+        self.assertTrue(any('rtk_hold' in r[3].reasons for r in rows if 12.0 < r[0] < 13.0))
+        blocked = [r[0] for r in rows if not r[3].usable_for_control and r[0] > 1.0]
+        self.assertTrue(13.0 < min(blocked) < 13.0 + 0.5 + 0.06, min(blocked))
+        self.assertIn('rtk_fixed_timeout', next(r for r in rows if r[0] == min(blocked))[3].reasons)
 
     def test_dead_reckoning_wrong_with_consistent_rtk_realigns_without_stopping(self):
         """车真的横着滑了 20 cm（两根天线都看得见，互检过）：推算错了，按 RTK 对齐，不停车。"""
