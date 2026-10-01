@@ -63,8 +63,8 @@
   "drive": {
     "type": "differential",
     "min_radius_m": 0.5,
-    "pivot_rate_rad_s": 1.0,
-    "pivot_accel_rad_s2": 2.0,
+    "pivot_rate_rad_s": 0.8,
+    "pivot_accel_rad_s2": 1.0,
     "nozzle_x_m": 0.30
   }
 }

@@ -358,8 +358,7 @@ def resolve_stick(throttle, steer, tier, tiers_mps, reverse_scale, geometry):
     return round(vx, 4), round(wz, 4), round(math.degrees(steer_rad), 1)
 
 
-# 手动摇杆打满时原地转的角速度（rad/s）：与路线原地转（车型配置 pivot_rate_rad_s）分开。
-# 2026-10-01 路线原地转从 0.8 提到 1.0 rad/s，手动手感保持原来的 0.8
+# 手动摇杆打满时原地转的角速度（rad/s）：与路线原地转（车型配置 pivot_rate_rad_s）分开，路线原地转再调时手动手感不变
 MANUAL_PIVOT_RATE_RAD_S = 0.8
 
 
