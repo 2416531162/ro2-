@@ -437,6 +437,49 @@ class TestRoute(Base):
         self.assertEqual(self.m.tracker.st.state, 'RUNNING')
         self.assertEqual(self.m.message, '定位恢复，自动继续')
 
+    def test_start_needs_rtk_confirmed_position(self):
+        """2026-10-01 用户：IMU 维持的前提是在 RTK 确认过的位置上，中途跳变才靠 IMU 接上，不能刚接入就用 IMU。"""
+        self.fusion.antenna_lever = lambda: (0.0, 0.0)
+        fix = lambda t, x, y: self.m.on_gnss(dict(kind='fix', t=t, lat=30.0 + y * 1e-5, lon=120.0 + x * 1e-5, height=20.0,
+                                                   sol='NARROW_INT', sigma_n=0.01, sigma_e=0.01, sigma_u=0.02,
+                                                   diff_age=1.0, sats=30))
+        start = lambda t: self.m.command({'cmd': 'route_start', 'route': RECT}, t)
+        # 推算维持中（固定解断了 / 卫星不可信）：位置能用于控制，但不能拿来开始
+        hold = FakeFusion.make(-1.0, 0.0, 0.0, quality='DEAD_RECKONING')
+        hold.reasons = ('heading_unavailable', 'rtk_hold', 'rtk_suspect')
+        self.fusion.current = hold
+        ok, why = start(0.0)
+        self.assertFalse(ok)
+        self.assertEqual('rtk_not_confirmed：rtk_hold、rtk_suspect', why)
+        # 从室内转发器下开出来：固定解照样来，但与融合位置差 22 m（融合要持续对不上 2 s 才对齐）
+        self.fusion.current = FakeFusion.make(-1.0, 0.0, 0.0)
+        fix(1.0, 21.0, 0.0)
+        self.assertEqual((False, 'rtk_not_confirmed'), start(1.0))
+        fix(2.0, -1.0, 0.0)                                         # 对齐了：固定解与融合对得上
+        self.assertEqual((False, 'rtk_not_confirmed'), start(2.6))  # 固定解停了 0.6 s：也不算确认
+        ok, why = start(2.1)
+        self.assertTrue(ok, why)
+
+    def test_auto_resume_waits_for_rtk_confirmed_position(self):
+        """暂停后自动继续也算重新接入：位置能用但还在推算维持，不接着走，等 RTK 确认了再走。"""
+        self.running_rect()
+        p = self.fusion.current
+        lost = FakeFusion.make(p.x, p.y, math.degrees(p.yaw), quality='DEAD_RECKONING', usable=False)
+        lost.reasons = ('rtk_fixed_timeout',)
+        self.fusion.current = lost
+        self.m.tick(5.0, 'NAVIGATION')
+        self.assertEqual(self.m.tracker.st.state, 'PAUSED')
+        hold = FakeFusion.make(p.x, p.y, math.degrees(p.yaw), quality='DEAD_RECKONING')
+        hold.reasons = ('rtk_hold',)
+        for k in range(1, 61):                                      # 3 s 一直在推算维持：不动
+            self.fusion.current = hold
+            self.assertEqual(self.m.tick(5.0 + 0.05 * k, 'NAVIGATION')[:2], (0.0, 0.0))
+        self.assertEqual(self.m.tracker.st.state, 'PAUSED')
+        self.fusion.current = FakeFusion.make(p.x, p.y, math.degrees(p.yaw))
+        self.drive(8.05, 10.0)
+        self.assertEqual(self.m.tracker.st.state, 'RUNNING')
+        self.assertEqual(self.m.message, '定位恢复，自动继续')
+
     def test_route_start_uses_learned_trim(self):
         self.m.integral0 = 0.05
         self.fusion.current = FakeFusion.make(-1.0, 0.0, 0.0)

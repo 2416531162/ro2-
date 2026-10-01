@@ -65,6 +65,13 @@ RTK_NOTICE_LOST = '卫星固定解中断超过 %g s，已原地停车，恢复�
 # 一直是「行驶中」）；恢复后起步检查不过、自动继续不了时说清楚原因（原因代码由 app 翻译）
 TRACKER_PAUSED_NOTICE = '定位暂时不能用，已原地停车，恢复后自动继续'
 RESUME_FAILED_NOTICE = '定位已恢复，但不能自动接着走：%s；请停止后重新开始'
+# 开始、继续作业（含暂停后自动继续）时位置必须是 RTK 确认过的（2026-10-01 用户：「imu 维持的前提必须得是在正确的
+# 路径」——靠 RTK 知道位置再开始走，中途跳变才靠 IMU 接上，恢复后继续用 RTK，不能刚接入就用 IMU）：
+# 融合是固定解、不在下面这几种状态，且最近 START_FIX_AGE_S 内的固定解与融合推算差不超过 START_AGREE_M。
+# 当天 13:40 实车：从室内转发器下开出来，RTK 已经差几十米，融合要持续对不上 2 s 才对齐，这期间照样能开始作业
+START_AGREE_M = 0.05
+START_FIX_AGE_S = 0.5
+UNCONFIRMED_REASONS = ('rtk_hold', 'rtk_suspect', 'rtk_rejoin', 'position_reset')
 
 
 def pose_problem(pose):
@@ -315,10 +322,20 @@ class LineMission:
             return _with(pose, usable_for_control=True, reasons=reasons + ('gyro_hold',))
         return pose
 
+    def _rtk_unconfirmed(self, pose, now):
+        """位置没被 RTK 确认（见 START_AGREE_M）时返回原因（app 翻译），确认了返回 None。"""
+        reasons = [r for r in UNCONFIRMED_REASONS if r in tuple(getattr(pose, 'reasons', ()))]
+        # 还没比过（只有开机后第一帧固定解时：那一帧融合直接按它定位置）只按固定解和原因判
+        inn = self._innovation
+        disagree = inn is not None and (now - inn[0] > START_FIX_AGE_S or math.hypot(inn[1], inn[2]) > START_AGREE_M)
+        if pose.quality != 'RTK_FIXED' or reasons or disagree:
+            return 'rtk_not_confirmed' + ('：' + '、'.join(reasons) if reasons else '')
+        return None
+
     def _resume(self, now):
         """定位恢复后接着走（操作员再按开始，或 tick 里定位连续可用 AUTO_RESUME_S 后自动）：控制权还在，重新检查起步条件。"""
         pose = self._control_pose(now)
-        problem = pose_problem(pose)
+        problem = pose_problem(pose) or self._rtk_unconfirmed(pose, now)
         if problem:
             return False, problem
         self._sync_imu(self.tracker, now)
@@ -338,7 +355,7 @@ class LineMission:
         if not 0.05 <= cruise <= 1.0:
             return False, '速度应在 0.05–1.0 m/s'
         pose = self._control_pose(now)
-        problem = pose_problem(pose)
+        problem = pose_problem(pose) or self._rtk_unconfirmed(pose, now)
         if problem:
             return False, problem
         tracker = self._line_tracker(cruise)
@@ -414,7 +431,7 @@ class LineMission:
         if self.route is None:
             return False, '车上还没有路线'
         pose = self._control_pose(now)
-        problem = pose_problem(pose)
+        problem = pose_problem(pose) or self._rtk_unconfirmed(pose, now)
         if problem:
             return False, problem
         try:
@@ -598,8 +615,10 @@ class LineMission:
         return vx, wz, None
 
     def _auto_resume(self, now, pose):
-        """定位问题暂停后，定位连续可用 AUTO_RESUME_S 就接着走；起步检查没过（如离线太远）隔 AUTO_RESUME_S 再试。"""
-        if self.operations.held or self.tracker.st.state != 'PAUSED' or not pose.usable_for_control:
+        """定位问题暂停后，定位连续可用、且 RTK 确认过（见 START_AGREE_M）AUTO_RESUME_S 就接着走；
+        起步检查没过（如离线太远）隔 AUTO_RESUME_S 再试。"""
+        if (self.operations.held or self.tracker.st.state != 'PAUSED' or not pose.usable_for_control
+                or self._rtk_unconfirmed(pose, now)):
             self._usable_since = self._resume_failed = None
             return
         if self._usable_since is None:
