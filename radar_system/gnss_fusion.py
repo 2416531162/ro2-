@@ -129,6 +129,19 @@ class FusionConfig:
     # 2026-09-30 19:37 实车：主天线固定解错了 20–100 cm（接收机照报 NARROW_INT，两根天线位置之差对不上测向基线），
     # 旧做法离群 2 s 后对齐到错的位置，横偏一下跳 14 cm，车拐过去追，5 s 一次
     rtk_hold_s: float = 0.0
+    # 测向基线长度（三维）在这个范围外就不用这帧测向，航向只按 IMU 推（原因 baseline_off）。2026-10-01 用户：测向「有效」
+    # 的 0.30–0.50 m 不改，但只要跑出 0.40–0.43 m 就立马信 IMU。Gen5 两根天线约 0.41 m：空旷处实测 0.405–0.418 m，
+    # 靠楼时到过 0.391 m。() = 不查
+    heading_length_band_m: tuple = ()
+    # 按两根天线位置互检的偏差逐步少信 RTK 位置、多靠 IMU + 轮速：最近 dual_weight_window_s 内互检偏差的最大值 d 超过
+    # dual_weight_m 时，固定解位置方差乘 (d / dual_weight_m)²（最多 DUAL_WEIGHT_MAX 倍）。2026-10-01 实车：空旷处偏差
+    # p95 1.3–1.4 cm（不受影响），靠楼 p95 5–9 cm，旧做法到 10 cm 才一刀切换推算，3–10 cm 时车跟着卫星晃。0 = 不降权
+    dual_weight_m: float = 0.0
+    dual_weight_window_s: float = 1.0
+    # 推算维持后按 RTK 接回时，位置最快每秒挪这么多（平滑接回，线上不出折角；挪到差 BLEND_DONE_M 以内再照常更新，
+    # 不确定度一直照常更新；时限见 BLEND_SPARE）。
+    # 2026-10-01 实车靠楼：维持 2.8 s 后一步对齐跳了 8.7 cm。0 = 一步对齐（旧做法）
+    rejoin_rate_mps: float = 0.0
     # 双天线位置互检：主、副天线固定解位置之差与测向基线（长度 × 方向）差连续 dual_check_n 次超过
     # dual_check_m + dual_check_rate_m × 车转的角速度（rad/s，按测向算）就不信固定解，降到 dual_ok_m 以下保持
     # dual_ok_s 才恢复；副天线 dual_stale_s 没有可比的数据就不按它判。
@@ -170,12 +183,17 @@ class FusionConfig:
         for name, value in self.__dict__.items():
             if name == 'yaw_input':
                 continue
+            if name == 'heading_length_band_m':
+                if value and not (len(value) == 2 and all(math.isfinite(v) for v in value) and 0 < value[0] < value[1]):
+                    raise ValueError('heading_length_band_m 必须是 () 或 (下限, 上限) 米')
+                continue
             if name == 'antenna_xy':
                 if len(value) != 2 or not all(math.isfinite(v) for v in value):
                     raise ValueError('antenna_xy 必须是两个有限数值')
             elif not math.isfinite(value):
                 raise ValueError(name + ' 必须是有限数值')
-            elif name in ('yaw_scale_sigma', 'heading_sync_s', 'antenna_height_m', 'rtk_hold_s'):
+            elif name in ('yaw_scale_sigma', 'heading_sync_s', 'antenna_height_m', 'rtk_hold_s', 'dual_weight_m',
+                          'rejoin_rate_mps'):
                 if value < 0:
                     raise ValueError(name + ' 不能为负')
             elif name not in ('baseline_yaw_body_deg', 'mount_offset_deg', 'drive_differential') and value <= 0:
@@ -234,6 +252,13 @@ HEADING_HOLD_SIGMA_DEG = 2.0
 # 主天线判过不可信、之后一阵没比过（主天线或中转断流）：副天线这么久内还来过，就一直不信，等重新比过；
 # 副天线这么久都没来（坏了），比不了，退回不按互检判
 DUAL_SUSPECT_KEEP_S = 10.0
+# 互检偏差给 RTK 位置降权最多这么多倍（方差；标准差 10 倍）：再大就是判卫星错了、按推算维持那一档
+DUAL_WEIGHT_MAX = 100.0
+# 平滑接回挪到离 RTK 这么近就交回普通更新（剩下的按普通更新慢慢吸收）
+BLEND_DONE_M = 0.01
+# 平滑接回最多用 BLEND_SPARE × 开始时的差距 / rejoin_rate_mps + 1 s；到时还没挪到：越离越远（推算一直在跑偏）就
+# 一步对齐，挪近了只是挪不进（RTK 自己在跳）就交回普通更新
+BLEND_SPARE = 1.5
 _FIXED = frozenset(('NARROW_INT',))
 _FLOAT = frozenset(('NARROW_FLOAT', 'L1_FLOAT', 'IONOFREE_FLOAT'))
 _HEADING = frozenset(('L1_INT', 'NARROW_INT', 'WIDE_INT'))
@@ -316,6 +341,7 @@ class DualAntennaCheck:
         self._ok_since = None
         self._over = 0              # 连续超过 dual_check_m 的次数
         self.secondary_t = None     # 最近一帧副天线的测量时刻
+        self._devs = []             # (t, 偏差 m)，最近 5 s 每次比的结果
 
     def add_heading(self, t, heading_deg, length_m, pitch_deg):
         if not all(math.isfinite(v) for v in (t, heading_deg, length_m)) or length_m <= 0:
@@ -354,6 +380,9 @@ class DualAntennaCheck:
             ex, ey = h[2] * math.sin(h[1]), h[2] * math.cos(h[1])          # 测向基线：主 → 副，东、北
             dev = math.hypot(x2 - p[0] - ex, y2 - p[1] - ey)
             self.last_dev, self.last_t = dev, t
+            self._devs.append((t, dev))
+            while self._devs and self._devs[0][0] < t - 5.0:
+                self._devs.pop(0)
             self.checks += 1
             limit = cfg.dual_check_m + cfg.dual_check_rate_m * self._turn_rate(t)
             self._over = self._over + 1 if dev > limit else 0
@@ -389,6 +418,11 @@ class DualAntennaCheck:
                 u = (t - a[0]) / (b[0] - a[0]) if b[0] > a[0] else 0.0
                 return a[1] + u * (b[1] - a[1]), a[2] + u * (b[2] - a[2])
         return None
+
+    def recent_dev(self, t, window):
+        """t 前 window 秒内互检偏差的最大值（m）；这段时间没比过为 None。"""
+        devs = [d for tt, d in self._devs if t - window <= tt <= t + 1e-9]
+        return max(devs) if devs else None
 
     def state_at(self, t):
         """t 时刻主天线固定解的互检结果：'suspect'（不可信）/ 'ok'（过了）/ 'pending'（主天线断过一阵、副天线一直在，
@@ -448,6 +482,13 @@ class _State:
         # 推算维持（rtk_hold_s > 0）：最近一次按 RTK 对齐接回的时刻、次数；互检不过丢掉的固定解帧数、最近一帧的时刻
         self.rejoin_t = self.suspect_t = -math.inf
         self.rejoins = self.fix_suspect = 0
+        # 平滑接回中（rejoin_rate_mps > 0）；blend_t 上一步的时刻，blend_until 时限，blend_d0 开始时离 RTK 多远
+        self.blending = False
+        self.blend_t = self.blend_until = -math.inf
+        self.blend_d0 = 0.0
+        self.weak_t = -math.inf             # 最近一帧按互检偏差降了权的固定解的时刻
+        self.heading_band_t = -math.inf     # 最近一帧因基线长度超范围没用的测向的时刻、累计帧数
+        self.heading_band_rejected = 0
 
 
 class GnssFusion:
@@ -529,7 +570,9 @@ class GnssFusion:
         if xy is not None and s.sol in _FIXED:
             # 互检的结果（到达时的）跟样本一起存下，历史重放时不变
             self._dual.add_primary(s.t, *xy)
-            xy = (xy[0], xy[1], self._dual.state_at(s.t) if self.config.rtk_hold_s > 0 else None)
+            cfg = self.config
+            xy = (xy[0], xy[1], self._dual.state_at(s.t) if cfg.rtk_hold_s > 0 else None,
+                  self._dual.recent_dev(s.t, cfg.dual_weight_window_s) if cfg.dual_weight_m > 0 else None)
         self._add(3, s, xy)
 
     def add_velocity(self, s: GnssVelocity):
@@ -853,6 +896,13 @@ class GnssFusion:
         if not valid:
             s.heading_ok = False
             return
+        band = cfg.heading_length_band_m
+        if band and not band[0] <= sample.length_m <= band[1]:
+            # 基线长度不对：测向多半被多路径带偏了，这帧不用，航向只按 IMU 推（立马信 IMU）
+            s.heading_ok = False
+            s.heading_band_t = sample.t
+            s.heading_band_rejected += 1
+            return
         raw = _wrap(math.radians(90. - sample.heading_deg) - self._baseline)
         rate = self._turn_rate()
         var = math.radians(max(cfg.heading_floor_deg, sample.sigma_heading_deg)) ** 2 + (rate * cfg.heading_sync_s) ** 2
@@ -910,6 +960,12 @@ class GnssFusion:
             s.outlier_since = None
         floor = cfg.fix_floor_m if fixed else cfg.float_floor_m
         re, rn = max(floor, sample.sigma_e) ** 2, max(floor, sample.sigma_n) ** 2
+        dev = xy[3] if len(xy) > 3 else None
+        if fixed and dev is not None and dev > cfg.dual_weight_m > 0:
+            # 两根天线对不上一点：卫星位置不太可信，按偏差降权，位置多靠推算（见 FusionConfig.dual_weight_m）
+            w = min(DUAL_WEIGHT_MAX, (dev / cfg.dual_weight_m) ** 2)
+            re, rn = re * w, rn * w
+            s.weak_t = sample.t
         ax, ay, _ = self._lever()           # 含倾斜补偿：天线在坡上偏出去的那段不算车的位置
         cs, sn = math.cos(s.yaw), math.sin(s.yaw)
         lx, ly = cs*ax-sn*ay, sn*ax+cs*ay
@@ -921,6 +977,41 @@ class GnssFusion:
         reset = (recovering or persistent) and far
         # 推算维持模式：维持后接回、或互检过了还与推算持续对不上（推算走偏了），都按 RTK 对齐但不停车
         rejoin = reset and cfg.rtk_hold_s > 0 and (recovering or dual == 'ok')
+        if rejoin and cfg.rejoin_rate_mps > 0 and not s.blending:
+            s.blending, s.blend_t = True, sample.t - 0.05
+            s.blend_d0 = math.hypot(dx, dy)
+            s.blend_until = sample.t + BLEND_SPARE * s.blend_d0 / cfg.rejoin_rate_mps + 1.0
+            s.rejoins += 1
+            self._end_segment()
+        if s.blending and not fixed:
+            s.blending = False                  # 接回途中又不是固定解了：不再往它挪，照常（浮点解权重很小）
+        if s.blending and sample.t > s.blend_until:
+            # 到时限还没挪到 BLEND_DONE_M 以内：
+            # - 比开始接回时离得还远：推算与 RTK 越差越远（比如轮速刻度错了），慢慢挪追不上，不再挂在半路，
+            #   按旧做法一步对齐（下面 reset 分支，计一次接回）；
+            # - 已经挪近了、只是挪不进 1 cm：多半是 RTK 自己在跳（靠楼多路径），交回普通（降过权的）更新，
+            #   不往这帧跳（2026-10-01 回放 11:42 靠楼那圈：RTK 在 1.6–6.9 cm 间来回跳，4 s 都没挪进 1 cm）
+            s.blending = False
+            if math.hypot(dx, dy) > s.blend_d0:
+                reset = rejoin = True
+        if s.blending:
+            dist = math.hypot(dx, dy)
+            if dist > BLEND_DONE_M:
+                # 平滑接回：每帧最多挪 rejoin_rate_mps × 帧间隔，挪到差 BLEND_DONE_M 以内再照常更新
+                # （差 5 cm 就交回普通更新时，剩下的几厘米 0.2 s 内补完，还是一个小跳）
+                step = min(dist, cfg.rejoin_rate_mps * min(0.1, max(0.0, sample.t - s.blend_t)))
+                # 不确定度照常按这帧固定解更新，只是位置不一步跟过去：不更新的话接回这几秒 σ 只涨不降，降权一停就因
+                # position_uncertain 停车（同一回放：接回途中停了 0.35 s）
+                x0, y0 = s.x, s.y
+                self._observe((1., 0., -ly, 0.), dx, re, gate=False, update_attitude=False)
+                self._observe((0., 1., lx, 0.), dy, rn, gate=False, update_attitude=False)
+                s.x = x0 + dx / dist * step
+                s.y = y0 + dy / dist * step
+                s.blend_t = s.rejoin_t = sample.t
+                s.outlier_since = None
+                s.fix_t, s.fixed_t, s.fix_reason, s.position_quality = sample.t, sample.t, '', 'RTK_FIXED'
+                return
+            s.blending = False
         if not s.position_ready or reset:
             s.outlier_since = None
             s.x, s.y = xy[0]-lx, xy[1]-ly
@@ -1115,6 +1206,10 @@ class GnssFusion:
                     usable = False
             if s.t - s.rejoin_t <= cfg.reset_hold_s:
                 reasons.append('rtk_rejoin')        # 刚按 RTK 对齐接回：只提示，不停车
+            if s.t - s.weak_t <= cfg.fixed_timeout_s:
+                # 卫星质量差、固定解降了权（位置多靠推算）：只提示。固定解照常在用，不确定度有界（降权最多到互检
+                # 10 cm 那档，20 Hz 时约 1.5 cm），不另开不停车的口子——那样没有时限，和「最多维持 rtk_hold_s」不符
+                reasons.append('rtk_weighted')
         elif s.t - s.fixed_t >= cfg.fixed_timeout_s - 1e-9:
             reasons.append('rtk_fixed_timeout')
             usable = False
@@ -1140,6 +1235,8 @@ class GnssFusion:
             usable = False
         if s.t - s.heading_reset_t <= cfg.reset_hold_s:
             reasons.append('heading_reset')         # 刚按测向重定了航向，只提示，不停车
+        if s.t - s.heading_band_t <= cfg.heading_timeout_s:
+            reasons.append('baseline_off')          # 测向基线长度超范围，这会儿航向按 IMU：只提示，不停车
         if cfg.antenna_height_m > 0 and self._lever()[2] is not None:
             reasons.append('tilt_uncompensated')    # 填了天线高度但这会儿没做倾斜补偿：只提示，不停车
         if s.t - s.wheel_t > cfg.sensor_timeout_s + 1e-9:
@@ -1214,7 +1311,8 @@ class GnssFusion:
             'rejected': {'wheel': self._dropped[0], 'imu': self._dropped[1],
                          'heading': self._dropped[2], 'fix': self._dropped[3], 'velocity': self._dropped[4],
                          'gyro_spikes': s.gyro_rejected, 'heading_outliers': s.heading_rejected,
-                         'position_outliers': s.fix_rejected, 'position_suspect': s.fix_suspect},
+                         'position_outliers': s.fix_rejected, 'position_suspect': s.fix_suspect,
+                         'heading_baseline_off': s.heading_band_rejected},
             'position_resets': s.resets,
             'rtk_rejoins': s.rejoins,
             'dual_antenna': self._dual.status(),

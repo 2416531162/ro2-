@@ -42,10 +42,11 @@ HDA536T ─CAN─► hda536t_imu ─/imu─────────────�
 ## 3. 定位融合（`gnss_fusion.py`）
 
 轮速 + IMU 航向角推算，RTK 固定解修位置、双天线测向修航向（航向以双天线为主）。Gen5 的专用设置在
-`line_node.load_fusion_config()` 里按车型补（航向角输入、`rtk_hold_s` 5 s 等），详见 [GNSS_FUSION.md](GNSS_FUSION.md)。
+`line_node.load_fusion_config()` 里按车型补（航向角输入、`rtk_hold_s` 8 s、卫星质量差时多靠 IMU 等），详见 [GNSS_FUSION.md](GNSS_FUSION.md)。
 
-- 双天线位置互检（`DualAntennaCheck`）：两根天线的固定解之差对不上测向基线（> 10 cm）就不信 RTK，按推算最多走 5 s 再停车，恢复后自动继续。
-- 掉信号（固定解没来：平板中转断流、浮点、没解）同样按 IMU + 轮速推算维持最多 `rtk_hold_s`（5 s），超过才原地停，恢复后自动继续（2026-10-01 用户：「我不是让 imu 可以允许维持 5 秒吗」；中转常断 0.4–0.8 s，原来断 0.5 s 就停）。中转断流后积压的数据按真实测量时刻处理（`um982.GnssClock` 不再把迟到的数据当成刚测到），迟到 1 s 内的按测量时刻插回重算，太旧的融合直接丢掉。
+- 双天线位置互检（`DualAntennaCheck`）：两根天线的固定解之差对不上测向基线（> 10 cm）就不信 RTK，按推算最多走 8 s 再停车，恢复后自动继续、按每秒 4 cm 平滑接回（`rejoin_rate_mps`）。
+- 卫星质量差（2026-10-01）：互检偏差超过 2 cm 就逐步少信 RTK 位置（`dual_weight_m`，原因 `rtk_weighted`，只提示）；测向基线长度不在 0.40–0.43 m 就不用这帧测向、按 IMU 航向（`heading_length_band_m`，原因 `baseline_off`）；IMU 航向权重加大（`yaw_walk_deg_sqrt_s` 0.03、`yaw_scale_sigma` 0.005）。
+- 掉信号（固定解没来：平板中转断流、浮点、没解）同样按 IMU + 轮速推算维持最多 `rtk_hold_s`（8 s），超过才原地停，恢复后自动继续（2026-10-01 用户：「我不是让 imu 可以允许维持 5 秒吗」，同日下午 5 → 8 s；中转常断 0.4–0.8 s，原来断 0.5 s 就停）。中转断流后积压的数据按真实测量时刻处理（`um982.GnssClock` 不再把迟到的数据当成刚测到），迟到 1 s 内的按测量时刻插回重算，太旧的融合直接丢掉。
 - 侧向过程噪声 `cross_walk_m_sqrt_s` 0.0015：融合侧向约 1.5 s 跟上 RTK。调大能少约 0.3–0.6 cm 慢摆，但主天线单独侧漂时车会跟着偏（2026-09-30 回放评估后保持不变）。
 
 ## 4. 配置都在哪

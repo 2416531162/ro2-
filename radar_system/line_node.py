@@ -25,7 +25,7 @@ from std_msgs.msg import String
 
 import runtime_config  # noqa: F401  服务直接运行本脚本时把仓库根目录加进 sys.path（line_tracker 要用 robot_core）
 from robot_core.service_watchdog import watchdog
-from line_mission import LineMission
+from line_mission import RTK_HOLD_S, LineMission
 from motion_client import MotionClient
 
 CONTROL_DT = 0.05
@@ -194,12 +194,22 @@ def load_fusion_config(gnss_fusion, path):
         # 航向以双天线为主（同日用户要求「RTK 航向稳定就必须信它」）：航向过程噪声 0.1°/√s，
         # 测向约 0.25 s 就完全跟过去，IMU 只管两次测向之间（50 ms）和测向断掉的时候
         overrides.setdefault('yaw_input', 'angle')
-        overrides.setdefault('yaw_scale_sigma', 0.03)
         overrides.setdefault('heading_sync_s', 0.02)
-        overrides.setdefault('yaw_walk_deg_sqrt_s', 0.1)
-        # 卫星位置不可信（双天线位置互检不过）或固定解中断（平板中转断流、浮点）时只靠推算走，最多 5 s 再停车
-        # （2026-09-30 用户规则：IMU 航向 5 秒内肯定没问题；2026-10-01 用户：断流也按 IMU 维持 5 秒）
-        overrides.setdefault('rtk_hold_s', 5.0)
+        # IMU 航向权重加大（2026-10-01 用户：「imu 的航向角还是非常稳的」「imu 的权重可以加大」）：实测空旷处 3 圈 1078°，
+        # IMU 航向角与双天线测向只差 0.4°（0.04%）。转角刻度不确定度 3% → 0.5%（留 10 倍余量），航向过程噪声
+        # 0.1 → 0.03°/√s：测向约 5 s 才完全拉过去（原来约 0.25 s），靠楼时测向的抖动、跳动多被 IMU 压住；
+        # 推算的航向错了（稳定的测向持续被拒 0.5 s）照旧按测向重定
+        overrides.setdefault('yaw_scale_sigma', 0.005)
+        overrides.setdefault('yaw_walk_deg_sqrt_s', 0.03)
+        # 卫星位置不可信（双天线位置互检不过）或固定解中断（平板中转断流、浮点）时只靠推算走，最多 RTK_HOLD_S（8 s）
+        # 再停车（2026-09-30 用户规则：IMU 航向 5 秒内肯定没问题；2026-10-01 用户：断流也维持，5 → 8 s）
+        overrides.setdefault('rtk_hold_s', RTK_HOLD_S)
+        # 测向基线超出 0.40–0.43 m 就立马按 IMU 航向（2026-10-01 用户；有效范围 0.30–0.50 m 不改）
+        overrides.setdefault('heading_length_band_m', (0.40, 0.43))
+        # 两根天线互检偏差超过 2 cm 就逐步少信卫星（空旷处 p95 1.4 cm 不受影响）；推算维持后每秒最多挪 4 cm 接回
+        # （离线验证：靠楼那圈的卫星误差叠到空旷那圈上，横向偏差 p95 2.8 → 2.5 cm、最大 10.6 → 3.6 cm）
+        overrides.setdefault('dual_weight_m', 0.02)
+        overrides.setdefault('rejoin_rate_mps', 0.04)
     return gnss_fusion.FusionConfig(**overrides)
 
 

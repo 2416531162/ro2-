@@ -54,10 +54,13 @@ LINE_CRUISE_MPS = 0.8
 # 卫星位置不可信 / 固定解中断（中转断流、浮点）时按推算维持（融合 rtk_hold_s，Gen5 5 s）给操作员的话，
 # 超时停车后恢复自动继续；恢复后改回「行驶中」。理由报真实情况：位置错了（双天线互检，融合原因里有 rtk_suspect）
 # 和固定解没来分开说
+# 推算维持最多多久（Gen5 融合 rtk_hold_s，line_node 按它设）：2026-10-01 用户 5 → 8 s（「imu 的航向角还是非常稳的」；
+# 实测空旷处 3 圈 1078°，IMU 航向角与双天线测向只差 0.4°）
+RTK_HOLD_S = 8.0
 RTK_NOTICE_HOLD = '卫星定位不可信，按 IMU 推算行驶'
-RTK_NOTICE_TIMEOUT = '卫星定位不可信超过 5 s，已停车，定位恢复后自动继续'
-RTK_NOTICE_LOST_HOLD = '卫星固定解中断，按 IMU 推算行驶（最多 5 s）'
-RTK_NOTICE_LOST = '卫星固定解中断超过 5 s，已原地停车，恢复后自动继续'
+RTK_NOTICE_TIMEOUT = '卫星定位不可信超过 %g s，已停车，定位恢复后自动继续' % RTK_HOLD_S
+RTK_NOTICE_LOST_HOLD = '卫星固定解中断，按 IMU 推算行驶（最多 %g s）' % RTK_HOLD_S
+RTK_NOTICE_LOST = '卫星固定解中断超过 %g s，已原地停车，恢复后自动继续' % RTK_HOLD_S
 # 跟踪器因定位暂停（上面几种以外的原因，如定位抖一下）时不能还显示「行驶中」（2026-10-01 实车：暂停 24 s 屏幕
 # 一直是「行驶中」）；恢复后起步检查不过、自动继续不了时说清楚原因（原因代码由 app 翻译）
 TRACKER_PAUSED_NOTICE = '定位暂时不能用，已原地停车，恢复后自动继续'
