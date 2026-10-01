@@ -358,10 +358,15 @@ def resolve_stick(throttle, steer, tier, tiers_mps, reverse_scale, geometry):
     return round(vx, 4), round(wz, 4), round(math.degrees(steer_rad), 1)
 
 
+# 手动摇杆打满时原地转的角速度（rad/s）：与路线原地转（车型配置 pivot_rate_rad_s）分开。
+# 2026-10-01 路线原地转从 0.8 提到 1.0 rad/s，手动手感保持原来的 0.8
+MANUAL_PIVOT_RATE_RAD_S = 0.8
+
+
 def _differential_stick(throttle, steer, tier, tiers_mps, reverse_scale, geometry):
     """差速车（两后轮差速、前面万向轮）：摇杆打横就原地转，没有前轮转角（返回 0°）。
 
-    角速度上限 = 原地转向角速度 × 本档车速 / 最快档车速，慢档转得也慢；前进时同一比例的角速度，
+    角速度上限 = 手动原地转角速度（不超过车型的原地转向角速度）× 本档车速 / 最快档车速，慢档转得也慢；前进时同一比例的角速度，
     车速越快弯越大。倒车时往左打是车尾往左（与旧车、方向盘一样的手感），所以角速度反号。
     """
     moving = abs(throttle) >= STICK_DEADBAND
@@ -369,7 +374,7 @@ def _differential_stick(throttle, steer, tier, tiers_mps, reverse_scale, geometr
         return 0.0, 0.0, 0.0
     base = tiers_mps.get(tier, tiers_mps['med'])
     vx = throttle * base * (reverse_scale if throttle < 0 else 1.0) if moving else 0.0
-    wz = steer * geometry.pivot_rate_rad_s * base / max(tiers_mps.values())
+    wz = steer * min(geometry.pivot_rate_rad_s, MANUAL_PIVOT_RATE_RAD_S) * base / max(tiers_mps.values())
     if vx < 0:
         wz = -wz
     return round(vx, 4), round(wz, 4), 0.0

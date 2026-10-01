@@ -197,11 +197,12 @@ class PathConfig:
 def differential_config(config=PathConfig()):
     """差速车（Gen5）的跟踪参数：直接下发车速和角速度，前轮是随动万向轮，不会转不够。
     执行延迟按 2026-09-30 实车 IMU 直行辨识：陀螺 ≈ 0.44 s 前的角速度指令 × 1.02–1.04（原来没辨识，
-    按 0.1 s 时仿真 0.8 m/s 画直线偏 20 cm 以上，按 0.44 s 约 2 cm）。弯道横向加速度 0.12 m/s²
-    （2026-09-30 用户嫌转弯慢，0.08 时 R 2.2 m 的圆只有 0.41 m/s；仿真 0.12 时 R 1.2–3 m 圆 p95 多 0.1–0.2 cm）：
-    R 2.2 m 约 0.51 m/s，角球弧 R 1 m 约 0.35 m/s，中圈、罚球弧（R 9.15 m）按 0.8 m/s 画；
+    按 0.1 s 时仿真 0.8 m/s 画直线偏 20 cm 以上，按 0.44 s 约 2 cm）。弯道横向加速度 0.20 m/s²
+    （2026-09-30 用户嫌转弯慢 0.08 → 0.12；2026-10-01 再提速：0.12 时实车 R 3.7 m 圆 0.67 m/s 进圆后 p95 0.9–1.3 cm、
+    R 2.2 m 圆 0.51 m/s p95 1.5–1.8 cm，余量大；仿真 0.20 时 R 2.2 m p95 2.3 cm，比 0.12 多约 0.5 cm）：
+    R 2.2 m 约 0.66 m/s，R 3.7 m 及以上按 0.8 m/s，角球弧 R 1 m 约 0.44 m/s；
     场地规划经 route_limits 用同一个值。起步先按 0.1 m/s 慢走 0.3 m（万向轮回正），起步 0.6 m 内锁车头。"""
-    return replace(config, delay_s=0.44, steer_gain=1.0, lat_accel_mps2=0.12, start_creep_mps=0.1, start_hold_m=0.6)
+    return replace(config, delay_s=0.44, steer_gain=1.0, lat_accel_mps2=0.20, start_creep_mps=0.1, start_hold_m=0.6)
 
 
 @dataclass

@@ -35,7 +35,7 @@ HDA536T ─CAN─► hda536t_imu ─/imu─────────────�
 | 定点画线 A→B（旧阿克曼车） | 同上 | `line_tracker.LineTracker` | 旧车用 |
 | 手动页「IMU 直行」 | `radar_web_server` | `heading_hold.HeadingHold` | 只用 IMU，不用 RTK |
 
-差速车参数集中在 `path_tracker.differential_config()`（执行延迟 0.44 s、弯道横向加速度 0.12 m/s²、起步慢走 / 锁车头）。
+差速车参数集中在 `path_tracker.differential_config()`（执行延迟 0.44 s、弯道横向加速度 0.20 m/s²、起步慢走 / 锁车头）；原地转向 1.0 rad/s、2.0 rad/s²（`robot_core/robot_gen5.json` 的 `drive`，不超过驱动器限幅）。
 
 **已知结构问题（待整理，见第 5 节）**：沿线控制有 4 套；路线直线段没用定点画线那套 IMU 内环，起步、甩头这类处理要分别写。
 

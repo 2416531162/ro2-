@@ -494,7 +494,7 @@ class TestMission(unittest.TestCase):
         self.assertIn('原地转向', msg)
         self.assertEqual(self.m.tracker.pivot_rate, DIFF.pivot_rate_rad_s)
         self.assertEqual(self.m.path_cfg.delay_s, 0.44)            # 2026-09-30 实车辨识
-        self.assertEqual(self.m.path_cfg.lat_accel_mps2, 0.12)       # 2026-09-30 用户嫌转弯慢，0.08 → 0.12
+        self.assertEqual(self.m.path_cfg.lat_accel_mps2, 0.20)       # 用户嫌转弯慢：09-30 0.08 → 0.12，10-01 → 0.20
         t, turned = 0.0, False
         sent, vx, wz = [], 0.0, 0.0                 # 车按跟踪器设的执行延迟（实测 0.44 s）执行指令
         while t < 200.0:

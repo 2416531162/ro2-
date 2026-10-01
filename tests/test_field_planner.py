@@ -273,8 +273,10 @@ class TestFieldExecution(unittest.TestCase):
         self.assertEqual('DONE',restored.operations.record['state'])
         restored._close_log()
     def test_stop_and_turn_after_a_line_is_not_painting(self):
-        # 一条线画完后停车、原地转、等停稳时段号还在这条线上：不能报 paint，喷头也不能喷（转向时喷头甩出去几十厘米）
-        p=self.prepare([dict(LINE,points=[[5,5],[10,5]]),dict(LINE,id='line2',points=[[10,8],[5,8]])])
+        # 一条线画完后停车、原地转、等停稳时段号还在这条线上：不能报 paint，喷头也不能喷（转向时喷头甩出去几十厘米）。
+        # 两条线首尾相接成直角，第一条线末尾一定原地转（平行往回的线，规划器按原地转向、弯道速度挑走法，
+        # 2026-10-01 提速后改成先弧线开出去、到第二条线前才转，测不到这个时段）
+        p=self.prepare([dict(LINE,points=[[5,5],[10,5]]),dict(LINE,id='line2',points=[[10,5],[10,8]])])
         value=self.cache.get(p['token'],.1)
         ok,msg=self.m.command(dict(cmd='route_field_start',field_plan=value,allow_outside=not value['inside']),.1)
         self.assertTrue(ok,msg)
