@@ -127,10 +127,16 @@ class FusionConfig:
     # 2026-09-30 19:37 实车：主天线固定解错了 20–100 cm（接收机照报 NARROW_INT，两根天线位置之差对不上测向基线），
     # 旧做法离群 2 s 后对齐到错的位置，横偏一下跳 14 cm，车拐过去追，5 s 一次
     rtk_hold_s: float = 0.0
-    # 双天线位置互检：主、副天线固定解位置之差与测向基线（长度 × 方向）差超过 dual_check_m 就不信固定解，
-    # 降到 dual_ok_m 以下保持 dual_ok_s 才恢复；副天线 dual_stale_s 没有可比的数据就不按它判。
-    # 2026-09-30 实车：正常时中位数 1–3 cm、最大约 5 cm；出错时 15–107 cm
+    # 双天线位置互检：主、副天线固定解位置之差与测向基线（长度 × 方向）差连续 dual_check_n 次超过
+    # dual_check_m + dual_check_rate_m × 车转的角速度（rad/s，按测向算）就不信固定解，降到 dual_ok_m 以下保持
+    # dual_ok_s 才恢复；副天线 dual_stale_s 没有可比的数据就不按它判。
+    # 2026-09-30 实车：正常时中位数 1–3 cm、最大约 5 cm；出错时 15–107 cm（主天线慢慢漂走）。
+    # 2026-10-01 换平板（SPRING2 内置接收机）在高楼边：副天线位置静止 2–3.5 cm，R 1.5 m 圆（0.37 rad/s）最大 10 cm、
+    # 原地转最大 14 cm，主天线照常；一帧过 10 cm 就判会把原地转、小圆误判成卫星错、改按推算走。
+    # 直线上门限不放宽：放到 15 cm 时主天线每秒漂 6 cm 的故障，融合会被带偏 15 cm（10 cm 时不到 3 cm）
     dual_check_m: float = 0.10
+    dual_check_rate_m: float = 0.08
+    dual_check_n: int = 2
     dual_ok_m: float = 0.06
     dual_ok_s: float = 1.0
     dual_stale_s: float = 1.0
@@ -303,6 +309,7 @@ class DualAntennaCheck:
         self.last_t = None          # 最近一次比的时刻
         self.checks = self.flags = 0
         self._ok_since = None
+        self._over = 0              # 连续超过 dual_check_m 的次数
 
     def add_heading(self, t, heading_deg, length_m, pitch_deg):
         if not all(math.isfinite(v) for v in (t, heading_deg, length_m)) or length_m <= 0:
@@ -341,10 +348,14 @@ class DualAntennaCheck:
             dev = math.hypot(x2 - p[0] - ex, y2 - p[1] - ey)
             self.last_dev, self.last_t = dev, t
             self.checks += 1
-            if dev > cfg.dual_check_m:
+            limit = cfg.dual_check_m + cfg.dual_check_rate_m * self._turn_rate(t)
+            self._over = self._over + 1 if dev > limit else 0
+            if self._over >= cfg.dual_check_n:
                 if not self.suspect:
                     self.flags += 1
                 self.suspect, self._ok_since = True, None
+            elif dev > limit:
+                self._ok_since = None
             elif dev < cfg.dual_ok_m:
                 if self.suspect:
                     self._ok_since = t if self._ok_since is None else self._ok_since
@@ -353,6 +364,14 @@ class DualAntennaCheck:
             else:
                 self._ok_since = None
         self._secondary = keep
+
+    def _turn_rate(self, t):
+        """t 前后约 0.3 s 内测向的平均转速（rad/s）；测向不够时为 0（不放宽）。"""
+        rows = [r for r in self._heads if abs(r[0] - t) <= 0.15]
+        if len(rows) < 2 or rows[-1][0] - rows[0][0] < 0.05:
+            return 0.0
+        turn = math.atan2(math.sin(rows[-1][1] - rows[0][1]), math.cos(rows[-1][1] - rows[0][1]))
+        return abs(turn) / (rows[-1][0] - rows[0][0])
 
     def _primary_at(self, t):
         rows = self._primary

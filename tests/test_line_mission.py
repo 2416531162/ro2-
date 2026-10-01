@@ -531,6 +531,7 @@ class TestRtkJumps(Base):
     def setUp(self):
         super().setUp()
         self.fusion.config = SimpleNamespace(antenna_xy=(0.345, 0.165))
+        self.m._on_line = lambda: True          # 记录、合并逻辑：当作业正沿线跑（是否在线上另有测试）
 
     def fix(self, t, x, y, yaw_deg, left=0.0, sol='NARROW_INT'):
         a = math.radians(yaw_deg)
@@ -572,6 +573,16 @@ class TestRtkJumps(Base):
             self.fix(10.0 + 2.0 * i, 5.0, 2.0, 90.0, left=0.05)             # 隔 2 s 偏一次：每次单独算
         self.m.tick(200.0, 'IDLE')
         self.assertEqual(self.m.status()['diag']['jumps'], 60)
+
+    def test_not_recorded_unless_running_on_the_line(self):
+        # 2026-10-01 用户：地图上跳动标记太多。停着、手动开、原地转、换段时不记
+        del self.m._on_line
+        self.fusion.current = FakeFusion.make(5.0, 2.0, 90.0)
+        self.fix(1.0, 5.0, 2.0, 90.0, left=0.06)
+        self.m.tick(1.1, 'IDLE')
+        st = self.m.status()
+        self.assertEqual((st['rtk_events'], st['diag']['jumps']), ([], 0))
+        self.assertAlmostEqual(st['diag']['rtk_left_m'], 0.06, places=6)     # 诊断照样报差值
 
     def test_not_recorded_while_fusion_is_not_fixed(self):
         self.fusion.current = FakeFusion.make(5.0, 2.0, 0.0, quality='RTK_FLOAT', usable=False)

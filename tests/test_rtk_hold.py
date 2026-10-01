@@ -121,6 +121,25 @@ class TestDualAntennaCheck(unittest.TestCase):
         chk, out = self.check(lambda t: 0.25 if 2.0 <= t < 2.5 else 0.08)
         self.assertEqual(dict(out)[5.0], 'suspect')             # 8 cm：没到 10 cm 不判，但也不算恢复（< 6 cm 才算）
 
+    def test_tolerance_grows_with_turn_rate(self):
+        """2026-10-01 新平板接收机：原地转、小圆时副天线位置晃 10–14 cm（主天线照常）。转得快时门限按
+        dual_check_rate_m × 转速放宽，直线上照旧 10 cm。"""
+        def run(rate):
+            chk = gf.DualAntennaCheck(gf.FusionConfig(**GEN5))
+            states, t = [], 0.0
+            while t < 4.0:
+                t = round(t + 0.05, 6)
+                chk.add_heading(t, math.degrees(rate * t) % 360.0, BASE, 0.0)
+                chk.add_primary(t, 0.0, 0.0)
+                if abs(t / 0.2 - round(t / 0.2)) < 1e-6:
+                    az = rate * t                                   # 测向基线方向（北零顺时针）
+                    ex, ey = BASE * math.sin(az), BASE * math.cos(az)
+                    chk.add_secondary(t, ex + 0.12, ey)             # 副天线比基线偏 12 cm
+                states.append(chk.state_at(t))
+            return states
+        self.assertNotIn('suspect', run(0.8))                   # 原地转 0.8 rad/s：门限约 16 cm
+        self.assertIn('suspect', run(0.0))                      # 直线：12 cm 超过 10 cm，连续两次就判
+
     def test_no_secondary_means_unknown(self):
         cfg = gf.FusionConfig(**GEN5)
         chk = gf.DualAntennaCheck(cfg)

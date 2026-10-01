@@ -166,8 +166,9 @@ class LineMission:
         """固定解与融合"先验"（这次观测交给融合之前，按车轮+陀螺推算到同一时刻）的主天线位置之差。
 
         车体系分解：沿车头、向左。差 JUMP_EVENT_M 以上记一次定位跳动（车当时的位置、经纬度、最大差值）。
-        只在融合本来就是固定解、可用于控制时记，开机、失锁恢复时的大差值不算。
-        """
+        只在融合本来就是固定解、可用于控制时记，开机、失锁恢复时的大差值不算；也只在作业正沿线跑时记
+        （2026-10-01 用户：地图上跳动标记太多。原地转、换段、停着、手动开车时融合与 RTK 的差多是转动中的时间差，
+        不是定位跳了）。"""
         fusion = self.fusion
         try:
             prior = fusion.pose(m['t'])
@@ -185,7 +186,7 @@ class LineMission:
         along, left = c * dx + s * dy, -s * dx + c * dy
         self._innovation = (m['t'], along, left)
         d = math.hypot(dx, dy)
-        if d < JUMP_EVENT_M or prior.quality != 'RTK_FIXED' or not prior.usable_for_control:
+        if d < JUMP_EVENT_M or prior.quality != 'RTK_FIXED' or not prior.usable_for_control or not self._on_line():
             return
         j = self._jump
         if j is None or m['t'] - j['t1'] > JUMP_MERGE_S:
@@ -278,6 +279,14 @@ class LineMission:
     def _track_point(self, pose):
         k = self.line_cfg.track_x_m
         return pose.x + k * math.cos(pose.yaw), pose.y + k * math.sin(pose.yaw)
+
+    def _on_line(self):
+        """作业正沿线跑：开着作业、跟踪器在跑，不在换段 / 原地转、不在倒车段。"""
+        t = self.tracker
+        if self.phase != 'RUNNING' or t.st.state != 'RUNNING' or getattr(t, 'switching', False):
+            return False
+        sections = getattr(t, 'sections', None)
+        return not sections or sections[t.index].direction > 0
 
     def _paused(self, task):
         return self.phase == 'RUNNING' and self.task == task and self.tracker.st.state == 'PAUSED'
