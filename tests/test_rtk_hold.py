@@ -284,7 +284,7 @@ class TestRtkHold(unittest.TestCase):
 
 # 2026-10-01 用户：IMU 航向很稳，加大 IMU 权重、维持 8 s、基线 0.40–0.43 m 外立马信 IMU；卫星质量差时逐步少信卫星、
 # 推算维持后平滑接回（见 line_node.load_fusion_config 的 Gen5 设置）
-GEN5_NEW = dict(GEN5, rtk_hold_s=8.0, yaw_walk_deg_sqrt_s=0.03, yaw_scale_sigma=0.005,
+GEN5_NEW = dict(GEN5, rtk_hold_s=8.0, yaw_walk_deg_sqrt_s=0.03, yaw_scale_sigma=0.03,
                 heading_length_band_m=(0.40, 0.43), dual_weight_m=0.02, rejoin_rate_mps=0.04)
 
 

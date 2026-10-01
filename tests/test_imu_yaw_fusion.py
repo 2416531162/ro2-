@@ -252,12 +252,29 @@ class NodeWiring(unittest.TestCase):
             cfg = line_node.load_fusion_config(gf, '/nonexistent/fusion.json')
         # 2026-10-01 用户：IMU 航向权重加大、维持 8 s、基线 0.40–0.43 m 外信 IMU、卫星质量差逐步降权、平滑接回
         self.assertEqual((cfg.yaw_input, cfg.yaw_scale_sigma, cfg.heading_sync_s, cfg.yaw_walk_deg_sqrt_s),
-                         ('angle', 0.005, 0.02, 0.03))
+                         ('angle', 0.03, 0.02, 0.03))
         self.assertEqual((cfg.rtk_hold_s, cfg.heading_length_band_m, cfg.dual_weight_m, cfg.rejoin_rate_mps),
                          (8.0, (0.40, 0.43), 0.02, 0.04))
         with mock.patch.dict(runtime_config.PROFILE['drive'], {'type': 'ackermann'}):
             cfg = line_node.load_fusion_config(gf, '/nonexistent/fusion.json')
         self.assertEqual((cfg.yaw_input, cfg.yaw_scale_sigma, cfg.heading_sync_s), ('rate', 0.0, 0.0))
+
+    def test_gen5_pivot_with_measured_scale_error_follows_rtk_right_away(self):
+        """Gen5 实际设置：原地转 90°，IMU 刻度差 1.3%（2026-10-01 实测原地转最多差 1.3%）或 3%：转完马上跟回测向，
+        不拒测向。刻度不确定度设成 0.5% 时转完还差 0.28° / 2.2°（3% 时把 19 帧正确的测向拒掉）。"""
+        import runtime_config
+        with mock.patch.dict(runtime_config.PROFILE['drive'], {'type': 'differential'}):
+            cfg = line_node.load_fusion_config(gf, '/nonexistent/fusion.json')
+        gen5 = {k: getattr(cfg, k) for k in ('drive_differential', 'yaw_input', 'yaw_scale_sigma', 'heading_sync_s',
+                                              'yaw_walk_deg_sqrt_s')}
+        end = PIVOT_AT + 2.8                                # 转 90° 约 2.76 s
+        for scale in (1.013, 1.03):
+            with self.subTest(scale=scale):
+                f, out = simulate(gen5, imu_scale=scale, marks=(end, end + 1.0))
+                self.assertLess(abs(out[end][0]), 0.1)
+                self.assertLess(abs(out[end + 1.0][0]), 0.05)
+                self.assertEqual(0, f._s.heading_rejected)
+                self.assertTrue(out[end][1].usable_for_control)
 
 
 if __name__ == '__main__':
