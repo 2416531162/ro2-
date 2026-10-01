@@ -380,6 +380,26 @@ class TestSatelliteQuality(unittest.TestCase):
         self.assertGreaterEqual(f.calibration()['rtk_rejoins'], 2)
         self.assertLess(max(abs(lateral(r)) for r in rows if r[0] > 13.0), 0.35)
 
+    def test_large_gap_after_hold_aligns_in_one_step(self):
+        """维持期间车横着被挪了 1 m（推车、轮子没电）：差得远不平滑，接回那一帧就对齐，不按 4 cm/s 挪 25 s。"""
+        f, rows = simulate(GEN5_NEW, fixes_on=lambda t: not 10.0 <= t < 13.0, slip=(10.5, 12.5, 0.5), T=16.0)
+        self.assertGreater(abs(lateral(next(r for r in rows if r[0] >= 12.9))), 0.8)      # 维持期间确实差 1 m
+        # 断流回来先跟副天线重新比过一次（约 0.2 s），比过就对齐
+        self.assertLess(max(abs(lateral(r)) for r in rows if r[0] >= 13.4), 0.02)
+        self.assertFalse(f._s.blending)
+        self.assertEqual(1, f.calibration()['rtk_rejoins'])
+
+    def test_leaving_indoor_repeater_aligns_instead_of_crawling(self):
+        """室内转发器：两根天线的固定解都在转发器天线那里（这里偏 20 m、10 m），开出门 RTK 位置一下差 22 m：
+        持续对不上 2 s 后一步对齐（旧做法），不能按 4 cm/s 挪十几分钟。2026-10-01 13:40 实车：融合位置偏 20–100 m
+        十几分钟，车每遍跑在不同的地方。"""
+        indoor = lambda t: (20.0, 10.0) if t < 10.0 else (0.0, 0.0)
+        f, rows = simulate(GEN5_NEW, primary_err=indoor, secondary_err=indoor, T=20.0)
+        gap = lambda r: math.hypot(r[3].x - r[1], r[3].y - r[2])
+        self.assertGreater(gap(next(r for r in rows if r[0] >= 9.0)), 20.0)              # 室内：融合在转发器那里
+        self.assertLess(max(gap(r) for r in rows if r[0] >= 13.0), 0.05)
+        self.assertFalse(f._s.blending)
+
 
 if __name__ == '__main__':
     unittest.main()

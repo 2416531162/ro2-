@@ -256,6 +256,10 @@ DUAL_SUSPECT_KEEP_S = 10.0
 DUAL_WEIGHT_MAX = 100.0
 # 平滑接回挪到离 RTK 这么近就交回普通更新（剩下的按普通更新慢慢吸收）
 BLEND_DONE_M = 0.01
+# 接回时离 RTK 超过这么远不平滑，一步对齐：平滑只为推算维持几秒后的几厘米误差不在线上留折角（实车靠楼 8.7 cm）；
+# 差得远是车在没有可用 RTK 时被挪过（室内转发器下开出门、轮子没电推车），或推算已经失效。2026-10-01 13:40 实车：
+# 从室内开出来差几十米，按 4 cm/s 慢慢挪，十几分钟里融合位置都偏 20–100 m，车每遍跑在不同的地方
+BLEND_MAX_M = 0.3
 # 平滑接回最多用 BLEND_SPARE × 开始时的差距 / rejoin_rate_mps + 1 s；到时还没挪到：越离越远（推算一直在跑偏）就
 # 一步对齐，挪近了只是挪不进（RTK 自己在跳）就交回普通更新
 BLEND_SPARE = 1.5
@@ -977,7 +981,7 @@ class GnssFusion:
         reset = (recovering or persistent) and far
         # 推算维持模式：维持后接回、或互检过了还与推算持续对不上（推算走偏了），都按 RTK 对齐但不停车
         rejoin = reset and cfg.rtk_hold_s > 0 and (recovering or dual == 'ok')
-        if rejoin and cfg.rejoin_rate_mps > 0 and not s.blending:
+        if rejoin and cfg.rejoin_rate_mps > 0 and not s.blending and math.hypot(dx, dy) <= BLEND_MAX_M:
             s.blending, s.blend_t = True, sample.t - 0.05
             s.blend_d0 = math.hypot(dx, dy)
             s.blend_until = sample.t + BLEND_SPARE * s.blend_d0 / cfg.rejoin_rate_mps + 1.0
@@ -985,8 +989,8 @@ class GnssFusion:
             self._end_segment()
         if s.blending and not fixed:
             s.blending = False                  # 接回途中又不是固定解了：不再往它挪，照常（浮点解权重很小）
-        if s.blending and sample.t > s.blend_until:
-            # 到时限还没挪到 BLEND_DONE_M 以内：
+        if s.blending and (sample.t > s.blend_until or math.hypot(dx, dy) > BLEND_MAX_M):
+            # 到时限还没挪到 BLEND_DONE_M 以内（或接回途中差到 BLEND_MAX_M 以外，不等时限）：
             # - 比开始接回时离得还远：推算与 RTK 越差越远（比如轮速刻度错了），慢慢挪追不上，不再挂在半路，
             #   按旧做法一步对齐（下面 reset 分支，计一次接回）；
             # - 已经挪近了、只是挪不进 1 cm：多半是 RTK 自己在跳（靠楼多路径），交回普通（降过权的）更新，
