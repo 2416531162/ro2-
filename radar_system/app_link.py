@@ -169,7 +169,7 @@ def client_frame(opcode, payload, mask=b'\x01\x02\x03\x04', fin=True):
 
 SPEED_TIERS = ('low', 'med', 'high')
 LINE_ACTIONS = ('mark', 'start', 'stop', 'clear')
-ROUTE_ACTIONS = ('set', 'start', 'clear', 'pause', 'preview', 'resume', 'rework', 'field_start')
+ROUTE_ACTIONS = ('set', 'start', 'start_current', 'clear', 'pause', 'preview', 'resume', 'rework', 'field_start')
 STRAIGHT_ACTIONS = ('go', 'stop')
 RTK_STALE_S = 2.0      # /gnss/status 2 Hz
 LINE_STALE_S = 1.5     # /line/status 5 Hz
@@ -288,7 +288,7 @@ def parse_command(text):
                         raise CommandError('补画范围至少 0.2 m')
         if action == 'set' and 'route' not in msg:
             raise CommandError('route.set 需要 route')
-        if action in ('set', 'start') and 'route' in msg:
+        if action in ('set', 'start', 'start_current') and 'route' in msg:
             import route_plan   # 结构和取值范围在这里挡住；画得成画不成由 line_node 判断
             try:
                 out['route'] = route_plan.parse_spec(msg['route']).to_dict(digits=4)

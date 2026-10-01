@@ -16,7 +16,7 @@ import route_plan as rp
 from path_tracker import Path, Section, SectionTracker
 
 HELD = ('PAUSING', 'PAUSED', 'INTERRUPTED')
-ACTIONS = ['pause', 'preview', 'resume', 'rework', 'field_start']
+ACTIONS = ['pause', 'preview', 'resume', 'rework', 'field_start', 'start_current']
 
 
 def signature(value):
@@ -177,10 +177,10 @@ class RouteOperations:
                     cursor_m=0.0, total_m=sum(s.path.length for s in sections), plan=self.encode(sections),
                     started_at=time.time(), updated_at=time.time(), rework=None)
 
-    def begin(self, sections):
+    def begin(self, sections, entry_m=0.0):
         old = self.record, self.parent, self.preview, self.execution
         self.record = self.new_record(sections)
-        self.execution = dict(sections=samples(sections), entry_m=0.0)
+        self.execution = dict(sections=samples(sections), entry_m=entry_m)
         self.parent = self.preview = None
         try:
             self.save()

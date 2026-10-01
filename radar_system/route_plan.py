@@ -948,6 +948,75 @@ def route_length(spec, min_radius, nozzle_x=None):
     return sum(p[0] for p in pieces), None
 
 
+def plan_current(spec, car_pose, min_radius, *, body=None, max_entry_m=MAX_ENTRY_M, nozzle_x=None):
+    """从当前压线点的最近路线段开始，裁去之前的分段，保持原图和后续路径。与 App RouteStart 对应。"""
+    from path_tracker import Path, Section
+    if spec.kind == 'path':
+        raw, _ = (_pivot_route_sections(spec, min_radius, nozzle_x) if nozzle_x is not None
+                  else _route_sections(spec, min_radius, body))
+        marker_x = nozzle_x if nozzle_x is not None else (body[0] - body[1]) / 2
+    else:
+        start, pieces = loop_pieces(spec, min_radius, nozzle_x if spec.kind == 'circle' else None)
+        raw = [(1, start, pieces)]
+        marker_x = nozzle_x if spec.kind == 'circle' and nozzle_x is not None else 0.0
+    sections = [Section(d, Path(start, pieces)) for d, start, pieces in raw]
+    px = car_pose[0] + marker_x * math.cos(car_pose[2])
+    py = car_pose[1] + marker_x * math.sin(car_pose[2])
+    best = None
+    for si, section in enumerate(sections):
+        if section.direction < 0:
+            continue
+        for piece in section.path.pieces:
+            mx = piece.x + marker_x * math.cos(piece.yaw)
+            my = piece.y + marker_x * math.sin(piece.yaw)
+            candidates = [0.0, piece.length]
+            if piece.straight:
+                candidates.append(max(0.0, min(piece.length, (px-mx)*math.cos(piece.yaw)+(py-my)*math.sin(piece.yaw))))
+            else:
+                r = 1 / piece.kappa
+                cx = piece.x - r * math.sin(piece.yaw)
+                cy = piece.y + r * math.cos(piece.yaw)
+                angle = math.atan2(py-cy, px-cx) - math.atan2(my-cy, mx-cx)
+                directed = (angle * math.copysign(1.0, piece.kappa)) % (2*math.pi)
+                u = directed / abs(piece.kappa)
+                if u <= piece.length + 1e-9:
+                    candidates.append(min(u, piece.length))
+            for u in candidates:
+                x, y, yaw = piece.pose(u)
+                d = math.hypot(px-x-marker_x*math.cos(yaw), py-y-marker_x*math.sin(yaw))
+                h = abs(wrap(car_pose[2]-yaw))
+                if best is None or d < best[0]-1e-3 or abs(d-best[0]) <= 1e-3 and h < best[1]-1e-9:
+                    best = (d, h, si, piece.s0+u)
+    if best is None:
+        raise ValueError('路线没有可前进的线段')
+    _, _, si, at = best
+    first = sections[si].path
+    pieces = [(p.s0+p.length-max(at,p.s0), p.kappa) for p in first.pieces if p.s0+p.length-at > 1e-8]
+    rest = ([Section(sections[si].direction, Path(first.pose(at), pieces))] if pieces else []) + sections[si+1:]
+    if sum(s.path.length for s in rest) < .2:
+        raise ValueError('车已在路线终点附近，没有后续路线可执行')
+    goal = rest[0].car_pose(0)
+    distance = math.hypot(car_pose[0]-goal[0], car_pose[1]-goal[1])
+    aligned = abs(wrap(car_pose[2]-goal[2])) <= math.radians(ON_LINE_DEG)
+    if distance <= ON_LINE_M and (nozzle_x is not None or aligned):
+        return rest, 0.0
+    if nozzle_x is not None:
+        heading = math.atan2(goal[1]-car_pose[1], goal[0]-car_pose[0])
+        entry = [Section(1, Path((*car_pose[:2], heading), [(distance, 0)]))]
+    else:
+        way = reeds_shepp(car_pose, goal, min_radius, end_forward=rest[0].direction > 0)
+        if way is None:
+            way = [(1, length, k) for length, k in dubins(car_pose, goal, min_radius)]
+        builder = _Sections(car_pose)
+        for direction, dist, kappa in way:
+            builder.add(direction, dist, kappa)
+        entry = [Section(d, Path(start, pieces)) for d, start, pieces in builder.out]
+    entry_m = sum(s.path.length for s in entry)
+    if entry_m > max_entry_m:
+        raise ValueError('车离最近路线段太远，请先手动开近路线')
+    return entry + rest, entry_m
+
+
 def plan(spec, car_pose, min_radius, *, body=None, max_entry_m=MAX_ENTRY_M, nozzle_x=None):
     """整条要跑的路径：从车当前位姿接入 + 路线本身。返回 ([path_tracker.Section, …], 接入路程米)。
 

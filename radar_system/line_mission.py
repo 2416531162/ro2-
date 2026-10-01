@@ -242,7 +242,7 @@ class LineMission:
             return self._start(cmd, now)
         if kind == 'route_set':
             return self._route_set(cmd.get('route'))
-        if kind == 'route_start':
+        if kind in ('route_start', 'route_start_current'):
             return self._route_start(cmd, now)
         if kind == 'route_clear':
             if self.phase != 'IDLE' or self.operations.held:
@@ -402,7 +402,8 @@ class LineMission:
             spec = self._route_local()
             k = self.line_cfg.track_x_m     # 与直线相同：控制点（默认后轴中心）压在路线上
             car = (pose.x + k * math.cos(pose.yaw), pose.y + k * math.sin(pose.yaw), pose.yaw)
-            sections, entry_m = route_plan.plan(spec, car, self.min_route_radius, body=self.body, nozzle_x=self.nozzle_x)
+            planner = route_plan.plan_current if cmd.get('cmd') == 'route_start_current' else route_plan.plan
+            sections, entry_m = planner(spec, car, self.min_route_radius, body=self.body, nozzle_x=self.nozzle_x)
             cfg = dataclasses.replace(self.path_cfg, cruise_mps=spec.cruise, track_x_m=k)
             tracker = SectionTracker(sections, cfg, self.geo, **self.section_options())
         except ValueError as exc:
@@ -411,7 +412,7 @@ class LineMission:
         if not ok:
             return False, why
         try:
-            self.operations.begin(sections)
+            self.operations.begin(sections, entry_m=entry_m)
         except ValueError as exc:
             return False, str(exc)
         self.tracker, self.task, self.cruise = tracker, 'route', spec.cruise
