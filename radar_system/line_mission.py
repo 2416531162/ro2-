@@ -25,7 +25,7 @@ from collections import deque
 import route_plan
 from line_cascade import NOTICES as CASCADE_NOTICES, REASON_TEXT, SHARED_FIELDS, CascadeConfig, ImuLineTracker
 from line_tracker import LineConfig, LineTracker
-from path_tracker import PathConfig, SectionTracker, differential_config
+from path_tracker import DIFF_REVERSE_MPS, DIFF_SETTLE_S, PathConfig, SectionTracker, differential_config
 from route_operations import RouteOperations
 
 SELECT_TIMEOUT_S = 3.0
@@ -709,10 +709,12 @@ class LineMission:
                                rtk_events=self._jump_events(), operations=self.operations.status()))
 
     def section_options(self):
-        """SectionTracker 按底盘的额外参数：差速车原地转向、倒车曲率照走（没有转向机构转不够）。"""
+        """SectionTracker 按底盘的额外参数：差速车原地转向、倒车曲率照走（没有转向机构转不够），倒车段限速、
+        段尾停稳时间按差速车（拐角提速，见 path_tracker.differential_config）。"""
         if not self.differential:
             return {}
-        return dict(pivot_rate=self.geo.pivot_rate_rad_s, pivot_accel=self.geo.pivot_accel_rad_s2, reverse_gain=1.0)
+        return dict(pivot_rate=self.geo.pivot_rate_rad_s, pivot_accel=self.geo.pivot_accel_rad_s2, reverse_gain=1.0,
+                    reverse_mps=DIFF_REVERSE_MPS, settle_s=DIFF_SETTLE_S)
 
     def _diag(self, calibration):
         """诊断：下发曲率与车实际走出的曲率（融合角速度 / 车速），RTK 与融合推算之差，离群、重置次数。"""

@@ -189,6 +189,10 @@ class PathConfig:
     # 留出的这段（route_plan PIVOT_REVERSE_MIN_M − 喷头前伸，0.5 m）全程慢走，喷头到线头时车已走直
     # （2026-10-01 用户：倒退完要慢速前进，让万向轮回正，才能开的直）
     reverse_creep_m: float = 0.0
+    reverse_creep_mps: float = 0.0  # 倒车后助跑慢走的车速（0 同 start_creep_mps）
+    # 倒车段自己起步慢走多远（None 同 start_creep_m）：倒车只是把车摆到助跑起点、不画线，原地转完万向轮横着，
+    # 倒车起步只要它转过来（约 90°）就行，不用慢走满 start_creep_m
+    reverse_section_creep_m: float = None
     # 段尾停车按这么久的执行延迟预估车还会走多远（None 同 delay_s）。车速指令比转向快：2026-10-01 实车 26 次
     # 段尾发 0 后实际还走的距离，对应延迟中位 0.33 s（四分位 0.29–0.37 s），按转向的 0.44 s 估多 3–5 cm，
     # 车停短 4–6 cm，原地转 90° 后成了下一段（进圆、矩形下一条边）的横偏
@@ -209,10 +213,18 @@ def differential_config(config=PathConfig()):
     （2026-09-30 用户嫌转弯慢 0.08 → 0.12；2026-10-01 再提速：0.12 时实车 R 3.7 m 圆 0.67 m/s 进圆后 p95 0.9–1.3 cm、
     R 2.2 m 圆 0.51 m/s p95 1.5–1.8 cm，余量大；仿真 0.20 时 R 2.2 m p95 2.3 cm，比 0.12 多约 0.5 cm）：
     R 2.2 m 约 0.66 m/s，R 3.7 m 及以上按 0.8 m/s，角球弧 R 1 m 约 0.44 m/s；
-    场地规划经 route_limits 用同一个值。起步先按 0.1 m/s 慢走 0.3 m（万向轮回正），倒车后往前起步慢走 0.5 m
-    （整段倒车助跑），起步 0.6 m 内锁车头；段尾停车按 0.33 s 预估（见 stop_delay_s）。"""
+    场地规划经 route_limits 用同一个值。起步先按 0.1 m/s 慢走 0.3 m（万向轮回正），倒车段只慢走 0.15 m，
+    倒车后往前起步按 0.15 m/s 慢走 0.5 m（整段倒车助跑），起步 0.6 m 内锁车头；段尾停车按 0.33 s 预估（见 stop_delay_s）。
+    拐角提速（2026-10-01 用户：矩形每个拐角都要倒车太慢，不改硬件、把走法调快）：实车一个拐角约 13.5 s（停稳、原地转
+    3 s、倒车 3.4 s、停稳、助跑 0.1 m/s 约 4 s）；原地转不提速（1.0 rad/s 时驱动器速度环冲过头，见 robot_gen5.json），
+    改倒车段慢走 0.3 → 0.15 m、倒车 0.3 → 0.5 m/s（DIFF_REVERSE_MPS）、停稳 0.3 → 0.2 s（DIFF_SETTLE_S）、
+    助跑慢走 0.1 → 0.15 m/s。"""
     return replace(config, delay_s=0.44, steer_gain=1.0, lat_accel_mps2=0.20, start_creep_mps=0.1, start_hold_m=0.6,
-                   reverse_creep_m=0.5, stop_delay_s=0.33)
+                   reverse_creep_m=0.5, reverse_creep_mps=0.15, reverse_section_creep_m=0.15, stop_delay_s=0.33)
+
+
+DIFF_REVERSE_MPS = 0.5      # 差速车倒车段限速（SectionTracker reverse_mps；阿克曼车 0.3）
+DIFF_SETTLE_S = 0.2         # 差速车段尾停稳要持续多久才换段（SectionTracker settle_s；阿克曼车 0.3）
 
 
 @dataclass
@@ -508,7 +520,8 @@ class SectionTracker:
             cfg = config if len(self.sections) == 1 else \
                 replace(config, start_min_left_m=min(config.start_min_left_m, config.stop_tol_m))
             if i > 0 and sec.direction > 0 > self.sections[i - 1].direction:
-                cfg = replace(cfg, start_creep_m=max(cfg.start_creep_m, cfg.reverse_creep_m))
+                cfg = replace(cfg, start_creep_m=max(cfg.start_creep_m, cfg.reverse_creep_m),
+                              start_creep_mps=cfg.reverse_creep_mps or cfg.start_creep_mps)
             if getattr(sec,'cruise_mps',None) is not None:
                 if not math.isfinite(sec.cruise_mps) or not .02<=sec.cruise_mps<=1.2:raise ValueError('分段速度无效')
                 cfg=replace(cfg,cruise_mps=sec.cruise_mps)
@@ -519,6 +532,8 @@ class SectionTracker:
                 # 倒车实测只走出下发曲率的 0.90（前进 0.96），延迟相近
                 cfg = replace(cfg, cruise_mps=min(cfg.cruise_mps, reverse_mps), track_x_m=-cfg.track_x_m,
                               steer_gain=reverse_gain)
+                if cfg.reverse_section_creep_m is not None:
+                    cfg = replace(cfg, start_creep_m=cfg.reverse_section_creep_m)
             self.trackers.append(PathTracker(sec.path, cfg, self.geo))
         self.kappa_max = self.trackers[0].kappa_max
         self.offsets, total = [], 0.0

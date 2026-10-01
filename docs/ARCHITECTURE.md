@@ -30,7 +30,7 @@ HDA536T ─CAN─► hda536t_imu ─/imu─────────────�
 
 | 任务 | 入口 | 控制器 | 说明 |
 | --- | --- | --- | --- |
-| 路线（连线、圆）、场地作业（球场） | `line_mission` 的 route、`route_operations.py` | `path_tracker.SectionTracker` / `PathTracker` | 规划 `route_plan.py`（差速车：缓弯喷头拖后轴、急弯原地转 + 倒 0.5 m）、场地 `field_planner.py`。曲率前馈 + 执行延迟 0.44 s 预估；原地转向差 5° 以上才转；起步慢走 0.3 m、起步 0.6 m 内锁车头 |
+| 路线（连线、圆）、场地作业（球场） | `line_mission` 的 route、`route_operations.py` | `path_tracker.SectionTracker` / `PathTracker` | 规划 `route_plan.py`（差速车：缓弯喷头拖后轴、急弯原地转 + 倒 0.8 m、往前 0.15 m/s 慢走 0.5 m 助跑）、场地 `field_planner.py`。曲率前馈 + 执行延迟 0.44 s 预估（段尾停车按 0.33 s）；原地转向差 5° 以上才转；起步慢走 0.3 m（倒车段 0.15 m、倒车 0.5 m/s）、起步 0.6 m 内锁车头 |
 | 定点画线 A→B（差速车） | `line_mission` 的 start | `line_cascade.ImuLineTracker` | IMU 航向内环（`heading_hold.HeadingHold`）+ RTK 喷嘴横偏外环；航向跳变按 IMU 维持 5 s |
 | 定点画线 A→B（旧阿克曼车） | 同上 | `line_tracker.LineTracker` | 旧车用 |
 | 手动页「IMU 直行」 | `radar_web_server` | `heading_hold.HeadingHold` | 只用 IMU，不用 RTK |

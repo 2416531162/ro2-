@@ -183,12 +183,14 @@ class Tracking(unittest.TestCase):
     def test_reverse_runup_creeps_all_the_way(self):
         sections, _ = plan(LINE, (-D, 0, 0))
         tr = diff_tracker(sections)
-        self.assertEqual((.3, .5), (tr.trackers[0].cfg.start_creep_m, tr.trackers[1].cfg.start_creep_m))
+        # 倒车段只慢走 0.15 m（只是摆车、不画线）；倒车后往前助跑整段 0.5 m 按 0.15 m/s 慢走（2026-10-01 拐角提速）
+        self.assertEqual((.15, .5), (tr.trackers[0].cfg.start_creep_m, tr.trackers[1].cfg.start_creep_m))
+        self.assertEqual((.1, .15), (tr.trackers[0].cfg.start_creep_mps, tr.trackers[1].cfg.start_creep_mps))
         car = DiffCar(-D, 0, 0)
         self.assertTrue(tr.start(car.pose()))
         fast = []
-        run(tr, car, every=lambda t, tr, c: fast.append(c.x) if tr.index == 1 and c.v > .101 else None)
-        self.assertGreaterEqual(min(fast), -.8 + .5 - .02)          # 助跑 0.5 m 内不超过 0.1 m/s
+        run(tr, car, every=lambda t, tr, c: fast.append(c.x) if tr.index == 1 and c.v > .151 else None)
+        self.assertGreaterEqual(min(fast), -.8 + .5 - .02)          # 助跑 0.5 m 内不超过 0.15 m/s
         self.assertEqual('DONE', tr.st.state)
 
     def test_short_entry_section_starts(self):
@@ -217,8 +219,20 @@ class Tracking(unittest.TestCase):
 
     def test_differential_parameters(self):
         cfg = differential_config(PathConfig())
-        self.assertEqual((.44, .33, .5), (cfg.delay_s, cfg.stop_delay_s, cfg.reverse_creep_m))
+        self.assertEqual((.44, .33, .5, .15, .15), (cfg.delay_s, cfg.stop_delay_s, cfg.reverse_creep_m,
+                                                  cfg.reverse_creep_mps, cfg.reverse_section_creep_m))
         self.assertEqual(.8, rp.PIVOT_REVERSE_MIN_M)
+
+
+    def test_differential_section_options(self):
+        from path_tracker import DIFF_REVERSE_MPS, DIFF_SETTLE_S
+        from test_differential_drive import DIFF
+        from types import SimpleNamespace
+        from line_tracker import LineConfig
+        m = LineMission(None, SAMPLES, tracker=SimpleNamespace(cfg=LineConfig(), geo=DIFF), body=BODY, nozzle_x=D)
+        self.assertEqual((DIFF_REVERSE_MPS, DIFF_SETTLE_S), (.5, .2))
+        opts = m.section_options()
+        self.assertEqual((opts['reverse_mps'], opts['settle_s']), (.5, .2))
 
 
 class Commands(unittest.TestCase):
