@@ -182,9 +182,11 @@ class TestStartHold(unittest.TestCase):
                 self.assertLess(rest, 0.3)
 
     def test_without_hold_the_line_head_is_off(self):
+        # 不锁车头时线头偏差是锁车头的 3 倍多（2026-10-01 下午倒车 1.2 m、ki 2.0 后 0.95 对 0.29 cm；之前 >1 cm）
         state, lead, head, rest = paint_straight(8.0, start_hold_m=0.0)
         self.assertEqual(state, 'DONE')
-        self.assertGreater(head, 1.0)
+        held = paint_straight(8.0)[2]
+        self.assertGreater(head, 2.5 * held)
 
     def test_no_whip_no_harm(self):
         state, lead, head, rest = paint_straight(0.0)
