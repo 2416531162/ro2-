@@ -485,6 +485,42 @@ class TestMission(unittest.TestCase):
         self.assertAlmostEqual(st['route_limits']['min_radius'], RADIUS, places=3)
         self.assertEqual((st['route']['cover']['pivots'], st['route']['cover']['cusps']), (1, 2))
 
+    def test_start_current_at_last_marked_point_runs_back_to_the_first(self):
+        """2026-10-01 用户：标 A、B 两点后车停在 B 上点「从当前位置开始」：原地掉头、倒车，
+        喷头从 B 一路画到 A。车按 0.44 s 执行延迟执行。"""
+        from test_line_mission import FakeFusion
+        route = dict(kind='path', points=[[0, 0], [6, 0]], closed=False, cruise=0.5)
+        self.fusion.current = FakeFusion.make(6.0 - NOZZLE, 0.0, 0.0)  # 从 A 开过来，喷头停在 B
+        ok, msg = self.m.command({'cmd': 'route_start_current', 'route': route}, 0.0)
+        self.assertTrue(ok, msg)
+        self.assertEqual([s.direction for s in self.m.tracker.sections], [-1, 1])
+        t, sent, vx, wz, gears, nozzle = 0.0, [], 0.0, 0.0, set(), []
+        while t < 200.0:
+            out = self.m.tick(t, 'NAVIGATION')
+            p = self.fusion.current
+            if out[0] < 0:
+                gears.add('reverse')
+            sent.append((t + self.m.path_cfg.delay_s, out[0], out[1]))
+            while sent and sent[0][0] <= t + 1e-9:
+                _, vx, wz = sent.pop(0)
+            yaw = p.yaw + wz * 0.05
+            self.fusion.current = FakeFusion.make(p.x + vx * 0.05 * math.cos(yaw), p.y + vx * 0.05 * math.sin(yaw),
+                                                  math.degrees(yaw), speed=vx)
+            self.fusion.current.yaw_rate = wz
+            q = self.fusion.current
+            if vx > 0.05 and math.cos(q.yaw) < -0.99:                   # 往 A 画的时候喷头离线多远
+                nozzle.append((q.x + NOZZLE * math.cos(q.yaw), q.y + NOZZLE * math.sin(q.yaw)))
+            t += 0.05
+            if self.m.phase == 'IDLE' and out[2] is False:
+                break
+        self.assertEqual(self.m.message, '路线完成')
+        self.assertIn('reverse', gears)
+        q = self.fusion.current
+        self.assertLess(abs(q.x + NOZZLE * math.cos(q.yaw)), 0.1)          # 喷头画到 A 附近停
+        on_line = [y for x, y in nozzle if 0.5 < x < 5.5]
+        self.assertTrue(on_line)
+        self.assertLess(max(abs(y) for y in on_line), 0.02)
+
     def test_route_start_turns_in_place_first(self):
         from test_line_mission import FakeFusion
         route = dict(kind='path', points=[[0, 0], [6, 0], [6, 5]], closed=False, cruise=0.5)

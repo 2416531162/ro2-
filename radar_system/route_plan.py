@@ -46,6 +46,7 @@ MAX_COORD_M = 1000.0         # 本地坐标范围（离原点）
 MIN_LEG_M = 0.2              # 相邻路点最小间距
 MAX_TURN_DEG = 170.0         # 路点折线：拐角转向超过这个角度就是折返，圆弧过渡需要的直线太长
 MAX_ENTRY_M = 30.0           # 接入路线最长：车离起点太远时先开近，不替人规划长距离穿越
+FROM_END_M = 0.5             # 「从当前位置开始」：差速车喷头离开放连线终点这么近，就从终点反着画回起点
 TURN_RADIUS_RANGE = (1.0, 20.0)
 CIRCLE_RADIUS_RANGE = (0.5, 100.0)
 CRUISE_RANGE = (0.1, 1.0)
@@ -675,7 +676,7 @@ def _pivot_cover(points, radius, nozzle_x):
     return out.out, n - 2 - len(smooth)
 
 
-def _pulled_cover(pts, radius, d):
+def _pulled_cover(pts, radius, d, out=None):
     """喷头在后轴前 d（> 0）：喷头沿连线走，后轴像拖车一样被喷头拖着走（曳物线），喷头始终压在线上。
 
     车头与下一条边的夹角 φ 决定后轴要转多急：后轴转弯半径 d / tan|φ|。|φ| ≤ atan(d / radius)（Gen5 d 0.30、
@@ -685,7 +686,8 @@ def _pulled_cover(pts, radius, d):
     """
     n, limit = len(pts), math.atan(d / radius)
     h0 = math.atan2(pts[1][1] - pts[0][1], pts[1][0] - pts[0][0])
-    out = _PivotSections(_offset(pts[0], h0, -d) + (h0,))
+    if out is None:     # 给了 out 就从它现在的位姿接着拖（喷头在第 1 个点附近，见 plan_current 从终点起步）
+        out = _PivotSections(_offset(pts[0], h0, -d) + (h0,))
     corners = 0
     for i in range(1, n):
         x, y, yaw = out.pose
@@ -949,8 +951,17 @@ def route_length(spec, min_radius, nozzle_x=None):
 
 
 def plan_current(spec, car_pose, min_radius, *, body=None, max_entry_m=MAX_ENTRY_M, nozzle_x=None):
-    """从当前压线点的最近路线段开始，裁去之前的分段，保持原图和后续路径。与 App RouteStart 对应。"""
+    """从当前压线点的最近路线段开始，裁去之前的分段，保持原图和后续路径。与 App RouteStart 对应。
+
+    差速车喷头在开放连线的终点附近（FROM_END_M 以内，比离起点近）：从终点反着画回起点，见 _plan_from_end。"""
     from path_tracker import Path, Section
+    if spec.kind == 'path' and not spec.closed and nozzle_x is not None and len(spec.points) >= 2:
+        nx = car_pose[0] + nozzle_x * math.cos(car_pose[2])
+        ny = car_pose[1] + nozzle_x * math.sin(car_pose[2])
+        a, b = spec.points[0], spec.points[-1]
+        to_end = math.hypot(nx - b[0], ny - b[1])
+        if to_end <= FROM_END_M and to_end < math.hypot(nx - a[0], ny - a[1]):
+            return _plan_from_end(spec, car_pose, min_radius, nozzle_x)
     if spec.kind == 'path':
         raw, _ = (_pivot_route_sections(spec, min_radius, nozzle_x) if nozzle_x is not None
                   else _route_sections(spec, min_radius, body))
@@ -1015,6 +1026,34 @@ def plan_current(spec, car_pose, min_radius, *, body=None, max_entry_m=MAX_ENTRY
     if entry_m > max_entry_m:
         raise ValueError('车离最近路线段太远，请先手动开近路线')
     return entry + rest, entry_m
+
+
+def _plan_from_end(spec, car_pose, min_radius, nozzle_x):
+    """差速车喷头停在开放连线终点上（标完最后一个点的位置）：从这里反着画回起点（2026-10-01 用户：标两个点后
+    应从后一个点退 0.5 m 调整方向、进线走到另一端）。原地转到连线方向（已经顺着就不转），倒车到后轴在这个点后方
+    max(nozzle_x, PIVOT_REVERSE_MIN_M)（至少倒这么远），再往前开，喷头开过这个点后沿线画到另一端。
+    不先往前开一小段：跟踪器起步要求一段至少剩 start_min_left_m，0.3 m 的段起不了步（实车报「已经过了路线终点」）。
+    返回 ([path_tracker.Section, …], 接入路程米)；接入是喷头回到这个点之前的那几段。"""
+    from path_tracker import Path, Section
+    pts = [tuple(map(float, p)) for p in reversed(spec.points)]
+    x, y, yaw = car_pose
+    d = nozzle_x
+    (bx, by), h0 = pts[0], math.atan2(pts[1][1] - pts[0][1], pts[1][0] - pts[0][0])
+    out = _PivotSections((x, y, yaw))
+    back = max(d, PIVOT_REVERSE_MIN_M)
+    if abs(wrap(h0 - yaw)) > math.radians(ON_LINE_DEG):
+        out.pivot(wrap(h0 - yaw))                    # 原地转到连线方向（车头已经顺着就不转）
+    along_c = (x - bx) * math.cos(h0) + (y - by) * math.sin(h0)
+    out.add(-1, max(back, along_c + back), 0.0)      # 后轴倒到这个点后方 back，至少倒 back
+    # 参考线放回连线上：后轴投到「这个点 → 下一个点」的直线上、车头取连线方向，画的线就是标的那条线；
+    # 车离线的那一点（标点时的对准误差，FROM_END_M 以内）由跟踪器在喷头开回这个点之前纠正
+    px, py, _ = out.pose
+    along = (px - bx) * math.cos(h0) + (py - by) * math.sin(h0)
+    out.pose = (bx + along * math.cos(h0), by + along * math.sin(h0), h0)
+    entry_m = sum(length for _, _, pieces in out.out for length, _ in pieces) + max(0.0, -along - d)
+    _pulled_cover(pts, min_radius, d, out=out)
+    sections = [Section(direction, Path(start, pieces)) for direction, start, pieces in out.out]
+    return sections, entry_m
 
 
 def plan(spec, car_pose, min_radius, *, body=None, max_entry_m=MAX_ENTRY_M, nozzle_x=None):
