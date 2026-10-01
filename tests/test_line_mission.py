@@ -451,14 +451,49 @@ class TestRoute(Base):
         ok, why = start(0.0)
         self.assertFalse(ok)
         self.assertEqual('rtk_not_confirmed：rtk_hold、rtk_suspect', why)
-        # 从室内转发器下开出来：固定解照样来，但与融合位置差 22 m（融合要持续对不上 2 s 才对齐）
+        # 从室内转发器下开出来：固定解照样来，但与融合位置差 22 m（融合要持续对不上 2 s 才对齐）：位置不能用
         self.fusion.current = FakeFusion.make(-1.0, 0.0, 0.0)
         fix(1.0, 21.0, 0.0)
-        self.assertEqual((False, 'rtk_not_confirmed'), start(1.0))
+        self.assertEqual((False, 'pose_unusable：position_mismatch'), start(1.0))
+        fix(1.5, -0.9, 0.0)                                         # 差 10 cm：还能用，但不算 RTK 确认
+        self.assertEqual((False, 'rtk_not_confirmed'), start(1.5))
         fix(2.0, -1.0, 0.0)                                         # 对齐了：固定解与融合对得上
         self.assertEqual((False, 'rtk_not_confirmed'), start(2.6))  # 固定解停了 0.6 s：也不算确认
         ok, why = start(2.1)
         self.assertTrue(ok, why)
+
+    def test_running_on_a_position_far_from_trusted_rtk_stops(self):
+        """2026-10-01 用户：app 上车在路线上走，就必须真的在那条路线上。走着走着卫星（没判不可信）与融合差 22 m：
+        立刻停车、报出差多少，不按错的位置接着走；融合对齐、RTK 确认后自动继续。"""
+        from line_mission import MISMATCH_NOTICE
+        self.running_rect()
+        self.fusion.antenna_lever = lambda: (0.0, 0.0)
+        fix = lambda t, x, y: self.m.on_gnss(dict(kind='fix', t=t, lat=30.0 + y * 1e-5, lon=120.0 + x * 1e-5, height=20.0,
+                                                   sol='NARROW_INT', sigma_n=0.01, sigma_e=0.01, sigma_u=0.02,
+                                                   diff_age=1.0, sats=30))
+        p = self.fusion.current
+        fix(5.0, p.x, p.y + 22.0)
+        self.assertEqual(self.m.tick(5.0, 'NAVIGATION')[:2], (0.0, 0.0))
+        self.assertEqual('PAUSED', self.m.tracker.st.state)
+        self.assertEqual(MISMATCH_NOTICE % 22.0, self.m.message)
+        st = self.m.status()['pose']
+        self.assertFalse(st['usable'])
+        self.assertIn('position_mismatch', st['reasons'])
+        t = 5.05
+        while t < 7.0:                                              # 融合对齐了：固定解与融合对得上
+            p = self.fusion.current
+            fix(t, p.x, p.y)
+            self.m.tick(t, 'NAVIGATION')
+            t += 0.05
+        self.assertEqual('RUNNING', self.m.tracker.st.state)
+        self.assertEqual('定位恢复，自动继续', self.m.message)
+        # 推算维持中（卫星判了不可信）时 RTK 的差不算数：照样按推算走
+        hold = FakeFusion.make(p.x, p.y, math.degrees(p.yaw), quality='DEAD_RECKONING')
+        hold.reasons = ('rtk_hold', 'rtk_suspect')
+        self.fusion.current = hold
+        fix(7.0, p.x, p.y + 22.0)
+        self.m.tick(7.0, 'NAVIGATION')
+        self.assertEqual('RUNNING', self.m.tracker.st.state)
 
     def test_auto_resume_waits_for_rtk_confirmed_position(self):
         """暂停后自动继续也算重新接入：位置能用但还在推算维持，不接着走，等 RTK 确认了再走。"""

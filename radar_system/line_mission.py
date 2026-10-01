@@ -40,8 +40,8 @@ RTK_FIXED_SOLS = ('NARROW_INT',)            # 与 gnss_fusion 的固定解一致
 INNOVATION_STALE_S = 1.0
 # 融合给出的原因里会禁止控制的那些，按根因排序（其余如 heading_unavailable、gyro_only 只说明降级来源），
 # 见 docs/GNSS_FUSION.md
-BLOCKING_REASONS = ('heading_uninitialized', 'imu_stale', 'imu_mismatch', 'wheel_stale', 'rtk_hold_timeout',
-                    'rtk_fixed_timeout', 'position_reset', 'heading_uncertain', 'position_uncertain')
+BLOCKING_REASONS = ('heading_uninitialized', 'imu_stale', 'imu_mismatch', 'wheel_stale', 'position_mismatch',
+                    'rtk_hold_timeout', 'rtk_fixed_timeout', 'position_reset', 'heading_uncertain', 'position_uncertain')
 # 测向浮点（无效）时航向只靠陀螺和行驶轨迹维持，融合的航向不确定度一过 0.5° 就判不可控制。
 # 主、副天线都是固定解（位置可信）时放宽到这么多照样走，原因里加 gyro_hold（2026-09-27 用户要求：
 # 走着走着测向变浮点不能停，要靠 IMU 维持）
@@ -72,6 +72,11 @@ RESUME_FAILED_NOTICE = '定位已恢复，但不能自动接着走：%s；请停
 START_AGREE_M = 0.05
 START_FIX_AGE_S = 0.5
 UNCONFIRMED_REASONS = ('rtk_hold', 'rtk_suspect', 'rtk_rejoin', 'position_reset')
+# 走着的时候也一样（2026-10-01 用户：app 上车在路线上走，就必须真的在那条路线上）：卫星没判不可信（不在推算维持）、
+# 最新固定解与融合推算差超过 MISMATCH_M，位置就不当真用——停车，原因 position_mismatch（app 显示），融合对齐后
+# 按 RTK 确认的位置自动继续。当天正常作业 23 趟（含靠楼）这个差最大 10.5 cm；13:36–13:50 出问题的 7 趟每帧都差 11–100 m
+MISMATCH_M = 0.3
+MISMATCH_NOTICE = '定位与卫星差 %.1f m，已停车，对上后自动继续'
 
 
 def pose_problem(pose):
@@ -312,15 +317,32 @@ class LineMission:
         """控制用的位姿：融合位姿，只因测向无效、陀螺维持的航向不确定度超了融合门槛而不可控制时，
         若主天线（融合已是 RTK 固定解）和副天线都固定、不确定度不超过 GYRO_HOLD_SIGMA_YAW_DEG，照样可用。"""
         pose = self.fusion.pose(now)
-        if pose is None or pose.usable_for_control:
+        if pose is None:
             return pose
-        reasons = tuple(getattr(pose, 'reasons', ()))
-        blocking = [r for r in BLOCKING_REASONS if r in reasons]
-        fix2 = self._fix2_t is not None and now - self._fix2_t <= FIX2_MAX_AGE_S
-        if (blocking == ['heading_uncertain'] and 'heading_unavailable' in reasons and fix2
-                and pose.quality == 'RTK_FIXED' and pose.sigma_yaw <= math.radians(GYRO_HOLD_SIGMA_YAW_DEG)):
-            return _with(pose, usable_for_control=True, reasons=reasons + ('gyro_hold',))
+        if not pose.usable_for_control:
+            reasons = tuple(getattr(pose, 'reasons', ()))
+            blocking = [r for r in BLOCKING_REASONS if r in reasons]
+            fix2 = self._fix2_t is not None and now - self._fix2_t <= FIX2_MAX_AGE_S
+            if (blocking == ['heading_uncertain'] and 'heading_unavailable' in reasons and fix2
+                    and pose.quality == 'RTK_FIXED' and pose.sigma_yaw <= math.radians(GYRO_HOLD_SIGMA_YAW_DEG)):
+                pose = _with(pose, usable_for_control=True, reasons=reasons + ('gyro_hold',))
+            else:
+                return pose
+        gap = self._rtk_gap(pose, now)
+        if gap is not None and gap > MISMATCH_M:
+            return _with(pose, usable_for_control=False,
+                         reasons=tuple(getattr(pose, 'reasons', ())) + ('position_mismatch',))
         return pose
+
+    def _rtk_gap(self, pose, now):
+        """最新固定解（START_FIX_AGE_S 内）与融合推算的主天线位置差多远，m；卫星判了不可信（推算维持中）、
+        还没比过或固定解过时为 None（这时 RTK 的差不算数）。"""
+        if any(r in tuple(getattr(pose, 'reasons', ())) for r in ('rtk_suspect', 'rtk_hold')):
+            return None
+        inn = self._innovation
+        if inn is None or now - inn[0] > START_FIX_AGE_S:
+            return None
+        return math.hypot(inn[1], inn[2])
 
     def _rtk_unconfirmed(self, pose, now):
         """位置没被 RTK 确认（见 START_AGREE_M）时返回原因（app 翻译），确认了返回 None。"""
@@ -578,7 +600,9 @@ class LineMission:
         notice = getattr(self.tracker, 'notice', None)
         text = notice() if callable(notice) else None
         reasons = getattr(pose, 'reasons', ()) or ()
-        if not text and 'rtk_hold_timeout' in reasons:
+        if not text and 'position_mismatch' in reasons:
+            text = MISMATCH_NOTICE % (self._rtk_gap(pose, now) or 0.0)
+        elif not text and 'rtk_hold_timeout' in reasons:
             text = RTK_NOTICE_TIMEOUT
         elif not text and 'rtk_fixed_timeout' in reasons:
             text = RTK_NOTICE_LOST
@@ -591,7 +615,8 @@ class LineMission:
             self.message = text
         elif self.message in CASCADE_NOTICES + (RTK_NOTICE_HOLD, RTK_NOTICE_TIMEOUT, RTK_NOTICE_LOST_HOLD,
                                                 RTK_NOTICE_LOST, TRACKER_PAUSED_NOTICE) \
-                or self.message.startswith(RESUME_FAILED_NOTICE.split('%s')[0]):
+                or self.message.startswith(RESUME_FAILED_NOTICE.split('%s')[0]) \
+                or self.message.startswith(MISMATCH_NOTICE.split('%')[0]):
             self.message = '行驶中'
         self._write_log(now, pose, vx)
         try:
