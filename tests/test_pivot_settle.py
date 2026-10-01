@@ -28,8 +28,9 @@ class SpringyChassis(Gen5Chassis):
     停下回弹：原地转时轮胎 / 万向轮被扭着，最多存 springback_deg；转动指令停了按 0.15 s 放掉，车头往回转；
     小指令推不动：停着原地转、角速度指令小于 stiction（rad/s）时轮子不转（实车 ±14 erpm ≈ 0.04 rad/s 推不动）。"""
 
-    def __init__(self, *a, springback_deg=1.2, stiction=0.06, whip_deg=0.0, whip_s=0.8, **kw):
-        super().__init__(*a, **kw)
+    def __init__(self, *a, springback_deg=1.2, stiction=0.06, whip_deg=0.0, whip_s=0.8, speed_delay_s=0.33, **kw):
+        # 车速延迟按 2026-10-01 实车路线段尾停车实测（见 Gen5Chassis）
+        super().__init__(*a, speed_delay_s=speed_delay_s, **kw)
         self.limit, self.stiction = springback_deg * DEG, stiction
         self.wound = 0.0
         # 起步甩头：原地转完从停着往前开，车头按上次原地转的方向再甩 whip_deg（whip_s 内，半正弦）。

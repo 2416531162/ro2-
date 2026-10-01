@@ -265,9 +265,54 @@ def route_geometry_cases():
             'on_line_deg': route_plan.ON_LINE_DEG, 'body': list(BODY), 'cases': out}
 
 
+def route_start_cases():
+    """开始作业（plan_current：从离车最近处开始、跑完整条路线）与 app RouteStart.kt 的对照样例。"""
+    line = dict(kind='path', points=[[0, 0], [10, 0]], closed=False, cruise=0.8)
+    legs = dict(kind='path', points=[[0, 0], [20, 0], [20, 10]], closed=False, cruise=0.5)
+    rect = dict(kind='path', points=[[0, 0], [10, 0], [10, 5], [0, 5]], closed=True, cruise=0.8)
+    circle = dict(kind='circle', center=[0, 0], radius=2.5, clockwise=True, laps=1, cruise=0.5)
+    d, ack = 0.30, min_route_radius()
+    cases = [
+        ('直线 喷头在起点', line, [-0.3, 0.0, 0.0], PIVOT_RADIUS, d),
+        ('直线 喷头在终点 从起点开过来', line, [9.7, 0.0, 0.0], PIVOT_RADIUS, d),
+        ('直线 标点偏 0.24 m', line, [9.7, 0.24, 0.0], PIVOT_RADIUS, d),
+        ('直线 中间 去近的一头', line, [5.5, 0.0, 0.0], PIVOT_RADIUS, d),
+        ('直线 助跑以外直接开进', line, [-1.5, 0.0, 0.0], PIVOT_RADIUS, d),
+        ('直线 起点后方偏一点 往前开到助跑点', line, [-1.0, 0.2, 0.0], PIVOT_RADIUS, d),
+        ('折线 在最后一点', legs, [20.0, 9.7, math.pi / 2], PIVOT_RADIUS, d),
+        ('矩形 边中间', rect, [4.7, -0.1, 0.0], PIVOT_RADIUS, d),
+        ('矩形 靠近拐角', rect, [9.6, 0.1, 0.0], PIVOT_RADIUS, d),
+        ('矩形 两圈', dict(rect, laps=2), [5.3, 5.1, math.pi], PIVOT_RADIUS, d),
+        ('矩形 车在中间', rect, [5.0, 2.4, math.pi / 2], PIVOT_RADIUS, d),
+        ('圆 喷头在圆边', circle, [2.5, -0.3, -math.pi / 2], PIVOT_RADIUS, d),
+        ('圆 喷头在圆心 朝东', circle, [-0.3, 0.0, 0.0], PIVOT_RADIUS, d),
+        ('圆 喷头在圆心 朝西北', circle, [-0.3 * math.cos(2.0), -0.3 * math.sin(2.0), 2.0], PIVOT_RADIUS, d),
+        ('圆 逆时针两圈', dict(circle, radius=3.0, clockwise=False, laps=2), [3.0, 0.0, math.pi / 2], PIVOT_RADIUS, d),
+        ('阿克曼 直线 靠近终点', line, [9.0, 0.0, math.pi], ack, None),
+        ('阿克曼 矩形', rect, [5.0, 0.3, 0.0], ack, None),
+        ('阿克曼 圆', dict(circle, radius=3.0), [3.0, 0.0, -math.pi / 2], ack, None),
+        ('阿克曼 路点折线 闭合', dict(rect, kind='points', turn_radius=2.0), [9.0, 0.0, 0.0], ack, None),
+        ('错误 太远', line, [0.0, -100.0, 0.0], PIVOT_RADIUS, d),
+    ]
+    out = []
+    for name, raw, car, radius, nozzle in cases:
+        spec = route_plan.parse_spec(raw)
+        case = dict(name=name, route=spec.to_dict(digits=6), car=car, radius=radius, nozzle=nozzle, body=list(BODY))
+        try:
+            sections, entry = route_plan.plan_current(spec, tuple(car), radius, body=BODY, nozzle_x=nozzle)
+            case.update(entry_m=entry, error=None, sections=[
+                dict(direction=s.direction, start=list(s.path.pieces[0].pose(0.0)),
+                     pieces=[[p.length, p.kappa] for p in s.path.pieces]) for s in sections])
+        except ValueError as exc:
+            case.update(entry_m=None, error=str(exc), sections=None)
+        out.append(case)
+    return out
+
+
 def fixture_messages():
     """文件名 -> 消息。tel_sample 是 IMU 定向直行中，tel_line_sample 是 RTK 走直线中，
-    tel_route_sample 是走路线中，route_geometry_sample 是路线几何对照样例。"""
+    tel_route_sample 是走路线中，route_geometry_sample 是路线几何对照样例，route_start_current_sample 是开始作业
+    （从最近处开始跑完整条）对照样例。"""
     snap = sample_snapshot()
     snap['gnss'] = sample_gnss()
     # IMU 定向直行正在跑（heading_hold.HeadingHold.status 的样子，作业键 = (会话, app 作业编号)）
@@ -285,7 +330,8 @@ def fixture_messages():
     route['wheeltec'] = dict(route['wheeltec'], guard={'navigation_uses_lidar': False, 'bypassed': True})
     tel_route = app_link.build_telemetry(route, now=100.0, seq=44)
     return {'tel_sample.json': tel, 'tel_line_sample.json': tel_line, 'tel_route_sample.json': tel_route,
-            'route_geometry_sample.json': route_geometry_cases(), 'hello_sample.json': hello}
+            'route_geometry_sample.json': route_geometry_cases(), 'hello_sample.json': hello,
+            'route_start_current_sample.json': route_start_cases()}
 
 
 def write(directory):

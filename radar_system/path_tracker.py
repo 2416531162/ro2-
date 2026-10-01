@@ -185,6 +185,14 @@ class PathConfig:
     # 换向后是横着的，一起步就把车身甩歪（2026-09-30 实车：车头甩 5–8°，线头 1 m 内偏 4–8 cm）；慢走让它先转回来
     start_creep_mps: float = 0.0
     start_creep_m: float = 0.3
+    # 倒车段之后往前起步慢走这么远（不比 start_creep_m 短）：倒完车万向轮朝前，往前走要整个翻过来；倒车助跑
+    # 留出的这段（route_plan PIVOT_REVERSE_MIN_M − 喷头前伸，0.5 m）全程慢走，喷头到线头时车已走直
+    # （2026-10-01 用户：倒退完要慢速前进，让万向轮回正，才能开的直）
+    reverse_creep_m: float = 0.0
+    # 段尾停车按这么久的执行延迟预估车还会走多远（None 同 delay_s）。车速指令比转向快：2026-10-01 实车 26 次
+    # 段尾发 0 后实际还走的距离，对应延迟中位 0.33 s（四分位 0.29–0.37 s），按转向的 0.44 s 估多 3–5 cm，
+    # 车停短 4–6 cm，原地转 90° 后成了下一段（进圆、矩形下一条边）的横偏
+    stop_delay_s: float = None
     # 起步锁车头（差速车）：每段起步后 start_hold_m 内，车头误差的纠正速度（1/s）不低于 start_hold_rate，不够的部分
     # 直接给角速度（不超过 start_hold_max rad/s）。曲率反馈给出的角速度 = 车速 × 曲率，慢走时几乎为 0：2026-09-30
     # 实车原地转完起步，车头按原地转的方向再甩 4–13°（21 次 19 次同向），0.1 m/s 时只给出 0.06 rad/s，压不住，
@@ -201,8 +209,10 @@ def differential_config(config=PathConfig()):
     （2026-09-30 用户嫌转弯慢 0.08 → 0.12；2026-10-01 再提速：0.12 时实车 R 3.7 m 圆 0.67 m/s 进圆后 p95 0.9–1.3 cm、
     R 2.2 m 圆 0.51 m/s p95 1.5–1.8 cm，余量大；仿真 0.20 时 R 2.2 m p95 2.3 cm，比 0.12 多约 0.5 cm）：
     R 2.2 m 约 0.66 m/s，R 3.7 m 及以上按 0.8 m/s，角球弧 R 1 m 约 0.44 m/s；
-    场地规划经 route_limits 用同一个值。起步先按 0.1 m/s 慢走 0.3 m（万向轮回正），起步 0.6 m 内锁车头。"""
-    return replace(config, delay_s=0.44, steer_gain=1.0, lat_accel_mps2=0.20, start_creep_mps=0.1, start_hold_m=0.6)
+    场地规划经 route_limits 用同一个值。起步先按 0.1 m/s 慢走 0.3 m（万向轮回正），倒车后往前起步慢走 0.5 m
+    （整段倒车助跑），起步 0.6 m 内锁车头；段尾停车按 0.33 s 预估（见 stop_delay_s）。"""
+    return replace(config, delay_s=0.44, steer_gain=1.0, lat_accel_mps2=0.20, start_creep_mps=0.1, start_hold_m=0.6,
+                   reverse_creep_m=0.5, stop_delay_s=0.33)
 
 
 @dataclass
@@ -250,7 +260,10 @@ class PathTracker:
         s, e, path_yaw, k = self.path.project(px, py, hint, extend_start=self.cfg.start_before_m)
         return s, e, wrap(yaw - path_yaw), k
 
-    def check_start(self, pose, hint=None):
+    def check_start(self, pose, hint=None, resume=False):
+        """resume=True（暂停后接着走）不查离终点多近：段尾前暂停的照样接着把这段走完（下一个周期到点就 DONE）。
+        2026-10-01 实车：接入段剩 0.14 m 时定位抖了一下暂停，恢复时按「离终点不到 0.5 m 不起步」每秒重试都不过，
+        车停着不动、屏幕还显示「行驶中」，直到操作员按停止。"""
         if not pose.usable_for_control:
             return False, 'pose_unusable'
         s, e, he, _ = self.locate(pose.x, pose.y, pose.yaw, hint)
@@ -260,14 +273,15 @@ class PathTracker:
             return False, 'heading_not_aligned'
         if s < -self.cfg.start_before_m + 1e-6:
             return False, 'too_far_behind_a'
-        if s > self.path.length - self.cfg.start_min_left_m:
+        if not resume and s > self.path.length - self.cfg.start_min_left_m:
             return False, 'already_past_b'
         return True, ''
 
     def start(self, pose, integral=None):
         # 暂停后继续：在暂停处附近找投影，多圈路线不会跳回第一圈、8 字交叉处不会跳到另一支
-        hint = self._hint if self.st.state == 'PAUSED' else None
-        ok, why = self.check_start(pose, hint)
+        resume = self.st.state == 'PAUSED'
+        hint = self._hint if resume else None
+        ok, why = self.check_start(pose, hint, resume=resume)
         if not ok:
             if self.st.state != 'PAUSED':
                 self.st.state = 'IDLE'
@@ -305,16 +319,17 @@ class PathTracker:
         self._sent.append((self._clock, v, wz))
         return v, wz
 
-    def predict(self, x, y, yaw):
+    def predict(self, x, y, yaw, delay=None):
         """已发出、还在执行延迟里的指令都执行完后的 (x, y, yaw)。
 
         第 i 条指令在 [t_i, t_i+1) 期间有效、晚 delay_s 才作用到车上，所以车接下来 delay_s 内怎么走，由
         [现在 − delay_s, 现在) 期间有效的那些指令决定；车实际角速度 = 下发角速度 × steer_gain。
+        delay 给了（不超过 delay_s）就按它推，段尾停车用（见 stop_delay_s）。
         """
-        d = self.cfg.delay_s
         sent = self._sent
-        while len(sent) >= 2 and sent[1][0] <= self._clock - d + 1e-9:
+        while len(sent) >= 2 and sent[1][0] <= self._clock - self.cfg.delay_s + 1e-9:
             sent.popleft()
+        d = self.cfg.delay_s if delay is None else min(delay, self.cfg.delay_s)
         if d <= 0.0:
             return x, y, yaw
         start = self._clock - d
@@ -362,6 +377,12 @@ class PathTracker:
             st.v_cmd, self._v_prev = 0.0, 0.0
             return 0.0, 0.0, 0.0
         remaining = self.path.length - s
+        if cfg.stop_delay_s is not None and cfg.stop_delay_s < cfg.delay_s:
+            # 停车（刹停曲线、到点）按车速指令的延迟预估：比转向的 delay_s 短，按 delay_s 会提前停、停短
+            xs, ys, yaws = self.predict(pose.x, pose.y, pose.yaw, cfg.stop_delay_s)
+            xs += pose.speed * cfg.lead_s * math.cos(yaws)
+            ys += pose.speed * cfg.lead_s * math.sin(yaws)
+            remaining = self.path.length - self.locate(xs, ys, yaws, s_now)[0]
         if remaining <= cfg.stop_tol_m:
             st.state, st.reason = 'DONE', ''
             st.v_cmd, self._v_prev = 0.0, 0.0
@@ -482,7 +503,12 @@ class SectionTracker:
         self.pivot_timeout_s = pivot_timeout_s
         self.trackers = []
         for i, sec in enumerate(self.sections):
-            cfg = config if i == 0 else replace(config, start_min_left_m=min(config.start_min_left_m, config.stop_tol_m))
+            # 「离终点太近不起步」只对整条路线的最后一段有意义；后面还有段的（如 0.3–0.9 m 的接入、倒车助跑段）
+            # 照样起步，否则短接入段一起步就报「已经过了路线终点」（2026-10-01 实车）
+            cfg = config if len(self.sections) == 1 else \
+                replace(config, start_min_left_m=min(config.start_min_left_m, config.stop_tol_m))
+            if i > 0 and sec.direction > 0 > self.sections[i - 1].direction:
+                cfg = replace(cfg, start_creep_m=max(cfg.start_creep_m, cfg.reverse_creep_m))
             if getattr(sec,'cruise_mps',None) is not None:
                 if not math.isfinite(sec.cruise_mps) or not .02<=sec.cruise_mps<=1.2:raise ValueError('分段速度无效')
                 cfg=replace(cfg,cruise_mps=sec.cruise_mps)

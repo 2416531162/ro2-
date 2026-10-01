@@ -19,6 +19,8 @@
 圆        从圆的最南点出发（逆时针时车头朝东、顺时针朝西），转 laps 圈回到这里停车。
           差速车（Gen5）按喷头画圆：喷头在后轴中点前 nozzle_x，后轴中点走半径 √(R²−nozzle_x²) 的同心圆，
           喷头正好在半径 R 上；最后多走 VERTEX_PASS_M 让喷头盖过起点。接入同连线路线（pivot_entry，原地转向）。
+开始作业  （app 的 start_current，plan_current）路线不分起点终点：从离车最近的地方开始、跑完整条（圆、闭合路线绕完整圈
+          回到起步处，开放路线从近的那一头画到另一头），见 start_from_nearest；差速车喷头离起点近就倒车助跑进线（runup_entry）。
 接入      路点折线和圆：从车当前位姿到路线起点（第 1 个路点、车头朝第 1 段方向；圆为最南点）用 Dubins
           最短路径：半径 turn_radius 的圆弧 + 直线 + 圆弧，或三段圆弧。只前进，不倒车。
 
@@ -46,7 +48,10 @@ MAX_COORD_M = 1000.0         # 本地坐标范围（离原点）
 MIN_LEG_M = 0.2              # 相邻路点最小间距
 MAX_TURN_DEG = 170.0         # 路点折线：拐角转向超过这个角度就是折返，圆弧过渡需要的直线太长
 MAX_ENTRY_M = 30.0           # 接入路线最长：车离起点太远时先开近，不替人规划长距离穿越
-FROM_END_M = 0.5             # 「从当前位置开始」：差速车喷头离开放连线终点这么近，就从终点反着画回起点
+NEAR_START_M = 0.5           # 「开始作业」：差速车喷头离起点（路线上离车最近处）这么近就原地转向、倒车助跑进线
+                             # （runup_entry），更远按 pivot_entry 开到起点前 ENTRY_LEAD_M 对正
+START_TIE_M = 0.05           # 离车差不多一样近（差这么多以内）的起点里挑接入最省事的（如喷头停在圆心）
+START_SNAP_M = 0.3           # 闭合连线离车最近处离拐角不到这么远就从拐角开始，不留一小截再拐
 TURN_RADIUS_RANGE = (1.0, 20.0)
 CIRCLE_RADIUS_RANGE = (0.5, 100.0)
 CRUISE_RANGE = (0.1, 1.0)
@@ -63,6 +68,9 @@ class RouteSpec:
     laps: int = 1
     turn_radius: float = 2.5     # 拐角圆弧、接入路线的转弯半径
     cruise: float = 0.5
+    # 圆：后轴从圆上哪个方位角出发（rad，东 0、逆时针为正）；None 为最南点。开始作业时按车的位置临时换
+    # （见 start_from_nearest），不存盘、不发给 app
+    start_angle: float = None
 
     def map_points(self, fn):
         """把路点和圆心逐个换算（本地 ↔ 经纬度），其余参数不变。"""
@@ -568,7 +576,11 @@ def cover_summary(spec, min_radius, body, *, nozzle_x=None):
 
 PIVOT_ARC_TOL_M = 0.01       # 喷头在两后轮中间时：缓弯按缓弯半径圆弧转过去离拐角不超过这么远才直接转，否则停车原地转
 PIVOT_TOL_RAD = math.radians(1.0)   # 前后两段车头方向差这么多以上才算原地转向（与 SectionTracker 的 pivot_tol 相同）
-PIVOT_REVERSE_MIN_M = 0.50          # 急弯原地转向后至少退 0.5 m，再前进回到拐角；喷头位置仍按实际杆臂算
+# 急弯原地转向后、起步倒车助跑时，后轴至少退到拐角 / 起点后方这么远，再往前慢走回到拐角 / 起点（喷头在它后方
+# 0.5 m 开始助跑，倒车后起步全程慢走，见 path_tracker reverse_creep_m）；喷头位置仍按实际杆臂算。
+# 2026-10-01 用户：倒退 0.5 m 改 0.8 m，倒完慢速前进让万向轮回正（实车倒 0.5 m 后喷头只剩 0.2 m 助跑，
+# 倒车留下的 2–4 cm 横偏带进线头，开画后 0.2–0.3 m 才收回）
+PIVOT_REVERSE_MIN_M = 0.80
 # 喷头在后轴前时后轴被喷头拖着走（见 _pulled_cover）：每片喷头走不超过 nozzle_x × PULL_STEP，片内按等曲率接
 # （片端车头方向准确，片内误差约 (PULL_STEP·d)²·φ/(12d)，d 0.30 m、拐 28° 约 0.8 mm）；车头与边的夹角
 # 收敛到 PULL_SETTLE_RAD 后用一段圆弧把后轴正好收回到边上（收回时喷头最多偏 PULL_SETTLE_RAD·d/4，约 0.3 mm）
@@ -676,7 +688,7 @@ def _pivot_cover(points, radius, nozzle_x):
     return out.out, n - 2 - len(smooth)
 
 
-def _pulled_cover(pts, radius, d, out=None):
+def _pulled_cover(pts, radius, d):
     """喷头在后轴前 d（> 0）：喷头沿连线走，后轴像拖车一样被喷头拖着走（曳物线），喷头始终压在线上。
 
     车头与下一条边的夹角 φ 决定后轴要转多急：后轴转弯半径 d / tan|φ|。|φ| ≤ atan(d / radius)（Gen5 d 0.30、
@@ -686,15 +698,14 @@ def _pulled_cover(pts, radius, d, out=None):
     """
     n, limit = len(pts), math.atan(d / radius)
     h0 = math.atan2(pts[1][1] - pts[0][1], pts[1][0] - pts[0][0])
-    if out is None:     # 给了 out 就从它现在的位姿接着拖（喷头在第 1 个点附近，见 plan_current 从终点起步）
-        out = _PivotSections(_offset(pts[0], h0, -d) + (h0,))
+    out = _PivotSections(_offset(pts[0], h0, -d) + (h0,))
     corners = 0
     for i in range(1, n):
         x, y, yaw = out.pose
         nx, ny = x + d * math.cos(yaw), y + d * math.sin(yaw)
         head = math.atan2(pts[i][1] - ny, pts[i][0] - nx)
         if i > 1 and abs(wrap(yaw - head)) > limit + 1e-12:
-            # 急弯：后轴开到拐角点，原地转向，至少退 0.5 m；前进时经过拐角，额外退的距离不改变压线点
+            # 急弯：后轴开到拐角点，原地转向，至少退 PIVOT_REVERSE_MIN_M；前进时经过拐角，额外退的距离不改变压线点
             corners += 1
             out.add(1, d, 0.0)
             out.pivot(wrap(head - yaw))
@@ -787,6 +798,45 @@ def pivot_entry(first, car, nozzle_x=0.0):
         out.add(1, length, k)
     return out.out, moved + ENTRY_LEAD_M
 
+
+def runup_entry(first, car, nozzle_x):
+    """差速车喷头已在路线起点附近（NEAR_START_M 以内）→ 第一段的接入：(接入后的分段, 接入路程米)。
+
+    倒车助跑（2026-10-01 用户：倒退 0.5 m 改 0.8 m，倒完慢速前进让万向轮回正，才能开得直）：
+    助跑起点 G = 后轴在路线第 1 个点（喷头压线的起点）后方 back = max(nozzle_x, PIVOT_REVERSE_MIN_M)、车头朝
+    第一段方向。车在 G 前方（顺第一段方向量）就原地转到车尾对着 G、倒过去；在 G 后方就转过去开过去。到 G 后转正，
+    往前走 back − nozzle_x 助跑（倒车后起步全程慢走，path_tracker reverse_creep_m），喷头到起点开始画。
+    G 定在线上：车离线一点（标点、停车对不准）由倒车这段带回线上，不留给画线时纠正。
+    车已压在第一段延长线上、离起点至少助跑那么远：直接开过去（同 pivot_entry）。
+    """
+    _, (x0, y0, h0), pieces = first
+    run = max(nozzle_x, PIVOT_REVERSE_MIN_M) - nozzle_x       # 后轴从 G 到第一段起点
+    x, y, yaw = car
+    along = (x - x0) * math.cos(h0) + (y - y0) * math.sin(h0)
+    side = -(x - x0) * math.sin(h0) + (y - y0) * math.cos(h0)
+    if along <= -run + 1e-9 and abs(side) <= ON_LINE_M and abs(wrap(yaw - h0)) <= math.radians(ON_LINE_DEG):
+        return pivot_entry(first, car, nozzle_x)
+    gx, gy = _offset((x0, y0), h0, -run)
+    dist = math.hypot(gx - x, gy - y)
+    out = _PivotSections((x, y, yaw))
+    moved = 0.0
+    if dist >= ON_LINE_M:
+        to_g = math.atan2(gy - y, gx - x)
+        if along + run > 0.0:       # 车在 G 前方：车尾对着 G 倒过去
+            out.pivot(wrap(to_g + math.pi - yaw))
+            out.add(-1, dist, 0.0)
+        else:
+            out.pivot(wrap(to_g - yaw))
+            out.add(1, dist, 0.0)
+        moved = dist
+    # 倒车终点就是 G；没开时车离 G 不到 ON_LINE_M，由跟踪器当横偏纠正（路线本身不跟着车偏）
+    out.pose = (gx, gy, out.pose[2])
+    out.pivot(wrap(h0 - out.pose[2]))
+    out.add(1, run, 0.0)
+    for length, k in pieces:
+        out.add(1, length, k)
+    return out.out, moved + run
+
 # ---- 路线本身（不含接入段）----
 
 def loop_pieces(spec, min_radius, nozzle_x=None):
@@ -805,12 +855,16 @@ def loop_pieces(spec, min_radius, nozzle_x=None):
             raise ValueError('圆半径 %.2f m 小于车能稳定跟踪的 %.2f m' % (spec.radius, min_radius))
         cx, cy = spec.center
         sign = -1.0 if spec.clockwise else 1.0
+
+        def start(r):
+            if spec.start_angle is None:            # 最南点
+                return cx, cy - r, math.pi if spec.clockwise else 0.0
+            a = spec.start_angle
+            return cx + r * math.cos(a), cy + r * math.sin(a), wrap(a + sign * math.pi / 2)
         if nozzle_x is not None and nozzle_x > 0:
             r = circle_axle_radius(spec.radius, nozzle_x, min_radius)
-            start = (cx, cy - r, math.pi if spec.clockwise else 0.0)
-            return start, [(2.0 * math.pi * r * spec.laps + VERTEX_PASS_M, sign / r)]
-        start = (cx, cy - spec.radius, math.pi if spec.clockwise else 0.0)
-        return start, [(2.0 * math.pi * spec.radius * spec.laps, sign / spec.radius)]
+            return start(r), [(2.0 * math.pi * r * spec.laps + VERTEX_PASS_M, sign / r)]
+        return start(spec.radius), [(2.0 * math.pi * spec.radius * spec.laps, sign / spec.radius)]
     return _points_loop(spec)
 
 
@@ -950,110 +1004,126 @@ def route_length(spec, min_radius, nozzle_x=None):
     return sum(p[0] for p in pieces), None
 
 
-def plan_current(spec, car_pose, min_radius, *, body=None, max_entry_m=MAX_ENTRY_M, nozzle_x=None):
-    """从当前压线点的最近路线段开始，裁去之前的分段，保持原图和后续路径。与 App RouteStart 对应。
-
-    差速车喷头在开放连线的终点附近（FROM_END_M 以内，比离起点近）：从终点反着画回起点，见 _plan_from_end。"""
-    from path_tracker import Path, Section
-    if spec.kind == 'path' and not spec.closed and nozzle_x is not None and len(spec.points) >= 2:
-        nx = car_pose[0] + nozzle_x * math.cos(car_pose[2])
-        ny = car_pose[1] + nozzle_x * math.sin(car_pose[2])
-        a, b = spec.points[0], spec.points[-1]
-        to_end = math.hypot(nx - b[0], ny - b[1])
-        if to_end <= FROM_END_M and to_end < math.hypot(nx - a[0], ny - a[1]):
-            return _plan_from_end(spec, car_pose, min_radius, nozzle_x)
-    if spec.kind == 'path':
-        raw, _ = (_pivot_route_sections(spec, min_radius, nozzle_x) if nozzle_x is not None
-                  else _route_sections(spec, min_radius, body))
-        marker_x = nozzle_x if nozzle_x is not None else (body[0] - body[1]) / 2
-    else:
-        start, pieces = loop_pieces(spec, min_radius, nozzle_x if spec.kind == 'circle' else None)
-        raw = [(1, start, pieces)]
-        marker_x = nozzle_x if spec.kind == 'circle' and nozzle_x is not None else 0.0
-    sections = [Section(d, Path(start, pieces)) for d, start, pieces in raw]
-    px = car_pose[0] + marker_x * math.cos(car_pose[2])
-    py = car_pose[1] + marker_x * math.sin(car_pose[2])
-    best = None
-    for si, section in enumerate(sections):
-        if section.direction < 0:
-            continue
-        for piece in section.path.pieces:
-            mx = piece.x + marker_x * math.cos(piece.yaw)
-            my = piece.y + marker_x * math.sin(piece.yaw)
-            candidates = [0.0, piece.length]
-            if piece.straight:
-                candidates.append(max(0.0, min(piece.length, (px-mx)*math.cos(piece.yaw)+(py-my)*math.sin(piece.yaw))))
-            else:
-                r = 1 / piece.kappa
-                cx = piece.x - r * math.sin(piece.yaw)
-                cy = piece.y + r * math.cos(piece.yaw)
-                angle = math.atan2(py-cy, px-cx) - math.atan2(my-cy, mx-cx)
-                directed = (angle * math.copysign(1.0, piece.kappa)) % (2*math.pi)
-                u = directed / abs(piece.kappa)
-                if u <= piece.length + 1e-9:
-                    candidates.append(min(u, piece.length))
-            for u in candidates:
-                x, y, yaw = piece.pose(u)
-                d = math.hypot(px-x-marker_x*math.cos(yaw), py-y-marker_x*math.sin(yaw))
-                h = abs(wrap(car_pose[2]-yaw))
-                if best is None or d < best[0]-1e-3 or abs(d-best[0]) <= 1e-3 and h < best[1]-1e-9:
-                    best = (d, h, si, piece.s0+u)
-    if best is None:
-        raise ValueError('路线没有可前进的线段')
-    _, _, si, at = best
-    first = sections[si].path
-    pieces = [(p.s0+p.length-max(at,p.s0), p.kappa) for p in first.pieces if p.s0+p.length-at > 1e-8]
-    rest = ([Section(sections[si].direction, Path(first.pose(at), pieces))] if pieces else []) + sections[si+1:]
-    if sum(s.path.length for s in rest) < .2:
-        raise ValueError('车已在路线终点附近，没有后续路线可执行')
-    goal = rest[0].car_pose(0)
-    distance = math.hypot(car_pose[0]-goal[0], car_pose[1]-goal[1])
-    aligned = abs(wrap(car_pose[2]-goal[2])) <= math.radians(ON_LINE_DEG)
-    if distance <= ON_LINE_M and (nozzle_x is not None or aligned):
-        return rest, 0.0
+def _marker_x(spec, body, nozzle_x):
+    """车上要压在路线上的点在后轴前多远：差速车是喷头；阿克曼车连线路线是车身中心，圆和路点折线是后轴中心。"""
     if nozzle_x is not None:
-        heading = math.atan2(goal[1]-car_pose[1], goal[0]-car_pose[0])
-        entry = [Section(1, Path((*car_pose[:2], heading), [(distance, 0)]))]
-    else:
-        way = reeds_shepp(car_pose, goal, min_radius, end_forward=rest[0].direction > 0)
-        if way is None:
-            way = [(1, length, k) for length, k in dubins(car_pose, goal, min_radius)]
-        builder = _Sections(car_pose)
-        for direction, dist, kappa in way:
-            builder.add(direction, dist, kappa)
-        entry = [Section(d, Path(start, pieces)) for d, start, pieces in builder.out]
-    entry_m = sum(s.path.length for s in entry)
-    if entry_m > max_entry_m:
-        raise ValueError('车离最近路线段太远，请先手动开近路线')
-    return entry + rest, entry_m
+        return nozzle_x
+    return (body[0] - body[1]) / 2 if spec.kind == 'path' and body is not None else 0.0
 
 
-def _plan_from_end(spec, car_pose, min_radius, nozzle_x):
-    """差速车喷头停在开放连线终点上（标完最后一个点的位置）：从这里反着画回起点（2026-10-01 用户：标两个点后
-    应从后一个点退 0.5 m 调整方向、进线走到另一端）。原地转到连线方向（已经顺着就不转），倒车到后轴在这个点后方
-    max(nozzle_x, PIVOT_REVERSE_MIN_M)（至少倒这么远），再往前开，喷头开过这个点后沿线画到另一端。
-    不先往前开一小段：跟踪器起步要求一段至少剩 start_min_left_m，0.3 m 的段起不了步（实车报「已经过了路线终点」）。
-    返回 ([path_tracker.Section, …], 接入路程米)；接入是喷头回到这个点之前的那几段。"""
-    from path_tracker import Path, Section
-    pts = [tuple(map(float, p)) for p in reversed(spec.points)]
+def _start_cost(start, car, min_radius, nozzle_x):
+    """车从当前位姿接入到后轴起点 start 大概要多久（秒，只用来在差不多一样近的起点里挑）。"""
+    x, y, yaw = car
+    sx, sy, h0 = start
+    if nozzle_x is None:
+        try:
+            return sum(length for length, _ in dubins(car, start, min_radius)) / 0.5
+        except ValueError:
+            return math.inf
+    gx, gy = _offset((sx, sy), h0, -ENTRY_LEAD_M)
+    dist = math.hypot(gx - x, gy - y)
+    to_g = math.atan2(gy - y, gx - x) if dist >= ON_LINE_M else yaw
+    return dist / 0.5 + (abs(wrap(to_g - yaw)) + abs(wrap(h0 - to_g))) / 0.8
+
+
+def start_from_nearest(spec, car_pose, min_radius, *, body=None, nozzle_x=None):
+    """开始作业跑的路线：路线不分起点终点，从离车最近的地方开始、跑完整条（2026-10-01 用户：「点击开始作业，
+    就直接在车最近的路线开始走，跑完所有轨迹」）。返回换过起点的 RouteSpec，原来的图纸不变：
+      圆            从离压线点（差速车喷头）最近的那一点开始（start_angle），绕完 laps 圈回到这一点；
+      闭合连线      从离压线点最近的那条边上的垂足开始（离拐角不到 START_SNAP_M 就从拐角），绕完 laps 圈回到这里；
+      闭合路点折线  从最近的路点开始（拐角有圆弧，不在边中间插点）；
+      开放连线、路点折线  从离压线点近的那一头开始画完整条线：近的是最后一点就把点倒过来（反着画）。
+    差不多一样近（START_TIE_M 以内，比如喷头停在圆心）时挑接入最省事的。"""
+    mx = _marker_x(spec, body, nozzle_x)
     x, y, yaw = car_pose
-    d = nozzle_x
-    (bx, by), h0 = pts[0], math.atan2(pts[1][1] - pts[0][1], pts[1][0] - pts[0][0])
-    out = _PivotSections((x, y, yaw))
-    back = max(d, PIVOT_REVERSE_MIN_M)
-    if abs(wrap(h0 - yaw)) > math.radians(ON_LINE_DEG):
-        out.pivot(wrap(h0 - yaw))                    # 原地转到连线方向（车头已经顺着就不转）
-    along_c = (x - bx) * math.cos(h0) + (y - by) * math.sin(h0)
-    out.add(-1, max(back, along_c + back), 0.0)      # 后轴倒到这个点后方 back，至少倒 back
-    # 参考线放回连线上：后轴投到「这个点 → 下一个点」的直线上、车头取连线方向，画的线就是标的那条线；
-    # 车离线的那一点（标点时的对准误差，FROM_END_M 以内）由跟踪器在喷头开回这个点之前纠正
-    px, py, _ = out.pose
-    along = (px - bx) * math.cos(h0) + (py - by) * math.sin(h0)
-    out.pose = (bx + along * math.cos(h0), by + along * math.sin(h0), h0)
-    entry_m = sum(length for _, _, pieces in out.out for length, _ in pieces) + max(0.0, -along - d)
-    _pulled_cover(pts, min_radius, d, out=out)
-    sections = [Section(direction, Path(start, pieces)) for direction, start, pieces in out.out]
-    return sections, entry_m
+    px, py = x + mx * math.cos(yaw), y + mx * math.sin(yaw)
+    cands = []          # (压线点到起点的距离, 换过起点的路线, 后轴起点位姿)
+
+    def leg_start(points):
+        (ax, ay), (bx, by) = points[0], points[1]
+        h = math.atan2(by - ay, bx - ax)
+        return _offset((ax, ay), h, -mx) + (h,)
+
+    if spec.kind == 'circle':
+        if spec.center is None:
+            raise ValueError('还没有设置圆心')
+        cx, cy = spec.center
+        d = nozzle_x if nozzle_x is not None and nozzle_x > 0 else 0.0
+        r = circle_axle_radius(spec.radius, d, min_radius) if d > 0 else spec.radius
+        sign = -1.0 if spec.clockwise else 1.0
+        lag = math.atan2(d, r)          # 喷头在后轴方位角前面（顺着画的方向）这么多
+        near = math.atan2(py - cy, px - cx) - sign * lag
+        for a in [near] + [near + 2 * math.pi * i / 72 for i in range(1, 72)]:
+            a = wrap(a)
+            sx, sy = cx + r * math.cos(a), cy + r * math.sin(a)
+            h = wrap(a + sign * math.pi / 2)
+            nx, ny = sx + d * math.cos(h), sy + d * math.sin(h)
+            cands.append((math.hypot(px - nx, py - ny), replace(spec, start_angle=a), (sx, sy, h)))
+    elif spec.closed and len(spec.points) >= 3:
+        pts = [tuple(map(float, p)) for p in spec.points]
+        n = len(pts)
+        for k in range(n):
+            (ax, ay), (bx, by) = pts[k], pts[(k + 1) % n]
+            length = math.hypot(bx - ax, by - ay)
+            if length < 1e-9:
+                continue
+            ux, uy = (bx - ax) / length, (by - ay) / length
+            u = max(0.0, min(length, (px - ax) * ux + (py - ay) * uy))
+            if spec.kind == 'points':           # 路点折线拐角有圆弧：只从路点起步
+                corner = k if u < length / 2 else (k + 1) % n
+            elif u < START_SNAP_M:
+                corner = k                      # 离这条边的起点（拐角）近：从拐角开始
+            elif u > length - START_SNAP_M:
+                corner = (k + 1) % n
+            else:
+                corner = None
+            order = pts[corner:] + pts[:corner] if corner is not None else \
+                [(ax + u * ux, ay + u * uy)] + pts[k + 1:] + pts[:k + 1]
+            sx, sy = order[0]
+            cands.append((math.hypot(px - sx, py - sy), replace(spec, points=tuple(order)), leg_start(order)))
+    elif len(spec.points) >= 2:
+        pts = tuple(tuple(map(float, p)) for p in spec.points)
+        for order in (pts, pts[::-1]):
+            cands.append((math.hypot(px - order[0][0], py - order[0][1]), replace(spec, points=order),
+                          leg_start(order)))
+    else:
+        return spec
+    best = min(c[0] for c in cands)
+    near = [c for c in cands if c[0] <= best + START_TIE_M]
+    if len(near) == 1:
+        return near[0][1]
+    return min(near, key=lambda c: (_start_cost(c[2], car_pose, min_radius, nozzle_x), c[0]))[1]
+
+
+def plan_current(spec, car_pose, min_radius, *, body=None, max_entry_m=MAX_ENTRY_M, nozzle_x=None):
+    """开始作业：从离车最近的地方开始、跑完整条路线（见 start_from_nearest）。返回 ([path_tracker.Section, …], 接入路程米)。
+
+    差速车（nozzle_x 不为 None）：喷头离起点不到 NEAR_START_M 就倒车助跑进线（runup_entry），更远按 pivot_entry
+    开到起点前 ENTRY_LEAD_M 对正；阿克曼车同 plan（Reeds-Shepp / Dubins 接入）。原始图纸不变。
+    """
+    from path_tracker import Path, Section
+    run = start_from_nearest(spec, car_pose, min_radius, body=body, nozzle_x=nozzle_x)
+    if nozzle_x is None:
+        return plan(run, car_pose, min_radius, body=body, max_entry_m=max_entry_m)
+    if run.kind == 'path':
+        if len(run.points) < 2:
+            raise ValueError('先在地图上点点，再把点连起来')
+        route, _ = _pivot_route_sections(run, min_radius, nozzle_x)
+    elif run.kind == 'circle':
+        start, loop = loop_pieces(run, min_radius, nozzle_x)
+        route = [(1, start, loop)]
+    else:
+        start, loop = loop_pieces(run, min_radius)
+        route = [(1, start, loop)]
+    _, (x0, y0, h0), _ = route[0]
+    x, y, yaw = car_pose
+    gap = math.hypot(x + nozzle_x * math.cos(yaw) - x0 - nozzle_x * math.cos(h0),
+                     y + nozzle_x * math.sin(yaw) - y0 - nozzle_x * math.sin(h0))
+    entry, entry_m = (runup_entry if gap <= NEAR_START_M else pivot_entry)(route[0], car_pose, nozzle_x)
+    if entry_m > max_entry_m:
+        raise ValueError('车离路线太远（接入路线 %.0f m，最多 %.0f m），请先把车开近些' % (entry_m, max_entry_m))
+    return [Section(d, Path(s, pieces, name='route_%s_%d' % (run.kind, i)))
+            for i, (d, s, pieces) in enumerate(entry + route[1:])], entry_m
 
 
 def plan(spec, car_pose, min_radius, *, body=None, max_entry_m=MAX_ENTRY_M, nozzle_x=None):

@@ -51,11 +51,17 @@ FIX2_MAX_AGE_S = 1.0        # 副天线固定解这么久内来过就算还固�
 AUTO_RESUME_S = 1.0
 # 定点画线 start 没带 cruise 时的车速（用户定的画线速度）；不再沿用上一次任务（跑过别的速度的路线也不影响）
 LINE_CRUISE_MPS = 0.8
-# 卫星位置不可信、按推算维持（融合 rtk_hold_s，Gen5 5 s）时给操作员的话；恢复后改回「行驶中」
+# 卫星位置不可信 / 固定解中断（中转断流、浮点）时按推算维持（融合 rtk_hold_s，Gen5 5 s）给操作员的话，
+# 超时停车后恢复自动继续；恢复后改回「行驶中」。理由报真实情况：位置错了（双天线互检，融合原因里有 rtk_suspect）
+# 和固定解没来分开说
 RTK_NOTICE_HOLD = '卫星定位不可信，按 IMU 推算行驶'
 RTK_NOTICE_TIMEOUT = '卫星定位不可信超过 5 s，已停车，定位恢复后自动继续'
-# 掉信号（固定解没来）原地停（2026-10-01 用户规则），恢复后自动继续
-RTK_NOTICE_LOST = '卫星信号中断，已原地停车，恢复后自动继续'
+RTK_NOTICE_LOST_HOLD = '卫星固定解中断，按 IMU 推算行驶（最多 5 s）'
+RTK_NOTICE_LOST = '卫星固定解中断超过 5 s，已原地停车，恢复后自动继续'
+# 跟踪器因定位暂停（上面几种以外的原因，如定位抖一下）时不能还显示「行驶中」（2026-10-01 实车：暂停 24 s 屏幕
+# 一直是「行驶中」）；恢复后起步检查不过、自动继续不了时说清楚原因（原因代码由 app 翻译）
+TRACKER_PAUSED_NOTICE = '定位暂时不能用，已原地停车，恢复后自动继续'
+RESUME_FAILED_NOTICE = '定位已恢复，但不能自动接着走：%s；请停止后重新开始'
 
 
 def pose_problem(pose):
@@ -111,6 +117,7 @@ class LineMission:
         self._imu = None                # 最近一帧 IMU (t, 偏航 rad, 陀螺 z rad/s)，差速车定点画线的内环用
         self._fix2_t = None             # 副天线最近一次固定解的时刻
         self._usable_since = None       # 暂停中定位从什么时候起一直可用（自动继续用）
+        self._resume_failed = None      # 自动继续时起步检查没过的原因代码（报给操作员）
         self._innovation = None         # 最近一次固定解与融合推算之差 (t, 沿车头, 向左) 米
         self._jumps = deque(maxlen=JUMP_EVENTS_MAX)     # 定位跳动记录，本次开机以来（只留最近 50 次）
         self._jump_count = 0            # 本次开机以来定位跳动总次数（作业记录按首末相减，不能用上面那个的长度）
@@ -556,10 +563,15 @@ class LineMission:
         elif not text and 'rtk_fixed_timeout' in reasons:
             text = RTK_NOTICE_LOST
         elif not text and 'rtk_hold' in reasons:
-            text = RTK_NOTICE_HOLD
+            text = RTK_NOTICE_HOLD if 'rtk_suspect' in reasons else RTK_NOTICE_LOST_HOLD
+        elif not text and self.tracker.st.state == 'PAUSED':
+            why = self._resume_failed
+            text = RESUME_FAILED_NOTICE % REASON_TEXT.get(why, why) if why else TRACKER_PAUSED_NOTICE
         if text:
             self.message = text
-        elif self.message in CASCADE_NOTICES + (RTK_NOTICE_HOLD, RTK_NOTICE_TIMEOUT, RTK_NOTICE_LOST):
+        elif self.message in CASCADE_NOTICES + (RTK_NOTICE_HOLD, RTK_NOTICE_TIMEOUT, RTK_NOTICE_LOST_HOLD,
+                                                RTK_NOTICE_LOST, TRACKER_PAUSED_NOTICE) \
+                or self.message.startswith(RESUME_FAILED_NOTICE.split('%s')[0]):
             self.message = '行驶中'
         self._write_log(now, pose, vx)
         try:
@@ -585,7 +597,7 @@ class LineMission:
     def _auto_resume(self, now, pose):
         """定位问题暂停后，定位连续可用 AUTO_RESUME_S 就接着走；起步检查没过（如离线太远）隔 AUTO_RESUME_S 再试。"""
         if self.operations.held or self.tracker.st.state != 'PAUSED' or not pose.usable_for_control:
-            self._usable_since = None
+            self._usable_since = self._resume_failed = None
             return
         if self._usable_since is None:
             self._usable_since = now
@@ -594,9 +606,9 @@ class LineMission:
         why = self.tracker.st.reason
         if self.tracker.start(pose):
             self.message = '航向恢复，自动继续' if why == 'heading_jump' else '定位恢复，自动继续'
-            self._usable_since = None
+            self._usable_since = self._resume_failed = None
         else:
-            self._usable_since = now
+            self._usable_since, self._resume_failed = now, self.tracker.st.reason
 
     def _start_integral(self):
         """直线学到的舵机零位（积分）。路线控制器积分增益不同，按相同的零位曲率换算过去。

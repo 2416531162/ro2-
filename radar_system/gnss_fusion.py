@@ -119,9 +119,11 @@ class FusionConfig:
     # outlier_reset_s 后对齐到 RTK 并暂停。> 0：
     # - 双天线位置互检不过（卫星位置错了，固定解照样在来）：位置只按轮速 + 航向推算，不用 RTK、不停车，最多这么久；
     #   超时才不可控（停车）。又有可信的固定解（互检过或比不了）就按 RTK 对齐接回，不停车
-    # - 没有固定解（掉信号：中转断流、浮点、没解）不推算：与旧做法一样断 fixed_timeout_s 就不可控、原地停，
-    #   恢复后按 RTK 对齐接回（2026-10-01 用户规则：「掉信号不要瞎动，应该原地停」；当天中转断流 3.85 s 推算着走，
-    #   积压的旧数据到了被当成当前位置，车跑偏）
+    # - 没有固定解（掉信号：中转断流、浮点、没解）同样按推算维持最多这么久，超时才不可控、原地停，恢复后按 RTK 对齐
+    #   接回（2026-10-01 11 点用户：「我不是让 imu 可以允许维持 5 秒吗」——平板中转常断 0.4–0.8 s，按断 0.5 s 就停，
+    #   当天 9 次作业停了 3 次、还因此卡住一次）。当天早上曾改成掉信号断 0.5 s 就原地停：07:42 中转断流 3.85 s，
+    #   积压的旧数据到了被当成当前位置把车拉偏 2.5 m；那是时间戳问题（um982.GnssClock 已修），断流期间推算本身没偏。
+    #   迟到 history_s 内的数据按测量时刻插回重算，更早的丢掉
     # - 固定解与推算对不上但互检过了：照旧按软门限用（离得远降权，推算有轮速刻度误差，不能完全不用）；持续对不上
     #   是推算走偏了，按 RTK 对齐但不停车。互检比不了（没有副天线）时照旧对齐并暂停
     # 2026-09-30 19:37 实车：主天线固定解错了 20–100 cm（接收机照报 NARROW_INT，两根天线位置之差对不上测向基线），
@@ -229,6 +231,9 @@ REANCHOR_RATE_DEG_S = 3.0
 # 双天线测向有效（刚收下过）时，航向不确定度到这么多都照常能开：这时的不确定度多半是原地转向、IMU 断了时按保守
 # 模型涨的，航向有测向拉着（与 line_mission 的 GYRO_HOLD_SIGMA_YAW_DEG 相同）
 HEADING_HOLD_SIGMA_DEG = 2.0
+# 主天线判过不可信、之后一阵没比过（主天线或中转断流）：副天线这么久内还来过，就一直不信，等重新比过；
+# 副天线这么久都没来（坏了），比不了，退回不按互检判
+DUAL_SUSPECT_KEEP_S = 10.0
 _FIXED = frozenset(('NARROW_INT',))
 _FLOAT = frozenset(('NARROW_FLOAT', 'L1_FLOAT', 'IONOFREE_FLOAT'))
 _HEADING = frozenset(('L1_INT', 'NARROW_INT', 'WIDE_INT'))
@@ -310,6 +315,7 @@ class DualAntennaCheck:
         self.checks = self.flags = 0
         self._ok_since = None
         self._over = 0              # 连续超过 dual_check_m 的次数
+        self.secondary_t = None     # 最近一帧副天线的测量时刻
 
     def add_heading(self, t, heading_deg, length_m, pitch_deg):
         if not all(math.isfinite(v) for v in (t, heading_deg, length_m)) or length_m <= 0:
@@ -324,6 +330,7 @@ class DualAntennaCheck:
         self._evaluate()
 
     def add_secondary(self, t, x, y):
+        self.secondary_t = t if self.secondary_t is None else max(self.secondary_t, t)
         self._secondary.append((t, x, y))
         del self._secondary[:-20]
         self._evaluate()
@@ -384,11 +391,19 @@ class DualAntennaCheck:
         return None
 
     def state_at(self, t):
-        """t 时刻主天线固定解的互检结果：'suspect'（不可信）/ 'ok'（过了）/ None（最近 dual_stale_s 没比过：
-        副天线断了，不按它判）。"""
-        if self.last_t is None or t - self.last_t > self.cfg.dual_stale_s:
-            return None
-        return 'suspect' if self.suspect else 'ok'
+        """t 时刻主天线固定解的互检结果：'suspect'（不可信）/ 'ok'（过了）/ 'pending'（主天线断过一阵、副天线一直在，
+        还没重新比过：先不用这帧）/ None（最近 dual_stale_s 没比过、副天线也没来：比不了，不按它判）。
+        判过不可信的要重新比过 dual_ok_s 才信：主天线断流后第一帧不能因为「最近没比过」就当可信（2026-10-01 仿真：
+        卫星位置错着又断 3 s，恢复后第一帧就按错的位置对齐，横偏跳 36 cm）。"""
+        if self.last_t is not None and t - self.last_t <= self.cfg.dual_stale_s:
+            # 最近一次比超了、还没连着超够 dual_check_n 次：先不用，等下一次比（约 0.2 s），不当它可信
+            return 'suspect' if self.suspect else 'pending' if self._over > 0 else 'ok'
+        since = None if self.secondary_t is None else t - self.secondary_t
+        if self.suspect and since is not None and since <= DUAL_SUSPECT_KEEP_S:
+            return 'suspect'
+        if since is not None and since <= self.cfg.dual_stale_s:
+            return 'pending'
+        return None
 
     def status(self):
         return {'suspect': self.suspect, 'dev_m': None if self.last_dev is None else round(self.last_dev, 4),
@@ -881,13 +896,16 @@ class GnssFusion:
             self._end_segment()
             return
         fixed = sample.sol in _FIXED
-        dual = xy[2] if len(xy) > 2 else None       # 双天线位置互检：'suspect' / 'ok' / None（比不了、没开推算维持）
+        # 双天线位置互检：'suspect' / 'ok' / 'pending' / None（比不了、没开推算维持），见 DualAntennaCheck.state_at
+        dual = xy[2] if len(xy) > 2 else None
         if dual == 'suspect':
             # 卫星位置错了（两根天线的固定解对不上测向基线）：这帧不用，位置靠推算；维持多久由 _pose 按 rtk_hold_s 判
             s.fix_suspect += 1
             s.fix_reason = 'rtk_suspect'
             s.suspect_t = sample.t
             return
+        if dual == 'pending':
+            return          # 主天线断过、还没跟副天线重新比过：这帧先不用（下一次比约 0.2 s 后），位置照旧推算
         if not fixed:
             s.outlier_since = None
         floor = cfg.fix_floor_m if fixed else cfg.float_floor_m
@@ -1083,21 +1101,17 @@ class GnssFusion:
                 reasons.append('gyro_only')
         holding = False
         if cfg.rtk_hold_s > 0:
-            # 推算维持只给「卫星位置错了」：固定解还在来、只是双天线互检不过被丢掉，多久没有可信的固定解不超过
-            # rtk_hold_s 照常能开（位置靠轮速 + 航向推算），超过才不可控。
-            # 掉信号（固定解没来：中转断流、浮点、没解）不推算着走，固定解断 fixed_timeout_s 就不可控、原地停，
-            # 恢复后自动继续（2026-10-01 用户规则：「掉信号不要瞎动，应该原地停」）
+            # 多久没有可信的固定解（卫星位置错了被互检丢掉，或掉信号：中转断流、浮点、没解）不超过 rtk_hold_s 照常能开
+            # （位置靠轮速 + IMU 航向推算），超过才不可控、原地停，恢复后自动继续（见 FusionConfig.rtk_hold_s）。
+            # 超时的原因按最近是不是卫星位置错了分开报：rtk_hold_timeout / rtk_fixed_timeout
             since = s.t - s.fixed_t
             if since >= cfg.fixed_timeout_s - 1e-9:
                 suspect = s.t - s.suspect_t < cfg.fixed_timeout_s - 1e-9
-                if suspect and since <= cfg.rtk_hold_s + 1e-9:
+                if since <= cfg.rtk_hold_s + 1e-9:
                     holding = True
                     reasons.append('rtk_hold')
-                elif suspect:
-                    reasons.append('rtk_hold_timeout')
-                    usable = False
                 else:
-                    reasons.append('rtk_fixed_timeout')
+                    reasons.append('rtk_hold_timeout' if suspect else 'rtk_fixed_timeout')
                     usable = False
             if s.t - s.rejoin_t <= cfg.reset_hold_s:
                 reasons.append('rtk_rejoin')        # 刚按 RTK 对齐接回：只提示，不停车

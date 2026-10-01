@@ -197,18 +197,18 @@ class TestMotionAuthorityPivot(unittest.TestCase):
 
 class TestPivotPlan(unittest.TestCase):
 
-    def test_half_metre_reverse_keeps_nozzle_geometry_and_covers_a_short_next_leg(self):
-        # 喷头仍在后轴前 0.30 m：转完退 0.50 m，喷头在线头前 0.20 m，前进重新经过线头。
-        # 下一边只有 0.10 m，不能把它减成负长度或漏掉。
+    def test_corner_reverse_keeps_nozzle_geometry_and_covers_a_short_next_leg(self):
+        # 喷头仍在后轴前 0.30 m：转完退 0.80 m（2026-10-01 用户由 0.5 m 改），喷头在线头前 0.50 m 助跑，
+        # 前进重新经过线头。下一边只有 0.10 m，不能把它减成负长度或漏掉。
         sections, corners = rp._pivot_cover([(0.0, 0.0), (2.0, 0.0), (2.0, 0.1)], RADIUS, NOZZLE)
         self.assertEqual(corners, 1)
         self.assertEqual([s[0] for s in sections], [1, -1, 1])
         reverse, forward = sections[1:]
-        self.assertAlmostEqual(sum(p[0] for p in reverse[2]), 0.50)
+        self.assertAlmostEqual(sum(p[0] for p in reverse[2]), 0.80)
         self.assertAlmostEqual(forward[1][0], 2.0)
-        self.assertAlmostEqual(forward[1][1], -0.50)
+        self.assertAlmostEqual(forward[1][1], -0.80)
         self.assertAlmostEqual(forward[1][2], math.pi / 2)
-        self.assertAlmostEqual(forward[1][1] + NOZZLE, -0.20)
+        self.assertAlmostEqual(forward[1][1] + NOZZLE, -0.50)
         x, y, yaw = forward[1]
         for length, kappa in forward[2]:
             x, y, yaw = rp.advance(x, y, yaw, length, kappa)
@@ -295,7 +295,8 @@ class TestPivotPlan(unittest.TestCase):
         diff, _ = rp.plan(spec, (-2.0, 0.0, 0.0), RADIUS, nozzle_x=NOZZLE)
         old, _ = rp.plan(spec, (-2.0, 0.0, 0.0), 1.72 / 0.9, body=(0.67, 0.08, 0.335))
         self.assertEqual([s.direction for s in diff], [1, -1, 1])
-        self.assertGreater(sum(s.path.length for s in old), sum(s.path.length for s in diff) + 2.0)
+        # 差速车急弯原地转（倒 0.8 m 再进）仍比阿克曼车掉头补角短得多
+        self.assertGreater(sum(s.path.length for s in old), sum(s.path.length for s in diff) + 1.4)
 
 
 def run(tracker, car, until=200.0, dt=0.05, every=None):

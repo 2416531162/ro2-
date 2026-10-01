@@ -75,25 +75,33 @@ class Disturbance:
 
 
 class Gen5Chassis:
-    """指令延迟 delay_s（车速、角速度都晚）、角速度一阶滞后 lag_s、实际/指令 gain，加减速限幅，单轮限速。"""
+    """指令延迟 delay_s（角速度）/ speed_delay_s（车速）、角速度一阶滞后 lag_s、实际/指令 gain，加减速限幅，单轮限速。
 
-    def __init__(self, x, y, yaw, *, delay_s=0.39, lag_s=0.05, gain=1.03, accel=1.0, decel=2.4, max_wheel=1.5,
-                 dist=None):
+    speed_delay_s：None 同 delay_s。2026-10-01 实车 26 次路线段尾停车，发 0 后实际还走的距离按已发指令折算的
+    等效延迟中位 0.33 s（四分位 0.29–0.37 s；这个替身车车速延迟 0.39 s 时等效约 0.39 s）；定点画线按 09-30 实测
+    0.40 s 调的，默认不改。"""
+
+    def __init__(self, x, y, yaw, *, delay_s=0.39, speed_delay_s=None, lag_s=0.05, gain=1.03, accel=1.0, decel=2.4,
+                 max_wheel=1.5, dist=None):
         self.x, self.y, self.yaw = x, y, yaw
         self.v = self.wz = self.wz_act = 0.0
         self.delay_s, self.lag_s, self.gain, self.accel, self.decel = delay_s, lag_s, gain, accel, decel
+        self.speed_delay_s = delay_s if speed_delay_s is None else speed_delay_s
         self.max_wheel, self.dist = max_wheel, dist
         self.push = 0.0             # 外力推着转的角速度（测试「被推歪」用），rad/s
-        self.queue, self.cmd = [], (0.0, 0.0)
+        self.queue, self.vqueue, self.cmd = [], [], (0.0, 0.0)
 
     def command(self, t, vx, wz):
-        self.queue.append((t + self.delay_s, vx, wz))
+        self.queue.append((t + self.delay_s, wz))
+        self.vqueue.append((t + self.speed_delay_s, vx))
 
     def step(self, t, dt):
-        while self.queue and self.queue[0][0] <= t + 1e-9:
-            _, vx, wz = self.queue.pop(0)
-            self.cmd = (vx, wz)
         vx, wz = self.cmd
+        while self.queue and self.queue[0][0] <= t + 1e-9:
+            wz = self.queue.pop(0)[1]
+        while self.vqueue and self.vqueue[0][0] <= t + 1e-9:
+            vx = self.vqueue.pop(0)[1]
+        self.cmd = (vx, wz)
         half = 0.5 * TRACK_M
         scale = min(1.0, self.max_wheel / max(abs(vx - wz * half), abs(vx + wz * half), 1e-12))
         vx, wz = vx * scale, wz * scale

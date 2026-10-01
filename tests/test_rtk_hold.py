@@ -4,7 +4,8 @@
 
 2026-09-30 19:37 实车：主天线固定解错了 20–100 cm，接收机照报 NARROW_INT；两根天线（车上相距约 0.40 m）的固定解位置之差
 对不上测向基线。旧做法离群 2 s 后对齐到错的位置（横偏一下跳 14 cm，车拐过去追，5 s 一次）。用户规则：卫星定位出问题
-不要信卫星，立马按 IMU 推算继续走，最多 5 s；超过就停车，定位恢复后自动继续。"""
+不要信卫星，立马按 IMU 推算继续走，最多 5 s；超过就停车，定位恢复后自动继续。
+2026-10-01 用户：固定解中断（平板中转断流、浮点）同样按 IMU 维持 5 秒（「我不是让 imu 可以允许维持 5 秒吗」）。"""
 import math
 import os
 import sys
@@ -23,10 +24,11 @@ GEN5 = dict(drive_differential=True, yaw_input='angle', yaw_scale_sigma=0.03, he
 
 
 def simulate(config, T=30.0, v=0.8, yaw_deg=30.0, primary_err=None, secondary_on=lambda t: True,
-             fixes_on=lambda t: True, slip=None, marks=None):
+             fixes_on=lambda t: True, slip=None, marks=None, stall=None):
     """直行 v（先静止 3 s），IMU 航向角、轮速 50 Hz，主天线定位、测向 20 Hz，副天线定位 5 Hz。
     primary_err(t) → (东, 北) 米：加在主天线固定解上（卫星位置错了，副天线照常）；fixes_on(t) 为假时这一帧主天线
-    没有固定解；slip=(t0, t1, 米/秒)：这段时间车横着滑（轮子、IMU 看不见，两根天线都看得见）。
+    没有固定解；slip=(t0, t1, 米/秒)：这段时间车横着滑（轮子、IMU 看不见，两根天线都看得见）；
+    stall=(t0, t1)：平板中转断流，这段时间测到的 GNSS 数据（定位、测向、副天线）都压着，t1 一批到（带原测量时刻）。
     返回 (融合, 行)：每 0.05 s 一行 (t, 真后轴 x, y, 位姿)。"""
     f = gf.GnssFusion(gf.FusionConfig(**config))
     f.set_origin(30.0, 120.0, 0.0)
@@ -35,6 +37,13 @@ def simulate(config, T=30.0, v=0.8, yaw_deg=30.0, primary_err=None, secondary_on
     x = y = 0.0
     dt, t, k = 0.004, 0.0, 0
     rows = []
+    held = []
+
+    def send(fn, sample):
+        if stall and stall[0] <= t < stall[1]:
+            held.append((fn, sample))
+        else:
+            fn(sample)
     while t < T - 1e-9:
         speed = 0.0 if t < 3.0 else v
         x += speed * c * dt
@@ -54,13 +63,17 @@ def simulate(config, T=30.0, v=0.8, yaw_deg=30.0, primary_err=None, secondary_on
                 ax, ay = ax + ex, ay + ey
             if fixes_on(t):
                 lat, lon = f.to_geodetic(ax, ay)
-                f.add_fix(gf.GnssFix(t, lat, lon, 0.0, 'NARROW_INT', 0.01, 0.01, 0.02, 1.0, 30))
+                send(f.add_fix, gf.GnssFix(t, lat, lon, 0.0, 'NARROW_INT', 0.01, 0.01, 0.02, 1.0, 30))
             heading = (180.0 - math.degrees(yaw)) % 360.0
-            f.add_heading(gf.DualHeading(t, heading, 0.0, BASE, 'NARROW_INT', 0.1, 30))
+            send(f.add_heading, gf.DualHeading(t, heading, 0.0, BASE, 'NARROW_INT', 0.1, 30))
         if k % 50 == 0 and secondary_on(t):  # 副天线 5 Hz：主天线右边 BASE
             bx, by = x + c * ANT[0] - s * (ANT[1] - BASE), y + s * ANT[0] + c * (ANT[1] - BASE)
             lat, lon = f.to_geodetic(bx, by)
-            f.add_fix2(gf.GnssFix(t, lat, lon, 0.0, 'NARROW_INT', 0.01, 0.01, 0.02, 1.0, 30))
+            send(f.add_fix2, gf.GnssFix(t, lat, lon, 0.0, 'NARROW_INT', 0.01, 0.01, 0.02, 1.0, 30))
+        if held and t >= stall[1]:          # 断流结束：积压的一批按原测量时刻送进去
+            for fn, sample in held:
+                fn(sample)
+            held.clear()
         if k % 12 == 0:
             p = f.pose(t)
             if p is not None:
@@ -182,27 +195,65 @@ class TestRtkHold(unittest.TestCase):
         self.assertTrue(rows[-1][3].usable_for_control)
         self.assertEqual(f.calibration()['position_resets'], 0)
 
-    def test_signal_loss_stops_at_once_and_resumes(self):
-        """掉信号（固定解没来）不推算着走：断 0.5 s 就不可控（原地停），恢复后接回、能开（2026-10-01 用户规则）。"""
-        for gap in (1.0, 3.0, 7.0):
+    def test_short_signal_loss_keeps_driving_on_dead_reckoning(self):
+        """固定解中断 5 s 以内（中转断流、浮点）：按 IMU + 轮速推算照常走、不停车，恢复后接回；横偏跟真值差不到 2 cm。"""
+        for gap in (0.6, 1.0, 3.0, 4.8):
             f, rows = simulate(GEN5, fixes_on=lambda t, g=gap: not 10.0 <= t < 10.0 + g)
             with self.subTest(gap=gap):
-                blocked = [r[0] for r in rows if not r[3].usable_for_control and r[0] > 1.0]
-                self.assertTrue(blocked)
-                self.assertLess(min(blocked), 10.0 + 0.5 + 0.06)
-                self.assertIn('rtk_fixed_timeout', next(r for r in rows if r[0] == min(blocked))[3].reasons)
-                self.assertFalse(any('rtk_hold' in r[3].reasons for r in rows))
-                self.assertLess(max(blocked), 10.0 + gap + 1.0)
+                self.assertTrue(all(r[3].usable_for_control for r in rows if r[0] > 1.0),
+                                [(r[0], r[3].reasons) for r in rows if not r[3].usable_for_control and r[0] > 1.0][:3])
+                self.assertTrue(any('rtk_hold' in r[3].reasons for r in rows if 10.0 < r[0] < 10.0 + gap))
+                self.assertLess(max(abs(lateral(r)) for r in rows if r[0] > 5.0), 0.02)
                 self.assertTrue(rows[-1][3].usable_for_control)
-                self.assertLess(abs(lateral(rows[-1])), 0.02)
 
-    def test_signal_loss_during_satellite_error_hold_stops(self):
-        """卫星位置错了、正在推算维持，信号又断了：不再维持，固定解停来 0.5 s 就原地停。"""
+    def test_long_signal_loss_stops_after_five_seconds_and_resumes(self):
+        f, rows = simulate(GEN5, fixes_on=lambda t: not 10.0 <= t < 17.0)
+        blocked = [r[0] for r in rows if not r[3].usable_for_control and r[0] > 1.0]
+        self.assertTrue(blocked, '断超过 5 s 要原地停')
+        self.assertGreater(min(blocked), 10.0 + 5.0 - 0.1)
+        self.assertLess(min(blocked), 10.0 + 5.0 + 0.1)
+        self.assertIn('rtk_fixed_timeout', next(r for r in rows if r[0] == min(blocked))[3].reasons)
+        self.assertLess(max(blocked), 17.0 + 1.0)                   # 恢复后接回、能开
+        self.assertTrue(rows[-1][3].usable_for_control)
+        self.assertLess(abs(lateral(rows[-1])), 0.02)
+
+    def test_relay_stall_late_burst_does_not_jump_or_stop(self):
+        """平板中转断流（2026-10-01 实车：0.4–0.8 s 常见，07:42 一次 3.85 s）：所有 GNSS 数据压着、结束时一批到。
+        5 s 以内照常走；迟到 1 s 内的按测量时刻插回重算，位置不跳；更早的丢掉。"""
+        for stall in ((10.0, 10.55), (10.0, 10.8), (10.0, 13.85)):
+            f, rows = simulate(GEN5, stall=stall)
+            with self.subTest(stall=stall):
+                self.assertTrue(all(r[3].usable_for_control for r in rows if r[0] > 1.0),
+                                [(r[0], r[3].reasons) for r in rows if not r[3].usable_for_control and r[0] > 1.0][:3])
+                self.assertLess(max(abs(lateral(r)) for r in rows if r[0] > 5.0), 0.02)
+                after = [r for r in rows if stall[1] <= r[0] < stall[1] + 0.5]
+                steps = [math.hypot(b[3].x - a[3].x, b[3].y - a[3].y) - math.hypot(b[1] - a[1], b[2] - a[2])
+                         for a, b in zip(after, after[1:])]
+                self.assertLess(max(abs(d) for d in steps), 0.02)    # 一批到时没有跳
+
+    def test_signal_loss_during_satellite_error_hold_counts_from_last_good_fix(self):
+        """卫星位置错了、正在推算维持，信号又断了：照样维持，从最后一个可信固定解起算满 5 s 才停。"""
         f, rows = simulate(GEN5, primary_err=ramp(10.0, 20.0, rate=0.06), fixes_on=lambda t: not 13.0 <= t < 16.0)
         self.assertTrue(any('rtk_hold' in r[3].reasons for r in rows if 12.0 < r[0] < 13.0))
+        self.assertTrue(all(r[3].usable_for_control for r in rows if 12.0 < r[0] < 16.0))
         blocked = [r[0] for r in rows if not r[3].usable_for_control and r[0] > 1.0]
-        self.assertTrue(13.0 < min(blocked) < 13.0 + 0.5 + 0.06, min(blocked))
-        self.assertIn('rtk_fixed_timeout', next(r for r in rows if r[0] == min(blocked))[3].reasons)
+        self.assertTrue(blocked)
+        self.assertGreater(min(blocked), 16.0)
+        self.assertIn('rtk_hold_timeout', next(r for r in rows if r[0] == min(blocked))[3].reasons)
+        # 断流恢复后第一帧（还是错的）不能因为「最近没比过」就当可信对齐过去（原来横偏一下跳 36 cm）
+        self.assertLess(max(abs(lateral(r)) for r in rows if r[0] > 5.0), 0.03)
+        self.assertTrue(rows[-1][3].usable_for_control)
+
+    def test_primary_dropout_that_comes_back_wrong_is_not_trusted(self):
+        """只有主天线断了 2 s（副天线一直在），回来时已经错了 30 cm：先等跟副天线比过，不按它对齐。"""
+        yaw = math.radians(30.0)
+
+        def wrong(t):
+            return (0.3 * math.sin(yaw), -0.3 * math.cos(yaw)) if t >= 11.0 else (0.0, 0.0)
+        f, rows = simulate(GEN5, primary_err=wrong, fixes_on=lambda t: not 10.0 <= t < 12.0, T=20.0)
+        self.assertLess(max(abs(lateral(r)) for r in rows if r[0] > 5.0), 0.03)
+        self.assertTrue(any('rtk_suspect' in r[3].reasons for r in rows if r[0] > 12.0))
+        self.assertTrue(all(r[3].usable_for_control for r in rows if 1.0 < r[0] < 15.0))   # 维持 5 s 内照常走
 
     def test_dead_reckoning_wrong_with_consistent_rtk_realigns_without_stopping(self):
         """车真的横着滑了 20 cm（两根天线都看得见，互检过）：推算错了，按 RTK 对齐，不停车。"""
