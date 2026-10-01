@@ -186,7 +186,7 @@ class PathConfig:
     start_creep_mps: float = 0.0
     start_creep_m: float = 0.3
     # 倒车段之后往前起步慢走这么远（不比 start_creep_m 短）：倒完车万向轮朝前，往前走要整个翻过来；倒车助跑
-    # 留出的这段（route_plan PIVOT_REVERSE_MIN_M − 喷头前伸，0.5 m）全程慢走，喷头到线头时车已走直
+    # 留出的这段（route_plan PIVOT_REVERSE_MIN_M − 喷头前伸，0.9 m）先慢走 0.5 m，剩下 0.4 m 加速，喷头到线头时车已走直
     # （2026-10-01 用户：倒退完要慢速前进，让万向轮回正，才能开的直）
     reverse_creep_m: float = 0.0
     reverse_creep_mps: float = 0.0  # 倒车后助跑慢走的车速（0 同 start_creep_mps）

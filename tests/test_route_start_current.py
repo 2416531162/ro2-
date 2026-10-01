@@ -53,8 +53,8 @@ class OpenLine(unittest.TestCase):
     def test_nozzle_on_first_point_backs_up_then_runs_up(self):
         sections, entry = plan(LINE, (-D, 0, 0))                     # 喷头压在 A、车头朝 B
         self.assertEqual([s.direction for s in sections], [-1, 1])
-        self.assertAlmostEqual(-.8, sections[0].car_pose(sections[0].path.length)[0])   # 后轴退到 A 后方 0.8 m
-        self.assertAlmostEqual(1.0, entry)                          # 倒 0.5 m + 助跑 0.5 m
+        self.assertAlmostEqual(-1.2, sections[0].car_pose(sections[0].path.length)[0])  # 后轴退到 A 后方 1.2 m
+        self.assertAlmostEqual(1.8, entry)                          # 倒 0.9 m + 助跑 0.9 m
         end = sections[-1]
         self.assertAlmostEqual(10.05, nozzle_at(end, end.path.length)[0])               # 画到 B，多开 5 cm
 
@@ -62,8 +62,8 @@ class OpenLine(unittest.TestCase):
         sections, entry = plan(LINE, (9.7, 0, 0))                   # 从 A 开过来，喷头停在 B
         self.assertEqual([s.direction for s in sections], [-1, 1])
         self.assertAlmostEqual(math.pi, abs(sections[0].car_pose(0)[2]), places=6)      # 原地掉头
-        self.assertAlmostEqual(1.1, sections[0].path.length)        # 后轴从 B 前 0.3 m 退到 B 后方 0.8 m
-        self.assertAlmostEqual(1.6, entry)
+        self.assertAlmostEqual(1.5, sections[0].path.length)        # 后轴从 B 前 0.3 m 退到 B 后方 1.2 m
+        self.assertAlmostEqual(2.4, entry)
         x, y = nozzle_at(sections[-1], sections[-1].path.length)
         self.assertAlmostEqual(-.05, x, places=6)
         self.assertAlmostEqual(0, y, places=6)
@@ -83,10 +83,10 @@ class OpenLine(unittest.TestCase):
         sections, entry = plan(LINE, (9.7, .24, 0))
         self.assertEqual([s.direction for s in sections], [-1, 1])
         x, y, yaw = sections[-1].car_pose(0)
-        self.assertAlmostEqual(10.8, x, places=6)
+        self.assertAlmostEqual(11.2, x, places=6)
         self.assertAlmostEqual(0, y, places=6)
         self.assertAlmostEqual(math.pi, abs(yaw), places=6)
-        self.assertAlmostEqual(math.hypot(1.1, .24) + .5, entry, places=6)
+        self.assertAlmostEqual(math.hypot(1.5, .24) + .9, entry, places=6)
 
     def test_already_behind_the_runup_on_the_line_drives_straight_in(self):
         sections, entry = plan(LINE, (-1.5, 0, 0))
@@ -131,7 +131,7 @@ class ClosedLoops(unittest.TestCase):
         sections, entry = plan(CIRCLE, car)
         self.assertEqual([-1, 1], [s.direction for s in sections])  # 喷头在附近：倒车助跑进圆
         r = rp.circle_axle_radius(2.5, D, R_MIN)
-        self.assertAlmostEqual(2 * math.pi * r + rp.VERTEX_PASS_M + .5, sections[-1].path.length, places=6)
+        self.assertAlmostEqual(2 * math.pi * r + rp.VERTEX_PASS_M + .9, sections[-1].path.length, places=6)
         tr, trail = drive(CIRCLE, car)
         self.assertEqual('DONE', tr.st.state)
         on = [p for p in trail if abs(math.hypot(*p) - 2.5) < .02]
@@ -155,7 +155,7 @@ class ClosedLoops(unittest.TestCase):
     def test_two_lap_circle(self):
         sections, _ = plan(dict(CIRCLE, laps=2), (2.5, -.3, -math.pi / 2))
         r = rp.circle_axle_radius(2.5, D, R_MIN)
-        self.assertAlmostEqual(4 * math.pi * r + rp.VERTEX_PASS_M + .5, sections[-1].path.length, places=6)
+        self.assertAlmostEqual(4 * math.pi * r + rp.VERTEX_PASS_M + .9, sections[-1].path.length, places=6)
 
 
 class Ackermann(unittest.TestCase):
@@ -180,24 +180,32 @@ class Ackermann(unittest.TestCase):
 
 class Tracking(unittest.TestCase):
 
-    def test_reverse_runup_creeps_all_the_way(self):
+    def test_reverse_runup_creeps_then_speeds_up_before_the_line(self):
         sections, _ = plan(LINE, (-D, 0, 0))
         tr = diff_tracker(sections)
-        # 倒车段只慢走 0.15 m（只是摆车、不画线）；倒车后往前助跑整段 0.5 m 按 0.15 m/s 慢走（2026-10-01 拐角提速）
+        # 倒车段只慢走 0.15 m（只是摆车、不画线）；倒车后往前助跑 0.9 m：头 0.5 m 按 0.15 m/s 慢走（万向轮翻回来），
+        # 剩下 0.4 m 加速，喷头到线头时已不是慢走车速（2026-10-01 下午：0.8 m 时加速全在线上，起步偏差大）
         self.assertEqual((.15, .5), (tr.trackers[0].cfg.start_creep_m, tr.trackers[1].cfg.start_creep_m))
         self.assertEqual((.1, .15), (tr.trackers[0].cfg.start_creep_mps, tr.trackers[1].cfg.start_creep_mps))
         car = DiffCar(-D, 0, 0)
         self.assertTrue(tr.start(car.pose()))
-        fast = []
-        run(tr, car, every=lambda t, tr, c: fast.append(c.x) if tr.index == 1 and c.v > .151 else None)
-        self.assertGreaterEqual(min(fast), -.8 + .5 - .02)          # 助跑 0.5 m 内不超过 0.15 m/s
+        fast, at_line = [], []
+
+        def watch(t, tr, c):
+            if tr.index == 1 and c.v > .151:
+                fast.append(c.x)
+            if tr.index == 1 and not at_line and c.x + D >= 0.0:
+                at_line.append(c.v)
+        run(tr, car, every=watch)
+        self.assertGreaterEqual(min(fast), -1.2 + .5 - .02)         # 助跑头 0.5 m 内不超过 0.15 m/s
+        self.assertGreaterEqual(at_line[0], min(.6, tr.trackers[1].cfg.cruise_mps) - 1e-3)   # 喷头到线头时已加速（0.8 m/s 巡航约 0.65 m/s）
         self.assertEqual('DONE', tr.st.state)
 
     def test_short_entry_section_starts(self):
         # 接入段比 start_min_left_m（0.5 m）短也能起步：只有整条路线的最后一段才查「离终点太近」
-        sections, _ = plan(LINE, (-.6, 0, 0))
+        sections, _ = plan(LINE, (-.75, 0, 0))                      # 喷头在线头前 0.45 m，后轴退 0.45 m 到助跑起点
         self.assertLess(sections[0].path.length, .5)
-        self.assertEqual((True, ''), diff_tracker(sections).check_start(DiffCar(-.6, 0, 0).pose()))
+        self.assertEqual((True, ''), diff_tracker(sections).check_start(DiffCar(-.75, 0, 0).pose()))
 
     def test_pause_near_the_end_resumes(self):
         # 2026-10-01 10:20 实车：段尾剩 0.14 m 时定位抖了一下，恢复后按「离终点不到 0.5 m 不起步」一直起不了步
@@ -221,7 +229,7 @@ class Tracking(unittest.TestCase):
         cfg = differential_config(PathConfig())
         self.assertEqual((.30, None, .5, .15, .15), (cfg.delay_s, cfg.stop_delay_s, cfg.reverse_creep_m,
                                                   cfg.reverse_creep_mps, cfg.reverse_section_creep_m))
-        self.assertEqual(.8, rp.PIVOT_REVERSE_MIN_M)
+        self.assertEqual(1.2, rp.PIVOT_REVERSE_MIN_M)
 
 
     def test_differential_section_options(self):
