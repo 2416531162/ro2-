@@ -42,7 +42,6 @@ if 'rclpy.callback_groups' not in sys.modules:
     _cg = types.ModuleType('rclpy.callback_groups')
     _cg.MutuallyExclusiveCallbackGroup = object
     sys.modules['rclpy.callback_groups'] = _cg
-ros_stubs.Node.create_timer = lambda self, period, cb, **k: types.SimpleNamespace(period=period)
 ros_stubs.Node.create_client = lambda self, *a, **k: types.SimpleNamespace(
     service_is_ready=lambda: False)
 

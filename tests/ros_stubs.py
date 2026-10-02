@@ -200,7 +200,7 @@ class Node:
         self.publishers_[topic] = pub
         return pub
 
-    def create_timer(self, period, cb):
+    def create_timer(self, period, cb, **kwargs):
         self.timers.append((period, cb))
         return types.SimpleNamespace(period=period)
 
