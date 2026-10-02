@@ -2,23 +2,12 @@ wheeltec_driver:
   ros__parameters:
     port: /dev/serial/by-id/usb-WCH.CN_USB_Single_Serial_0002-if00
     baud: 115200
+    legacy_commands: false  # 唯一入口：带租约的 /follow|manual|navigation/command
     receive_only: false
     protocol: twist
     protocol_confirmed: true
     mode_byte: 0
     steering_scale: 1.0
-    wheelbase_m: 0.54          # 实测 2026-09-16 (原 0.25 是错的)
-    max_speed_m_s: 1.30
-    max_steering_rad: 0.35
-    max_yaw_rate_rad_s: 1.00
-    acceleration_m_s2: 3.50
-    steering_rate_rad_s: 2.50
-    cmd_timeout_s: 0.50
-    feedback_timeout_s: 0.30
-    startup_stop_s: 3.0
-    tx_hz: 50.0
     # 唯一的 odom -> base_link 动态 TF 发布者；重启驱动生效。
     # base_link 与测量几何统一为后轴中心。不要再给它静态 map 父坐标。
-    frame_id: odom
-    base_frame_id: base_link
     publish_tf: true

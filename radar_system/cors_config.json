@@ -1,9 +1,0 @@
-{
-  "enabled": false,
-  "server": "rtk.ntrip.qxwz.com",
-  "port": 8002,
-  "mountpoint": "AUTO",
-  "username": "",
-  "password": "",
-  "preset": "qxwz"
-}

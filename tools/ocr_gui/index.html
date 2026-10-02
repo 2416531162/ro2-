@@ -1,0 +1,853 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OpenCodeReview 可视化工作台</title>
+  <style>
+    :root {
+      --bg: #0f1117;
+      --card-bg: #181b24;
+      --card-border: #262b38;
+      --text: #e6edf3;
+      --text-muted: #8b949e;
+      --primary: #3b82f6;
+      --primary-hover: #2563eb;
+      --success: #10b981;
+      --warning: #f59e0b;
+      --danger: #ef4444;
+      --critical: #dc2626;
+      --purple: #8b5cf6;
+      --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: var(--font); }
+    body { background: var(--bg); color: var(--text); min-height: 100vh; display: flex; flex-direction: column; }
+    
+    /* Top Bar */
+    header {
+      background: #141720; border-bottom: 1px solid var(--card-border);
+      padding: 10px 24px; display: flex; align-items: center; justify-content: space-between;
+      position: sticky; top: 0; z-index: 100; gap: 16px;
+    }
+    .brand { display: flex; align-items: center; gap: 12px; }
+    .brand-logo { width: 34px; height: 34px; background: linear-gradient(135deg, #3b82f6, #8b5cf6); border-radius: 9px; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 19px; color: #fff; box-shadow: 0 2px 8px rgba(59,130,246,0.4); }
+    .brand-title { font-size: 15px; font-weight: 600; letter-spacing: -0.3px; }
+    .brand-sub { font-size: 11px; color: var(--text-muted); }
+
+    /* Project Selector Pill & Dropdown */
+    .project-selector-wrapper { position: relative; }
+    .project-pill {
+      background: #1c212e; border: 1px solid #333c4d; border-radius: 8px;
+      padding: 6px 12px; display: flex; align-items: center; gap: 8px;
+      cursor: pointer; transition: all 0.2s; user-select: none;
+    }
+    .project-pill:hover { background: #252c3d; border-color: #3b82f6; }
+    .project-pill .folder-icon { font-size: 15px; }
+    .project-pill .project-name { font-size: 13px; font-weight: 600; color: #60a5fa; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .project-pill .chevron { font-size: 11px; color: var(--text-muted); transition: transform 0.2s; }
+    .project-pill.active .chevron { transform: rotate(180deg); }
+
+    .project-dropdown {
+      position: absolute; top: calc(100% + 8px); left: 0; width: 380px;
+      background: #181b24; border: 1px solid #2d3342; border-radius: 10px;
+      box-shadow: 0 12px 36px rgba(0,0,0,0.6); z-index: 1000; padding: 10px 0;
+      animation: fadeIn 0.15s ease-out;
+    }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+
+    .dropdown-section { padding: 8px 16px; }
+    .dropdown-label { font-size: 11px; font-weight: 600; text-transform: uppercase; color: var(--text-muted); letter-spacing: 0.5px; margin-bottom: 6px; }
+    .current-path-box {
+      background: #0f1117; border: 1px solid #262b38; border-radius: 6px;
+      padding: 8px 10px; font-family: ui-monospace, monospace; font-size: 12px;
+      color: #93c5fd; word-break: break-all; display: flex; justify-content: space-between; align-items: center; gap: 8px;
+    }
+    .btn-copy-path { background: #1f293d; border: 1px solid #374151; color: #93c5fd; border-radius: 4px; padding: 3px 6px; font-size: 10px; cursor: pointer; white-space: nowrap; }
+    .btn-copy-path:hover { background: #2563eb; color: #fff; }
+
+    .dropdown-divider { height: 1px; background: var(--card-border); margin: 8px 0; }
+    .dropdown-btn {
+      width: 100%; display: flex; align-items: center; gap: 10px;
+      padding: 9px 16px; border: none; background: transparent; color: var(--text);
+      font-size: 13px; text-align: left; cursor: pointer; transition: background 0.15s;
+    }
+    .dropdown-btn:hover { background: rgba(59, 130, 246, 0.12); color: #60a5fa; }
+    .dropdown-btn .btn-desc { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+
+    .recent-list { max-height: 180px; overflow-y: auto; }
+    .recent-item {
+      padding: 8px 16px; display: flex; align-items: center; justify-content: space-between;
+      cursor: pointer; transition: background 0.15s;
+    }
+    .recent-item:hover { background: rgba(255,255,255,0.05); }
+    .recent-info { overflow: hidden; }
+    .recent-name { font-size: 13px; font-weight: 500; color: #e6edf3; }
+    .recent-path { font-size: 11px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 290px; }
+    .recent-current-badge { font-size: 10px; padding: 2px 6px; border-radius: 4px; background: rgba(16, 185, 129, 0.2); color: #34d399; font-weight: 600; white-space: nowrap; }
+
+    .top-meta { display: flex; align-items: center; gap: 12px; }
+    .badge { padding: 4px 10px; border-radius: 6px; font-size: 12px; font-weight: 500; display: inline-flex; align-items: center; gap: 6px; }
+    .badge-git { background: #1f293d; color: #60a5fa; border: 1px solid #2d3748; }
+    .badge-model { background: #1e2922; color: #34d399; border: 1px solid #164e3b; }
+    .badge-warning { background: #3b2a1a; color: #f59e0b; border: 1px solid #78350f; }
+    .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+    .btn-secondary { background: #212631; border: 1px solid var(--card-border); color: var(--text); padding: 6px 12px; border-radius: 6px; font-size: 13px; cursor: pointer; transition: all 0.2s; text-decoration: none; display: inline-flex; align-items: center; gap: 6px; }
+    .btn-secondary:hover { background: #2b313f; }
+
+    /* Layout */
+    .container { max-width: 1280px; width: 100%; margin: 0 auto; padding: 20px 24px; flex: 1; display: flex; flex-direction: column; gap: 20px; }
+    
+    /* Project Quick Bar */
+    .project-banner {
+      background: #141824; border: 1px solid #262e40; border-radius: 10px;
+      padding: 12px 18px; display: flex; align-items: center; justify-content: space-between; gap: 16px;
+    }
+    .banner-left { display: flex; align-items: center; gap: 12px; flex: 1; overflow: hidden; }
+    .banner-path-badge {
+      background: #0b0d13; border: 1px solid #1f2638; border-radius: 6px;
+      padding: 5px 10px; font-family: ui-monospace, monospace; font-size: 12px;
+      color: #93c5fd; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 600px;
+    }
+    .btn-switch-repo {
+      background: #2563eb; color: #fff; border: none; padding: 6px 14px; border-radius: 6px;
+      font-size: 12px; font-weight: 600; cursor: pointer; transition: all 0.2s; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap;
+    }
+    .btn-switch-repo:hover { background: #1d4ed8; }
+
+    /* Tabs */
+    .tabs { display: flex; gap: 8px; border-bottom: 1px solid var(--card-border); padding-bottom: 8px; }
+    .tab-btn { background: transparent; border: none; color: var(--text-muted); padding: 8px 16px; border-radius: 6px; font-size: 14px; font-weight: 500; cursor: pointer; transition: all 0.2s; }
+    .tab-btn:hover { color: var(--text); background: rgba(255,255,255,0.05); }
+    .tab-btn.active { color: #fff; background: var(--primary); }
+
+    /* Card */
+    .card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 12px; padding: 20px; box-shadow: 0 4px 20px rgba(0,0,0,0.25); }
+    .card-title { font-size: 15px; font-weight: 600; margin-bottom: 16px; display: flex; align-items: center; justify-content: space-between; }
+    
+    /* Mode Grid */
+    .mode-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; margin-bottom: 20px; }
+    .mode-card {
+      background: #141720; border: 2px solid var(--card-border); border-radius: 10px; padding: 16px;
+      cursor: pointer; transition: all 0.2s; position: relative;
+    }
+    .mode-card:hover { border-color: #3b82f6; transform: translateY(-2px); }
+    .mode-card.selected { border-color: var(--primary); background: rgba(59, 130, 246, 0.08); }
+    .mode-card h4 { font-size: 14px; margin-bottom: 6px; display: flex; align-items: center; gap: 8px; }
+    .mode-card p { font-size: 12px; color: var(--text-muted); line-height: 1.5; }
+    
+    /* Action Bar */
+    .action-bar { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+    .btn-run {
+      background: linear-gradient(135deg, #2563eb, #7c3aed); color: #fff; border: none;
+      padding: 12px 28px; border-radius: 8px; font-size: 15px; font-weight: 600;
+      cursor: pointer; transition: all 0.2s; box-shadow: 0 4px 15px rgba(37, 99, 235, 0.4);
+      display: inline-flex; align-items: center; gap: 8px;
+    }
+    .btn-run:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 6px 20px rgba(37, 99, 235, 0.6); }
+    .btn-run:disabled { opacity: 0.6; cursor: not-allowed; }
+
+    /* Parameters */
+    .param-group { display: flex; gap: 12px; flex: 1; align-items: center; }
+    .input-field { background: #141720; border: 1px solid var(--card-border); color: var(--text); padding: 8px 12px; border-radius: 6px; font-size: 13px; width: 100%; outline: none; }
+    .input-field:focus { border-color: var(--primary); }
+
+    /* Live Logs */
+    .log-box {
+      background: #0b0c10; border: 1px solid #1f2330; border-radius: 8px;
+      padding: 14px; font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 12px; line-height: 1.6; color: #a5b4fc; max-height: 280px; overflow-y: auto;
+      white-space: pre-wrap; word-break: break-all;
+    }
+    .log-spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid rgba(255,255,255,0.3); border-top-color: #fff; border-radius: 50%; animation: spin 0.8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* Stats Overview */
+    .stat-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 20px; }
+    .stat-card { background: #141720; border: 1px solid var(--card-border); border-radius: 8px; padding: 14px; text-align: center; }
+    .stat-num { font-size: 24px; font-weight: 700; margin-top: 4px; }
+    .stat-label { font-size: 12px; color: var(--text-muted); }
+    .stat-critical .stat-num { color: #f87171; }
+    .stat-high .stat-num { color: #fb923c; }
+    .stat-medium .stat-num { color: #fbbf24; }
+    .stat-low .stat-num { color: #94a3b8; }
+
+    /* Findings List */
+    .finding-card {
+      background: #141720; border: 1px solid var(--card-border); border-radius: 8px;
+      padding: 16px; margin-bottom: 12px; transition: border-color 0.2s;
+    }
+    .finding-card:hover { border-color: #3b82f6; }
+    .finding-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+    .finding-file { font-size: 13px; font-weight: 600; color: #60a5fa; text-decoration: none; }
+    .finding-badge { font-size: 11px; padding: 3px 8px; border-radius: 4px; font-weight: 600; text-transform: uppercase; }
+    .badge-critical { background: rgba(220, 38, 38, 0.2); color: #f87171; border: 1px solid rgba(220, 38, 38, 0.3); }
+    .badge-high { background: rgba(234, 88, 12, 0.2); color: #fb923c; border: 1px solid rgba(234, 88, 12, 0.3); }
+    .badge-medium { background: rgba(217, 119, 6, 0.2); color: #fbbf24; border: 1px solid rgba(217, 119, 6, 0.3); }
+    .badge-low { background: rgba(148, 163, 184, 0.2); color: #cbd5e1; border: 1px solid rgba(148, 163, 184, 0.3); }
+    .finding-desc { font-size: 13px; line-height: 1.6; color: #cbd5e1; margin-bottom: 12px; }
+    .finding-code {
+      background: #0b0d13; border-left: 3px solid var(--primary); padding: 10px 14px;
+      font-family: ui-monospace, monospace; font-size: 12px; color: #93c5fd;
+      border-radius: 0 6px 6px 0; overflow-x: auto; margin-top: 8px;
+    }
+
+    /* Table */
+    .history-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .history-table th, .history-table td { padding: 10px 14px; text-align: left; border-bottom: 1px solid var(--card-border); }
+    .history-table th { color: var(--text-muted); font-weight: 500; }
+    .history-table tr:hover td { background: rgba(255,255,255,0.02); }
+    .btn-link { color: var(--primary); text-decoration: none; cursor: pointer; font-weight: 500; }
+    .btn-link:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+
+  <header>
+    <div class="brand">
+      <div class="brand-logo">🛡️</div>
+      <div>
+        <div class="brand-title">OpenCodeReview 可视化工作台</div>
+        <div class="brand-sub">Alibaba AI Code Review · macOS GUI 控制中心</div>
+      </div>
+    </div>
+
+    <!-- 顶部工程选择器 -->
+    <div class="project-selector-wrapper">
+      <div class="project-pill" id="current-project-pill" onclick="toggleProjectMenu()" title="点击切换代码工程目录">
+        <span class="folder-icon">📁</span>
+        <span class="project-name" id="current-project-name">加载中...</span>
+        <span class="chevron">▾</span>
+      </div>
+
+      <div class="project-dropdown" id="project-dropdown" style="display: none;">
+        <div class="dropdown-section">
+          <div class="dropdown-label">当前审查工程路径</div>
+          <div class="current-path-box">
+            <span id="current-project-full-path">读取中...</span>
+            <button class="btn-copy-path" onclick="copyCurrentPath()">复制</button>
+          </div>
+        </div>
+
+        <div class="dropdown-divider"></div>
+
+        <button class="dropdown-btn" onclick="chooseFolderViaFinder()">
+          <span style="font-size: 18px;">📂</span>
+          <div>
+            <div style="font-weight: 600;">在访达中选取工程...</div>
+            <div class="btn-desc">弹出系统原生文件夹选择器</div>
+          </div>
+        </button>
+
+        <button class="dropdown-btn" onclick="promptManualRepoPath()">
+          <span style="font-size: 18px;">✏️</span>
+          <div>
+            <div style="font-weight: 600;">输入/粘贴本地路径...</div>
+            <div class="btn-desc">支持绝对路径或 ~ 路径</div>
+          </div>
+        </button>
+
+        <div class="dropdown-divider"></div>
+        <div class="dropdown-section" style="padding-bottom: 4px;">
+          <div class="dropdown-label">最近打开的工程</div>
+        </div>
+        <div class="recent-list" id="recent-projects-list">
+          <div style="padding: 10px 16px; font-size: 12px; color: var(--text-muted);">暂无历史工程</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="top-meta">
+      <div class="badge badge-git"><span class="dot"></span><span id="git-branch">读取中...</span></div>
+      <div class="badge badge-model"><span class="dot"></span><span id="cfg-model">deepseek-chat</span></div>
+      <a href="http://localhost:5483" target="_blank" class="btn-secondary">🌐 打开官方 Viewer</a>
+    </div>
+  </header>
+
+  <div class="container">
+    <!-- 当前工程快捷提示横幅 -->
+    <div class="project-banner">
+      <div class="banner-left">
+        <span style="font-size: 13px; font-weight: 600; color: #94a3b8; white-space: nowrap;">当前审查目标工程:</span>
+        <span class="banner-path-badge" id="banner-repo-path">读取中...</span>
+        <span id="banner-git-status" style="font-size: 12px; color: #60a5fa;"></span>
+      </div>
+      <div style="display: flex; gap: 8px;">
+        <button class="btn-switch-repo" onclick="chooseFolderViaFinder()">
+          <span>📂 切换工程</span>
+        </button>
+      </div>
+    </div>
+
+    <div class="tabs">
+      <button class="tab-btn active" onclick="switchTab('review')">⚡️ 发起审查</button>
+      <button class="tab-btn" onclick="switchTab('results')">📊 审查结果</button>
+      <button class="tab-btn" onclick="switchTab('history')">🕒 历史会话</button>
+      <button class="tab-btn" onclick="switchTab('settings')">⚙️ 模型设置</button>
+    </div>
+
+    <!-- TAB 1: 审查操作 -->
+    <div id="tab-review">
+      <div class="card">
+        <div class="card-title">
+          <span>选择审查模式</span>
+          <span style="font-size: 12px; color: var(--text-muted);" id="changed-hint">正在检查代码变更...</span>
+        </div>
+
+        <div class="mode-grid">
+          <div class="mode-card selected" onclick="selectMode('workspace', this)">
+            <h4>📂 工作区未提交 (Workspace)</h4>
+            <p>审查当前所有已暂存（staged）和未暂存（unstaged）的改动。日常写代码即时检查首选。</p>
+          </div>
+          <div class="mode-card" onclick="selectMode('branch', this)">
+            <h4>🌿 分支差异对比 (Branch Diff)</h4>
+            <p>对比目标分支（如 main）与当前分支的所有增删改动。提交 PR/MR 前必跑。</p>
+          </div>
+          <div class="mode-card" onclick="selectMode('commit', this)">
+            <h4>📌 最近提交 (Commit HEAD)</h4>
+            <p>单独审计最新一次提交的内容（HEAD commit），确认刚刚 commit 的改动无缺陷。</p>
+          </div>
+          <div class="mode-card" onclick="selectMode('scan', this)">
+            <h4>🔍 目录全量扫描 (Full Scan)</h4>
+            <p>无需 Git 历史，直接对指定目录或核心算法文件做完整的安全与架构审计。</p>
+          </div>
+        </div>
+
+        <div id="branch-params" style="display: none; margin-bottom: 16px;">
+          <div class="param-group">
+            <label style="font-size: 13px; color: var(--text-muted); min-width: 70px;">基准分支:</label>
+            <input id="param-from-branch" class="input-field" value="main" placeholder="例如 main 或 master" style="max-width: 200px;">
+            <label style="font-size: 13px; color: var(--text-muted); margin-left: 12px;">目标分支:</label>
+            <input id="param-to-branch" class="input-field" value="HEAD" placeholder="例如 HEAD" style="max-width: 200px;">
+          </div>
+        </div>
+
+        <div id="scan-params" style="display: none; margin-bottom: 16px;">
+          <div class="param-group">
+            <label style="font-size: 13px; color: var(--text-muted); min-width: 70px;">扫描路径:</label>
+            <input id="param-scan-path" class="input-field" value="" placeholder="留空则扫描全仓，或输入 radar_system 等相对路径">
+          </div>
+        </div>
+
+        <div class="action-bar">
+          <button id="btn-start-review" class="btn-run" onclick="startReview()">
+            <span>▶ 开始 AI 审查</span>
+          </button>
+          <span id="run-status-text" style="font-size: 13px; color: var(--text-muted);">准备就绪</span>
+        </div>
+      </div>
+
+      <!-- 实时日志与监控面板 -->
+      <div class="card" id="monitor-card" style="display: none; margin-top: 20px;">
+        <div class="card-title">
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <span id="run-spinner" class="log-spinner"></span>
+            <span>审查执行动态 (Live Agent Console)</span>
+          </div>
+          <span id="run-timer" style="font-size: 12px; color: var(--text-muted);">00:00</span>
+        </div>
+        <div class="log-box" id="log-content">等待任务调度...</div>
+      </div>
+    </div>
+
+    <!-- TAB 2: 审查结果 -->
+    <div id="tab-results" style="display: none;">
+      <div class="stat-row">
+        <div class="stat-card stat-critical">
+          <div class="stat-label">Critical 严重缺陷</div>
+          <div class="stat-num" id="count-critical">0</div>
+        </div>
+        <div class="stat-card stat-high">
+          <div class="stat-label">High 高危风险</div>
+          <div class="stat-num" id="count-high">0</div>
+        </div>
+        <div class="stat-card stat-medium">
+          <div class="stat-label">Medium 中度缺陷</div>
+          <div class="stat-num" id="count-medium">0</div>
+        </div>
+        <div class="stat-card stat-low">
+          <div class="stat-label">Low / 改进建议</div>
+          <div class="stat-num" id="count-low">0</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">
+          <span id="results-title">审查详情列表</span>
+          <button class="btn-secondary" onclick="loadLatestSession()">🔄 刷新最新结果</button>
+        </div>
+        <div id="findings-container">
+          <p style="color: var(--text-muted); font-size: 13px; text-align: center; padding: 30px;">
+            暂无审查数据，请先在「发起审查」标签中点击开始审查。
+          </p>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB 3: 历史记录 -->
+    <div id="tab-history" style="display: none;">
+      <div class="card">
+        <div class="card-title">
+          <span>历史审查会话记录 (Session History)</span>
+          <button class="btn-secondary" onclick="loadSessions()">🔄 刷新历史</button>
+        </div>
+        <table class="history-table">
+          <thead>
+            <tr>
+              <th>会话 ID</th>
+              <th>审查模式</th>
+              <th>目标范围</th>
+              <th>文件数</th>
+              <th>缺陷数</th>
+              <th>状态</th>
+              <th>时间</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="history-body">
+            <tr><td colspan="8" style="text-align: center; color: var(--text-muted);">加载中...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- TAB 4: 模型与配置 -->
+    <div id="tab-settings" style="display: none;">
+      <div class="card">
+        <div class="card-title">大模型供应商与密钥配置</div>
+        <div style="display: flex; flex-direction: column; gap: 16px; max-width: 500px;">
+          <div>
+            <label style="font-size: 13px; color: var(--text-muted); display: block; margin-bottom: 6px;">Provider 供应商:</label>
+            <select id="cfg-provider-select" class="input-field" onchange="onProviderChange()">
+              <option value="deepseek">DeepSeek (性价比极高，推荐)</option>
+              <option value="dashscope">阿里云通义千问 (DashScope)</option>
+              <option value="openai">OpenAI</option>
+              <option value="anthropic">Anthropic (Claude)</option>
+            </select>
+          </div>
+          <div>
+            <label style="font-size: 13px; color: var(--text-muted); display: block; margin-bottom: 6px;">Model 模型名称:</label>
+            <input id="cfg-model-input" class="input-field" value="deepseek-chat">
+          </div>
+          <div>
+            <label style="font-size: 13px; color: var(--text-muted); display: block; margin-bottom: 6px;">API Key 密钥:</label>
+            <input id="cfg-key-input" type="password" class="input-field" placeholder="留空则保持现有密钥不变">
+          </div>
+          <div style="margin-top: 8px;">
+            <button class="btn-run" onclick="saveConfig()">💾 保存配置并测试</button>
+            <span id="save-cfg-status" style="font-size: 13px; color: var(--text-muted); margin-left: 12px;"></span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let currentRepo = "";
+    let currentMode = 'workspace';
+    let pollInterval = null;
+    let timerInterval = null;
+    let secondsElapsed = 0;
+
+    function toggleProjectMenu(force) {
+      const dd = document.getElementById('project-dropdown');
+      const pill = document.getElementById('current-project-pill');
+      const show = (force !== undefined) ? force : (dd.style.display === 'none');
+      dd.style.display = show ? 'block' : 'none';
+      if (show) pill.classList.add('active');
+      else pill.classList.remove('active');
+    }
+
+    // 点击外部关闭下拉菜单
+    document.addEventListener('click', (e) => {
+      const wrapper = document.querySelector('.project-selector-wrapper');
+      if (wrapper && !wrapper.contains(e.target)) {
+        toggleProjectMenu(false);
+      }
+    });
+
+    function copyCurrentPath() {
+      if (currentRepo) {
+        navigator.clipboard.writeText(currentRepo).then(() => {
+          alert('工程绝对路径已复制到剪贴板！');
+        });
+      }
+    }
+
+    async function chooseFolderViaFinder() {
+      toggleProjectMenu(false);
+      const btn = document.getElementById('run-status-text');
+      const originalText = btn.textContent;
+      btn.textContent = '正在呼出 macOS 访达文件夹选择窗口...';
+      try {
+        const res = await fetch('/api/choose_folder', { method: 'POST' });
+        const data = await res.json();
+        if (data.status === 'ok') {
+          await applyNewRepo(data.repo, data.git, data.recent_repos);
+        } else if (data.status === 'cancelled') {
+          // 用户取消，恢复提示
+        } else if (data.message) {
+          alert('选择工程失败: ' + data.message);
+        }
+      } catch (e) {
+        alert('无法呼出访达选择器: ' + e);
+      } finally {
+        btn.textContent = originalText;
+      }
+    }
+
+    async function promptManualRepoPath() {
+      toggleProjectMenu(false);
+      const input = prompt('请输入或粘贴本地代码工程的绝对路径 (如 /Users/xxx/my_project):', currentRepo || '');
+      if (!input || !input.trim()) return;
+      await setRepoPath(input.trim());
+    }
+
+    async function setRepoPath(path) {
+      try {
+        const res = await fetch('/api/set_repo', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ repo: path })
+        });
+        const data = await res.json();
+        if (data.error) {
+          alert('切换失败: ' + data.error);
+          return;
+        }
+        await applyNewRepo(data.repo, data.git, data.recent_repos);
+      } catch (e) {
+        alert('网络请求失败: ' + e);
+      }
+    }
+
+    async function applyNewRepo(repo, git, recentList) {
+      currentRepo = repo;
+      const basename = repo.split('/').filter(Boolean).pop() || repo;
+      document.getElementById('current-project-name').textContent = basename;
+      document.getElementById('current-project-full-path').textContent = repo;
+      document.getElementById('banner-repo-path').textContent = repo;
+
+      if (git && git.is_git) {
+        document.getElementById('git-branch').textContent = git.branch;
+        document.getElementById('banner-git-status').textContent = `(分支: ${git.branch} · ${git.changed_count} 处未提交修改)`;
+        document.getElementById('changed-hint').textContent = `工作区目前有 ${git.changed_count} 个改动文件`;
+      } else {
+        document.getElementById('git-branch').textContent = '非 Git 目录';
+        document.getElementById('banner-git-status').textContent = `(普通文件夹，支持全量扫描)`;
+        document.getElementById('changed-hint').textContent = `当前目录未初始化 Git，建议使用「目录全量扫描」`;
+      }
+
+      if (recentList && recentList.length) {
+        renderRecentList(recentList);
+      }
+
+      // 重新加载该工程的历史审查与最新结果
+      loadSessions();
+      loadLatestSession();
+    }
+
+    function renderRecentList(recents) {
+      const container = document.getElementById('recent-projects-list');
+      if (!recents || !recents.length) {
+        container.innerHTML = '<div style="padding: 10px 16px; font-size: 12px; color: var(--text-muted);">暂无历史工程</div>';
+        return;
+      }
+      container.innerHTML = recents.map(r => {
+        const name = r.split('/').filter(Boolean).pop() || r;
+        const isCurrent = (r === currentRepo);
+        return `
+          <div class="recent-item" onclick="setRepoPath('${r.replace(/'/g, "\\'")}')">
+            <div class="recent-info">
+              <div class="recent-name">📁 ${name}</div>
+              <div class="recent-path" title="${r}">${r}</div>
+            </div>
+            ${isCurrent ? '<span class="recent-current-badge">当前</span>' : ''}
+          </div>
+        `;
+      }).join('');
+    }
+
+    function switchTab(tabId) {
+      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+      event.target.classList.add('active');
+      ['review', 'results', 'history', 'settings'].forEach(t => {
+        document.getElementById('tab-' + t).style.display = (t === tabId) ? 'block' : 'none';
+      });
+      if (tabId === 'history') loadSessions();
+      if (tabId === 'results') loadLatestSession();
+    }
+
+    function selectMode(mode, el) {
+      currentMode = mode;
+      document.querySelectorAll('.mode-card').forEach(c => c.classList.remove('selected'));
+      el.classList.add('selected');
+      document.getElementById('branch-params').style.display = (mode === 'branch') ? 'block' : 'none';
+      document.getElementById('scan-params').style.display = (mode === 'scan') ? 'block' : 'none';
+    }
+
+    async function fetchStatus() {
+      try {
+        const res = await fetch('/api/status');
+        const data = await res.json();
+        if (data.repo) {
+          await applyNewRepo(data.repo, data.git, data.recent_repos);
+        }
+        if (data.config) {
+          document.getElementById('cfg-model').textContent = `${data.config.provider}: ${data.config.model}`;
+          document.getElementById('cfg-model-input').value = data.config.model;
+          document.getElementById('cfg-provider-select').value = data.config.provider;
+        }
+        if (data.task && data.task.running) {
+          showRunningState(true);
+        }
+      } catch (e) {
+        console.error(e);
+      }
+    }
+
+    async function startReview() {
+      const btn = document.getElementById('btn-start-review');
+      btn.disabled = true;
+      showRunningState(true);
+
+      const payload = {
+        repo: currentRepo,
+        mode: currentMode
+      };
+      if (currentMode === 'branch') {
+        payload.from_branch = document.getElementById('param-from-branch').value.trim();
+        payload.to_branch = document.getElementById('param-to-branch').value.trim();
+      } else if (currentMode === 'scan') {
+        payload.path = document.getElementById('param-scan-path').value.trim();
+      }
+
+      try {
+        const res = await fetch('/api/run', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const d = await res.json();
+        if (d.error) {
+          alert('启动失败: ' + d.error);
+          showRunningState(false);
+          btn.disabled = false;
+        }
+      } catch (e) {
+        alert('网络请求失败: ' + e);
+        showRunningState(false);
+        btn.disabled = false;
+      }
+    }
+
+    function showRunningState(running) {
+      const monitor = document.getElementById('monitor-card');
+      const btn = document.getElementById('btn-start-review');
+      const st = document.getElementById('run-status-text');
+      const spinner = document.getElementById('run-spinner');
+
+      if (running) {
+        monitor.style.display = 'block';
+        btn.disabled = true;
+        st.textContent = '审查 Agent 正在分析与调用工具中...';
+        spinner.style.display = 'inline-block';
+        secondsElapsed = 0;
+        if (!timerInterval) {
+          timerInterval = setInterval(() => {
+            secondsElapsed++;
+            const m = String(Math.floor(secondsElapsed / 60)).padStart(2, '0');
+            const s = String(secondsElapsed % 60).padStart(2, '0');
+            document.getElementById('run-timer').textContent = `${m}:${s}`;
+          }, 1000);
+        }
+        if (!pollInterval) {
+          pollInterval = setInterval(pollLogs, 1500);
+        }
+      } else {
+        btn.disabled = false;
+        st.textContent = '任务已完成';
+        spinner.style.display = 'none';
+        if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
+        if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
+      }
+    }
+
+    async function pollLogs() {
+      try {
+        const res = await fetch('/api/logs');
+        const d = await res.json();
+        const box = document.getElementById('log-content');
+        if (d.logs && d.logs.length) {
+          box.textContent = d.logs.join('\n');
+          box.scrollTop = box.scrollHeight;
+        }
+        if (!d.running) {
+          showRunningState(false);
+          if (d.session_id) {
+            loadSessionDetail(d.session_id);
+            document.querySelectorAll('.tab-btn')[1].click();
+          }
+        }
+      } catch (e) {
+        console.error(e);
+      }
+    }
+
+    async function loadSessions() {
+      const tbody = document.getElementById('history-body');
+      tbody.innerHTML = '<tr><td colspan="8" style="text-align: center; color: var(--text-muted);">加载中...</td></tr>';
+      try {
+        const url = currentRepo ? `/api/sessions?repo=${encodeURIComponent(currentRepo)}` : '/api/sessions';
+        const res = await fetch(url);
+        const data = await res.json();
+        if (!data.sessions || !data.sessions.length) {
+          tbody.innerHTML = '<tr><td colspan="8" style="text-align: center; color: var(--text-muted);">当前工程暂无历史会话</td></tr>';
+          return;
+        }
+        tbody.innerHTML = data.sessions.map(s => `
+          <tr>
+            <td><code>${s.session_id.substring(0, 8)}...</code></td>
+            <td><span class="badge badge-git">${s.mode}</span></td>
+            <td><code>${s.range}</code></td>
+            <td>${s.files}</td>
+            <td><strong>${s.comments}</strong></td>
+            <td><span class="badge ${s.status === 'complete' ? 'badge-model' : 'badge-warning'}">${s.status}</span></td>
+            <td style="color: var(--text-muted);">${s.started}</td>
+            <td>
+              <a class="btn-link" onclick="viewSession('${s.session_id}')">查看结果</a>
+            </td>
+          </tr>
+        `).join('');
+      } catch (e) {
+        tbody.innerHTML = `<tr><td colspan="8" style="color: #f87171;">加载失败: ${e}</td></tr>`;
+      }
+    }
+
+    function viewSession(sid) {
+      document.querySelectorAll('.tab-btn')[1].click();
+      loadSessionDetail(sid);
+    }
+
+    async function loadLatestSession() {
+      try {
+        const url = currentRepo ? `/api/sessions?repo=${encodeURIComponent(currentRepo)}` : '/api/sessions';
+        const res = await fetch(url);
+        const data = await res.json();
+        if (data.sessions && data.sessions.length) {
+          loadSessionDetail(data.sessions[0].session_id);
+        } else {
+          document.getElementById('findings-container').innerHTML = `
+            <p style="color: var(--text-muted); font-size: 13px; text-align: center; padding: 30px;">
+              当前工程暂无审查数据，请先在「发起审查」标签中点击开始审查。
+            </p>
+          `;
+          document.getElementById('count-critical').textContent = 0;
+          document.getElementById('count-high').textContent = 0;
+          document.getElementById('count-medium').textContent = 0;
+          document.getElementById('count-low').textContent = 0;
+        }
+      } catch (e) {
+        console.error(e);
+      }
+    }
+
+    async function loadSessionDetail(sessionId) {
+      const container = document.getElementById('findings-container');
+      container.innerHTML = '<p style="color: var(--text-muted); padding: 20px; text-align: center;">加载缺陷详情中...</p>';
+      try {
+        const url = `/api/session_detail?id=${sessionId}${currentRepo ? '&repo=' + encodeURIComponent(currentRepo) : ''}`;
+        const res = await fetch(url);
+        const data = await res.json();
+        const comments = data.comments || [];
+
+        let critical = 0, high = 0, medium = 0, low = 0;
+        comments.forEach(c => {
+          const sev = (c.severity || '').toLowerCase();
+          if (sev === 'critical') critical++;
+          else if (sev === 'high') high++;
+          else if (sev === 'medium') medium++;
+          else low++;
+        });
+
+        document.getElementById('count-critical').textContent = critical;
+        document.getElementById('count-high').textContent = high;
+        document.getElementById('count-medium').textContent = medium;
+        document.getElementById('count-low').textContent = low;
+
+        document.getElementById('results-title').textContent = `会话 ${sessionId.substring(0, 8)}... 的审查结果 (共 ${comments.length} 条缺陷)`;
+
+        if (!comments.length) {
+          container.innerHTML = `
+            <div style="text-align: center; padding: 40px; color: #10b981;">
+              <div style="font-size: 36px; margin-bottom: 8px;">🎉</div>
+              <h3 style="font-size: 16px; font-weight: 600;">审查通过，未发现代码缺陷！</h3>
+              <p style="color: var(--text-muted); font-size: 13px; margin-top: 6px;">你的代码很整洁，符合安全与架构规则。</p>
+            </div>
+          `;
+          return;
+        }
+
+        container.innerHTML = comments.map(c => {
+          const sev = (c.severity || 'low').toLowerCase();
+          return `
+            <div class="finding-card">
+              <div class="finding-header">
+                <div>
+                  <span class="finding-file">${c.path}</span>
+                  <span style="color: var(--text-muted); font-size: 12px; margin-left: 8px;">Line ${c.start_line}${c.end_line !== c.start_line ? '-' + c.end_line : ''}</span>
+                </div>
+                <span class="finding-badge badge-${sev}">${c.category || 'DEFECT'} · ${sev}</span>
+              </div>
+              <div class="finding-desc">${escapeHtml(c.content)}</div>
+              ${c.existing_code ? `<pre class="finding-code"><code>${escapeHtml(c.existing_code)}</code></pre>` : ''}
+            </div>
+          `;
+        }).join('');
+      } catch (e) {
+        container.innerHTML = `<p style="color: #f87171; padding: 20px;">加载详情失败: ${e}</p>`;
+      }
+    }
+
+    function escapeHtml(str) {
+      return (str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+
+    async function saveConfig() {
+      const p = document.getElementById('cfg-provider-select').value;
+      const m = document.getElementById('cfg-model-input').value.trim();
+      const k = document.getElementById('cfg-key-input').value.trim();
+      const st = document.getElementById('save-cfg-status');
+      st.textContent = '保存中...';
+
+      const payload = { provider: p, model: m };
+      if (k) payload.api_key = k;
+
+      try {
+        const res = await fetch('/api/config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const d = await res.json();
+        st.textContent = '✅ 保存成功';
+        setTimeout(() => { st.textContent = ''; }, 3000);
+        fetchStatus();
+      } catch (e) {
+        st.textContent = '❌ 保存失败: ' + e;
+      }
+    }
+
+    function onProviderChange() {
+      const p = document.getElementById('cfg-provider-select').value;
+      const mInput = document.getElementById('cfg-model-input');
+      if (p === 'deepseek') mInput.value = 'deepseek-chat';
+      else if (p === 'dashscope') mInput.value = 'qwen-plus';
+      else if (p === 'openai') mInput.value = 'gpt-4o';
+      else if (p === 'anthropic') mInput.value = 'claude-3-5-sonnet-20241022';
+    }
+
+    // 初始化
+    fetchStatus();
+  </script>
+</body>
+</html>

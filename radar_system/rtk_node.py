@@ -1,670 +1,377 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-RK3588 CUAV C-RTK 2HP (Unicore UM982) 高精度卫星定位定向 ROS2 节点
-- 接口: /dev/ttyUSB0 (默认 921600 波特率)
-- 自动唤醒与配置和芯星通 UM982 (MODE ROVER, NMEA + BESTPOSA + HEADINGA)
-- 集成网络 CORS / NTRIP 客户端，直灌 RTCM3 差分数据包，实现厘米级 RTK 固定解
-- 实时发布:
-    1. /rtk/status (std_msgs/msg/String, JSON 格式，包含搜星数、双天线状态、CORS连接态、经纬度等)
-    2. /gps/fix (sensor_msgs/msg/NavSatFix, ROS 2 标准卫星导航消息)
-"""
+"""RTK 节点：独占 UM982 串口（雷迅 CUAV 双天线），发布测量和状态；有账号文件时跑 NTRIP 差分。
 
-import os
-import sys
-import time
+接收机可以接在车上的 USB 串口，也可以接在安卓平板的串口上：平板 app 把串口原始字节经 TCP 48622
+原样转过来（gnss_bridge.TabletSerialServer），或者走蓝牙 RFCOMM（gnss_bridge.BluetoothSerialServer，
+平板不用连车的 WiFi）。几路同时监听，正在出数据的那一路一直用下去，它 2 s 没数据才换另一路；几路的数据从不
+混在一起（换路时解析状态、钟差全部重来）。平板转来的数据（WiFi 或蓝牙）的差分由平板用同一个 CORS 账号自己连、
+直接写进平板串口，车端这时暂停自己的 CORS（同一账号两处登录会互相顶掉），换回 USB 再连。
+
+    /gnss/raw      std_msgs/String JSON，每条测量一条（fix / heading / vel，字段见 um982.Um982Stream）；
+                   时间是本机单调时钟的测量时刻，走直线节点（融合）用它
+    /gnss/status   std_msgs/String JSON，2 Hz：定位等级、卫星数、差分龄期、航向、各日志频率、NTRIP 状态；
+                   测向有效时 heading.yaw_deg 是双天线测出的车头方向（与 /gnss/heading 同一换算），否则为 null
+    /gnss/fix      sensor_msgs/NavSatFix，ANT1 位置（frame_id gnss），协方差 ENU 对角
+    /gnss/heading  sensor_msgs/Imu，只有车头方向（ENU，东为 0 逆时针），已扣 ~/rtk/fusion.json 里的安装偏差；
+                   航向无效时不发。后两个是 ROS 2 标准消息，Foxglove 地图、rviz2、rosbag、robot_localization 可直接用
+
+CORS 账号在 ~/rtk/ntrip.env（权限 600，由人手工创建，本节点只读、不打印密码）。没有账号文件时照常
+输出单点定位，状态里写明未配置差分。接收机的日志频率和基线配置记录见车上 ~/rtk/README.md。
+"""
+import argparse
 import json
 import math
-import socket
-import base64
+import os
+import signal
 import threading
-import serial
+import time
 
 import rclpy
 from rclpy.node import Node
+from rclpy.time import Time
+from sensor_msgs.msg import Imu, NavSatFix, NavSatStatus
 from std_msgs.msg import String
-from sensor_msgs.msg import NavSatFix, NavSatStatus
 
-PORT = "/dev/ttyUSB0"
-BAUD = 921600
-CORS_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cors_config.json")
+from um982 import RTK_FIXED, RTK_FLOAT, NtripClient, Um982Stream
+from ntrip_config import NtripReload
+import runtime_config  # bootstraps the release root for direct script launches
+from robot_core.service_watchdog import watchdog
+from gnss_bridge import BT_CHANNEL, TABLET_PORT, BluetoothSerialServer, TabletSerialServer
 
-def safe_float(v, default=0.0):
+DEFAULT_PORT = ('/dev/serial/by-id/usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_Controller_'
+                'b0d06fec6eabed1183a10e9aa7669f5d-if00-port0')
+DEFAULT_ENV = '~/rtk/ntrip.env'
+FUSION_CONFIG = '~/rtk/fusion.json'     # 标定（安装偏差）与走直线节点共用这一份
+# 只增加副天线 20 Hz 日志（与主天线 BESTPOS 同频，按测量时刻配对检查两天线距离），不清除已有输出、不写接收机闪存
+ANT2_LOG = b'BESTNAVHA 0.05\r\n'
+SOURCE_HOLD_S = 2.0                     # 正在用的一路（USB / 平板 WiFi / 平板蓝牙）这么久没数据才换另一路
+# 平板转来的几路（WiFi TCP、蓝牙）：差分由平板自己连 CORS，车端暂停自己的 CORS、不往这几路写改正数
+TABLET_SOURCES = ('tablet', 'bluetooth')
+
+# sensor_msgs/NavSatStatus 的取值（照 nmea_navsat_driver 的对应：单点 FIX、伪距差分 SBAS、RTK 浮点/固定 GBAS）
+NO_FIX, FIX, SBAS_FIX, GBAS_FIX = -1, 0, 1, 2
+SERVICES = 1 | 2 | 4 | 8               # GPS | GLONASS | 北斗(COMPASS) | Galileo
+DIAGONAL_KNOWN = 2
+UNKNOWN_VAR = 1e6                       # 横滚、俯仰不知道：给很大的方差
+
+
+def navsat_status(sol):
+    if sol in RTK_FIXED or sol in RTK_FLOAT:
+        return GBAS_FIX
+    if sol == 'PSRDIFF':
+        return SBAS_FIX
+    if sol == 'SINGLE':
+        return FIX
+    return NO_FIX
+
+
+def navsat_fix(m, stamp):
+    """/gnss/raw 的 fix 消息 → sensor_msgs/NavSatFix。"""
+    msg = NavSatFix()
+    msg.header.stamp, msg.header.frame_id = stamp, 'gnss'
+    msg.status = NavSatStatus(status=navsat_status(m['sol']), service=SERVICES)
+    msg.latitude, msg.longitude, msg.altitude = m['lat'], m['lon'], m['height']
+    msg.position_covariance = [m['sigma_e'] ** 2, 0.0, 0.0, 0.0, m['sigma_n'] ** 2, 0.0, 0.0, 0.0, m['sigma_u'] ** 2]
+    msg.position_covariance_type = DIAGONAL_KNOWN
+    return msg
+
+
+def heading_valid(m):
+    """Um982Stream 已按整周固定 + 基线长度范围判过测向（见 um982.heading_usable），这里只看它的结论。"""
+    return bool(m.get('valid'))
+
+
+def vehicle_yaw(heading_deg, mount_offset_deg=0.0, baseline_yaw_body_deg=-90.0):
+    """HEADING（ANT1→ANT2 方向，正北顺时针，度）→ 车头 ENU 偏航（弧度，−π…π）：
+    90° − HEADING − 基线在车体系的方向 + 安装偏差，与 gnss_fusion 的换算相同。"""
+    yaw = math.radians(90.0 - heading_deg - baseline_yaw_body_deg + mount_offset_deg)
+    return math.atan2(math.sin(yaw), math.cos(yaw))
+
+
+def heading_imu(m, stamp, mount_offset_deg=0.0, baseline_yaw_body_deg=-90.0):
+    """/gnss/raw 的 heading 消息 → 只带航向的 sensor_msgs/Imu（车头方向见 vehicle_yaw）。"""
+    yaw = vehicle_yaw(m['heading'], mount_offset_deg, baseline_yaw_body_deg)
+    msg = Imu()
+    msg.header.stamp, msg.header.frame_id = stamp, 'base_link'
+    msg.orientation.x = msg.orientation.y = 0.0
+    msg.orientation.z, msg.orientation.w = math.sin(yaw / 2.0), math.cos(yaw / 2.0)
+    var = math.radians(max(0.1, m['sigma_heading'])) ** 2
+    msg.orientation_covariance = [UNKNOWN_VAR, 0.0, 0.0, 0.0, UNKNOWN_VAR, 0.0, 0.0, 0.0, var]
+    msg.angular_velocity_covariance = [-1.0] + [0.0] * 8        # 不提供角速度、加速度
+    msg.linear_acceleration_covariance = [-1.0] + [0.0] * 8
+    return msg
+
+
+def load_heading_calibration(path=FUSION_CONFIG):
+    """从融合标定文件读安装偏差和基线方向；没有文件就用默认值。"""
     try:
-        return float(v)
-    except Exception:
-        return default
+        with open(os.path.expanduser(path), encoding='utf-8') as fh:
+            cfg = json.load(fh)
+        return float(cfg.get('mount_offset_deg', 0.0)), float(cfg.get('baseline_yaw_body_deg', -90.0))
+    except FileNotFoundError:
+        return 0.0, -90.0
 
-def safe_int(v, default=0):
-    try:
-        return int(v)
-    except Exception:
-        return default
 
-FIX_TYPE_MAP = {
-    0: "未定位 (无天线/搜星中)",
-    1: "单点定位 (3D SPS)",
-    2: "差分定位 (DGPS)",
-    4: "RTK 厘米级固定解 (Fixed)",
-    5: "RTK 浮点解 (Float)"
-}
-
-def classify_ant_fix(pos_type, sol_stat="SOL_COMPUTED", fix_quality=None, sats_used=0):
-    """
-    统一归纳为用户指定的严格三态：单点 / 浮点 / 固定 (以及未定位时的 搜星中)
-    """
-    p = str(pos_type or '').upper()
-    s = str(sol_stat or '').upper()
-    q = fix_quality if fix_quality is not None else 0
-
-    # 1. 固定解 (载波相位整周模糊度固定，含窄巷/宽巷/L1固定及GGA 4)
-    if (('INT' in p or 'FIX' in p or 'FIXED' in p or q == 4) and 'FLOAT' not in p):
-        return "固定"
-
-    # 2. 浮点解 (RTK Float，含窄巷/宽巷浮点及GGA 5)
-    if ('FLOAT' in p or q == 5):
-        return "浮点"
-
-    # 3. 单点定位 (SPS / PSRDIFF / SBAS / 单点粗定位及GGA 1, 2)
-    if ('SINGLE' in p or 'PSRDIFF' in p or 'SBAS' in p or 'SPS' in p or q in [1, 2] or (sats_used >= 4 and s == "SOL_COMPUTED")):
-        return "单点"
-
-    if sats_used >= 4:
-        return "单点"
-    return "搜星中"
-
-class RTKNode(Node):
-    def __init__(self):
+class RtkNode(Node):
+    def __init__(self, port, baud=921600, ntrip_env=DEFAULT_ENV, serial_factory=None, fusion_config=FUSION_CONFIG,
+                 tablet_port=None, bt_channel=None, bt_factory=None):
         super().__init__('rtk_node')
-        self.pub_status = self.create_publisher(String, '/rtk/status', 10)
-        self.pub_fix = self.create_publisher(NavSatFix, '/gps/fix', 10)
-
+        self.port, self.baud = port, baud
+        self.serial_factory = serial_factory
+        self.pub_raw = self.create_publisher(String, '/gnss/raw', 50)
+        self.pub_status = self.create_publisher(String, '/gnss/status', 1)
+        self.pub_fix = self.create_publisher(NavSatFix, '/gnss/fix', 10)
+        self.pub_heading = self.create_publisher(Imu, '/gnss/heading', 10)
+        try:
+            self.mount_offset_deg, self.baseline_yaw_body_deg = load_heading_calibration(fusion_config)
+        except (OSError, ValueError, TypeError) as exc:
+            self.mount_offset_deg, self.baseline_yaw_body_deg = 0.0, -90.0
+            self.get_logger().error('读不了标定文件 %s：%s（航向先不扣安装偏差）' % (fusion_config, exc))
+        self.stream = Um982Stream()
+        self.stream_lock = threading.Lock()
+        self.write_lock = threading.Lock()
         self.ser = None
+        self.port_error = None
+        self.source = None                  # 正在用的接收机数据：'usb' / 'tablet' / 'bluetooth'，还没收到过为 None
+        self.source_rx = {}                 # 每一路最后收到数据的时刻
         self.running = True
+        self.cors = NtripReload(ntrip_env, lambda env: NtripClient(env, self.gga_report, self.write_corrections))
+        # 平板串口转发（tablet_port=None 不监听；0 由系统分配端口，测试用）
+        self.tablet, self.tablet_error = None, None
+        if tablet_port is not None:
+            try:
+                self.tablet = TabletSerialServer(tablet_port, on_connect=self.tablet_connected)
+            except OSError as exc:          # 端口被占：只用 USB，状态里写明
+                self.tablet_error = '%s: %s' % (type(exc).__name__, exc)
+                self.get_logger().error('平板串口转发端口 %s 打不开：%s' % (tablet_port, exc))
+        # 平板蓝牙转发（bt_channel=None 不开；bt_factory 测试用，给一个不碰 BlueZ 的假服务）
+        self.bt = None
+        if bt_channel is not None:
+            factory = bt_factory or (lambda: BluetoothSerialServer(bt_channel, on_connect=self.bt_connected))
+            self.bt = factory()
+            if self.bt.error:
+                self.get_logger().error('平板蓝牙转发不可用：%s' % self.bt.error)
+        self.create_timer(0.5, self.publish_status)
+        self.reader = threading.Thread(target=self.read_loop, daemon=True)
+        self.reader.start()
+        if self.tablet is not None:
+            self.tablet_reader = threading.Thread(target=self.bridge_loop, args=(self.tablet, 'tablet'), daemon=True)
+            self.tablet_reader.start()
+        if self.bt is not None:
+            self.bt_reader = threading.Thread(target=self.bridge_loop, args=(self.bt, 'bluetooth'), daemon=True)
+            self.bt_reader.start()
 
-        self.data_lock = threading.Lock()
-        self.gsv_satellites = {} # prn -> {'az': az, 'el': el, 'snr': snr, 'ts': timestamp, 'sys': sys}
-        self.state = {
-            'connected': False,
-            'port': PORT,
-            'baud': BAUD,
-            'fix_quality': 0,
-            'fix_type_str': "未连接",
-            'sats_used': 0,
-            'sats_tracked': 0,
-            'sats_in_view': 0,
-            # 双天线 (左天线 ANT1 / 右天线 ANT2) 详细搜星解算指标
-            'ant1_used': 0,       # 主天线(左 ANT1) 参与解算卫星数
-            'ant1_tracked': 0,    # 主天线(左 ANT1) 跟踪卫星数
-            'ant2_used': 0,       # 辅天线(右 ANT2) 参与解算卫星数
-            'ant2_tracked': 0,    # 辅天线(右 ANT2) 跟踪卫星数
-            'heading_sats_common': 0, # 双天线共视定向卫星数
-            # 空间机体左右侧天空卫星分布 (相对于车身/雷达前方)
-            'sats_left': 0,       # 机体左侧天空可见卫星数 (方位 180°~360°)
-            'sats_right': 0,      # 机体右侧天空可见卫星数 (方位 0°~180°)
-            'satellites': [],     # 可见卫星天空极坐标列表
-            'lat': 0.0,
-            'lon': 0.0,
-            'alt': 0.0,
-            'hdop': 99.0,
-            'heading': 0.0,
-            'pitch': 0.0,
-            'baseline_m': 0.0,
-            'has_heading': False,
-            'heading_status': "未定向",
-            'speed_kmh': 0.0,
-            'sol_status': "INSUFFICIENT_OBS",
-            'pos_type': "NONE",
-            'sol_status2': "INSUFFICIENT_OBS",
-            'pos_type2': "NONE",
-            'ant1_fix': "搜星中",  # 用户指定三态：单点 / 浮点 / 固定
-            'ant2_fix': "搜星中",  # 用户指定三态：单点 / 浮点 / 固定
-            'raw_time': "",
-            'last_update': 0.0,
-            # CORS 网络差分客户端状态
-            'cors': {
-                'enabled': False,
-                'connected': False,
-                'status': "未启用",
-                'server': "",
-                'user': "",
-                'bytes_received': 0,
-                'rtcm_age': 99.0,
-                'rate_kbs': 0.0
-            }
-        }
-
-        self.last_raw_gga = ""
-        self.cors_socket = None
-        self.cors_reconnect_event = threading.Event()
-        self.cors_config = self.load_cors_config()
-        self.sub_cors_cmd = self.create_subscription(String, '/rtk/cors_cmd', self.cors_cmd_cb, 10)
-
-        # 启动后台读取线程
-        self.reader_thread = threading.Thread(target=self.serial_loop, daemon=True)
-        self.reader_thread.start()
-
-        # 启动后台 CORS / NTRIP 差分流注入线程
-        self.cors_thread = threading.Thread(target=self.cors_loop, daemon=True)
-        self.cors_thread.start()
-
-        # 1Hz 发布定时器
-        self.timer = self.create_timer(1.0, self.publish_status)
-        self.get_logger().info(f">>> [RTK Node] 启动成功，正在连接 {PORT} @ {BAUD}...")
-
+    # ---- 串口 ----
     def open_serial(self):
-        if self.ser:
-            try:
-                self.ser.close()
-            except Exception:
-                pass
-            self.ser = None
+        if self.serial_factory is not None:
+            return self.serial_factory()
+        import serial
+        return serial.Serial(self.port, self.baud, timeout=0.1)
 
-        if not os.path.exists(PORT):
-            return False
-
-        try:
-            ser = serial.Serial(PORT, BAUD, timeout=1.0)
-            ser.dtr = True
-            ser.rts = True
-            time.sleep(0.05)
-            ser.reset_input_buffer()
-
-            # 发送配置指令开启 NMEA 和 Unicore 格式数据 (含双天线主辅数据与多星座星历)
-            init_cmds = [
-                b"MODE ROVER\r\n",
-                b"LOG GNGGA ONTIME 1\r\n",
-                b"LOG GNRMC ONTIME 1\r\n",
-                b"LOG GNGSA ONTIME 1\r\n",
-                b"LOG GPGSV ONTIME 1\r\n",
-                b"LOG GBGSV ONTIME 1\r\n",
-                b"LOG GLGSV ONTIME 1\r\n",
-                b"LOG GAGSV ONTIME 1\r\n",
-                b"LOG HEADINGA ONTIME 1\r\n",
-                b"LOG BESTPOSA ONTIME 1\r\n",
-                b"LOG BESTPOS2A ONTIME 1\r\n",
-                b"SAVECONFIG\r\n"
-            ]
-            for cmd in init_cmds:
-                ser.write(cmd)
-                time.sleep(0.03)
-
-            self.ser = ser
-            with self.data_lock:
-                self.state['connected'] = True
-                self.state['fix_type_str'] = FIX_TYPE_MAP.get(self.state['fix_quality'], "搜星中")
-            self.get_logger().info(f">>> [RTK Node] 成功连接并配置 {PORT} @ {BAUD}")
-            return True
-        except Exception as e:
-            self.get_logger().warn(f"打开串口 {PORT} 失败: {e}", throttle_duration_sec=3.0)
-            return False
-
-    def load_cors_config(self):
-        if os.path.exists(CORS_CONFIG_PATH):
-            try:
-                with open(CORS_CONFIG_PATH, 'r', encoding='utf-8') as f:
-                    return json.load(f)
-            except Exception:
-                pass
-        return {
-            "enabled": False,
-            "server": "rtk.ntrip.qxwz.com",
-            "port": 8002,
-            "mountpoint": "AUTO",
-            "username": "",
-            "password": "",
-            "preset": "qxwz"
-        }
-
-    def cors_cmd_cb(self, msg):
-        self.get_logger().info(f">>> [CORS] 收到重载/连接指令: {msg.data}")
-        self.cors_config = self.load_cors_config()
-        if self.cors_socket:
-            try:
-                self.cors_socket.close()
-            except Exception:
-                pass
-            self.cors_socket = None
-        self.cors_reconnect_event.set()
-
-    def cors_loop(self):
-        time.sleep(2.0)
+    def read_loop(self):
+        # 读线程不能悄悄死掉：任何异常都写进状态（port_error）再重试，app 和日志里看得到
         while self.running:
-            cfg = self.cors_config
-            if not cfg.get('enabled') or not cfg.get('username'):
-                with self.data_lock:
-                    self.state['cors'] = {
-                        'enabled': False,
-                        'connected': False,
-                        'status': '未启用 (请配置CORS账号)',
-                        'server': f"{cfg.get('server', '')}:{cfg.get('port', 8002)}/{cfg.get('mountpoint', '')}",
-                        'user': cfg.get('username', ''),
-                        'bytes_received': 0,
-                        'rtcm_age': 99.0,
-                        'rate_kbs': 0.0
-                    }
-                time.sleep(1.5)
-                continue
-
-            host = cfg.get('server', '').strip()
-            port = int(cfg.get('port', 8002))
-            mount = cfg.get('mountpoint', '').strip().lstrip('/')
-            user = cfg.get('username', '').strip()
-            pwd = cfg.get('password', '').strip()
-
-            with self.data_lock:
-                self.state['cors'] = {
-                    'enabled': True,
-                    'connected': False,
-                    'status': f'正在连接 {host}:{port}...',
-                    'server': f"{host}:{port}/{mount}",
-                    'user': user,
-                    'bytes_received': 0,
-                    'rtcm_age': 99.0,
-                    'rate_kbs': 0.0
-                }
-
-            s = None
-            try:
-                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.settimeout(6.0)
-                s.connect((host, port))
-                self.cors_socket = s
-
-                # 发送 NTRIP HTTP GET 请求
-                auth = base64.b64encode(f"{user}:{pwd}".encode()).decode()
-                req = (
-                    f"GET /{mount} HTTP/1.1\r\n"
-                    f"Host: {host}:{port}\r\n"
-                    f"Ntrip-Version: Ntrip/2.0\r\n"
-                    f"User-Agent: NTRIP RK3588_RTK/2.0\r\n"
-                    f"Authorization: Basic {auth}\r\n"
-                    f"Accept: */*\r\n"
-                    f"Connection: close\r\n\r\n"
-                )
-                s.sendall(req.encode())
-
-                # 读取响应头 (处理 ICY 200 OK 或 HTTP/1.1 200 OK)
-                resp = b""
-                while b"\r\n\r\n" not in resp and b"\n\n" not in resp:
-                    chunk = s.recv(512)
-                    if not chunk:
-                        break
-                    resp += chunk
-
-                header_str = resp.decode('latin1', errors='ignore')
-                if "200 OK" not in header_str and "ICY 200" not in header_str:
-                    err_msg = "鉴权失败 (账号密码错误)" if "401" in header_str else "挂载点不存在 (404)" if "404" in header_str else "CORS 拒绝"
-                    self.get_logger().warn(f">>> [CORS] 连接失败: {err_msg} ({header_str[:50]})")
-                    with self.data_lock:
-                        self.state['cors']['status'] = f"失败: {err_msg}"
-                        self.state['cors']['connected'] = False
-                    s.close()
-                    self.cors_socket = None
-                    time.sleep(5.0)
-                    continue
-
-                self.get_logger().info(f">>> [CORS] 成功握手 {host}:{port}/{mount}，开始下发 RTCM3 差分流...")
-                with self.data_lock:
-                    self.state['cors']['status'] = "已连接 · 接收差分流"
-                    self.state['cors']['connected'] = True
-
-                s.settimeout(6.0)
-                last_gga_time = 0
-                total_bytes = 0
-                calc_time = time.time()
-                bytes_in_sec = 0
-                last_rtcm_ts = time.time()
-
-                while self.running and not self.cors_reconnect_event.is_set():
-                    now = time.time()
-                    # 1. 周期性上传本车坐标 (VRS 基站依赖本车位置下发临近差分数据，每 5 秒发送一次)
-                    if now - last_gga_time >= 5.0:
-                        raw_gga = self.last_raw_gga
-                        if raw_gga:
-                            try:
-                                s.sendall((raw_gga + "\r\n").encode())
-                                last_gga_time = now
-                            except Exception:
-                                break
-
-                    # 2. 接收 RTCM 差分包
-                    try:
-                        rtcm_chunk = s.recv(2048)
-                    except socket.timeout:
-                        continue
-                    except Exception:
-                        break
-
-                    if not rtcm_chunk:
-                        break
-
-                    # 3. 将 RTCM 二进制差分流直接灌入串口给 UM982 芯片解算
-                    if self.ser:
-                        try:
-                            self.ser.write(rtcm_chunk)
-                        except Exception:
-                            pass
-
-                    total_bytes += len(rtcm_chunk)
-                    bytes_in_sec += len(rtcm_chunk)
-                    last_rtcm_ts = now
-
-                    # 4. 计算速率与龄期
-                    if now - calc_time >= 1.0:
-                        rate_kbs = round(bytes_in_sec / (now - calc_time) / 1024.0, 1)
-                        bytes_in_sec = 0
-                        calc_time = now
-                        with self.data_lock:
-                            self.state['cors']['bytes_received'] = total_bytes
-                            self.state['cors']['rate_kbs'] = rate_kbs
-                            self.state['cors']['rtcm_age'] = round(now - last_rtcm_ts, 1)
-                            self.state['cors']['status'] = f"差分流注入中 ({rate_kbs} KB/s)"
-                            self.state['cors']['connected'] = True
-
-            except Exception as e:
-                self.get_logger().warn(f">>> [CORS] 异常: {e}")
-                with self.data_lock:
-                    self.state['cors']['status'] = f"连接断开: {e}"
-                    self.state['cors']['connected'] = False
-            finally:
-                if s:
-                    try:
-                        s.close()
-                    except Exception:
-                        pass
-                self.cors_socket = None
-                self.cors_reconnect_event.clear()
-
-            time.sleep(3.0)
-
-    def parse_lat_lon(self, val, direction):
-        if not val or not direction:
-            return 0.0
-        try:
-            deg_len = 2 if direction in ["N", "S"] else 3
-            deg = float(val[:deg_len])
-            minute = float(val[deg_len:])
-            res = deg + minute / 60.0
-            if direction in ["S", "W"]:
-                res = -res
-            return res
-        except Exception:
-            return 0.0
-
-    def serial_loop(self):
-        while self.running:
-            if not self.ser:
-                if not self.open_serial():
-                    with self.data_lock:
-                        self.state['connected'] = False
-                        self.state['fix_type_str'] = "未连接设备"
-                    time.sleep(1.0)
-                    continue
-
-            try:
-                line_b = self.ser.readline()
-                if not line_b:
-                    continue
-                line = line_b.decode(errors="replace").strip()
-                if not line:
-                    continue
-
-                now = time.time()
-
+            watchdog.tick("serial")
+            if self.ser is None:
                 try:
-                    # 1. 解析 $GNGGA
-                    if line.startswith("$GNGGA") or line.startswith("$GPGGA"):
-                        self.last_raw_gga = line
-                        parts = line.split("*")[0].split(",")
-                        if len(parts) >= 10:
-                            raw_time = parts[1]
-                            lat = self.parse_lat_lon(parts[2], parts[3])
-                            lon = self.parse_lat_lon(parts[4], parts[5])
-                            q = safe_int(parts[6], 0)
-                            sats = safe_int(parts[7], 0)
-                            hdop = safe_float(parts[8], 99.0)
-                            alt = safe_float(parts[9], 0.0)
-
-                            with self.data_lock:
-                                self.state['raw_time'] = raw_time
-                                self.state['fix_quality'] = q
-                                self.state['fix_type_str'] = FIX_TYPE_MAP.get(q, f"解算模式({q})")
-                                if sats > 0:
-                                    self.state['sats_used'] = sats
-                                self.state['hdop'] = hdop
-                                if q > 0 and (lat != 0 or lon != 0):
-                                    self.state['lat'] = lat
-                                    self.state['lon'] = lon
-                                    self.state['alt'] = alt
-                                self.state['last_update'] = now
-
-                    # 2. 解析 $GNRMC
-                    elif line.startswith("$GNRMC") or line.startswith("$GPRMC"):
-                        parts = line.split("*")[0].split(",")
-                        if len(parts) >= 9:
-                            spd_knots = safe_float(parts[7], 0.0)
-                            spd_kmh = round(spd_knots * 1.852, 1)
-                            with self.data_lock:
-                                self.state['speed_kmh'] = spd_kmh
-
-                    # 3. 解析 GSV (包含北斗GBGSV、GPS GPGSV、GLONASS GLGSV、Galileo GAGSV等天空方位与仰角)
-                    elif line.startswith(("$GPGSV", "$GBGSV", "$GLGSV", "$GAGSV", "$GQGSV", "$BDGSV")):
-                        parts = line.split("*")[0].split(",")
-                        if len(parts) >= 4:
-                            sys_prefix = parts[0][1:3]
-                            idx = 4
-                            while idx + 3 < len(parts):
-                                sat_id = parts[idx].strip()
-                                if sat_id:
-                                    prn = f"{sys_prefix}{sat_id}"
-                                    el = safe_float(parts[idx+1], 0.0)
-                                    az = safe_float(parts[idx+2], 0.0)
-                                    snr = safe_float(parts[idx+3], 0.0)
-                                    self.gsv_satellites[prn] = {
-                                        'prn': prn,
-                                        'sys': sys_prefix,
-                                        'el': el,
-                                        'az': az,
-                                        'snr': snr,
-                                        'ts': now
-                                    }
-                                idx += 4
-
-                    # 4. 解析 #BESTPOSA (主天线 / 左天线 ANT1 实时定位与搜星)
-                    elif line.startswith("#BESTPOSA"):
-                        if ";" in line:
-                            body = line.split(";")[1].split("*")[0].split(",")
-                            if len(body) >= 15:
-                                sol_stat = body[0]
-                                pos_type = body[1]
-                                b_lat = safe_float(body[2], 0.0)
-                                b_lon = safe_float(body[3], 0.0)
-                                b_hgt = safe_float(body[4], 0.0)
-                                tracked = safe_int(body[13], 0)
-                                used = safe_int(body[14], 0)
-                                with self.data_lock:
-                                    self.state['sol_status'] = sol_stat
-                                    self.state['pos_type'] = pos_type
-                                    if tracked > 0:
-                                        self.state['sats_tracked'] = tracked
-                                        self.state['ant1_tracked'] = tracked
-                                    if used > 0:
-                                        self.state['sats_used'] = used
-                                        self.state['ant1_used'] = used
-                                    if sol_stat == "SOL_COMPUTED" and (b_lat != 0 or b_lon != 0):
-                                        self.state['lat'] = b_lat
-                                        self.state['lon'] = b_lon
-                                        self.state['alt'] = b_hgt
-                                        if self.state['fix_quality'] == 0:
-                                            self.state['fix_quality'] = 1
-                                            self.state['fix_type_str'] = "单点定位 (3D SPS)"
-
-                    # 5. 解析 #BESTPOS2A (辅天线 / 右天线 ANT2 实时搜星与解算)
-                    elif line.startswith("#BESTPOS2A"):
-                        if ";" in line:
-                            body = line.split(";")[1].split("*")[0].split(",")
-                            if len(body) >= 15:
-                                sol_stat2 = body[0]
-                                pos_type2 = body[1]
-                                tracked2 = safe_int(body[13], 0)
-                                used2 = safe_int(body[14], 0)
-                                with self.data_lock:
-                                    self.state['sol_status2'] = sol_stat2
-                                    self.state['pos_type2'] = pos_type2
-                                    if tracked2 > 0:
-                                        self.state['ant2_tracked'] = tracked2
-                                    if used2 > 0:
-                                        self.state['ant2_used'] = used2
-
-                    # 6. 解析 #HEADINGA (双天线基线长度、相对航向与共视卫星)
-                    elif line.startswith("#HEADINGA"):
-                        if ";" in line:
-                            hbody = line.split(";")[1].split("*")[0].split(",")
-                            if len(hbody) >= 12:
-                                h_stat = hbody[0]
-                                h_pos = hbody[1]
-                                length = safe_float(hbody[2], 0.0)
-                                heading = safe_float(hbody[3], 0.0)
-                                pitch = safe_float(hbody[4], 0.0)
-                                common_sats = safe_int(hbody[10], 0)
-                                with self.data_lock:
-                                    self.state['baseline_m'] = length
-                                    self.state['heading'] = heading
-                                    self.state['pitch'] = pitch
-                                    self.state['heading_type'] = h_pos
-                                    if common_sats > 0:
-                                        self.state['heading_sats_common'] = common_sats
-                                    if h_stat == "SOL_COMPUTED" and heading > 0:
-                                        self.state['has_heading'] = True
-                                        self.state['heading_status'] = f"已锁定 {heading:.1f}° ({h_pos})"
-                                    else:
-                                        self.state['has_heading'] = False
-                                        self.state['heading_status'] = "未锁定 (搜星中)"
-                except Exception as parse_err:
-                    pass
-
-            except (serial.SerialException, OSError) as exc:
-                self.get_logger().warn(f"串口物理断开或读取异常: {exc}, 正在重连...")
-                if self.ser:
+                    ser = self.open_serial()
+                    with self.write_lock:
+                        ser.write(ANT2_LOG)
+                        self.ser = ser
+                    self.port_error = None
+                except Exception as exc:        # 串口不存在、没权限、pyserial 没装……
+                    self.port_error = '%s: %s' % (type(exc).__name__, exc)
+                    time.sleep(2.0)
+                    continue
+            try:
+                data = self.ser.read(4096)
+            except Exception as exc:
+                # USB 掉线：关掉重开，状态里报出来
+                self.port_error = '%s: %s' % (type(exc).__name__, exc)
+                with self.write_lock:
                     try:
                         self.ser.close()
                     except Exception:
                         pass
                     self.ser = None
-                time.sleep(1.0)
+                continue
+            if data:
+                try:
+                    self.on_serial_data(data, time.monotonic())
+                except Exception as exc:        # 解析或发布出了意外：丢掉这一块数据，记下来，接着读
+                    self.port_error = 'data: %s: %s' % (type(exc).__name__, exc)
+                    self.get_logger().error('处理串口数据出错：%r' % exc)
+
+    # ---- 平板串口转发 ----
+    def tablet_connected(self):
+        # 单向：车不往平板写。副天线日志（BESTNAVHA）由平板 app 按串口带宽自己补（平板串口 115200，
+        # 照 USB 那样固定发 20 Hz 会把串口挤满）；差分由平板自己连 CORS
+        self.get_logger().info('平板串口转发已连接：%s' % self.tablet.peer)
+
+    def bt_connected(self):
+        self.get_logger().info('平板蓝牙转发已连接：%s' % self.bt.peer)
+
+    def bridge_loop(self, bridge, source):
+        """平板转来的一路（WiFi 'tablet' / 蓝牙 'bluetooth'）的读线程。"""
+        while self.running:
+            watchdog.tick(source)
+            try:
+                data = bridge.read(4096)
+            except Exception as exc:        # 不让读线程悄悄死掉
+                self._bridge_error(source, '%s: %s' % (type(exc).__name__, exc))
+                time.sleep(0.5)
+                continue
+            if data:
+                try:
+                    self.on_serial_data(data, time.monotonic(), source)
+                except Exception as exc:
+                    self._bridge_error(source, 'data: %s: %s' % (type(exc).__name__, exc))
+                    self.get_logger().error('处理平板%s数据出错：%r' % ('蓝牙' if source == 'bluetooth' else '串口', exc))
+
+    def _bridge_error(self, source, text):
+        if source == 'bluetooth':
+            self.bt.error = text
+        else:
+            self.tablet_error = text
+
+    def on_serial_data(self, data, t_rx, source='usb'):
+        # 不能叫 handle：会遮住 rclpy.Node.handle，Node.__init__ 里 `with self.handle:` 就崩了
+        with self.stream_lock:
+            self.source_rx[source] = t_rx
+            if source != self.source:
+                last = self.source_rx.get(self.source)
+                if last is not None and t_rx - last < SOURCE_HOLD_S:
+                    return                  # 另一路正在出数据：两台接收机（或同一台的两个口）不混用
+                if self.source is not None:
+                    self.get_logger().warning('接收机数据来源 %s → %s' % (self.source, source))
+                self.source = source
+                self.stream = Um982Stream()     # 换一路：钟差、两天线配对、上一条测量全部重来
+            messages = self.stream.feed(data, t_rx)
+        for m in messages:
+            self.pub_raw.publish(String(data=json.dumps(m, allow_nan=False)))
+            if m['kind'] == 'fix':
+                self.pub_fix.publish(navsat_fix(m, self.stamp(m['t'])))
+            elif m['kind'] == 'heading' and heading_valid(m):
+                self.pub_heading.publish(heading_imu(m, self.stamp(m['t']), self.mount_offset_deg,
+                                                     self.baseline_yaw_body_deg))
+
+    def stamp(self, t_meas):
+        """单调时钟的测量时刻 → ROS 时间戳（标准消息的 header 用，和其他节点的时间一致）。"""
+        age_ns = int(max(0.0, time.monotonic() - t_meas) * 1e9)
+        return Time(nanoseconds=self.get_clock().now().nanoseconds - age_ns).to_msg()
+
+    def gga_report(self):
+        with self.stream_lock:
+            return self.stream.gga_report()
+
+    def write_corrections(self, data):
+        # 车端 CORS 只给 USB 上的接收机；平板转来的几路由平板自己连 CORS（这时车端 CORS 已暂停）
+        if self.source in TABLET_SOURCES:
+            return
+        with self.write_lock:
+            if self.ser is not None:
+                try:
+                    self.ser.write(data)
+                except OSError as exc:
+                    self.port_error = str(exc)
+
+    # ---- 状态 ----
+    def status(self, now=None):
+        now = time.monotonic() if now is None else now
+        with self.stream_lock:
+            st = self.stream.status(now)
+            hd = self.stream.last.get('heading')
+        if st.get('heading') is not None:
+            # 双天线测出的车头方向（ENU 度，已扣安装偏差）：只在测向有效时给，无效时的数不能拿来显示
+            ok = st['heading'].get('valid') and hd is not None and heading_valid(hd)
+            st['heading']['yaw_deg'] = round(math.degrees(vehicle_yaw(
+                hd['heading'], self.mount_offset_deg, self.baseline_yaw_body_deg)), 2) if ok else None
+        tablet = self.tablet.status() if self.tablet is not None else None
+        bt = self.bt.status() if self.bt is not None else None
+        st['source'] = self.source
+        if self.source == 'tablet':
+            st['port_open'] = bool(tablet and tablet['connected'])
+            st['port_error'] = None if st['port_open'] else 'tablet disconnected'
+        elif self.source == 'bluetooth':
+            st['port_open'] = bool(bt and bt['connected'])
+            st['port_error'] = None if st['port_open'] else 'bluetooth disconnected'
+        else:
+            st['port_open'] = self.ser is not None
+            st['port_error'] = self.port_error
+        st['usb'] = dict(open=self.ser is not None, error=self.port_error)
+        st['tablet'] = dict(listening=tablet is not None, error=self.tablet_error,
+                            **(tablet or dict(port=None, connected=False, peer=None)))
+        st['bluetooth'] = dict(listening=bt is not None,
+                               **(bt or dict(channel=None, registered=False, connected=False, peer=None, error=None)))
+        if self.cors.client is not None:
+            n = self.cors.client.status()
+            st['ntrip'] = dict(configured=True, connected=n['connected'], mount=n['mount'],
+                               bytes=n['bytes'], rtcm_types=n['rtcm_types'], error=n['error'],
+                               age_s=None if n['last_rx'] is None else round(now - n['last_rx'], 1))
+        else:
+            st['ntrip'] = dict(configured=self.cors.configured, connected=False, error=self.cors.error)
+        st['ntrip']['enabled'] = self.cors.enabled
+        st['ntrip']['config_revision'] = self.cors.applied_revision
+        st['ntrip']['config_error'] = self.cors.error
+        st['ntrip']['paused'] = self.cors.paused
+        return st
+
+    def sync_cors(self):
+        """数据来自平板（WiFi 或蓝牙）时暂停车端 CORS（平板自己连），换回 USB（或还没数据）时恢复。"""
+        if self.source in TABLET_SOURCES:
+            self.cors.pause('tablet')
+        else:
+            self.cors.resume()
 
     def publish_status(self):
-        now = time.time()
-        # 统计分析当前可见卫星的天空左右分布情况 (相对于航向)
-        with self.data_lock:
-            hdg = self.state.get('heading', 0.0) or 0.0
+        self.sync_cors()
+        self.cors.poll()
+        self.pub_status.publish(String(data=json.dumps(self.status(), allow_nan=False)))
 
-        # 清理 6 秒未刷新的旧星历数据
-        stale_keys = [k for k, v in self.gsv_satellites.items() if now - v['ts'] > 6.0]
-        for k in stale_keys:
-            del self.gsv_satellites[k]
-
-        active_sats = list(self.gsv_satellites.values())
-        left_count = 0
-        right_count = 0
-        sat_list = []
-
-        for s in active_sats:
-            # 相对航向角的方位角：0°为正前方(顺时针)
-            rel_az = (s['az'] - hdg) % 360.0
-            # 0°~180° 为机体右侧天空，180°~360° 为机体左侧天空
-            is_right = (0.0 < rel_az < 180.0)
-            side = 'right' if is_right else 'left'
-            if is_right:
-                right_count += 1
-            else:
-                left_count += 1
-
-            sat_list.append({
-                'prn': s['prn'],
-                'sys': s['sys'],
-                'az': round(s['az'], 1),
-                'el': round(s['el'], 1),
-                'snr': round(s['snr'], 1),
-                'rel_az': round(rel_az, 1),
-                'side': side
-            })
-
-        with self.data_lock:
-            # 计算左右天线独立的固定情况：单点 / 浮点 / 固定
-            ant1_pos = self.state.get('pos_type', '')
-            ant1_sol = self.state.get('sol_status', '')
-            ant1_used = self.state.get('ant1_used', 0)
-            fix_q = self.state.get('fix_quality', 0)
-            ant1_fix = classify_ant_fix(ant1_pos, ant1_sol, fix_q, ant1_used)
-
-            ant2_pos = self.state.get('pos_type2', '')
-            ant2_sol = self.state.get('sol_status2', '')
-            ant2_used = self.state.get('ant2_used', 0)
-            heading_type = self.state.get('heading_type', '')
-            if ant2_pos and ant2_pos != "NONE":
-                ant2_fix = classify_ant_fix(ant2_pos, ant2_sol, None, ant2_used)
-            else:
-                ant2_fix = classify_ant_fix(heading_type, "SOL_COMPUTED" if self.state.get('has_heading') else "", None, ant2_used)
-
-            self.state['ant1_fix'] = ant1_fix
-            self.state['ant2_fix'] = ant2_fix
-
-            if len(active_sats) > 0:
-                self.state['sats_in_view'] = len(active_sats)
-            self.state['sats_left'] = left_count
-            self.state['sats_right'] = right_count
-            self.state['satellites'] = sat_list
-            payload = dict(self.state)
-
-        # 1. 发布 JSON 状态
-        msg_str = String()
-        msg_str.data = json.dumps(payload, ensure_ascii=False)
-        self.pub_status.publish(msg_str)
-
-        # 2. 发布 ROS 2 NavSatFix 格式消息
-        fix_msg = NavSatFix()
-        fix_msg.header.stamp = self.get_clock().now().to_msg()
-        fix_msg.header.frame_id = "gps"
-        if payload['fix_quality'] > 0:
-            fix_msg.status.status = NavSatStatus.STATUS_FIX if payload['fix_quality'] == 1 else NavSatStatus.STATUS_GBAS_FIX
-        else:
-            fix_msg.status.status = NavSatStatus.STATUS_NO_FIX
-        fix_msg.status.service = NavSatStatus.SERVICE_GPS
-
-        fix_msg.latitude = payload['lat']
-        fix_msg.longitude = payload['lon']
-        fix_msg.altitude = payload['alt']
-        fix_msg.position_covariance_type = NavSatFix.COVARIANCE_TYPE_APPROXIMATED
-        self.pub_fix.publish(fix_msg)
-
-    def destroy_node(self):
+    def shutdown(self):
         self.running = False
-        if self.cors_socket:
-            try:
-                self.cors_socket.close()
-            except Exception:
-                pass
-            self.cors_socket = None
-        if self.ser:
-            try:
-                self.ser.close()
-            except Exception:
-                pass
-        super().destroy_node()
+        self.cors.stop()
+        if self.tablet is not None:
+            self.tablet.close()
+        if self.bt is not None:
+            self.bt.close()
 
 
-def main(args=None):
-    rclpy.init(args=args)
-    node = RTKNode()
+def main():
+    p = argparse.ArgumentParser(description='UM982 RTK 节点')
+    p.add_argument('--port', default=os.environ.get('RK3588_RTK_PORT', DEFAULT_PORT))
+    p.add_argument('--baud', type=int, default=921600)
+    p.add_argument('--ntrip-env', default=os.environ.get('RK3588_NTRIP_ENV', DEFAULT_ENV))
+    p.add_argument('--tablet-port', type=int, default=int(os.environ.get('RK3588_RTK_TABLET_PORT', TABLET_PORT)),
+                   help='平板串口转发的 TCP 端口，0 不监听')
+    p.add_argument('--bt-channel', type=int, default=int(os.environ.get('RK3588_RTK_BT_CHANNEL', BT_CHANNEL)),
+                   help='平板蓝牙转发的 RFCOMM 通道，0 不开')
+    argv = __import__('sys').argv[1:]
+    args = p.parse_args(argv[:argv.index('--ros-args')] if '--ros-args' in argv else argv)
+    rclpy.init()
+    node = RtkNode(args.port, args.baud, args.ntrip_env, tablet_port=args.tablet_port or None,
+                   bt_channel=args.bt_channel or None)
+    watchdog.start("ros", "serial", *(("tablet",) if node.tablet is not None else ()),
+                   *(("bluetooth",) if node.bt is not None else ()))
+    node.create_timer(0.5, lambda: watchdog.tick("ros"))
+
+    def on_signal(_sig=None, _frame=None):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGINT, on_signal)
+    signal.signal(signal.SIGTERM, on_signal)
     try:
         rclpy.spin(node)
-    except (KeyboardInterrupt, rclpy.executors.ExternalShutdownException):
+    except KeyboardInterrupt:
         pass
-    node.destroy_node()
-    if rclpy.ok():
-        rclpy.shutdown()
+    finally:
+        watchdog.close()
+        node.shutdown()
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+
 
 if __name__ == '__main__':
     main()

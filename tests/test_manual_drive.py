@@ -25,12 +25,56 @@ class TestManualDriveLatch(unittest.TestCase):
         self.assertEqual(latch.sample(now=1.2), (0.0, 0.0, False, True))
         self.assertEqual(latch.sample(now=1.22), (0.0, 0.0, False, False))
 
+    def test_differential_turn_in_place_is_a_move(self):
+        """差速车:车速 0、角速度不为 0 是原地转,不能当成停车清掉(原来会插一帧零速,把手动打回空闲)。"""
+        latch = ManualDriveLatch(timeout_s=0.75, allow_pivot=True)
+        latch.set(0.0, 0.6, now=1.0)
+        self.assertEqual(latch.sample(now=1.02), (0.0, 0.6, True, False))
+        self.assertTrue(latch.accept("page", 5, 0.0, 0.6))
+        self.assertFalse(latch.accept("page", 4, 0.0, 0.6))    # 迟到的原地转也丢
+        latch.set(0.0, 0.0, now=1.1)
+        self.assertEqual(latch.sample(now=1.1), (0.0, 0.0, False, True))
+
+    def test_straight_run_id_rides_with_the_speed(self):
+        """IMU 定向直行:latch 里带作业编号,停车、超时都清掉;摇杆指令不带。"""
+        latch = ManualDriveLatch(timeout_s=0.75)
+        latch.set(0.4, 0.0, now=1.0, hold=("app-1", 3))
+        self.assertEqual(latch.sample_hold(now=1.02), (0.4, 0.0, True, False, ("app-1", 3)))
+        self.assertEqual(latch.sample(now=1.04), (0.4, 0.0, True, False))
+        latch.set(0.3, 0.1, now=1.1)
+        self.assertIsNone(latch.sample_hold(now=1.12)[4])
+        latch.set(0.4, 0.0, now=2.0, hold=("app-1", 4))
+        self.assertEqual(latch.sample_hold(now=2.8), (0.0, 0.0, False, True, None))
+        latch.set(0.4, 0.0, now=3.0, hold=("app-1", 5))
+        latch.set(0.0, 0.0, now=3.1, hold=("app-1", 5))
+        self.assertEqual(latch.sample_hold(now=3.1), (0.0, 0.0, False, True, None))
+
     def test_watchdog_expires_to_one_zero_frame(self):
         latch = ManualDriveLatch(timeout_s=0.75)
         latch.set(0.30, 0.0, now=2.0)
         self.assertTrue(latch.sample(now=2.75)[2])
         self.assertEqual(latch.sample(now=2.751), (0.0, 0.0, False, True))
         self.assertEqual(latch.sample(now=2.80), (0.0, 0.0, False, False))
+
+    def test_late_move_after_newer_command_is_dropped(self):
+        """网络乱序:seq=5 的前进晚于 seq=6 的刹车到达,不能再把车开起来。"""
+        latch = ManualDriveLatch(timeout_s=0.75)
+        self.assertTrue(latch.accept("page", 6, 0.0, 0.0))
+        self.assertFalse(latch.accept("page", 5, 0.85, 0.0))
+        self.assertFalse(latch.accept("page", 6, 0.85, 0.0))
+        self.assertTrue(latch.accept("page", 7, 0.85, 0.0))
+
+    def test_late_stop_is_still_applied(self):
+        """迟到的刹车宁可多停一下,也不丢弃。"""
+        latch = ManualDriveLatch(timeout_s=0.75)
+        self.assertTrue(latch.accept("page", 9, 0.85, 0.0))
+        self.assertTrue(latch.accept("page", 8, 0.0, 0.0))
+
+    def test_sessions_and_legacy_clients_are_independent(self):
+        latch = ManualDriveLatch(timeout_s=0.75)
+        self.assertTrue(latch.accept("phone", 100, 0.5, 0.0))
+        self.assertTrue(latch.accept("screen", 1, 0.5, 0.0))
+        self.assertTrue(latch.accept(None, None, 0.5, 0.0))
 
 
 if __name__ == "__main__":
