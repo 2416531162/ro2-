@@ -3,7 +3,9 @@
 """车的 WiFi 用哪种方式：连现场 WiFi（client，路由器或手机热点），或车自己发热点（hotspot）。
 
 做法参考 SWOZI 划线机器人：车自己发热点时热点名固定格式（RTKCAR-XX-XX，取网卡 MAC 末两字节）、
-密码固定、车的地址固定（192.168.42.1），平板不用到处找车；平板差分自己用 4G 连 CORS，不经过车。
+每辆车一个固定密码、车的地址固定（192.168.42.1），平板不用到处找车；平板差分自己用 4G 连 CORS，不经过车。
+密码不写在代码里（仓库是公开的）：运行环境 RTK_HOTSPOT_PSK 设了就用它；没设就沿用车上已有热点配置的密码；
+都没有（新车第一次建热点）随机生成一个，存在 NetworkManager 的配置里。app 从 hello.network 拿到密码。
 
 切换由 app 一条指令触发（radar_web_server 的 ``network`` 指令），用 NetworkManager（nmcli）：
 - 车热点是一个单独的连接配置 ``rtk-car-hotspot``（没有就建）。切到热点：打开它的自动连接、启用它；
@@ -17,6 +19,7 @@
 """
 import os
 import re
+import secrets
 import threading
 import time
 
@@ -24,8 +27,9 @@ import subprocess
 
 HOTSPOT_CON = 'rtk-car-hotspot'
 HOTSPOT_PREFIX = 'RTKCAR'
-# 热点密码固定（与 SWOZI 一样写死，平板不用输）；现场要换就在运行环境里设 RTK_HOTSPOT_PSK（至少 8 位）
-HOTSPOT_PSK = os.environ.get('RTK_HOTSPOT_PSK') or '12345678'
+# 热点密码：运行环境 RTK_HOTSPOT_PSK（8–63 个可见 ASCII 字符），见模块说明
+HOTSPOT_PSK_ENV = 'RTK_HOTSPOT_PSK'
+PSK_ALPHABET = 'abcdefghjkmnpqrstuvwxyz23456789'     # 随机密码不用 i l o 0 1，平板上照着输不会认错
 HOTSPOT_IP = '192.168.42.1'
 HOTSPOT_PREFIX_LEN = 24
 # 只用 WPA2-CCMP、关掉受保护管理帧：NetworkManager 默认会同时广播 WPA/TKIP 和 PSK-SHA256，
@@ -38,6 +42,30 @@ HOTSPOT_SECURITY = ['wifi-sec.proto', 'rsn', 'wifi-sec.pairwise', 'ccmp', 'wifi-
 HOTSPOT_BAND = os.environ.get('RTK_HOTSPOT_BAND') or 'a'
 HOTSPOT_CHANNEL = int(os.environ.get('RTK_HOTSPOT_CHANNEL') or (36 if HOTSPOT_BAND == 'a' else 0))
 FALLBACK_BAND = ['802-11-wireless.band', 'bg', '802-11-wireless.channel', '0']
+
+
+def valid_psk(psk):
+    """WPA2 口令：8–63 个可见 ASCII 字符。
+
+    >>> valid_psk('abcd1234'), valid_psk('short'), valid_psk(None), valid_psk('含中文的密码abc')
+    (True, False, False, False)
+    """
+    return isinstance(psk, str) and 8 <= len(psk) <= 63 and all(32 <= ord(c) < 127 for c in psk)
+
+
+def configured_psk(environ=None):
+    """运行环境里设的热点密码；没设或不合规为 None。"""
+    psk = (os.environ if environ is None else environ).get(HOTSPOT_PSK_ENV)
+    return psk if valid_psk(psk) else None
+
+
+def random_psk(length=10):
+    """新车第一次建热点用的随机密码。
+
+    >>> p = random_psk(); len(p), valid_psk(p), set(p) <= set(PSK_ALPHABET)
+    (10, True, True)
+    """
+    return ''.join(secrets.choice(PSK_ALPHABET) for _ in range(length))
 
 
 def band_settings(band=None, channel=None):
@@ -115,7 +143,7 @@ class CarNetwork:
     """车的 WiFi 方式和切换。status() 给遥测 / 车载屏幕，request() 给 app 指令，tick() 每秒调一次。"""
 
     def __init__(self, *, nmcli=run_nmcli, app_joined=None, clock=time.monotonic,
-                 read_mac=None, delay_s=SWITCH_DELAY_S, revert_s=REVERT_S, spawn=None):
+                 read_mac=None, delay_s=SWITCH_DELAY_S, revert_s=REVERT_S, spawn=None, psk=None):
         self.nmcli = nmcli
         # 平板一共连上来过几次（只增不减，car_display.Sessions.joined）：切换后比切换时多了才算新连上
         self.app_joined = app_joined or (lambda: 0)
@@ -133,6 +161,9 @@ class CarNetwork:
         self.error = None         # 上一次切换失败的原因（给 app 看）
         self.last_switch = None   # 上一次切换的结果说明
         self.fallback = None      # 5 GHz 热点起不来、退回 2.4 GHz 的原因
+        # 热点密码：设了的（参数 / 运行环境）一定用它；没设时第一次用到再定（沿用车上已有配置的，没有就随机）
+        self.configured_psk = psk if valid_psk(psk) else configured_psk()
+        self.psk = self.configured_psk
 
     # ---- 查 ----
     def refresh(self):
@@ -167,8 +198,21 @@ class CarNetwork:
 
     def hotspot_info(self):
         """hello 里告诉 app：车热点的名字、密码、车的地址，app 用来帮平板连上热点。"""
+        psk = self.hotspot_psk()
         with self._lock:
-            return {'hotspot_ssid': self.hotspot, 'hotspot_psk': HOTSPOT_PSK, 'hotspot_ip': HOTSPOT_IP}
+            return {'hotspot_ssid': self.hotspot, 'hotspot_psk': psk, 'hotspot_ip': HOTSPOT_IP}
+
+    def hotspot_psk(self):
+        """车热点用的密码：设了的；没设就沿用车上已有热点配置的；都没有随机生成一个（建热点时写进配置）。"""
+        with self._lock:
+            if self.psk is not None:
+                return self.psk
+        ok, out = self.nmcli(['-s', '-g', '802-11-wireless-security.psk', 'con', 'show', HOTSPOT_CON], timeout=5)
+        existing = _unescape((out or '').strip().splitlines()[0]) if ok and (out or '').strip() else None
+        with self._lock:
+            if self.psk is None:
+                self.psk = existing if valid_psk(existing) else random_psk()
+            return self.psk
 
     # ---- 切 ----
     def request(self, mode):
@@ -247,14 +291,14 @@ class CarNetwork:
         ssid = hotspot_ssid(self.read_mac(dev))
         if ok and HOTSPOT_CON in connection_names(names):
             self.nmcli(['con', 'modify', HOTSPOT_CON, '802-11-wireless.ssid', ssid,
-                        'wifi-sec.psk', HOTSPOT_PSK, 'connection.interface-name', dev] + HOTSPOT_SECURITY + band_settings(),
+                        'wifi-sec.psk', self.hotspot_psk(), 'connection.interface-name', dev] + HOTSPOT_SECURITY + band_settings(),
                        timeout=5)
             return True, ''
         ok, out = self.nmcli([
             'con', 'add', 'type', 'wifi', 'ifname', dev, 'con-name', HOTSPOT_CON, 'autoconnect', 'no',
             'ssid', ssid, '802-11-wireless.mode', 'ap'] + band_settings() + [
             'ipv4.method', 'shared', 'ipv4.addresses', '%s/%d' % (HOTSPOT_IP, HOTSPOT_PREFIX_LEN),
-            'ipv6.method', 'disabled', 'wifi-sec.key-mgmt', 'wpa-psk', 'wifi-sec.psk', HOTSPOT_PSK,
+            'ipv6.method', 'disabled', 'wifi-sec.key-mgmt', 'wpa-psk', 'wifi-sec.psk', self.hotspot_psk(),
             'connection.autoconnect-priority', '100'] + HOTSPOT_SECURITY, timeout=10)
         return (True, '') if ok else (False, '建车热点配置失败：' + _short(out))
 
@@ -284,11 +328,12 @@ class CarNetwork:
         ok, out = self.nmcli(['-s', '-g', ','.join(fields), 'con', 'show', HOTSPOT_CON], timeout=5)
         if not ok:
             return None
-        got = [v.replace('\\:', ':').replace('\\\\', '\\') for v in (out or '').splitlines()] + [''] * len(fields)
-        if (got[:4] == [HOTSPOT_PSK, 'rsn', 'ccmp', 'ccmp'] and got[4] in ('1', 'disable')
+        got = [_unescape(v) for v in (out or '').splitlines()] + [''] * len(fields)
+        psk = self.hotspot_psk()
+        if (got[:4] == [psk, 'rsn', 'ccmp', 'ccmp'] and got[4] in ('1', 'disable')
                 and got[5] == HOTSPOT_BAND and got[6] == str(HOTSPOT_CHANNEL)):
             return False
-        self.nmcli(['con', 'modify', HOTSPOT_CON, 'wifi-sec.psk', HOTSPOT_PSK] + HOTSPOT_SECURITY + band_settings(),
+        self.nmcli(['con', 'modify', HOTSPOT_CON, 'wifi-sec.psk', psk] + HOTSPOT_SECURITY + band_settings(),
                    timeout=5)
         with self._lock:
             restart = self.mode == 'hotspot' and not self.busy and self.device is not None
@@ -322,6 +367,11 @@ class CarNetwork:
                 time.sleep(period)
         threading.Thread(target=loop, daemon=True).start()
         return self
+
+
+def _unescape(value):
+    """nmcli -g（terse）输出里的转义：\\: → :，\\\\ → \\。"""
+    return value.replace('\\:', ':').replace('\\\\', '\\')
 
 
 def _read_mac(device):

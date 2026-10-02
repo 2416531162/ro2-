@@ -7,12 +7,15 @@ import os
 import sys
 import time
 import unittest
+import unittest.mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, 'radar_system'))
 sys.path.insert(0, ROOT)
 
 import car_network as cn  # noqa: E402
+
+PSK = 'test-pass-1'     # 测试里设好的热点密码（真车的密码不写在代码里）
 
 
 class FakeNmcli:
@@ -24,7 +27,7 @@ class FakeNmcli:
         self.fail = set(fail)
         self.calls = []
         # 车热点配置现在的 psk / proto / pairwise / group / pmf / band / channel（nmcli -s -g 的输出顺序）
-        self.security = list(security or [cn.HOTSPOT_PSK, 'rsn', 'ccmp', 'ccmp', '1', 'a', '36'])
+        self.security = list(security or [PSK, 'rsn', 'ccmp', 'ccmp', '1', 'a', '36'])
         self.band = None        # 车热点配置的频段（add / modify 里设的）；fail 里有 'up5' 时 5 GHz 起不来
 
     def __call__(self, args, timeout=None):
@@ -79,10 +82,10 @@ class Clock:
         return self.t
 
 
-def network(nm, joined=None, clock=None):
+def network(nm, joined=None, clock=None, psk=PSK):
     count = joined if joined is not None else [0]
     net = cn.CarNetwork(nmcli=nm, app_joined=lambda: count[0], clock=clock or Clock(),
-                        read_mac=lambda dev: 'a4:7e:fa:3f:a2:10', delay_s=0, spawn=lambda fn: fn())
+                        read_mac=lambda dev: 'a4:7e:fa:3f:a2:10', delay_s=0, spawn=lambda fn: fn(), psk=psk)
     net.refresh()
     return net, count
 
@@ -100,8 +103,8 @@ class CarNetworkTest(unittest.TestCase):
         net2, _ = network(FakeNmcli(active=cn.HOTSPOT_CON, profiles=('pattern', cn.HOTSPOT_CON)))
         self.assertEqual(('hotspot', 'RTKCAR-A2-10'), (net2.status()['mode'], net2.status()['ssid']))
         info = net.hotspot_info()
-        self.assertEqual(('RTKCAR-A2-10', cn.HOTSPOT_PSK, '192.168.42.1'), (info['hotspot_ssid'], info['hotspot_psk'], info['hotspot_ip']))
-        self.assertGreaterEqual(len(cn.HOTSPOT_PSK), 8)
+        self.assertEqual(('RTKCAR-A2-10', PSK, '192.168.42.1'), (info['hotspot_ssid'], info['hotspot_psk'], info['hotspot_ip']))
+        self.assertGreaterEqual(len(PSK), 8)
 
     def test_switch_to_hotspot_creates_profile_once_and_enables_autoconnect(self):
         nm = FakeNmcli(active='pattern')
@@ -112,7 +115,7 @@ class CarNetworkTest(unittest.TestCase):
         self.assertEqual(1, len(add))
         cmd = add[0]
         for key, value in (('802-11-wireless.mode', 'ap'), ('ipv4.method', 'shared'), ('ipv4.addresses', '192.168.42.1/24'),
-                           ('ssid', 'RTKCAR-A2-10'), ('wifi-sec.psk', cn.HOTSPOT_PSK), ('autoconnect', 'no'),
+                           ('ssid', 'RTKCAR-A2-10'), ('wifi-sec.psk', PSK), ('autoconnect', 'no'),
                            ('wifi-sec.proto', 'rsn'), ('wifi-sec.pairwise', 'ccmp'), ('wifi-sec.pmf', 'disable'),
                            ('802-11-wireless.band', 'a'), ('802-11-wireless.channel', '36')):
             self.assertEqual(value, cmd[cmd.index(key) + 1], key)
@@ -163,7 +166,7 @@ class CarNetworkTest(unittest.TestCase):
     def test_sync_profile_moves_old_2g_hotspot_to_5g(self):
         # 早先建在 2.4 GHz 的热点（密码、加密都对）：服务起来时改到 5 GHz 36 信道并重启热点
         nm = FakeNmcli(active=cn.HOTSPOT_CON, profiles=('pattern', cn.HOTSPOT_CON),
-                       security=[cn.HOTSPOT_PSK, 'rsn', 'ccmp', 'ccmp', '1', 'bg', '0'])
+                       security=[PSK, 'rsn', 'ccmp', 'ccmp', '1', 'bg', '0'])
         net, _ = network(nm)
         self.assertTrue(net.sync_profile())
         mod = nm.ran('con', 'modify', cn.HOTSPOT_CON)[0]
@@ -173,12 +176,46 @@ class CarNetworkTest(unittest.TestCase):
 
     def test_sync_profile_falls_back_when_5g_will_not_start(self):
         nm = FakeNmcli(active=cn.HOTSPOT_CON, profiles=('pattern', cn.HOTSPOT_CON), fail={'up5'},
-                       security=[cn.HOTSPOT_PSK, 'rsn', 'ccmp', 'ccmp', '1', 'bg', '0'])
+                       security=[PSK, 'rsn', 'ccmp', 'ccmp', '1', 'bg', '0'])
         net, _ = network(nm)
         self.assertTrue(net.sync_profile())
         self.assertEqual('bg', nm.band)
         self.assertEqual('hotspot', net.status()['mode'])
         self.assertIn('已改用 2.4 GHz', net.status()['error'])
+
+    def test_password_not_set_keeps_the_one_already_on_the_car(self):
+        # 没设 RTK_HOTSPOT_PSK：沿用车上热点配置里的密码，部署后平板不用重新输；hello 报的就是它
+        nm = FakeNmcli(active=cn.HOTSPOT_CON, profiles=('pattern', cn.HOTSPOT_CON),
+                       security=['on-the-car-9', 'rsn', 'ccmp', 'ccmp', '1', 'a', '36'])
+        with unittest.mock.patch.dict(os.environ, {}, clear=True):
+            net, _ = network(nm, psk=None)
+        self.assertEqual('on-the-car-9', net.hotspot_info()['hotspot_psk'])
+        self.assertFalse(net.sync_profile())
+        self.assertFalse(nm.ran('con', 'modify'))
+
+    def test_password_not_set_and_no_hotspot_yet_is_random(self):
+        # 新车第一次建热点：随机生成，写进新建的配置，hello 也报这一个
+        nm = FakeNmcli(active='pattern')
+        with unittest.mock.patch.dict(os.environ, {}, clear=True):
+            net, _ = network(nm, psk=None)
+        psk = net.hotspot_info()['hotspot_psk']
+        self.assertTrue(cn.valid_psk(psk))
+        self.assertTrue(net.request('hotspot')[0])
+        add = nm.ran('con', 'add')[0]
+        self.assertEqual(psk, add[add.index('wifi-sec.psk') + 1])
+        self.assertEqual(psk, net.hotspot_info()['hotspot_psk'])
+
+    def test_password_from_environment_is_enforced(self):
+        nm = FakeNmcli(active=cn.HOTSPOT_CON, profiles=('pattern', cn.HOTSPOT_CON),
+                       security=['on-the-car-9', 'rsn', 'ccmp', 'ccmp', '1', 'a', '36'])
+        with unittest.mock.patch.dict(os.environ, {cn.HOTSPOT_PSK_ENV: 'from-env-77'}):
+            net, _ = network(nm, psk=None)
+        self.assertEqual('from-env-77', net.hotspot_info()['hotspot_psk'])
+        self.assertTrue(net.sync_profile())
+        mod = nm.ran('con', 'modify', cn.HOTSPOT_CON)[0]
+        self.assertEqual('from-env-77', mod[mod.index('wifi-sec.psk') + 1])
+        with unittest.mock.patch.dict(os.environ, {cn.HOTSPOT_PSK_ENV: 'short'}):
+            self.assertIsNone(cn.configured_psk())              # 不合规（少于 8 位）当没设
 
     def test_sync_profile_leaves_matching_hotspot_alone(self):
         nm = FakeNmcli(active=cn.HOTSPOT_CON, profiles=('pattern', cn.HOTSPOT_CON))
@@ -195,7 +232,7 @@ class CarNetworkTest(unittest.TestCase):
         self.assertTrue(net.sync_profile())
         mod = nm.ran('con', 'modify', cn.HOTSPOT_CON)
         self.assertEqual(1, len(mod))
-        for key, value in (('wifi-sec.psk', cn.HOTSPOT_PSK), ('wifi-sec.proto', 'rsn'), ('wifi-sec.pmf', 'disable')):
+        for key, value in (('wifi-sec.psk', PSK), ('wifi-sec.proto', 'rsn'), ('wifi-sec.pmf', 'disable')):
             self.assertEqual(value, mod[0][mod[0].index(key) + 1], key)
         self.assertEqual([['con', 'up', cn.HOTSPOT_CON, 'ifname', 'wlan0']], nm.ran('con', 'up'))
         st = net.status()
@@ -296,9 +333,9 @@ class AppProtocolNetworkTest(unittest.TestCase):
 
     def test_hello_and_telemetry_fields(self):
         from runtime_config import PROFILE
-        hello = self.al.build_hello(PROFILE, name='车', network={'hotspot_ssid': 'RTKCAR-A2-10', 'hotspot_psk': '12345678',
+        hello = self.al.build_hello(PROFILE, name='车', network={'hotspot_ssid': 'RTKCAR-A2-10', 'hotspot_psk': 'example-pass',
                                                                 'hotspot_ip': '192.168.42.1'})
-        self.assertEqual({'hotspot_ssid': 'RTKCAR-A2-10', 'hotspot_psk': '12345678', 'hotspot_ip': '192.168.42.1'}, hello['network'])
+        self.assertEqual({'hotspot_ssid': 'RTKCAR-A2-10', 'hotspot_psk': 'example-pass', 'hotspot_ip': '192.168.42.1'}, hello['network'])
         self.assertIsNone(self.al.build_hello(PROFILE, name='车')['network'])
         tel = self.al.build_telemetry({'network': {'mode': 'hotspot', 'ssid': 'RTKCAR-A2-10', 'hotspot_ssid': 'RTKCAR-A2-10',
                                                    'hotspot_ip': '192.168.42.1', 'busy': False, 'error': None,
