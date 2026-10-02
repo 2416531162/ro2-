@@ -245,6 +245,41 @@ class TestPolicy(unittest.TestCase):
         self.assertEqual(p.tick(4.5), (0.0, 0.0))             # 指令 0.5 s 没更新
         self.assertEqual(p.reason, 'armed_waiting_command')
 
+    def test_release_waits_for_a_full_second_at_different_feedback_rates(self):
+        """提高控制频率、短时间成批反馈都不能把停稳等待缩短到半秒。"""
+        for hz in (25.0, 50.0):
+            with self.subTest(hz=hz):
+                p = DiffControlPolicy(DiffConfig(tx_hz=hz), 0.0)
+                p.link(True, 0.0)
+                for i in range(int(hz)):
+                    now = i / hz
+                    p.feedback({'velocity': [0.0, 0.0, 0.0]}, now)
+                    self.assertFalse(p.ready_to_release(now))
+                p.feedback({'velocity': [0.0, 0.0, 0.0]}, 1.0)
+                self.assertTrue(p.ready_to_release(1.0))
+        p = DiffControlPolicy(DiffConfig(), 0.0)
+        for i in range(100):
+            p.feedback({'velocity': [0.0, 0.0, 0.0]}, i * 0.001)
+        self.assertFalse(p.ready_to_release(0.1))
+
+    def test_release_restarts_wait_after_motion_stale_feedback_or_reconnection(self):
+        p = DiffControlPolicy(DiffConfig(feedback_timeout_s=0.3), 0.0)
+        for i in range(51):
+            p.feedback({'velocity': [0.0, 0.0, 0.0]}, i * 0.02)
+        self.assertTrue(p.ready_to_release(1.0))
+        self.assertFalse(p.ready_to_release(1.31))            # 过期静止反馈不能放空
+        p.feedback({'velocity': [0.0, 0.0, 0.0]}, 1.32)
+        self.assertFalse(p.ready_to_release(1.32))           # 反馈中断后满 1 s 才可放空
+        for i in range(1, 52):
+            p.feedback({'velocity': [0.0, 0.0, 0.0]}, 1.32 + i * 0.02)
+        self.assertTrue(p.ready_to_release(p.last_rx))
+        p.feedback({'velocity': [0.2, 0.0, 0.0]}, 2.36)
+        p.feedback({'velocity': [0.0, 0.0, 0.0]}, 2.38)
+        self.assertFalse(p.ready_to_release(2.38))           # 被推动后重计时
+        p.link(True, 2.40)
+        p.feedback({'velocity': [0.0, 0.0, 0.0]}, 2.40)
+        self.assertFalse(p.ready_to_release(2.40))
+
 
 if __name__ == '__main__':
     unittest.main()
@@ -334,6 +369,7 @@ class TestRosNodeShape(unittest.TestCase):
         self.published = published
 
     def step(self, seconds, command=None):
+        dt = 1.0 / self.node.config.tx_hz
         end = self.clock[0] + seconds
         while self.clock[0] < end - 1e-9:
             if command is not None:
@@ -341,8 +377,8 @@ class TestRosNodeShape(unittest.TestCase):
                             profile_hash=self.wd.profile_hash(self.wd.PROFILE), stamp=self.clock[0] - 0.01)
                 self.node.on_motion('manual', self.wd.String(data=self.json.dumps(data)))
             self.node._io_step(self.clock[0])
-            self.device.advance(0.04)
-            self.clock[0] += 0.04
+            self.device.advance(dt)
+            self.clock[0] += dt
 
     def test_manual_pivot_then_emergency_stop(self):
         node = self.node
@@ -383,6 +419,17 @@ class TestRosNodeShape(unittest.TestCase):
         self.step(2.5)                                          # 松手：超时回空闲，停稳 1 s 后放空
         self.assertTrue(node.released)
         self.assertLess(max(abs(m.speed) for m in dev.motors.values()), 1.0)
+
+    def test_stop_holds_motors_until_stationary_for_one_second(self):
+        self.step(4.0)
+        self.step(1.0, command=(0.3, 0.0))
+        self.node.on_stop(None, NS_response())
+        self.step(0.8)                                          # 刹停后约 0.65 s，不能因 50 Hz 提前放空
+        self.assertFalse(self.node.released)
+        self.assertTrue(all(m.speed_mode for m in self.device.motors.values()))
+        self.step(0.5)
+        self.assertTrue(self.node.released)
+        self.assertFalse(any(m.speed_mode for m in self.device.motors.values()))
 
     def test_driver_fault_goes_to_fault_and_needs_reset(self):
         self.step(4.0)

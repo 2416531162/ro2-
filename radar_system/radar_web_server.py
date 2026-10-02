@@ -403,7 +403,7 @@ class WebBridgeNode(Node):
         if cmd['action']=='field_start':
             payload['field_plan']=FIELD_PLANS.get(cmd['preview_token'])
             payload['allow_outside']=cmd.get('allow_outside',False)
-        for key in ('route', 'route_rev', 'job_id', 'preview_token', 'operation', 'element', 'from_m', 'to_m', 'overlap_m', 'allow_outside'):
+        for key in ('route', 'route_rev', 'job_id', 'preview_token', 'operation', 'element', 'element_id', 'edge_index', 'from_m', 'to_m', 'overlap_m', 'allow_outside'):
             if key in cmd:
                 payload[key] = cmd[key]
         self.pub_line.publish(String(data=json.dumps(payload)))

@@ -169,7 +169,7 @@ def client_frame(opcode, payload, mask=b'\x01\x02\x03\x04', fin=True):
 
 SPEED_TIERS = ('low', 'med', 'high')
 LINE_ACTIONS = ('mark', 'start', 'stop', 'clear')
-ROUTE_ACTIONS = ('set', 'start', 'start_current', 'clear', 'pause', 'preview', 'resume', 'rework', 'field_start')
+ROUTE_ACTIONS = ('set', 'start', 'start_current', 'clear', 'pause', 'preview', 'resume', 'rework', 'field_start', 'imu_hold', 'end')
 STRAIGHT_ACTIONS = ('go', 'stop')
 NETWORK_MODES = ('hotspot', 'client')     # 车自己发热点 / 连现场 WiFi（car_network.py）
 RTK_STALE_S = 2.0      # /gnss/status 2 Hz
@@ -257,7 +257,7 @@ def parse_command(text):
             if not isinstance(token,str) or not 1<=len(token)<=80:raise CommandError('缺少规划标识')
             if not isinstance(msg.get('allow_outside',False),bool):raise CommandError('越界确认格式错误')
             out.update(preview_token=token,allow_outside=msg.get('allow_outside',False))
-        if action in ('pause', 'preview', 'resume', 'rework'):
+        if action in ('pause', 'preview', 'resume', 'rework', 'imu_hold', 'end'):
             if 'allow_outside' in msg:
                 if type(msg['allow_outside']) is not bool:raise CommandError('越界确认格式错误')
                 out['allow_outside']=msg['allow_outside']
@@ -271,8 +271,10 @@ def parse_command(text):
                     if not isinstance(value, str) or not 1 <= len(value) <= 80:
                         raise CommandError(key + ' 格式无效')
                     out[key] = value
-            if action == 'pause' and 'job_id' not in out:
-                raise CommandError('暂停需要 job_id')
+            if action in ('pause', 'imu_hold', 'end') and 'job_id' not in out:
+                raise CommandError('当前任务操作需要 job_id')
+            if action == 'imu_hold' and not out.get('id'):
+                raise CommandError('IMU 测试需要指令 id')
             if action in ('resume', 'rework') and 'preview_token' not in out:
                 raise CommandError('请先预览接入路径')
             if action == 'preview':
@@ -285,10 +287,22 @@ def parse_command(text):
                         raise CommandError('续画需要 job_id')
                     out['overlap_m'] = _route_distance(msg.get('overlap_m', 0), 'overlap_m', 0, 0.5)
                 else:
-                    element = msg.get('element')
-                    if isinstance(element, bool) or not isinstance(element, int) or not 0 <= element < 20000:
-                        raise CommandError('element 必须是线段编号')
-                    out['element'] = element
+                    if 'element_id' in msg:
+                        if 'element' in msg:
+                            raise CommandError('不能同时指定普通路线和场地补画编号')
+                        ident, index = msg['element_id'], msg.get('edge_index')
+                        if not isinstance(ident, str) or not 1 <= len(ident) <= 100:
+                            raise CommandError('element_id 必须是原场地图形编号')
+                        if index is not None and (type(index) is not int or not 0 <= index < 400):
+                            raise CommandError('edge_index 必须是原图形边编号或 null')
+                        if 'job_id' not in out:
+                            raise CommandError('场地补画需要 job_id')
+                        out.update(element_id=ident, edge_index=index)
+                    else:
+                        element = msg.get('element')
+                        if isinstance(element, bool) or not isinstance(element, int) or not 0 <= element < 20000:
+                            raise CommandError('element 必须是线段编号')
+                        out['element'] = element
                     for key in ('from_m', 'to_m'):
                         out[key] = _route_distance(msg.get(key), key, 0, 1000000)
                     if out['to_m'] - out['from_m'] < 0.2:
@@ -513,6 +527,7 @@ def line_telemetry(line, now):
     return {
         'stale': False, 'phase': ln.get('phase'), 'message': ln.get('message'),
         **({'operations': ln['operations']} if ln.get('operations') is not None else {}),
+        **({'imu_hold_test': ln['imu_hold_test']} if ln.get('imu_hold_test') is not None else {}),
         'cruise': _num(ln.get('cruise')), 'motion_mode': ln.get('motion_mode'),
         'points': ln.get('points') or {},
         'pose': None if not pose else {

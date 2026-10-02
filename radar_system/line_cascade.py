@@ -110,6 +110,7 @@ class ImuLineTracker:
 
     def __init__(self, config=CascadeConfig(), geometry=None):
         self.cfg = config
+        self.speed_limit_mps = None
         self.geo = geometry or ChassisGeometry()
         # 内环的 speed 只用来判断「车走起来了没有」（指令车速不到一半不积分），按巡航速度算
         self.hold_cfg = dataclasses.replace(config.hold, speed=config.cruise_mps)
@@ -352,6 +353,8 @@ class ImuLineTracker:
             v = min(v, max(cfg.min_mps, cfg.align_radius_m * cfg.turn_rate_deg_s * DEG))
         ramping = v > self._v_prev + cfg.accel_mps2 * dt
         v = min(v, self._v_prev + cfg.accel_mps2 * dt)
+        if self.speed_limit_mps is not None:
+            v = min(v, max(0.0, self.speed_limit_mps))
         if self._settled_since is None and not self._aligning and not ramping:
             # 起步转完、加速完：偏移从这里重新平均（起步转弯里 IMU 刻度误差攒下的差不带进来）
             self._settled_since = now

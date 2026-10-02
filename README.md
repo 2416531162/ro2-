@@ -11,6 +11,8 @@ UM982 双天线 RTK + RION HDA536T IMU 定位，按平板 app 下发的路线、
 - `robot_core`：车型配置（`robot_gen5.json`）、运动学。
 - `deployment`：发布包（从 git 提交打包）、校验、systemd 服务激活与回滚。
 
+旧 Wheeltec 阿克曼底盘与 Gen5 差速底盘的下发频率均为 50 Hz（每 20 ms 一次）；自动循迹控制、App 手动和 IMU 直行指令刷新也统一为 50 Hz。GNSS、IMU 的传感器采样频率按各自现有配置运行。
+
 ```bash
 # Mac：跑相关测试、从提交打发布包
 python3 -m pytest -q tests/test_path_tracking.py tests/test_line_mission.py

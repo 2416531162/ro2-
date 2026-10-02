@@ -11,6 +11,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT/'tests'), str(ROOT/'radar_system'), str(ROOT)]
 from gen5_line_sim import Gen5Chassis, GEN5, make_pose, percentile, Disturbance, PoseNoise
+from robot_core.config import CONTROL_DT
 import path_tracker
 
 
@@ -36,16 +37,18 @@ def pivot(module=path_tracker, angle_deg=180., delay=0.39, gain=1.03, rate=0.8, 
     commands = []
     settled = False
     paused = False
+    next_ctrl = 0.0
     for i in range(4500):
         t = i*.01
-        if i % 5 == 0:
+        if t >= next_ctrl - 1e-9:
+            next_ctrl += CONTROL_DT
             pose = make_pose(car.x, car.y, car.yaw, car.v, car.wz)
             if pause_at is not None and not paused and t >= pause_at:
                 tracker.pause('operator')
                 paused = True
             if paused and tracker.st.state == 'PAUSED' and t >= pause_at + 2:
                 tracker.start(pose)
-            v, w = tracker.update(pose, .05)
+            v, w = tracker.update(pose, CONTROL_DT)
             turning = tracker._pivot is not None
             starts += bool(turning and not was_turning)
             was_turning = turning
@@ -92,12 +95,14 @@ def circle(radius, lateral_accel, seed, clockwise=True):
     tr.start(make_pose(car.x,car.y,car.yaw,car.v,car.wz))
     errors,reported,first,speeds,inner = [],[],[],[],[]
     travelled = 0.
+    next_ctrl = 0.0
     for i in range(40000):
         t=i*.01
-        if i%5==0:
-            dx,dy,dyaw = noise.step(.05)
+        if t >= next_ctrl - 1e-9:
+            next_ctrl += CONTROL_DT
+            dx,dy,dyaw = noise.step(CONTROL_DT)
             pose = make_pose(car.x+dx,car.y+dy,car.yaw+dyaw,car.v,car.wz)
-            v,w=tr.update(pose,.05)
+            v,w=tr.update(pose,CONTROL_DT)
             car.command(t,v,w)
             nx,ny=car.nozzle()
             e=abs(math.hypot(nx,ny)-radius)*100

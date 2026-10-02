@@ -169,7 +169,7 @@ def parse_selection(raw):
     return selected
 
 
-def parse_strokes(raw,selected=None):
+def parse_strokes(raw,selected=None,max_strokes=80):
     if not isinstance(raw,list) or not 1<=len(raw)<=80:raise ValueError('场地须有 1–80 个图形')
     strokes=[];manual=[];ids=set();matched=set()
     def add(stroke,ident,index):
@@ -178,7 +178,7 @@ def parse_strokes(raw,selected=None):
         matched.add(key)
         stroke.update(key=key,selection=dict(element_id=ident,edge_index=index))
         strokes.append(stroke)
-        if len(strokes)>80:raise ValueError('一次规划支持 1–80 条线或圆弧，请选择部分边')
+        if len(strokes)>max_strokes:raise ValueError('图纸分段过多，请选择部分边')
     for item in raw:
         if not isinstance(item,dict):raise ValueError('图形格式无效')
         ident=item.get('id');name=item.get('name',ident)
@@ -204,7 +204,7 @@ def parse_strokes(raw,selected=None):
             if selected is None:manual.append(mark)
         else:raise ValueError('不支持的场地图形：'+str(kind))
     if selected is not None and matched!=selected:raise ValueError('选中的边已不存在，请重新选择；点位需人工标记')
-    if not strokes or len(strokes)>80:raise ValueError('一次规划支持 1–80 条线或圆弧')
+    if not strokes or len(strokes)>max_strokes:raise ValueError('一次规划支持 1–%d 条线或圆弧' % max_strokes)
     return strokes,manual
 
 

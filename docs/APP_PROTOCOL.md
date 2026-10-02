@@ -5,6 +5,14 @@
 
 协议样例的基准在 `tests/fixtures/app_protocol/`，`tests/test_app_link.py` 检查它与车端编码器一致。改了字段后，用 `python3 radar_system/tools/export_app_fixtures.py --out <安卓工程>/app/src/test/resources` 重新生成并同步到安卓工程，安卓端的单元测试解析的就是这份样例。
 
+## 手动 IMU 维持测试
+
+Gen5 行驶中的路线任务可以发送 `{"type":"route","action":"imu_hold","id":"唯一指令标识","route_rev":3,"job_id":"当前任务 id"}`。服务转发 `route_imu_hold`，执行结果仍在 `line.last_result`。车端核对任务、路线版本、NAVIGATION 控制权及新鲜 IMU，并要求当前 RTK 位置确认可用；不启动新任务。
+
+测试时暂时屏蔽 GNSS 位置、双天线测向、GNSS 速度与副天线观测，按 IMU 航向和轮速推算，5 秒后自动恢复。测试期迟到 GNSS 不回放。相同 id 幂等，不同 id 在测试中拒绝，不能续时。误差预算与传感器中断检查保留；暂停、停止、控制权中断或跟踪器暂停/结束时取消测试并恢复接收观测。
+
+支持此功能时 `line.imu_hold_test` 包含 `state`（idle/running/done/cancelled）、`duration_s:5`、`remaining_s`、`id` 与 `reason`，不支持时省略。App 显示车端倒计时；`pose.reasons` 增加 `imu_hold_test`，推算位姿显示为 `DEAD_RECKONING`，不可当作独立 RTK 真值。
+
 ## 找到车
 
 | 方式 | 说明 |
@@ -44,7 +52,7 @@
 | `straight` | IMU 定向直行（`radar_system/heading_hold.py`，只用 `/imu/data` 偏航角，RTK 不参与）：`imu_ok` IMU 偏航 0.2 s 内有更新、`yaw_deg` 当前 IMU 偏航（相对值，上电为 0）、`state`（`idle` 从没开过 / `running` / `stopped`）、`session` + `run` 这次作业是哪个连接的第几次开始（app 用 hello 的 `session` 认自己的）、`reason` 停车原因（`user` 点了停止、`no_imu` 开始时没有 IMU 航向、`imu_stale` IMU 中断、`deviation` 偏差超过 `abort_deg`、`command_timeout` 0.75 s 没收到 go、`estop`、`manual` 摇杆或网页接管、`disconnected` 平板断线、`chassis` 底盘不收指令）、`target_deg` 锁定的目标偏航、`error_deg` 当前偏差（左偏为正）、`max_error_deg` 这次最大偏差、`within_pct` 偏差在 `tolerance_deg` 内的时间占比、`elapsed_s`、`speed`/`wz` 此刻发给底盘的车速和角速度。车端没有这个功能时不带这一项 |
 | `rtk` | RTK 接收机（`rtk_node`）：`fix`（FIXED/FLOAT/SINGLE/NONE，与融合的取舍一致：FIXED 只指 `NARROW_INT`，`WIDE_INT`/`L1_INT` 归 FLOAT；解算状态不是 `SOL_COMPUTED` 按 NONE）、`sats`、`diff_age`（秒，无差分为 null）、`sigma_h`（米）、`heading_ok`（双天线测向整周固定，且测向基线长度 `baseline_m` 在 0.30–0.50 m 之内（`um982.HEADING_BASELINE_MIN_M`/`MAX_M`）；不要求两根天线的位置也是 RTK 固定解；范围外——室内转发器几毫米、模糊度固定错的长度——不算）、`baseline_m`（测向长度）、`receiver_ok`、`source`（接收机数据从哪来：`usb` 车上串口 / `tablet` 平板经 WiFi 转发 / `bluetooth` 平板经蓝牙转发，见上文「平板串口转发」「平板蓝牙转发」；旧 RTK 节点为 null）、`tablet_connected`（平板转发连着，WiFi 或蓝牙）、`ntrip`（`configured`/`connected`/`error`/`age_s`/`paused` 车端 CORS 暂停的原因：`tablet` 数据来自平板、差分由平板自己连，没暂停为 null）、`antennas`（`ant1` 主天线 BESTPOS、`ant2` 副天线 BESTNAVH：`sol`/`fix`/`sats_used`/`sats_tracked`/`age_s`；`ant2` 另有 `offset_m` 两天线固定解的平面实时距离（东、北，不算高差）、`consistent` 保留为 null）、`heading`（测向解：`sol`/`fix`/`sats_used`/`sats_tracked`/`length_m`/`pitch_deg`/`sigma_deg`/`ref_m` 两天线固定解的平面实时距离（只作显示，不参与判定）/`valid`（同 `heading_ok`）/`yaw_deg` 双天线测出的车头方向，度，东为 0、逆时针为正，已扣安装偏差，与 `/gnss/heading` 同一换算；只在 `valid` 为 true 时有值，否则 null，app 不得显示无效测向的角度） |
 | `line` | RTK 走直线（`line_node`）：`phase`（IDLE/SELECTING/RUNNING）、`message`、`cruise`、`motion_mode`、`points`（`A`/`B` 本地 ENU 米，x 东 y 北）、`pose`（`x`/`y`/`yaw_deg`（东为 0 逆时针）/`speed`/`quality`/`usable`/`sigma_xy`/`sigma_yaw_deg`/`reasons`）、`track`（`state`/`reason`/`e` 横偏米（行进方向的左侧为正）/`heading_err_deg`/`s` 沿线米/`length`/`v_cmd`（倒车为负）/`rms`/`max`/`gear` forward 或 reverse/`section` 第几段/`sections` 共几段/`switching` 在换向点等车停稳/`pivoting` 差速车正在原地转向）、`last_result`（上一条 line/route 指令的执行结果，按 `id` 对应）；走路线另见下一行 |
-| `line`（路线） | `task`（line/route，当前或最近一次任务）、`origin`（本地坐标原点的 [纬度, 经度]，融合还没有有效定位时为 null；`line_node` 每次启动取第一次有效定位，原点会变，路线存经纬度所以照样对得上）、`antenna`（主天线最近一次定位：`x`/`y` 本地米、`sol`、`sigma` 米；超过 2 s 没更新为 null。融合位姿不可用时 app 用它画车的位置）、`route`（车上存的路线，换算到当前本地坐标：`kind` points/circle、`points` [[x,y]…]、`closed`、`center`、`radius`、`clockwise`、`laps`、`turn_radius`、`cruise`、`rev` 版本号、`length` 路线长度米（不含接入段；连线路线是连线本身）、`problem` 画不成的原因（null 表示可以跑）、`cover` 连线路线才有：`drive_m` 压过全部连线实际要开的路程（含倒车补角，不含接入段）、`cusps` 换向次数、`corners` 掉头补角的拐角数；画不成为 null）、`route_limits`（`min_radius` 能稳定跟踪的最小转弯半径、`max_points`、`max_laps`、`max_entry_m`、`body` 连线路线压线用的车身 [后轴中心到车头, 到车尾, 半宽] 米、`drive` 同 hello、`nozzle_x` 差速车连线路线按喷头压线时喷头在后轴前多少米（阿克曼车为 null，仍按车身中心）。差速车的 `cover` 另有 `pivots` 原地转向次数，`corners` 是原地转向的拐角数、`cusps` 是倒车换向次数） |
+| `line`（路线） | `task`（line/route，当前或最近一次任务）、`origin`（本地坐标原点的 [纬度, 经度]，融合还没有有效定位时为 null；`line_node` 每次启动取第一次有效定位，原点会变，路线存经纬度所以照样对得上）、`antenna`（主天线最近一次定位：`x`/`y` 本地米、`sol`、`sigma` 米；超过 2 s 没更新为 null。融合位姿不可用时 app 用它画车的位置）、`route`（车上存的路线，换算到当前本地坐标：`kind` points/circle、`points` [[x,y]…]、`closed`、`center`、`radius`、`clockwise`、`laps`、`turn_radius`、`cruise`、`turn`（同 route 指令）、`rev` 版本号、`length` 路线长度米（不含接入段；连线路线是连线本身）、`problem` 画不成的原因（null 表示可以跑）、`cover` 连线路线才有：`drive_m` 压过全部连线实际要开的路程（含倒车补角，不含接入段）、`cusps` 换向次数、`corners` 掉头补角的拐角数；画不成为 null）、`route_limits`（`min_radius` 能稳定跟踪的最小转弯半径、`max_points`、`max_laps`、`max_entry_m`、`body` 连线路线压线用的车身 [后轴中心到车头, 到车尾, 半宽] 米、`drive` 同 hello、`nozzle_x` 差速车连线路线按喷头压线时喷头在后轴前多少米（阿克曼车为 null，仍按车身中心）、`turns` 差速车连线路线急弯可选的转法 `["pivot", "arc"]`（阿克曼车和旧车端为 null / 没有，app 不显示「急弯转法」）。差速车的 `cover` 另有 `pivots` 原地转向次数，`corners` 是原地转向的拐角数、`cusps` 是倒车换向次数） |
 | `line`（诊断） | `diag`：`kappa_cmd` 下发曲率、`kappa_act` 车实际走出的曲率（融合角速度 / 车速，车速 < 0.05 m/s 为 null；车头坐标左转为正，1/m）、`yaw_rate` rad/s、`rtk_along_m` / `rtk_left_m` 最近一次 RTK 固定解与融合在同一时刻推算的主天线位置之差（车体系沿车头 / 向左，米；超过 1 s 没有新的固定解为 null）、`position_outliers` 融合里位置离群（降权或拒绝）次数、`position_resets` 位置重置次数、`jumps` 本次开机以来的定位跳动次数。只读，app 的诊断页画曲线用 |
 | `line`（定位跳动） | `rtk_events`：最近 20 次定位跳动（RTK 固定解与融合推算差 3 cm 以上，间隔不到 1 s 的算同一次）：`id` 这次开始的时刻（车上单调时钟，同一次在每帧里重复出现）、`x`/`y` 车当时的本地坐标、`lat`/`lon`、`d` 最大差值米、`left` 向左分量、`dur` 持续秒、`age_s` 距今秒。只在融合本来是固定解、可用于控制时记。app 按经纬度累计，在地图上标出反复跳动的地点 |
 | `line`（车身姿态） | `attitude`：`roll_deg` 横滚、`pitch_deg` 俯仰、`yaw_deg` IMU 偏航，度，ROS REP-103 车体系（x 车头、y 左、z 上）：横滚左侧抬起（右侧压低）为正，俯仰车头压低为正，偏航左转为正（−180…180）；`source` 为 `imu_madgwick`（旧车：`imu` 组件是 ROS 2 `imu_filter_madgwick`，gain 0.01，读底盘原始 `/imu`，发 `/imu/data`）或 `hda536t`（Gen5：`imu` 组件是瑞芬 HDA536T 驱动，姿态是传感器自己算的，偏航上电为 0），这一项只给 app 显示（填了天线高度时融合用同一份横滚俯仰做倾斜补偿，见下一行）；0.5 s 没有新姿态或车端没有 `imu` 组件时为 null。没有磁力计，`yaw_deg` 没有绝对参考：0 大致是 `imu` 组件启动时的车头方向，随陀螺零偏漂移（实测静止约 3°/分钟），组件重启归零；旧车端没有这一项。绝对航向：`rtk.heading.yaw_deg`（双天线，只在固定时有）、`pose.yaw_deg`（RTK 融合，控制用）|
@@ -66,7 +74,7 @@
 | `reset` | — | 健康且停稳时复位 |
 | `ping` | `t` | 回 `pong`，app 用来量往返延迟 |
 | `network` | `mode`（`hotspot` 车自己发热点 / `client` 连存着的 WiFi）、`id` | 切换车的 WiFi 方式，见下文「切换车的 WiFi 方式」。车在行驶（NAVIGATION/MANUAL）、有作业（`line.phase` 不是 IDLE）、IMU 直行中、车速 > 0.05 m/s 时回 `ok=false` 和原因；已经是这种方式、正在切也回 `ok=false` |
-| `route` | `action`（set/start/start_current/clear）、`route`（set 必带，start 可带：带了就先保存再开始）：`kind`（`path` 连线路线，app 默认：操作员点的点按连线顺序走直线，没连回起点就走一遍不绕圈；`circle`；旧版 `points` 自动圆弧过弯）、`points`（≤400 个，本地 ENU 米）、`closed`、`center`、`radius`、`clockwise`、`laps`（1–10，开放路线只跑一次）、`turn_radius`（米）、`cruise`（0.1–1.0 m/s） | 转发 `/line/command`（`route_set`/`route_start`/`route_clear`），结果同样看 `line.last_result`。车上把路点换算成经纬度存进 `~/rtk/route.json`。几何见 `radar_system/route_plan.py`：`path` 要让车身中心（车长中点，后轴前 (front−rear)/2）压过全部连线：缓弯（车身中心离拐角 ≤ 5 cm）直接转过去；急弯掉头补角——车身中心开过拐角 5 cm，整车开出拐角（车尾也过 5 cm）后倒车一次、车头摆向下一条边，再往前开上下一条边，三段都可打方向，在"前进-倒车-前进"里按 Reeds-Shepp 取最短（90° 多开 R·π/2 ≈ 3.0 m、换向 2 次），不要求拐角两边的线有多长；起步用 Reeds-Shepp 最短路径（可以倒车）开到第一段延长线上、车身中心到第 1 个点前 0.5 m 对正，已压在延长线上就直接开过去（app 用同一算法画预览、做仿真）。`points` 拐角按 `turn_radius` 圆弧过渡，圆从最南点出发，二者用 Dubins 接入段（只前进，最长 30 m）。然后申请 NAVIGATION；跑完停在终点。`start_current`（app 的「开始作业」）不分起点终点：从离车最近的地方开始、跑完整条路线（圆和闭合路线绕完整圈回到起步处，开放路线从近的那一头画到另一头），差速车喷头离起点 0.5 m 内倒车 0.8 m 助跑进线，见 `route_plan.plan_current`、docs/DIFFERENTIAL_DRIVE.md。NAVIGATION 默认不经过雷达防撞（底盘驱动参数 `navigation_uses_lidar`，遥测 `motion.nav_lidar`）。运行中停止用 `line` 的 stop；定位丢失暂停后，定位连续可用 1 s 自动从暂停处继续（`line.message`「定位恢复，自动继续」），也可以再发 route start。测向浮点（无效）时航向靠陀螺维持：主、副天线都是固定解、航向 1σ ≤ 2° 就照样走，`line.pose.reasons` 带 `gyro_hold` |
+| `route` | `action`（set/start/start_current/clear）、`route`（set 必带，start 可带：带了就先保存再开始）：`kind`（`path` 连线路线，app 默认：操作员点的点按连线顺序走直线，没连回起点就走一遍不绕圈；`circle`；旧版 `points` 自动圆弧过弯）、`points`（≤400 个，本地 ENU 米）、`closed`、`center`、`radius`、`clockwise`、`laps`（1–10，开放路线只跑一次）、`turn_radius`（米，1–20）、`cruise`（0.1–1.0 m/s）、`turn`（差速车连线路线急弯的转法：`pivot` 停车原地转向、倒车助跑回拐角，默认，没有这个字段也是它；`arc` 圆弧掉头，只往前、不停车，按 `turn_radius` 绕过去接到下一条边上，见 docs/DIFFERENTIAL_DRIVE.md；阿克曼车、圆不管） | 转发 `/line/command`（`route_set`/`route_start`/`route_clear`），结果同样看 `line.last_result`。车上把路点换算成经纬度存进 `~/rtk/route.json`。几何见 `radar_system/route_plan.py`：`path` 要让车身中心（车长中点，后轴前 (front−rear)/2）压过全部连线：缓弯（车身中心离拐角 ≤ 5 cm）直接转过去；急弯掉头补角——车身中心开过拐角 5 cm，整车开出拐角（车尾也过 5 cm）后倒车一次、车头摆向下一条边，再往前开上下一条边，三段都可打方向，在"前进-倒车-前进"里按 Reeds-Shepp 取最短（90° 多开 R·π/2 ≈ 3.0 m、换向 2 次），不要求拐角两边的线有多长；起步用 Reeds-Shepp 最短路径（可以倒车）开到第一段延长线上、车身中心到第 1 个点前 0.5 m 对正，已压在延长线上就直接开过去（app 用同一算法画预览、做仿真）。`points` 拐角按 `turn_radius` 圆弧过渡，圆从最南点出发，二者用 Dubins 接入段（只前进，最长 30 m）。然后申请 NAVIGATION；跑完停在终点。`start_current`（app 的「开始作业」）不分起点终点：从离车最近的地方开始、跑完整条路线（圆和闭合路线绕完整圈回到起步处，开放路线从近的那一头画到另一头），差速车喷头离起点 0.5 m 内倒车 0.8 m 助跑进线，见 `route_plan.plan_current`、docs/DIFFERENTIAL_DRIVE.md。NAVIGATION 默认不经过雷达防撞（底盘驱动参数 `navigation_uses_lidar`，遥测 `motion.nav_lidar`）。运行中停止用 `line` 的 stop；定位丢失暂停后，定位连续可用 1 s 自动从暂停处继续（`line.message`「定位恢复，自动继续」），也可以再发 route start。测向浮点（无效）时航向靠陀螺维持：主、副天线都是固定解、航向 1σ ≤ 2° 就照样走，`line.pose.reasons` 带 `gyro_hold` |
 | `line` | `action`（mark/start/stop/clear）、`point`（mark 时 A/B）、`cruise`（start 时可选，0.05–1.0 m/s） | 转发 `/line/command`；ack 只表示已转发，执行结果看遥测 `line.last_result`。记点需要 RTK 固定解；start 先检查起步条件（离线 ≤0.5 m、车头偏 ≤30°），再申请 NAVIGATION。融合位姿不能用于控制时结果是 `pose_unusable：原因代码`（多个用顿号连接，代码见 `docs/GNSS_FUSION.md`），由 app 翻译 |
 
 ## 切换车的 WiFi 方式
@@ -94,8 +102,8 @@ HTTP 200 的 `status: pending_reload` 只表示请求已保存。App 要等新�
 
 ### 车辆操作
 
-- 摇杆按住时 app 以 20 Hz 发 `drive`；松手立即发一次 0。车端 0.75 s 收不到新指令自动停。
-- IMU 定向直行开着时 app 以 20 Hz 发 `straight` go（不用按住），点停止发 stop；平板断线、0.75 s 收不到 go、急停、摇杆接管都会停，IMU 中断或偏差超过 5° 车端自己停。保证的是 IMU 读数稳在 ±1°，IMU 零偏漂移会让真实车头跟着偏（2026-09-30 实车 HDA536T 静止 84 s 漂 0.02°）。
+- 摇杆按住时 app 以 50 Hz 发 `drive`；松手立即发一次 0。车端 0.75 s 收不到新指令自动停。
+- IMU 定向直行开着时 app 以 50 Hz 发 `straight` go（不用按住），点停止发 stop；平板断线、0.75 s 收不到 go、急停、摇杆接管都会停，IMU 中断或偏差超过 5° 车端自己停。保证的是 IMU 读数稳在 ±1°，IMU 零偏漂移会让真实车头跟着偏（2026-09-30 实车 HDA536T 静止 84 s 漂 0.02°）。
 - WebSocket 断开时，若该会话开过车，车端立即清零。3 s 收不到任何上行消息（app 每秒 ping）即判断线。
 - 急停同时走 WebSocket 与 HTTP。复位必须单独操作，急停不会被任何指令自动解除。
 - 所有速度、转角上限由车端共享配置决定，app 只发比例。
@@ -117,6 +125,24 @@ ack 仍仅表示转发，执行结果用 `line.last_result.id` 关联。预览�
 `job` 包含 ID、kind（route/rework）、state、reason、cursor_m、total_m、can_resume。任务路径及方向按经纬度持久化到 `route_path + '.task.json'`，每秒及状态转换时原子保存；重启恢复待继续状态。人工暂停和中断任务禁止被 set/clear/start 覆盖，需显式继续或结束。`line stop` 结束当前任务；结束补画会恢复原任务的待继续断点。完成与恢复父任务在一次原子写入中提交，最近 20 次结果保留在 history。
 
 当前 `spray_supported=false`，cursor_m 是车辆规划路径进度，含原路线接入/掉头，不是已喷漆长度；重新接入不重复增加原任务进度。新功能没有新增泵阀驱动或自动避障能力。突然掉电可能重走最后一秒未落盘的范围，恢复后不自动开车。写入失败不会阻止停车，确认续画/补画时写入失败不会申请控制权。
+
+### 整场断点内局部补画（App 1.9.1）
+
+沿用 `preview/rework/resume`，能力标识 `operations.actions` 增加 `field_rework` 和 `end`。新整场任务将完整原图纸保存为经纬度快照，保留原图形 ID、折线边编号和圆弧起角方向。升级前没有图纸快照的任务仍可按原路径续行，但不宣告局部补画能力。当前补画子任务不再接受嵌套补画。
+
+暂停整场且确认停稳后，`operations.elements` 提供 `id`、`name`、`length_m`、`kind`（polyline/circle/arc）、`source_element_id`、`source_edge_index` 和图纸采样 `points`；`operations.context` 给出完整原图背景。`id` 仅供界面列表使用，执行以原图形及边编号为准。选边任务可显式补画原图其他线，父任务的选择范围及原执行路径保持不变。
+
+```json
+{"type":"route","action":"preview","operation":"rework","route_rev":7,"job_id":"原整场任务 ID","element_id":"boundary","edge_index":0,"from_m":5,"to_m":10}
+```
+
+`edge_index` 是折线边的零起始编号；圆和圆弧使用 null。`from_m/to_m` 按原图纸方向及喷头目标线长度量取，区间至少 0.2 m；全圆从图纸起角沿正向起算。车端先裁切目标图形，再按原喷头安装偏移重算后轴路径，并用原边界和真实车身参数规划接入。不能把后轴路径长度直接当圆弧的补画米数。
+
+预览沿用 token、request_id、entry、target、sections、长度与 max_outside_m，另带 `field_plan:true`、完整 `context` 和捕捉车位 `start:[x,y,yaw_rad]`。确认时 `rework` 必须带原 `job_id`、路线版本和 token，外伸需 `allow_outside:true`。任务、原图或车辆参数改变、原点改变、车移动超过 0.10 m / 5°、超过 60 秒或停车条件不满足时拒绝。预览本身不申请控制权。
+
+接受补画前原子保存独立子任务和完整父断点；`job.parent_job_id` 指向父任务。补画的转场为 transit，目标区间为 paint，停车、转向和暂停均不报告 painting。完成或结束补画后原子保存历史并恢复原父任务为待继续，不自动驾驶；操作员再明确预览并确认 resume。补画中暂停、急停、故障或重启保留子任务和父断点。接受状态写入失败不启动，父断点恢复写入失败继续停车并保留可恢复状态。
+
+`route.end` 带 `route_rev` 和明确的 `job_id`，只结束该任务。若结束子补画的请求迟到，而子任务已完成并恢复父任务，则幂等回应且不停止或取消父任务。整场插入补画要求同时支持 `field_rework` 和 `end`；旧端的通用 `line stop` 保持原语义，急停仍无条件生效。
 
 
 ## 整场内场优先规划（App 1.8.0）

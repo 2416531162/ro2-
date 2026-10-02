@@ -60,6 +60,7 @@ class LineState:
 
 class LineTracker:
     def __init__(self, config=LineConfig(), geometry=None):
+        self.speed_limit_mps = None
         self.cfg = config
         self.geo = geometry or ChassisGeometry()
         # 用共享转向模型的最小转弯半径；输出 wz = v·κ，底盘驱动用同一模型换回舵角
@@ -189,6 +190,8 @@ class LineTracker:
             v *= max(0.4, 1.0 - (abs(e) - cfg.slow_offset_m) / 0.3)
         v = min(v, max(cfg.min_mps, math.sqrt(2.0 * cfg.decel_mps2 * max(0.0, remaining - cfg.stop_tol_m))))
         v = min(v, self._v_prev + cfg.accel_mps2 * dt)
+        if self.speed_limit_mps is not None:
+            v = min(v, max(0.0, self.speed_limit_mps))
         self._v_prev = v
         st.v_cmd = v
 

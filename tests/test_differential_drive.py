@@ -380,6 +380,132 @@ class TestPivotTracking(unittest.TestCase):
         self.assertEqual(tr.check_start(pose(yaw_deg=90.0)), (False, 'heading_not_aligned'))
 
 
+def path_samples(section, step=0.001):
+    """一段按规划开时每 step 米的 (路程, 后轴 x, y, 车头)。"""
+    d, (x, y, yaw), pieces = section
+    out, s = [], 0.0
+    for length, k in pieces:
+        n = max(1, int(length / step))
+        for i in range(n):
+            px, py, pyaw = rp.advance(x, y, yaw, length * i / n, k)
+            out.append((s + length * i / n, px, py, pyaw if d > 0 else pyaw + math.pi))
+        x, y, yaw = rp.advance(x, y, yaw, length, k)
+        s += length
+    return out
+
+
+class TestArcTurnPlan(unittest.TestCase):
+    """圆弧掉头（turn='arc'，2026-10-02 用户：前面要掉头时不原地转，像阿克曼车一样拐弯掉头丝滑接入；原地转保留，app 可选）。"""
+
+    def arc_spec(self, points, **kw):
+        return rp.parse_spec(dict(dict(kind='path', points=[list(p) for p in points], turn='arc', turn_radius=1.0), **kw))
+
+    def test_square_is_one_forward_section_and_the_nozzle_passes_every_edge_and_corner(self):
+        spec = self.arc_spec(SQUARE, closed=True)
+        sections, corners = rp._pivot_route_sections(spec, RADIUS, NOZZLE)
+        self.assertEqual(corners, 3)
+        self.assertEqual(len(sections), 1)                              # 不停车：一段到底
+        self.assertEqual(sections[0][0], 1)                             # 不倒车
+        self.assertEqual(rp.pivot_count(sections), 0)
+        self.assertLessEqual(max(abs(k) for _, k in sections[0][2]), 1.0 / spec.turn_radius + 1e-9)
+        track = nozzle_track(sections, step=0.002)
+        drawn = SQUARE + [SQUARE[0]]
+        for a, b in zip(drawn, drawn[1:]):
+            n = int(math.hypot(b[0] - a[0], b[1] - a[1]) / 0.01)
+            for i in range(n + 1):
+                q = (a[0] + (b[0] - a[0]) * i / n, a[1] + (b[1] - a[1]) * i / n)
+                self.assertLess(min(math.hypot(q[0] - x, q[1] - y) for x, y in track), 0.002, q)
+        summary = rp.cover_summary(spec, RADIUS, None, nozzle_x=NOZZLE)
+        self.assertEqual((summary['corners'], summary['pivots'], summary['cusps']), (3, 0, 0))
+
+    def test_runs_out_past_each_corner_and_is_straight_on_the_next_leg_before_it(self):
+        points = [(0.0, 0.0), (8.0, 0.0), (8.0, 3.0), (0.0, 3.0)]        # 行距 3 m 往返：两个直角
+        sections, _ = rp._pivot_route_sections(self.arc_spec(points, closed=False), RADIUS, NOZZLE)
+        samples = path_samples(sections[0])
+
+        def nozzle(p):
+            return p[1] + NOZZLE * math.cos(p[3]), p[2] + NOZZLE * math.sin(p[3])
+        for k in (1, 2):
+            v, nxt, prev = points[k], points[k + 1], points[k - 1]
+            h_in = math.atan2(v[1] - prev[1], v[0] - prev[0])
+            h = math.atan2(nxt[1] - v[1], nxt[0] - v[0])
+            # 喷头到拐角（进来的那条边）后还沿这条边的延长线直线开一段才转（ARC_RUN_OUT_M，至少 0.15 m）
+            arrive = next(p for p in samples if math.dist(nozzle(p), v) < 0.001 and abs(rp.wrap(p[3] - h_in)) < 1e-6)
+            out = [p for p in samples if arrive[0] <= p[0] <= arrive[0] + 0.15]
+            self.assertGreater(len(out), 140)
+            for p in out:
+                self.assertLess(abs(rp.wrap(p[3] - h_in)), 1e-6)
+                nx, ny = nozzle(p)
+                self.assertLess(abs(-(nx - v[0]) * math.sin(h_in) + (ny - v[1]) * math.cos(h_in)), 1e-6)
+            # 喷头到拐角（出去的那条边）前 ARC_RUN_IN_M 已经在这条边的延长线上、车头对正
+            leave = next(p for p in samples if p[0] > arrive[0] and math.dist(nozzle(p), v) < 0.001
+                         and abs(rp.wrap(p[3] - h)) < 1e-6)
+            run_in = [p for p in samples if leave[0] - rp.ARC_RUN_IN_M + 0.002 <= p[0] <= leave[0]]
+            self.assertGreater(len(run_in), 800)
+            for p in run_in:
+                self.assertLess(abs(rp.wrap(p[3] - h)), 1e-6)
+                nx, ny = nozzle(p)
+                self.assertLess(abs(-(nx - v[0]) * math.sin(h) + (ny - v[1]) * math.cos(h)), 1e-6)
+        # 与原地转的倒车助跑同一个起点：后轴在拐角后 1.2 m
+        self.assertAlmostEqual(rp.ARC_RUN_IN_M + NOZZLE, rp.PIVOT_REVERSE_MIN_M)
+
+    def test_hairpin_and_nozzle_between_the_wheels(self):
+        for points, nozzle in (([(0.0, 0.0), (8.0, 0.0), (0.0, 0.5)], NOZZLE), (SQUARE, 0.0)):
+            sections, corners = rp._pivot_cover(points, RADIUS, nozzle, arc_radius=1.0)
+            self.assertEqual(len(sections), 1)
+            self.assertEqual(sections[0][0], 1)
+            x, y, yaw = sections[0][1]
+            track = []
+            for length, k in sections[0][2]:
+                n = max(1, int(length / 0.002))
+                for i in range(n + 1):
+                    px, py, pyaw = rp.advance(x, y, yaw, length * i / n, k)
+                    track.append((px + nozzle * math.cos(pyaw), py + nozzle * math.sin(pyaw)))
+                x, y, yaw = rp.advance(x, y, yaw, length, k)
+            for v in points:
+                self.assertLess(min(math.dist(v, p) for p in track), 0.002, v)
+
+    def test_gentle_bends_are_still_pulled_through_and_the_radius_is_the_routes(self):
+        gentle = bend(10.0)
+        self.assertEqual(rp._pivot_cover(gentle, RADIUS, NOZZLE, arc_radius=1.0), rp._pivot_cover(gentle, RADIUS, NOZZLE))
+        for radius in (1.0, 2.0):
+            sections, _ = rp._pivot_route_sections(self.arc_spec(SQUARE, turn_radius=radius), RADIUS, NOZZLE)
+            curved = [abs(k) for _, k in sections[0][2] if abs(k) > 1e-9]
+            self.assertAlmostEqual(max(curved), 1.0 / radius)
+        with self.assertRaisesRegex(ValueError, '圆弧掉头半径 0.30 m 小于车能稳定跟踪的'):
+            rp._pivot_cover(SQUARE, RADIUS, NOZZLE, arc_radius=0.3)
+
+    def test_turn_is_parsed_echoed_and_defaults_to_pivot(self):
+        self.assertEqual(rp.parse_spec(dict(kind='path', points=[[0, 0], [1, 0]])).turn, 'pivot')   # 旧 app、旧存盘
+        spec = self.arc_spec(SQUARE)
+        self.assertEqual(spec.to_dict()['turn'], 'arc')
+        self.assertEqual(rp.parse_spec(spec.to_dict()), spec)
+        with self.assertRaisesRegex(ValueError, '急弯转法'):
+            rp.parse_spec(dict(kind='path', points=[[0, 0], [1, 0]], turn='drift'))
+        cmd = al.parse_command(json.dumps({'type': 'route', 'action': 'set', 'route': spec.to_dict()}))
+        self.assertEqual(cmd['route']['turn'], 'arc')
+        with self.assertRaises(al.CommandError):
+            al.parse_command(json.dumps({'type': 'route', 'action': 'set', 'route': dict(spec.to_dict(), turn=1)}))
+        # 阿克曼车的连线路线不管这个字段
+        body = (0.67, 0.08, 0.335)
+        self.assertEqual(rp._route_sections(spec, 1.916, body), rp._route_sections(replace(spec, turn='pivot'), 1.916, body))
+
+    def test_ideal_car_never_stops_turns_in_place_or_reverses_on_the_route(self):
+        spec = self.arc_spec(SQUARE, closed=True)
+        car = DiffCar(-1.5, 0.0, 0.0)                                  # 第一段延长线上：接入就是直线
+        sections, _ = rp.plan(spec, (car.x, car.y, car.yaw), RADIUS, nozzle_x=NOZZLE)
+        self.assertEqual(len(sections), 1)
+        tr = diff_tracker(sections)
+        self.assertTrue(tr.start(car.pose()))
+        rows = run(tr, car)
+        self.assertEqual(tr.st.state, 'DONE')
+        self.assertFalse(any(r[4] or r[5] for r in rows))              # 没有段尾停车、原地转向
+        self.assertTrue(all(r[1] >= 0.0 for r in rows))
+        moving = [r for r in rows if r[0] > 5.0]
+        self.assertGreater(min(r[1] for r in moving[:-60]), 0.2)       # 拐弯也不停（圆弧上按横向加速度限速）
+        self.assertLess(max(abs(r[6]) for r in rows), 0.015)
+
+
 class TestFusedClosedLoop(unittest.TestCase):
     """原始传感器 → 真实融合 → 跟踪 → Gen5 差速底盘（path_sim.DifferentialChassis）。"""
 
@@ -485,6 +611,43 @@ class TestMission(unittest.TestCase):
         self.assertEqual((st['route_limits']['drive'], st['route_limits']['nozzle_x']), ('differential', NOZZLE))
         self.assertAlmostEqual(st['route_limits']['min_radius'], RADIUS, places=3)
         self.assertEqual((st['route']['cover']['pivots'], st['route']['cover']['cusps']), (1, 2))
+        self.assertEqual(st['route_limits']['turns'], ['pivot', 'arc'])
+        self.assertEqual(st['route']['turn'], 'pivot')
+
+    def test_route_start_with_arc_turns_drives_through_the_corner(self):
+        """路线选圆弧掉头：开始时说几次圆弧掉头，整趟不原地转、不停车换段、不倒车（车按执行延迟执行）。"""
+        from test_line_mission import FakeFusion
+        route = dict(kind='path', points=[[0, 0], [6, 0], [6, 5]], closed=False, cruise=0.5, turn='arc',
+                     turn_radius=1.0)
+        self.fusion.current = FakeFusion.make(-1.5, 0.0, 0.0)          # 第一段延长线上：接入是直线
+        ok, msg = self.m.command({'cmd': 'route_start', 'route': route}, 0.0)
+        self.assertTrue(ok, msg)
+        self.assertIn('圆弧掉头 1 次', msg)
+        self.assertNotIn('原地转向', msg)
+        self.assertEqual(self.m.status()['route']['turn'], 'arc')
+        t, sent, vx, wz, gears = 0.0, [], 0.0, 0.0, set()
+        while t < 200.0:
+            out = self.m.tick(t, 'NAVIGATION')
+            if self.m.phase == 'RUNNING':
+                st = self.m.tracker.status()
+                gears.update(k for k in ('pivoting', 'switching') if st.get(k))
+                if out[0] < 0:
+                    gears.add('reverse')
+            p = self.fusion.current
+            sent.append((t + self.m.path_cfg.delay_s, out[0], out[1]))
+            while sent and sent[0][0] <= t + 1e-9:
+                _, vx, wz = sent.pop(0)
+            yaw = p.yaw + wz * 0.05
+            self.fusion.current = FakeFusion.make(p.x + vx * 0.05 * math.cos(yaw), p.y + vx * 0.05 * math.sin(yaw),
+                                                  math.degrees(yaw), speed=vx)
+            self.fusion.current.yaw_rate = wz
+            t += 0.05
+            if self.m.phase == 'IDLE' and out[2] is False:
+                break
+        self.assertEqual(self.m.message, '路线完成')
+        self.assertEqual(gears, set())
+        p = self.fusion.current
+        self.assertLess(math.hypot(p.x + NOZZLE * math.cos(p.yaw) - 6.0, p.y + NOZZLE * math.sin(p.yaw) - 5.05), 0.07)
 
     def test_start_current_at_last_marked_point_runs_back_to_the_first(self):
         """2026-10-01 用户：标 A、B 两点后车停在 B 上点「从当前位置开始」：原地掉头、倒车，

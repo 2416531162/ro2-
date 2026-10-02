@@ -129,6 +129,19 @@ class FusionConfig:
     # 2026-09-30 19:37 实车：主天线固定解错了 20–100 cm（接收机照报 NARROW_INT，两根天线位置之差对不上测向基线），
     # 旧做法离群 2 s 后对齐到错的位置，横偏一下跳 14 cm，车拐过去追，5 s 一次
     rtk_hold_s: float = 0.0
+    # 任务层的喷头推算误差预算；Gen5 在 line_node 中开启，旧车保持原有时限行为。
+    # 估计预算 = 协方差的若干 σ + 轮速比例/滑移等模型余量，不是经认证的真实误差上界。
+    hold_budget_enabled: bool = False
+    hold_watch_s: float = 0.15  # Gen5 正常固定解 20 Hz；短时中断先预算停车，避免等 0.5 s 后才开始减速。
+    hold_lateral_limit_m: float = 0.03
+    hold_along_limit_m: float = 0.10
+    hold_sigma_multiplier: float = 2.0
+    hold_wheel_scale_error: float = 0.02
+    hold_slip_per_m: float = 0.002
+    hold_slip_mps: float = 0.001
+    hold_turn_slip_m_per_rad: float = 0.01
+    hold_turn_scale_error: float = 0.03
+    hold_slow_ratio: float = 0.65
     # 测向基线长度（三维）在这个范围外就不用这帧测向，航向只按 IMU 推（原因 baseline_off）。2026-10-01 用户：测向「有效」
     # 的 0.30–0.50 m 不改，但只要跑出 0.40–0.43 m 就立马信 IMU。Gen5 两根天线约 0.41 m：空旷处实测 0.405–0.418 m，
     # 靠楼时到过 0.391 m。() = 不查
@@ -183,6 +196,10 @@ class FusionConfig:
         for name, value in self.__dict__.items():
             if name == 'yaw_input':
                 continue
+            if name == 'hold_budget_enabled':
+                if type(value) is not bool:
+                    raise ValueError('hold_budget_enabled 必须是布尔值')
+                continue
             if name == 'heading_length_band_m':
                 if value and not (len(value) == 2 and all(math.isfinite(v) for v in value) and 0 < value[0] < value[1]):
                     raise ValueError('heading_length_band_m 必须是 () 或 (下限, 上限) 米')
@@ -193,7 +210,8 @@ class FusionConfig:
             elif not math.isfinite(value):
                 raise ValueError(name + ' 必须是有限数值')
             elif name in ('yaw_scale_sigma', 'heading_sync_s', 'antenna_height_m', 'rtk_hold_s', 'dual_weight_m',
-                          'rejoin_rate_mps'):
+                          'rejoin_rate_mps', 'hold_wheel_scale_error', 'hold_slip_per_m', 'hold_slip_mps',
+                          'hold_turn_slip_m_per_rad', 'hold_turn_scale_error'):
                 if value < 0:
                     raise ValueError(name + ' 不能为负')
             elif name not in ('baseline_yaw_body_deg', 'mount_offset_deg', 'drive_differential') and value <= 0:
@@ -208,6 +226,12 @@ class FusionConfig:
             raise ValueError('history_max_samples 必须是至少 10 的整数')
         if self.dual_ok_m >= self.dual_check_m:
             raise ValueError('dual_ok_m 必须小于 dual_check_m')
+        if not 0 < self.hold_slow_ratio < 1:
+            raise ValueError('hold_slow_ratio 必须在 0 与 1 之间')
+        if max(self.hold_wheel_scale_error, self.hold_turn_scale_error) > 1:
+            raise ValueError('推算比例误差必须是 0–1 的比例')
+        if self.hold_budget_enabled and self.hold_watch_s >= self.fixed_timeout_s:
+            raise ValueError('hold_watch_s 必须小于 fixed_timeout_s')
 
 
 @dataclass(frozen=True)
@@ -225,6 +249,12 @@ class FusedPose:
     quality: str
     usable_for_control: bool
     reasons: tuple
+    # x、y、yaw 的协方差上三角；由同一历史快照产生，任务层换算到喷头与路线方向。
+    covariance_xy_yaw: tuple = ()
+    hold_age_s: float = 0.0
+    hold_distance_m: float = 0.0
+    hold_turn_rad: float = 0.0
+    bias_sigma_rad_s: float = 0.0
 
 
 def _wrap(angle):
@@ -493,6 +523,7 @@ class _State:
         self.weak_t = -math.inf             # 最近一帧按互检偏差降了权的固定解的时刻
         self.heading_band_t = -math.inf     # 最近一帧因基线长度超范围没用的测向的时刻、累计帧数
         self.heading_band_rejected = 0
+        self.hold_distance = self.hold_turn = 0.0  # 最近一次接受固定解之后，绝对路程及绝对转角（倒车不抵消）。
 
 
 class GnssFusion:
@@ -690,6 +721,8 @@ class GnssFusion:
         s.y += dy
         s.yaw = _wrap(s.yaw + angle)
         s.odo += s.speed * dv
+        s.hold_distance += abs(distance)
+        s.hold_turn += abs(angle)
         a, c, e = -dy, dx, -dg
         b, d = a * e / 2, c * e / 2
         xx, xy, xh, xb, yy, yh, yb, hh, hb, bb = s.p
@@ -1014,6 +1047,7 @@ class GnssFusion:
                 s.blend_t = s.rejoin_t = sample.t
                 s.outlier_since = None
                 s.fix_t, s.fixed_t, s.fix_reason, s.position_quality = sample.t, sample.t, '', 'RTK_FIXED'
+                s.hold_distance = s.hold_turn = 0.0
                 return
             s.blending = False
         if not s.position_ready or reset:
@@ -1061,6 +1095,7 @@ class GnssFusion:
         s.position_quality = 'RTK_FIXED' if fixed else 'RTK_FLOAT'
         if fixed:
             s.fixed_t = sample.t
+            s.hold_distance = s.hold_turn = 0.0
             self._position_course(sample, xy)
         else:
             self._end_segment()
@@ -1200,6 +1235,8 @@ class GnssFusion:
             # （位置靠轮速 + IMU 航向推算），超过才不可控、原地停，恢复后自动继续（见 FusionConfig.rtk_hold_s）。
             # 超时的原因按最近是不是卫星位置错了分开报：rtk_hold_timeout / rtk_fixed_timeout
             since = s.t - s.fixed_t
+            if cfg.hold_budget_enabled and cfg.hold_watch_s <= since < cfg.fixed_timeout_s:
+                reasons.append('rtk_hold_pending')
             if since >= cfg.fixed_timeout_s - 1e-9:
                 suspect = s.t - s.suspect_t < cfg.fixed_timeout_s - 1e-9
                 if since <= cfg.rtk_hold_s + 1e-9:
@@ -1252,7 +1289,10 @@ class GnssFusion:
             usable = False
         return FusedPose(s.t, s.x, s.y, _wrap(s.yaw), s.speed*cfg.wheel_scale,
                          s.gyro-s.bias, sigma_xy, sigma_yaw, s.bias, self._mount,
-                         quality, usable, tuple(reasons))
+                         quality, usable, tuple(reasons),
+                         (s.p[0], s.p[1], s.p[2], s.p[4], s.p[5], s.p[7]),
+                         max(0.0, s.t - s.fixed_t), s.hold_distance, s.hold_turn,
+                         math.sqrt(max(0.0, s.p[9])))
 
     def antenna_lever(self):
         """现在用的 ANT1 水平杠杆臂（车体系前、左，m，含倾斜补偿）；line_mission 核对定位跳动时用同一个。"""

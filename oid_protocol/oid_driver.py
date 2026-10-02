@@ -51,7 +51,7 @@ class DiffConfig:
     cmd_timeout_s: float = PROFILE['driver']['cmd_timeout_s']
     feedback_timeout_s: float = PROFILE['driver']['feedback_timeout_s']
     startup_stop_s: float = PROFILE['driver']['startup_stop_s']
-    tx_hz: float = 25.0
+    tx_hz: float = 50.0
     feedback_grace_s: float = 1.0
     backlog_tolerance: int = 8
 
@@ -70,9 +70,9 @@ class DiffConfig:
 
 
 # 停稳且没有驾驶指令时放空电机：纯霍尔的驱动器锁在零速闭环里会来回找位置，停着也咔哒响、耗电。
-# 先按零速刹停，连续这么多帧（25 Hz，约 1 s）读到静止才放空，之后只读反馈；一有指令、或车被推动
+# 先按零速刹停，连续读到静止满 1 s 才放空，之后只读反馈；一有指令、或车被推动
 # （不再静止）就回到速度闭环锁零速
-RELEASE_STATIONARY_FRAMES = 25
+RELEASE_STATIONARY_S = 1.0
 
 
 class DiffControlPolicy(ControlPolicy):
@@ -82,6 +82,26 @@ class DiffControlPolicy(ControlPolicy):
     def __init__(self, config, now):
         super().__init__(config, now)
         self.fault = None
+        self.stationary_since = None
+
+    def link(self, connected, now):
+        super().link(connected, now)
+        self.stationary_since = None
+
+    def feedback(self, telemetry, now):
+        previous_rx = self.last_rx
+        super().feedback(telemetry, now)
+        if not self.stationary_frames:
+            self.stationary_since = None
+        elif (self.stationary_since is None or previous_rx is None
+              or not 0 <= now - previous_rx <= self.config.feedback_timeout_s):
+            self.stationary_since = now
+
+    def ready_to_release(self, now):
+        """以连续静止反馈的时间计时，频率提高或反馈成批到达都不能提前放空。"""
+        return (self.stationary_since is not None and self.last_rx is not None
+                and 0 <= now - self.last_rx <= self.config.feedback_timeout_s
+                and self.last_rx - self.stationary_since >= RELEASE_STATIONARY_S)
 
     def ready(self, now):
         reason = super().ready(now)
@@ -218,7 +238,7 @@ PARAMS = dict(confirmed=False, left_bus='can', right_bus='can',
               rs485_word_order='big', rs485_timeout_s=0.03, rs485_echo=False,
               heartbeat_s=0.1, pole_pairs=0, wheel_radius_m=0.2046, gear_ratio=1.0,
               left_sign=1, right_sign=-1, wheel_accel_mps2=1.0, wheel_decel_mps2=2.0,
-              tx_hz=25.0, yaw_acceleration_rad_s2=2.0, publish_tf=False, navigation_uses_lidar=False)
+              tx_hz=50.0, yaw_acceleration_rad_s2=2.0, publish_tf=False, navigation_uses_lidar=False)
 
 
 class OidDriver(wd.WheeltecDriver):
@@ -263,7 +283,7 @@ class OidDriver(wd.WheeltecDriver):
             self.policy.speed_filter = self.guard_speed_filter
         self.parser = _Counters()
         self.chassis, self.port = None, bus_label(self.params)
-        self.released = False               # 停稳后已放空电机（见 RELEASE_STATIONARY_FRAMES）
+        self.released = False               # 停稳后已放空电机（见 RELEASE_STATIONARY_S）
         self.running = True
         self.tx_packets = self.tx_bytes = self.rx_bytes = self.io_errors = 0
         self.last_tx_hex = ''
@@ -389,7 +409,7 @@ class OidDriver(wd.WheeltecDriver):
             self.apply_motion(now)
             v, w = self.policy.tick(now)
             idle = (send and v == 0.0 and w == 0.0 and self.policy.latest is None
-                    and self.policy.stationary_frames >= RELEASE_STATIONARY_FRAMES)
+                    and self.policy.ready_to_release(now))
         if idle:
             if not self.released:
                 self.chassis.release(now)

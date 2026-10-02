@@ -108,7 +108,7 @@ def sample_route_line(now=100.0):
             'route': route,
             'route_limits': {'min_radius': round(min_route_radius(), 3), 'max_points': route_plan.MAX_POINTS,
                              'max_laps': route_plan.MAX_LAPS, 'max_entry_m': route_plan.MAX_ENTRY_M,
-                             'body': list(BODY), 'drive': 'ackermann', 'nozzle_x': None},
+                             'body': list(BODY), 'drive': 'ackermann', 'nozzle_x': None, 'turns': None},
             'pose': {'x': 10.004, 'y': 5.0, 'yaw_deg': 90.3, 'speed': 0.5, 'quality': 'RTK_FIXED',
                      'usable': True, 'sigma_xy': 0.009, 'sigma_yaw_deg': 0.08, 'reasons': []},
             'tracker': {'state': 'RUNNING', 'reason': '', 'e': -0.004, 'heading_err_deg': 0.3, 's': 17.1,
@@ -192,6 +192,19 @@ def route_geometry_cases():
         ('连线 罚球弧折线', dict(path, points=arc(9.15, 106.0, 0.005)), [-2.0, 0.0, 0.0], 0.30),
         ('连线 短边连续缓弯', dict(path, points=[[0, 0], [3, 0], [3.5, 0.1], [4, 0], [4.5, 0.1], [8, 0.1]]),
          [-2.0, 0.0, 0.0], 0.30),
+    ]
+    # 差速车圆弧掉头（turn='arc'）：急弯不停车，喷头开过拐角后按 turn_radius 绕 Dubins 接到下一条边上
+    arc_turn = dict(path, turn='arc', turn_radius=1.0)
+    cases += [
+        ('圆弧掉头 闭环矩形 两圈', dict(arc_turn, points=[[0, 0], [8, 0], [8, 6], [0, 6]], closed=True, laps=2),
+         [-2.0, 0.0, 0.0], 0.30),
+        ('圆弧掉头 行距 3 m 往返 R1.5', dict(arc_turn, points=[[0, 0], [8, 0], [8, 3], [0, 3]], turn_radius=1.5),
+         [-2.0, 0.0, 0.0], 0.30),
+        ('圆弧掉头 折返 176°', dict(arc_turn, points=[[0, 0], [8, 0], [0, 0.5]]), [-2.0, 0.0, 0.0], 0.30),
+        ('圆弧掉头 右转 缓弯照样拖过去', dict(arc_turn, points=[[0, 0], [6, 0], [12, -1], [12, -6]], turn_radius=2.0),
+         [-2.0, 0.0, 0.0], 0.30),
+        ('圆弧掉头 喷头在两轮中间', dict(arc_turn, points=[[0, 0], [6, 0], [6, 0.8], [0, 0.8]]), [-2.0, 0.0, 0.0], 0.0),
+        ('圆弧掉头 接入要原地转', dict(arc_turn, points=[[0, 0], [6, 0], [6, 5]]), [-2.0, 1.0, 2.0], 0.30),
     ]
     out = []
     for name, d, car, *fixed in cases:
@@ -288,6 +301,8 @@ def route_start_cases():
         ('圆 喷头在圆心 朝东', circle, [-0.3, 0.0, 0.0], PIVOT_RADIUS, d),
         ('圆 喷头在圆心 朝西北', circle, [-0.3 * math.cos(2.0), -0.3 * math.sin(2.0), 2.0], PIVOT_RADIUS, d),
         ('圆 逆时针两圈', dict(circle, radius=3.0, clockwise=False, laps=2), [3.0, 0.0, math.pi / 2], PIVOT_RADIUS, d),
+        ('矩形 圆弧掉头 边中间', dict(rect, turn='arc', turn_radius=1.0), [4.7, -0.1, 0.0], PIVOT_RADIUS, d),
+        ('矩形 圆弧掉头 靠近拐角 两圈', dict(rect, turn='arc', turn_radius=1.5, laps=2), [9.6, 0.1, 0.0], PIVOT_RADIUS, d),
         ('阿克曼 直线 靠近终点', line, [9.0, 0.0, math.pi], ack, None),
         ('阿克曼 矩形', rect, [5.0, 0.3, 0.0], ack, None),
         ('阿克曼 圆', dict(circle, radius=3.0), [3.0, 0.0, -math.pi / 2], ack, None),
@@ -307,6 +322,33 @@ def route_start_cases():
             case.update(entry_m=None, error=str(exc), sections=None)
         out.append(case)
     return out
+
+
+def sample_field_rework_line(now=100.0):
+    """整场暂停后局部补画预览；新字段由正常遥测编码器一并输出。"""
+    line = sample_route_line(now)
+    elements = [
+        dict(id=0, name='边框 · 1', kind='polyline', source_element_id='frame', source_edge_index=0,
+             length_m=10.0, points=[[5.0,5.0],[15.0,5.0]]),
+        dict(id=1, name='中圈', kind='circle', source_element_id='circle', source_edge_index=None,
+             length_m=6*math.pi, points=[[18.0,10.0],[15.0,13.0],[12.0,10.0],[15.0,7.0],[18.0,10.0]]),
+        dict(id=2, name='禁区弧', kind='arc', source_element_id='arc', source_edge_index=None,
+             length_m=math.pi, points=[[20.0,10.0],[19.1213,12.1213],[17.0,13.0]])]
+    context = [dict(direction=1,points=e['points']) for e in elements]
+    line.update(phase='PAUSED',message='已暂停，可局部补画后回原断点',motion_mode='IDLE')
+    line['pose'].update(x=8.0,y=8.0,yaw_deg=0.0,speed=0.0,usable=True)
+    line['tracker'].update(state='PAUSED',reason='operator')
+    line['operations'] = dict(actions=['pause','preview','resume','rework','field_start','start_current','end','field_rework'],
+        durable=True,spray_supported=False,error=None,
+        job=dict(id='field-parent',kind='route',state='PAUSED',reason='operator',label='场地作业 · 内场优先',
+                 cursor_m=12.0,total_m=72.0,can_resume=True,field_plan=True,current_role='transit',painting=False,
+                 parent_id=None,parent_job_id=None), elements=elements,context=context,history=[],execution=None,
+        preview=dict(token='field-repair-ticket',request_id='repair-1',operation='rework',label='边框 · 1 · 2.00–4.00 m',
+                     entry_m=3.0,total_m=5.0,field_plan=True,max_outside_m=0.0,start=[8.0,8.0,0.0],context=context,
+                     sections=[dict(direction=1,points=[[8.0,8.0],[6.7,5.5],[8.7,5.5]])],
+                     entry=[dict(direction=1,points=[[8.0,8.0],[6.7,5.5]])],
+                     target=[dict(direction=1,points=[[7.0,5.0],[9.0,5.0]])]))
+    return line
 
 
 def fixture_messages():
@@ -333,9 +375,13 @@ def fixture_messages():
                  line=sample_route_line())
     route['wheeltec'] = dict(route['wheeltec'], guard={'navigation_uses_lidar': False, 'bypassed': True})
     tel_route = app_link.build_telemetry(route, now=100.0, seq=44)
+    field = sample_snapshot()
+    field.update(motion={'mode':'IDLE','healthy':True},gnss=sample_gnss(),line=sample_field_rework_line())
+    field['wheeltec']['telemetry']['velocity'] = [0.0,0.0,0.0]
+    tel_field_rework = app_link.build_telemetry(field, now=100.0, seq=45)
     return {'tel_sample.json': tel, 'tel_line_sample.json': tel_line, 'tel_route_sample.json': tel_route,
             'route_geometry_sample.json': route_geometry_cases(), 'hello_sample.json': hello,
-            'route_start_current_sample.json': route_start_cases()}
+            'route_start_current_sample.json': route_start_cases(),'tel_field_rework_sample.json':tel_field_rework}
 
 
 def write(directory):

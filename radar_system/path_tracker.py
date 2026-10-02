@@ -264,6 +264,7 @@ class PathTracker:
             raise ValueError('路径最小转弯半径 %.2f m，底盘能稳定跟踪的最小半径是 %.2f m'
                              % (1.0 / path.kappa_abs_max, 1.0 / usable))
         self.path = path
+        self.speed_limit_mps = None
         # 控制律按车实际走出的曲率算，最多能走出 steer_gain·kappa_max（下发的仍不超过 kappa_max）
         self.kappa_act_max = config.steer_gain * self.kappa_max
         self.k_theta = 2.0 * config.zeta * config.omega_per_m
@@ -447,6 +448,8 @@ class PathTracker:
         if cfg.start_creep_mps > 0 and started < cfg.start_creep_m:
             v = min(v, cfg.start_creep_mps)
         v = min(v, self._v_prev + cfg.accel_mps2 * dt)
+        if self.speed_limit_mps is not None:
+            v = min(v, max(0.0, self.speed_limit_mps))
         self._v_prev = v
         st.v_cmd = v
         w_hold = 0.0
@@ -515,6 +518,7 @@ class SectionTracker:
         转完仍差 pivot_min 以上最多补转 pivot_retries 次，再不行按 pivot_timeout 中止。没转到位时角速度不低于
         pivot_floor（rad/s，0.1 约轮子 33 erpm；实车 ±5–19 erpm 收尾磨 1.6 s，±14 erpm 补转推不动）。"""
         self.sections = list(sections)
+        self.speed_limit_mps = None
         if not self.sections:
             raise ValueError('路径是空的')
         self.cfg = config
@@ -655,6 +659,7 @@ class SectionTracker:
         if self.switching:
             return self._switch(pose, dt)
         sec, tr = self.sections[self.index], self.trackers[self.index]
+        tr.speed_limit_mps = self.speed_limit_mps
         v, w = tr.update(self._view(sec, pose), dt)
         self._sync()
         if tr.st.state == 'DONE':

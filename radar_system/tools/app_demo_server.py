@@ -47,6 +47,7 @@ import car_display  # noqa: E402
 import car_network  # noqa: E402
 from line_sim import Chassis  # noqa: E402
 from runtime_config import PROFILE, profile_hash  # noqa: E402
+from robot_core.config import CONTROL_DT  # noqa: E402
 from robot_core.kinematics import ChassisGeometry  # noqa: E402
 from line_mission import LineMission  # noqa: E402
 from field_plan_service import FieldPlanService  # noqa: E402
@@ -70,7 +71,7 @@ FIELD_PLANS = FieldPlanService()
 
 
 class DemoSim:
-    """仿真时钟：底盘每 10 ms 积分一次，控制（control_hook）20 Hz，与车上 line_node 的周期相同。"""
+    """仿真时钟：底盘每 10 ms 积分一次，控制（control_hook）50 Hz，与车上 line_node 的周期相同。"""
 
     def __init__(self, car):
         self.t, self.car, self.control_hook = 0.0, car, None
@@ -81,7 +82,7 @@ class DemoSim:
         while self.t < end - 1e-9:
             if self.t >= self._next - 1e-9:
                 self.control_hook(self.t)
-                self._next += 0.05
+                self._next += CONTROL_DT
             self.car.step(self.t, 0.01)
             self.t += 0.01
 
@@ -274,7 +275,7 @@ class DemoCar:
                 # Cache expiry uses wall time; the simulated mission runs on its own clock.
                 value['created_at'] = self.sim.t
                 payload.update(field_plan=value, allow_outside=cmd.get('allow_outside', False))
-            for key in ('route', 'route_rev', 'job_id', 'preview_token', 'operation', 'element', 'from_m', 'to_m', 'overlap_m', 'allow_outside'):
+            for key in ('route', 'route_rev', 'job_id', 'preview_token', 'operation', 'element', 'element_id', 'edge_index', 'from_m', 'to_m', 'overlap_m', 'allow_outside'):
                 if key in cmd:
                     payload[key] = cmd[key]
             ok, message = self.mission.command(payload, self.sim.t)

@@ -8,6 +8,9 @@ from pathlib import Path
 DEFAULT_PATH = Path(__file__).with_name('robot.json')
 # 底盘驱动方式：ackermann 旧 Wheeltec 前轮转向；differential Gen5 两后轮差速、前面自由万向轮（能原地转）
 DRIVE_TYPES = ('ackermann', 'differential')
+# 两种底盘共用的运动控制周期；传感器采样和状态上报使用各自的频率。
+CONTROL_HZ = 50.0
+CONTROL_DT = 1.0 / CONTROL_HZ
 
 
 def load_profile(path=None):

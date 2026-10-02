@@ -175,10 +175,10 @@ class OidSimCar:
     """用两台模拟驱动器开的 Gen5（底盘仿真接口同 line_sim.Chassis）。车体原点是后轴中点。
 
     wheels 默认：Gen5 CAD 轮距 0.675 m、轮半径 0.2046 m，磁极对数按 15 模拟，右轮电机镜像安装。
-    control_s：驱动程序下发、查询的周期（与 oid.yaml 的 tx_hz 25 相同）。
+    control_s：驱动程序下发、查询的周期（与 oid.yaml 的 tx_hz 50 相同）。
     """
 
-    def __init__(self, wheels=None, *, control_s=0.04, accel_mps2=1.0, decel_mps2=2.0):
+    def __init__(self, wheels=None, *, control_s=0.02, accel_mps2=1.0, decel_mps2=2.0):
         self.wheels = wheels or WheelConfig(pole_pairs=15, accel_mps2=accel_mps2, decel_mps2=decel_mps2)
         self.bus = SimOidBus(self.wheels.pole_pairs)
         self.chassis = OidChassis(CanLink(self.bus, (1, 2)), self.wheels)

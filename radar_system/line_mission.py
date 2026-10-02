@@ -27,6 +27,8 @@ from line_cascade import NOTICES as CASCADE_NOTICES, REASON_TEXT, SHARED_FIELDS,
 from line_tracker import LineConfig, LineTracker
 from path_tracker import DIFF_REVERSE_MPS, DIFF_SETTLE_S, PathConfig, SectionTracker, differential_config
 from route_operations import RouteOperations
+from rtk_hold_budget import HoldDecision, evaluate_hold
+from robot_core.config import CONTROL_DT
 
 SELECT_TIMEOUT_S = 3.0
 ANTENNA_STALE_S = 2.0       # 天线定位这么久没更新就不在状态里报
@@ -41,6 +43,7 @@ INNOVATION_STALE_S = 1.0
 # 融合给出的原因里会禁止控制的那些，按根因排序（其余如 heading_unavailable、gyro_only 只说明降级来源），
 # 见 docs/GNSS_FUSION.md
 BLOCKING_REASONS = ('heading_uninitialized', 'imu_stale', 'imu_mismatch', 'wheel_stale', 'position_mismatch',
+                    'rtk_hold_budget_exceeded', 'rtk_hold_braking_timeout', 'rtk_hold_budget_missing',
                     'rtk_hold_timeout', 'rtk_fixed_timeout', 'position_reset', 'heading_uncertain', 'position_uncertain')
 # 测向浮点（无效）时航向只靠陀螺和行驶轨迹维持，融合的航向不确定度一过 0.5° 就判不可控制。
 # 主、副天线都是固定解（位置可信）时放宽到这么多照样走，原因里加 gyro_hold（2026-09-27 用户要求：
@@ -54,9 +57,8 @@ LINE_CRUISE_MPS = 0.8
 # 卫星位置不可信 / 固定解中断（中转断流、浮点）时按推算维持（融合 rtk_hold_s，Gen5 5 s）给操作员的话，
 # 超时停车后恢复自动继续；恢复后改回「行驶中」。理由报真实情况：位置错了（双天线互检，融合原因里有 rtk_suspect）
 # 和固定解没来分开说
-# 推算维持最多多久（Gen5 融合 rtk_hold_s，line_node 按它设）：2026-10-01 用户 5 → 8 s（「imu 的航向角还是非常稳的」；
-# 实测空旷处 3 圈 1078°，IMU 航向角与双天线测向只差 0.4°）
-RTK_HOLD_S = 8.0
+# 推算维持最多多久（Gen5 融合 rtk_hold_s，line_node 按它设）；手动维持测试也使用同一时限。
+RTK_HOLD_S = 5.0
 RTK_NOTICE_HOLD = '卫星定位不可信，按 IMU 推算行驶'
 RTK_NOTICE_TIMEOUT = '卫星定位不可信超过 %g s，已停车，定位恢复后自动继续' % RTK_HOLD_S
 RTK_NOTICE_LOST_HOLD = '卫星固定解中断，按 IMU 推算行驶（最多 %g s）' % RTK_HOLD_S
@@ -71,7 +73,7 @@ RESUME_FAILED_NOTICE = '定位已恢复，但不能自动接着走：%s；请停
 # 当天 13:40 实车：从室内转发器下开出来，RTK 已经差几十米，融合要持续对不上 2 s 才对齐，这期间照样能开始作业
 START_AGREE_M = 0.05
 START_FIX_AGE_S = 0.5
-UNCONFIRMED_REASONS = ('rtk_hold', 'rtk_suspect', 'rtk_rejoin', 'position_reset')
+UNCONFIRMED_REASONS = ('rtk_hold', 'rtk_hold_pending', 'rtk_suspect', 'rtk_rejoin', 'position_reset')
 # 走着的时候也一样（2026-10-01 用户：app 上车在路线上走，就必须真的在那条路线上）：卫星没判不可信（不在推算维持）、
 # 最新固定解与融合推算差超过 MISMATCH_M，位置就不当真用——停车，原因 position_mismatch（app 显示），融合对齐后
 # 按 RTK 确认的位置自动继续。当天正常作业 23 趟（含靠楼）这个差最大 10.5 cm；13:36–13:50 出问题的 7 趟每帧都差 11–100 m
@@ -143,6 +145,12 @@ class LineMission:
         self.cruise = self.tracker.cfg.cruise_mps
         self.pose = None
         self._last_tick = None
+        self._hold_decision = None
+        self._hold_speed_limit = None
+        self._hold_pause_reason = None  # 预算暂停后，降低速度本身不等于重新确认了位置；等 RTK 恢复再解除。
+        self._sent_motion = deque()    # 最近已下发的速度/转速，停车预估覆盖执行延迟里的指令。
+        self._imu_hold_test = None      # 手动测试只在当前运行任务中生效，不持久化。
+        self._imu_hold_gnss_after = -math.inf  # 测试区间的迟到 GNSS 永远不回放。
         self.release_pending = False    # 任务结束后要把 NAVIGATION 交还给仲裁
         self._log = self._log_file = None
         self.integral0 = self._load_integral()
@@ -153,6 +161,8 @@ class LineMission:
     # ---- 传感器输入 ----
     def on_gnss(self, m):
         s, kind = self.samples, m.get('kind')
+        if kind in ('fix', 'fix2', 'heading', 'vel') and m['t'] < self._imu_hold_gnss_after:
+            return
         inf = lambda v: math.inf if v is None else v  # noqa: E731
         if kind == 'fix':
             self._antenna = (m['t'], m['lat'], m['lon'], m['sol'], max(m['sigma_n'], m['sigma_e']))
@@ -240,15 +250,20 @@ class LineMission:
     def command(self, cmd, now):
         """返回 (是否接受, 说明)。start 被接受只表示开始申请控制权，结果看 tick/status。"""
         kind = cmd.get('cmd')
+        if kind == 'route_imu_hold':
+            return self._start_imu_hold_test(cmd, now)
         if kind=='route_field_start':
             try:return True,self.operations.start_field(cmd,now)
             except (ValueError,TypeError,KeyError) as exc:return False,str(exc)
-        if kind in ('route_pause', 'route_preview', 'route_resume', 'route_rework'):
+        if kind in ('route_pause', 'route_preview', 'route_resume', 'route_rework', 'route_end'):
             try:
                 if kind == 'route_pause':
                     message = self.operations.pause(cmd, now)
+                    self._end_imu_hold_test(now, 'cancelled', '作业已暂停')
                 elif kind == 'route_preview':
                     message = self.operations.prepare(cmd, now)
+                elif kind == 'route_end':
+                    message = self.operations.end(cmd, now)
                 else:
                     message = self.operations.commit(cmd, now, kind.removeprefix('route_'))
                 return True, message
@@ -274,11 +289,62 @@ class LineMission:
             self.operations.clear()
             return True, '已删除路线'
         if kind == 'stop':
+            self._end_imu_hold_test(now, 'cancelled', '作业已停止')
             self.tracker.stop('operator')
             if self.phase in ('SELECTING', 'RUNNING', 'PAUSING', 'PAUSED') or self.operations.held:
                 self._finish('操作员停止', state='CANCELLED')
             return True, '已停止'
         return False, '未知指令'
+
+    def _imu_hold_supported(self):
+        cfg = getattr(self.fusion, 'config', None)
+        return self.differential and getattr(cfg, 'yaw_input', None) == 'angle' and getattr(cfg, 'rtk_hold_s', 0) >= RTK_HOLD_S
+
+    def _start_imu_hold_test(self, cmd, now):
+        if not self._imu_hold_supported():
+            return False, '车端尚未支持 IMU 维持 %g 秒测试' % RTK_HOLD_S
+        try:
+            self.operations.check_identity(cmd)
+        except (ValueError, TypeError, KeyError) as exc:
+            return False, str(exc)
+        request_id = cmd.get('id')
+        if not isinstance(request_id, str) or not request_id:
+            return False, 'IMU 测试缺少指令标识'
+        test = self._imu_hold_test
+        if test and test['id'] == request_id:
+            return True, '此 IMU 测试指令已处理'
+        if self.task != 'route' or self.phase != 'RUNNING' or self.last_motion_mode != 'NAVIGATION' or self.tracker.st.state != 'RUNNING':
+            return False, '请先开始路线作业，行驶中才能测试'
+        if test and test['state'] == 'running':
+            return False, 'IMU 维持测试正在进行，请等待结束'
+        pose = self._control_pose(now)
+        problem = pose_problem(pose) or self._rtk_unconfirmed(pose, now)
+        if problem:
+            return False, problem
+        cfg = self.fusion.config
+        if self._imu is None or now - self._imu[0] > cfg.sensor_timeout_s or any(r in pose.reasons for r in ('imu_stale', 'imu_mismatch')):
+            return False, 'IMU 航向不可用，不能测试'
+        self._imu_hold_test = dict(id=request_id, state='running', started=now, until=now + RTK_HOLD_S, reason='')
+        self._imu_hold_gnss_after = now + RTK_HOLD_S
+        self._innovation = None
+        return True, '已切换 IMU + 轮速维持，%g 秒后自动接回 RTK' % RTK_HOLD_S
+
+    def _end_imu_hold_test(self, now, state, reason):
+        test = self._imu_hold_test
+        if test and test['state'] == 'running':
+            test.update(state=state, ended=now, reason=reason)
+            self._imu_hold_gnss_after = min(test['until'], now)
+
+    def _imu_hold_test_status(self):
+        if not self._imu_hold_supported():
+            return None
+        test = self._imu_hold_test
+        if test is None:
+            return dict(state='idle', duration_s=RTK_HOLD_S, remaining_s=0.0, id=None, reason='')
+        now = self._last_tick if test['state'] == 'running' else test['ended']
+        remaining = max(0.0, min(RTK_HOLD_S, test['until'] - (now if now is not None else test['started'])))
+        return dict(state=test['state'], duration_s=RTK_HOLD_S, remaining_s=round(remaining, 1) if test['state'] == 'running' else 0.0,
+                    id=test['id'], reason=test['reason'])
 
     def _mark(self, point, now):
         if point not in ('A', 'B'):
@@ -317,8 +383,13 @@ class LineMission:
         """控制用的位姿：融合位姿，只因测向无效、陀螺维持的航向不确定度超了融合门槛而不可控制时，
         若主天线（融合已是 RTK 固定解）和副天线都固定、不确定度不超过 GYRO_HOLD_SIGMA_YAW_DEG，照样可用。"""
         pose = self.fusion.pose(now)
+        self._hold_decision = self._hold_speed_limit = None
         if pose is None:
             return pose
+        test = self._imu_hold_test
+        if test and test['state'] == 'running' and now < test['until']:
+            # 标明实际控制来源；预算、传感器中断和航向超限检查照常执行。
+            pose = _with(pose, quality='DEAD_RECKONING', reasons=tuple(pose.reasons) + ('imu_hold_test', 'rtk_hold'))
         if not pose.usable_for_control:
             reasons = tuple(getattr(pose, 'reasons', ()))
             blocking = [r for r in BLOCKING_REASONS if r in reasons]
@@ -332,7 +403,58 @@ class LineMission:
         if gap is not None and gap > MISMATCH_M:
             return _with(pose, usable_for_control=False,
                          reasons=tuple(getattr(pose, 'reasons', ())) + ('position_mismatch',))
+        cfg = getattr(self.fusion, 'config', None)
+        if self.differential and getattr(cfg, 'hold_budget_enabled', False):
+            decision = self._hold_budget(pose, cfg, now)
+            self._hold_decision = decision
+            if decision is not None:
+                if decision.stop:
+                    self._hold_pause_reason = decision.reason
+                elif self._hold_pause_reason:
+                    decision = dataclasses.replace(decision, state='stop', reason=self._hold_pause_reason, speed_limit_mps=0.0)
+                    self._hold_decision = decision
+                self._hold_speed_limit = decision.speed_limit_mps
+                if decision.reason:
+                    pose = _with(pose, usable_for_control=not decision.stop,
+                                 reasons=tuple(pose.reasons) + (decision.reason,))
+            elif not self._rtk_unconfirmed(pose, now):
+                self._hold_pause_reason = None
         return pose
+
+    def _hold_budget(self, pose, cfg, now):
+        if not any(r in pose.reasons for r in ('rtk_hold', 'rtk_hold_pending', 'rtk_suspect', 'rtk_hold_timeout', 'rtk_fixed_timeout')):
+            return None
+        tracker, settings = self.tracker, self.tracker.cfg
+        forward, left = self.nozzle_x, 0.0
+        field = (self.operations.record or {}).get('field_context', {})
+        if (self.operations.record or {}).get('field_plan'):
+            if not isinstance(field, dict) or not all(isinstance(field.get(k), (int, float)) and math.isfinite(field[k]) for k in ('forward', 'right')):
+                return HoldDecision('stop', 'rtk_hold_budget_missing', speed_limit_mps=0.0)
+            forward, left = field['forward'], -field['right']
+        heading = getattr(tracker, 'line_yaw', getattr(tracker, 'yaw', pose.yaw))
+        if isinstance(tracker, SectionTracker):
+            index = tracker._next if tracker.switching and tracker._next is not None else tracker.index
+            tr = tracker.trackers[index]
+            settings = tr.cfg
+            heading = tr.path.pose(max(0.0, tr.st.s))[2]
+            if field:
+                k = tr.path.kappa(max(0.0, tr.st.s))
+                direction = tracker.sections[index].direction
+                heading += math.atan2(k * direction * forward, 1.0 - k * direction * left)
+        elif hasattr(tracker, 'path'):
+            heading = tracker.path.pose(max(0.0, tracker.st.s))[2]
+        delay = max(0.0, getattr(settings, 'speed_delay_s',
+                    getattr(settings, 'stop_delay_s', None) or getattr(settings, 'delay_s', 0.35))) + 0.05
+        while self._sent_motion and self._sent_motion[0][0] < now - delay:
+            self._sent_motion.popleft()
+        speed = max([abs(pose.speed), abs(tracker.st.v_cmd)] + [abs(v) for _, v, _ in self._sent_motion])
+        turn = max([abs(pose.yaw_rate)] + [abs(w) for _, _, w in self._sent_motion])
+        from runtime_config import PROFILE
+        braking = min(settings.decel_mps2, PROFILE['safety']['decel_mps2'])
+        return evaluate_hold(pose, cfg, nozzle_x=forward, nozzle_y=left, route_yaw=heading,
+                             cruise_mps=self.cruise, speed_peak=speed, turn_peak=turn,
+                             delay_s=delay, decel_mps2=braking,
+                             angular_decel=self.geo.pivot_accel_rad_s2)
 
     def _rtk_gap(self, pose, now):
         """最新固定解（START_FIX_AGE_S 内）与融合推算的主天线位置差多远，m；卫星判了不可信（推算维持中）、
@@ -461,7 +583,9 @@ class LineMission:
             k = self.line_cfg.track_x_m     # 与直线相同：控制点（默认后轴中心）压在路线上
             car = (pose.x + k * math.cos(pose.yaw), pose.y + k * math.sin(pose.yaw), pose.yaw)
             planner = route_plan.plan_current if cmd.get('cmd') == 'route_start_current' else route_plan.plan
-            sections, entry_m = planner(spec, car, self.min_route_radius, body=self.body, nozzle_x=self.nozzle_x)
+            info = {}
+            sections, entry_m = planner(spec, car, self.min_route_radius, body=self.body, nozzle_x=self.nozzle_x,
+                                        info=info)
             cfg = dataclasses.replace(self.path_cfg, cruise_mps=spec.cruise, track_x_m=k)
             tracker = SectionTracker(sections, cfg, self.geo, **self.section_options())
         except ValueError as exc:
@@ -480,6 +604,7 @@ class LineMission:
             # 倒车几段（每段前后各换向一次，tracker.reversals 是换向次数）
             reverses = sum(1 for sec in sections if sec.direction < 0)
             turns = ('，原地转向 %d 次' % tracker.pivots if tracker.pivots else '') + \
+                    ('，圆弧掉头 %d 次' % info['arc_turns'] if info.get('arc_turns') else '') + \
                     ('，倒车 %d 次' % reverses if reverses else '')
         self.message = '申请控制权（接入 %.1f m，全程 %.1f m%s）' % (entry_m, tracker.length, turns)
         return True, self.message
@@ -553,9 +678,15 @@ class LineMission:
     # ---- 控制周期 ----
     def tick(self, now, motion_mode):
         """返回 (vx, wz, select)。select=True/False 表示节点要调用 /motion/navigation，None 不动。"""
-        dt = 0.05 if self._last_tick is None else max(0.0, min(0.2, now - self._last_tick))
+        dt = CONTROL_DT if self._last_tick is None else max(0.0, min(0.2, now - self._last_tick))
         self._last_tick = now
         self.last_motion_mode = motion_mode
+        test = self._imu_hold_test
+        if test and test['state'] == 'running':
+            if now >= test['until']:
+                self._end_imu_hold_test(test['until'], 'done', '%g 秒结束，正在接回 RTK' % RTK_HOLD_S)
+            elif self.phase != 'RUNNING' or motion_mode != 'NAVIGATION' or self.tracker.st.state != 'RUNNING':
+                self._end_imu_hold_test(now, 'cancelled', '作业已暂停或停止，正在接回 RTK')
         self.pose = pose = self._control_pose(now)
         self._sync_imu(self.tracker, now)
         if self.phase == 'PAUSING':
@@ -594,13 +725,29 @@ class LineMission:
         if pose is None:
             pose = _NoPose()
         self._auto_resume(now, pose)
+        self.tracker.speed_limit_mps = self._hold_speed_limit
         vx, wz = self.tracker.update(pose, dt)
+        self._sent_motion.append((now, vx, wz))
+        if self.tracker.st.state != 'RUNNING':
+            self._end_imu_hold_test(now, 'cancelled', '作业已暂停或停止，正在接回 RTK')
+        while self._sent_motion and self._sent_motion[0][0] < now - 2.0:
+            self._sent_motion.popleft()
         # 航向跳变按 IMU 维持 / 超过 5 s 停车等航向（定点画线控制器）、卫星位置不可信按推算维持 / 超时停车（融合）：
         # 报给操作员，过去了改回「行驶中」
         notice = getattr(self.tracker, 'notice', None)
         text = notice() if callable(notice) else None
         reasons = getattr(pose, 'reasons', ()) or ()
-        if not text and 'position_mismatch' in reasons:
+        if not text and self._hold_decision is not None and self._hold_decision.reason:
+            d = self._hold_decision
+            if d.reason == 'rtk_hold_budget_missing':
+                text = '推算误差数据不足，已停车，等待 RTK 恢复'
+            elif d.reason == 'rtk_hold_braking_timeout':
+                text = '推算维持即将超时，已提前停车，等待 RTK 恢复'
+            else:
+                text = '推算误差预算%s：预计停稳时横向 %.1f / %.1f cm，沿线 %.1f / %.1f cm' % (
+                    '不足，已停车' if d.stop else '接近上限，已降速',
+                    d.stop_lateral_m*100, d.lateral_limit_m*100, d.stop_along_m*100, d.along_limit_m*100)
+        elif not text and 'position_mismatch' in reasons:
             text = MISMATCH_NOTICE % (self._rtk_gap(pose, now) or 0.0)
         elif not text and 'rtk_hold_timeout' in reasons:
             text = RTK_NOTICE_TIMEOUT
@@ -616,7 +763,8 @@ class LineMission:
         elif self.message in CASCADE_NOTICES + (RTK_NOTICE_HOLD, RTK_NOTICE_TIMEOUT, RTK_NOTICE_LOST_HOLD,
                                                 RTK_NOTICE_LOST, TRACKER_PAUSED_NOTICE) \
                 or self.message.startswith(RESUME_FAILED_NOTICE.split('%s')[0]) \
-                or self.message.startswith(MISMATCH_NOTICE.split('%')[0]):
+                or self.message.startswith(MISMATCH_NOTICE.split('%')[0]) \
+                or self.message.startswith(('推算误差', '推算维持即将超时')):
             self.message = '行驶中'
         self._write_log(now, pose, vx)
         try:
@@ -748,11 +896,15 @@ class LineMission:
                                                  body=[round(v, 4) for v in self.body],
                                                  # 差速车（能原地转）按喷头压线：nozzle_x 喷头在后轴前多少米
                                                  drive=self.geo.drive, nozzle_x=self.nozzle_x,
+                                                 # 差速车连线路线急弯可选的转法（路线的 turn 字段；圆弧掉头按 turn_radius 绕）
+                                                 turns=list(route_plan.TURNS) if self.differential else None,
                                                  pivot_rate=self.geo.pivot_rate_rad_s,
                                                  pivot_accel=self.geo.pivot_accel_rad_s2,
                                                  accel=self.path_cfg.accel_mps2,
                                                  lateral_accel=self.path_cfg.lat_accel_mps2),
                                calibration=calibration, diag=self._diag(calibration), tilt=tilt,
+                               hold_budget=self._hold_decision.status() if self._hold_decision is not None else None,
+                               imu_hold_test=self._imu_hold_test_status(),
                                rtk_events=self._jump_events(), operations=self.operations.status()))
 
     def section_options(self):

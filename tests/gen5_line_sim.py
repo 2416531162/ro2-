@@ -31,6 +31,7 @@ sys.path.insert(0, ROOT)
 from line_mission import LineMission  # noqa: E402
 from line_tracker import LineConfig, LineTracker  # noqa: E402
 from path_tracker import Path, PathConfig, PathTracker, differential_config  # noqa: E402
+from robot_core.config import CONTROL_HZ  # noqa: E402
 from robot_core.kinematics import ChassisGeometry  # noqa: E402
 
 DEG = math.pi / 180.0
@@ -184,7 +185,7 @@ def percentile(values, q):
 
 
 def run(controller='cascade', *, v=0.8, seed=1, length=40.0, delay_s=0.39, lag_s=0.05, gain=1.03,
-        imu_drift_deg_min=0.03, align_deg=0.0, rate_hz=20.0, start=None, dist_scale=1.0, margin_m=0.0,
+        imu_drift_deg_min=0.03, align_deg=0.0, rate_hz=CONTROL_HZ, start=None, dist_scale=1.0, margin_m=0.0,
         imu_gap=None, pose_gap=None, push=None, max_time=None, noise_kw=None, cascade_kw=None, heading_jump=None,
         trace=None, imu_scale=0.0, path_kw=None):
     """跑一条 A=(0,0) → B=(length,0) 的线，返回结果 dict：
@@ -310,7 +311,7 @@ if __name__ == '__main__':
         for seed in (1, 2, 3, 4):
             for kind in ('old', 'cascade'):
                 cases.append((kind, dict(v=v, seed=seed)))
-            cases.append(('cascade', dict(v=v, seed=seed, rate_hz=50.0)))
+            cases.append(('cascade', dict(v=v, seed=seed, rate_hz=20.0)))  # 旧控制周期对照
     for seed in (1, 2, 3, 4):
         cases.append(('cascade', dict(v=0.8, seed=seed, length=100.0, imu_drift_deg_min=1.0, align_deg=0.5)))
     with Pool(8) as pool:

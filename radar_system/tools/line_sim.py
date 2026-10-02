@@ -35,11 +35,11 @@ sys.path.insert(0, os.path.dirname(HERE))
 sys.path.insert(0, os.path.dirname(os.path.dirname(HERE)))
 
 from line_tracker import LineConfig, LineTracker  # noqa: E402
+from robot_core.config import CONTROL_DT  # noqa: E402
 from robot_core.kinematics import ChassisGeometry, steer_from_yaw, yaw_from_steer  # noqa: E402
 from runtime_config import PROFILE  # noqa: E402
 
 DT = 0.01
-CONTROL_DT = 0.05
 
 
 class Chassis:
@@ -159,7 +159,7 @@ def run(name='nominal', *, length=20.0, cruise=0.5, start=(-1.5, 0.0, 0.0), trim
             outage_x = car.x
         drift_x.step(DT)
         drift_y.step(DT)
-        if t >= next_ctrl:
+        if t >= next_ctrl - 1e-9:
             next_ctrl += CONTROL_DT
             pose = measured(t)
             if not started:

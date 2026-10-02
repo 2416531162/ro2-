@@ -16,7 +16,7 @@ import route_plan as rp
 from path_tracker import Path, Section, SectionTracker
 
 HELD = ('PAUSING', 'PAUSED', 'INTERRUPTED')
-ACTIONS = ['pause', 'preview', 'resume', 'rework', 'field_start', 'start_current']
+ACTIONS = ['pause', 'preview', 'resume', 'rework', 'field_start', 'start_current', 'end']
 
 
 def signature(value):
@@ -136,6 +136,7 @@ class RouteOperations:
         self.last_token = None
         self.execution = None
         self._elements_key = self._elements = None
+        self._field_key = self._field_elements = self._field_context = None
         self._load()
 
     @property
@@ -148,6 +149,31 @@ class RouteOperations:
     def profile(self):
         return signature(dict(body=self.m.body, radius=self.m.min_route_radius,
                               track_x=self.m.path_cfg.track_x_m, line_track_x=self.m.line_cfg.track_x_m))
+
+    def field_profile(self, record):
+        """原图纸与喷头设置属于任务快照；运动参数改变后必须重新规划。"""
+        return signature(dict(profile=self.profile(), field_context=record.get('field_context'),
+                              cruise=record.get('cruise'), yaw_rate=self.m.geo.pivot_rate_rad_s,
+                              yaw_accel=self.m.geo.pivot_accel_rad_s2, accel=self.m.path_cfg.accel_mps2,
+                              lateral_accel=self.m.path_cfg.lat_accel_mps2))
+
+    def field_info(self, record):
+        from field_rework import decode_source, catalog
+        key = (record['field_source_hash'], self.m._origin())
+        if key != self._field_key:
+            job = decode_source(record['field_source'], self.m.fusion)
+            self._field_elements = catalog(job)
+            self._field_context = [dict(direction=1, points=e['points']) for e in self._field_elements]
+            self._field_key = key
+        return self._field_elements, self._field_context
+
+    def field_source_usable(self, record):
+        try:
+            return bool(record.get('field_source') and
+                        signature(record['field_source']) == record.get('field_source_hash') and
+                        self.field_profile(record) == record.get('field_profile'))
+        except (ValueError, TypeError, KeyError):
+            return False
 
     def encode(self, sections):
         f = self.m.fusion
@@ -288,6 +314,23 @@ class RouteOperations:
             self.m.message += '；' + str(exc)
         return self.m.message
 
+    def end(self, cmd, now):
+        """迟到的补画结束请求不能结束刚恢复的原任务。"""
+        self.check_identity(cmd, require_job=False)
+        requested = cmd.get('job_id')
+        if not self.record or requested != self.record['id']:
+            if self.record and any(h.get('id') == requested and h.get('kind') == 'rework' and
+                                   h.get('parent_job_id') == self.record['id'] for h in self.history):
+                return '该补画已结束；原任务断点已保留'
+            raise ValueError('任务已改变，未结束当前任务')
+        if self.record['state'] in ('DONE', 'CANCELLED'):
+            return '该任务已结束'
+        self.m.tracker.stop('operator')
+        self.m._finish('操作员结束作业', state='CANCELLED')
+        if self.record.get('reason') == 'storage_error':
+            raise ValueError(self.m.message)
+        return self.m.message
+
     def hold_tick(self, now, pose, mode):
         # Keep updating the stop point inside the current traversal branch, without
         # advancing across a cusp or allowing a position jump to move the checkpoint.
@@ -383,6 +426,11 @@ class RouteOperations:
             boundary=[self.m.fusion.to_geodetic(*q) for q in value['boundary']],
             forward=value['nozzle_forward_m'], right=value['nozzle_right_m'],
             transit_speed=value['transit_speed'])
+        if isinstance(value.get('source_job'), dict):
+            from field_rework import encode_source
+            self.record['field_source'] = encode_source(value['source_job'], self.m.fusion)
+            self.record['field_source_hash'] = signature(self.record['field_source'])
+            self.record['field_profile'] = self.field_profile(self.record)
         self.parent=None
         try:self.save()
         except ValueError:
@@ -411,14 +459,24 @@ class RouteOperations:
             rest = tail(self.decode(r), base)
             label = '从 %.2f m 继续%s' % (r['cursor_m'], '（重叠 %.2f m）' % overlap if overlap else '')
         elif operation == 'rework':
-            if r and r.get('field_plan'):
-                raise ValueError('整场任务请先结束，再选择需要重画的图形重新规划')
             if r and r['kind'] == 'rework' and r['state'] not in ('DONE', 'CANCELLED'):
                 raise ValueError('请先结束当前补画')
-            if self.m.route is None:
-                raise ValueError('车辆没有路线')
-            rest, label = rework_sections(self.m._route_local(), cmd.get('element'), cmd.get('from_m'),
-                                         cmd.get('to_m'), self.m.min_route_radius, self.m.body, self.m.line_cfg.track_x_m)
+            if r and r.get('field_plan'):
+                self.check_identity(cmd)
+                if not self.held:
+                    raise ValueError('请先暂停并保留原场地任务')
+                if not r.get('field_source'):
+                    raise ValueError('旧任务没有完整图纸，仍可续画；局部补画需重新载入场地')
+                if r['field_source_hash'] != signature(r['field_source']) or r['field_profile'] != self.field_profile(r):
+                    raise ValueError('场地图纸或车辆参数已改变，不能套用旧任务')
+                rest, label = None, ''  # 下方用原图纸和喷头几何生成区间。
+            else:
+                if 'element_id' in cmd:
+                    raise ValueError('当前没有可局部补画的整场任务')
+                if self.m.route is None:
+                    raise ValueError('车辆没有路线')
+                rest, label = rework_sections(self.m._route_local(), cmd.get('element'), cmd.get('from_m'),
+                                             cmd.get('to_m'), self.m.min_route_radius, self.m.body, self.m.line_cfg.track_x_m)
             base = 0.0
             label += ' · %.2f–%.2f m' % (cmd['from_m'], cmd['to_m'])
         else:
@@ -426,7 +484,16 @@ class RouteOperations:
         k = 0.0 if (r or {}).get('field_plan') else self.m.line_cfg.track_x_m
         car = (p.x + k * math.cos(p.yaw), p.y + k * math.sin(p.yaw), p.yaw)
         outside = None
-        if operation == 'resume' and r.get('field_plan'):
+        target = context = None
+        field = bool((r or {}).get('field_plan'))
+        if operation == 'rework' and field:
+            from field_rework import prepare
+            rest, entry, entry_m, outside, target, label = prepare(r, self.m, cmd, car)
+            label += ' · %.2f–%.2f m' % (cmd['from_m'], cmd['to_m'])
+            plan = entry + rest
+        elif operation == 'resume' and field:
+            if r.get('field_profile') and r['field_profile'] != self.field_profile(r):
+                raise ValueError('车辆参数已改变，不能套用旧断点')
             from field_planner import Settings, polygon, transit, speed_for, path_violation, pivot_violation
             saved=r.get('field_context')
             if not saved:raise ValueError('任务缺少场地边界，请重新规划')
@@ -447,13 +514,16 @@ class RouteOperations:
             label+=' · 内场优先接入'
         else:
             plan, entry_m, entry = entry_to(rest, car, self.m.min_route_radius)
+        if field and self.field_source_usable(r):
+            _, context = self.field_info(r)
         self.preview = dict(token=str(uuid.uuid4()), request_id=cmd.get('id'), operation=operation,
                             created=now, origin=self.m._origin(), car=(p.x, p.y, p.yaw),
                             route_rev=self.m.route_rev, job_id=r['id'] if r else None,
                             cursor=r['cursor_m'] if r else None, profile=self.profile(),
                             plan=plan, rest=rest, entry=entry, entry_m=entry_m, base=base, label=label,
-                            selection={k: cmd[k] for k in ('element', 'from_m', 'to_m') if k in cmd},
-                            max_outside_m=outside)
+                            selection={k: cmd[k] for k in ('element', 'element_id', 'edge_index', 'from_m', 'to_m') if k in cmd},
+                            max_outside_m=outside, field_plan=field, target=target, context=context,
+                            field_source_hash=(r or {}).get('field_source_hash'))
         return '预览已就绪，请确认接入路径'
 
     def commit(self, cmd, now, operation):
@@ -462,17 +532,21 @@ class RouteOperations:
         v = self.preview
         if not v or v['operation'] != operation or cmd.get('preview_token') != v['token'] or now - v['created'] > 60:
             raise ValueError('预览已过期，请重新预览')
-        self.check_identity(cmd, require_job=operation == 'resume')
+        self.check_identity(cmd, require_job=operation == 'resume' or v.get('field_plan', False))
         p = self.ready(now)
         r = self.record
         if (self.m._origin() != v['origin'] or self.m.route_rev != v['route_rev'] or self.profile() != v['profile'] or
                 (r['id'] if r else None) != v['job_id'] or (r['cursor_m'] if r else None) != v['cursor'] or
                 math.hypot(p.x - v['car'][0], p.y - v['car'][1]) > 0.10 or abs(rp.wrap(p.yaw - v['car'][2])) > math.radians(5)):
             raise ValueError('车辆位置或任务已改变，请重新预览')
+        if v.get('field_plan') and r.get('field_source') and operation == 'rework':
+            if (v['field_source_hash'] != r.get('field_source_hash') or
+                    signature(r['field_source']) != r['field_source_hash'] or self.field_profile(r) != r['field_profile']):
+                raise ValueError('场地图纸或车辆参数已改变，请重新预览')
         if (v.get('max_outside_m') or 0)>1e-7 and cmd.get('allow_outside') is not True:
             raise ValueError('请先核对接入和剩余路线的外场范围')
         from dataclasses import replace
-        cruise=self.m.route.cruise if self.m.route else (r or {}).get('cruise',.5)
+        cruise=r.get('cruise',.5) if v.get('field_plan') else self.m.route.cruise if self.m.route else (r or {}).get('cruise',.5)
         track_x=0.0 if (r or {}).get('field_plan') else self.m.line_cfg.track_x_m
         tracker = SectionTracker(v['plan'], replace(self.m.path_cfg, cruise_mps=cruise,
                                                    track_x_m=track_x, start_min_left_m=0.0), self.m.geo, **self.m.section_options())
@@ -484,6 +558,12 @@ class RouteOperations:
             self.parent = copy.deepcopy(r)
             self.record = self.new_record(v['rest'], 'rework', v['label'])
             self.record['rework'] = v['selection']
+            self.record['parent_job_id'] = r['id'] if r else None
+            if v.get('field_plan'):
+                for key in ('field_context', 'field_source', 'field_source_hash', 'field_profile', 'cruise', 'selected_strokes'):
+                    if key in r:
+                        self.record[key] = copy.deepcopy(r[key])
+                self.record.update(field_plan=True, target_length_m=v['selection']['to_m']-v['selection']['from_m'])
         else:
             self.record = copy.deepcopy(r)
         self.record.update(state='RUNNING', reason='')
@@ -497,7 +577,7 @@ class RouteOperations:
         self.m.phase, self.m.select_since = 'SELECTING', now
         self.m.release_pending = False
         self.m.message = '申请控制权 · ' + ('继续作业' if operation == 'resume' else '补画')
-        self.execution = dict(sections=samples(v['plan']), entry_m=v['entry_m'], target=samples(v['rest']))
+        self.execution = dict(sections=samples(v['plan']), entry_m=v['entry_m'], target=v.get('target') or samples(v['rest']))
         self.last_token, self.preview = v['token'], None
         return self.m.message
 
@@ -505,19 +585,26 @@ class RouteOperations:
         r = self.record
         if not r or self.m.task != 'route':
             return
+        before = copy.deepcopy((self.record, self.parent, self.history))
         if state == 'DONE':
             r['cursor_m'] = r['total_m']
         r.update(state=state, reason=reason, updated_at=time.time())
         self.execution = None
         self.preview = None
         if state in ('DONE', 'CANCELLED'):
-            self.history.append({k: v for k, v in r.items() if k != 'plan'})
+            self.history.append({k: v for k, v in r.items() if k not in ('plan', 'field_source')})
             self.history = self.history[-20:]
             if r['kind'] == 'rework' and self.parent:
                 self.record, self.parent = self.parent, None
                 if self.record['state'] in HELD:
                     self.m.phase, self.m.message = 'PAUSED', reason + '；原任务断点已保留，可继续'
-        self.save()  # Completion, history, and restoring the parent are one atomic write.
+        try:
+            self.save()  # 完成记录和恢复父任务必须同一次原子保存。
+        except ValueError:
+            self.record, self.parent, self.history = before
+            self.record.update(state='PAUSED', reason='storage_error')
+            self.m.phase = 'PAUSED'
+            raise
 
     def clear(self):
         self.record = self.parent = self.preview = self.execution = None
@@ -525,9 +612,10 @@ class RouteOperations:
 
     def status(self):
         out = dict(actions=ACTIONS, durable=bool(self.path), spray_supported=False, error=self.error,
-                   job=None, preview=None, elements=[], history=self.history[-20:], execution=self.execution)
+                   job=None, preview=None, elements=[], context=[], history=self.history[-20:], execution=self.execution)
         if self.record:
-            out['job'] = {k: v for k, v in self.record.items() if k not in ('plan', 'profile', 'route_hash', 'field_context')}
+            out['job'] = {k: v for k, v in self.record.items() if k not in ('plan', 'profile', 'route_hash', 'field_context',
+                                                                      'field_source', 'field_source_hash', 'field_profile')}
             if self.record.get('field_plan') and isinstance(self.m.tracker,SectionTracker):
                 t=self.m.tracker
                 role=getattr(t.sections[t.index],'field_role',None)
@@ -537,6 +625,16 @@ class RouteOperations:
                 out['job']['painting']=role=='paint' and not t.switching and t.st.state=='RUNNING' and self.m.phase=='RUNNING'
             out['job']['can_resume'] = self.held and self.record['route_hash'] == self.fingerprint()
             out['job']['parent_id'] = self.parent['id'] if self.parent else None
+            out['job']['parent_job_id'] = self.parent['id'] if self.parent else None
+            if self.field_source_usable(self.record):
+                try:
+                    field_elements, context = self.field_info(self.record)
+                    out['context'] = context
+                    if self.record['kind'] != 'rework':
+                        out['elements'] = field_elements
+                        out['actions'] = [*ACTIONS, 'field_rework']
+                except (ValueError, KeyError, TypeError):
+                    pass
         try:
             if self.m.route and not (self.record or {}).get('field_plan'):
                 key=(self.m.route_rev, self.m.min_route_radius, self.m._origin())
@@ -550,6 +648,7 @@ class RouteOperations:
         if v:
             out['preview'] = {k: v[k] for k in ('token', 'request_id', 'operation', 'label', 'entry_m')}
             out['preview'].update(total_m=sum(s.path.length for s in v['plan']),
-                                  sections=samples(v['plan']), entry=samples(v['entry']), target=samples(v['rest']),
-                                  max_outside_m=v.get('max_outside_m'))
+                                  sections=samples(v['plan']), entry=samples(v['entry']), target=v.get('target') or samples(v['rest']),
+                                  max_outside_m=v.get('max_outside_m'), field_plan=v.get('field_plan',False),
+                                  context=v.get('context') or [], start=list(v['car']))
         return out

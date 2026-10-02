@@ -411,6 +411,37 @@ class TestLineNode(unittest.TestCase):
         self.assertEqual([n for n, _ in self.fusion.inputs], ['add_velocity', 'add_imu', 'add_wheel'])
         self.assertEqual(self.fusion.inputs[1][1].t, 100.0)
 
+    def test_navigation_50hz_ramps_with_elapsed_time(self):
+        self.fusion.current = FakeFusion.make(0, 0, 0)
+        self.assertTrue(self.cmd(cmd='mark', point='A')['ok'])
+        self.fusion.current = FakeFusion.make(10, 0, 0)
+        self.assertTrue(self.cmd(cmd='mark', point='B')['ok'])
+        self.fusion.current = FakeFusion.make(-0.5, 0, 0)
+        self.assertTrue(self.cmd(cmd='start', cruise=0.4)['ok'])
+        self.motion.mode = 'NAVIGATION'
+        period, control = next((p, cb) for p, cb in self.node.timers if cb == self.node.control)
+        self.assertAlmostEqual(period, 0.02)
+        self.assertEqual(next(p for p, cb in self.node.timers if cb == self.node.publish_status), 0.2)
+
+        # 首帧按 20 ms 起步；调度有抖动时斜坡按真正经过的时间累计。
+        control()
+        elapsed = period
+        accel = self.node.mission.tracker.cfg.accel_mps2
+        self.assertAlmostEqual(self.motion.published[-1][0], accel * elapsed)
+        for dt in (0.013, 0.027) * 10:
+            self.t[0] += dt
+            elapsed += dt
+            control()
+            self.assertAlmostEqual(self.motion.published[-1][0], accel * elapsed)
+
+        # 50 次 20 ms 定时回调恰好是一秒；发出的指令每次更新，最终受巡航速度约束。
+        sent = len(self.motion.published)
+        for _ in range(50):
+            self.t[0] += period
+            control()
+        self.assertEqual(len(self.motion.published) - sent, 50)
+        self.assertAlmostEqual(self.motion.published[-1][0], 0.4)
+
     def test_start_selects_navigation_then_drives_and_releases_on_stop(self):
         self.fusion.current = FakeFusion.make(0, 0, 0)
         self.assertTrue(self.cmd(cmd='mark', point='A')['ok'])

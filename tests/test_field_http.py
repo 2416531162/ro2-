@@ -69,5 +69,15 @@ class TestFieldHttp(unittest.TestCase):
         status,data=self.request(job=dict(job,selected_strokes=[]))
         self.assertEqual(400,status);self.assertFalse(data['ok'])
 
+    def test_field_rework_source_identity_reaches_real_ros_bridge(self):
+        bridge=web.WebBridgeNode()
+        wire=dict(type='route',action='preview',id='repair',route_rev=7,job_id='field-parent',
+                  operation='rework',element_id='frame',edge_index=3,from_m=2.0,to_m=4.0)
+        bridge.route_command(app_link.parse_command(json.dumps(wire)))
+        forwarded=json.loads(bridge.pub_line.sent[-1].data)
+        for key in ('route_rev','job_id','operation','element_id','edge_index','from_m','to_m'):
+            self.assertEqual(wire[key],forwarded[key])
+        self.assertEqual('route_preview',forwarded['cmd'])
+
 
 if __name__=='__main__':unittest.main()

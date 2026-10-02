@@ -24,11 +24,11 @@ from sensor_msgs.msg import Imu
 from std_msgs.msg import String
 
 import runtime_config  # noqa: F401  服务直接运行本脚本时把仓库根目录加进 sys.path（line_tracker 要用 robot_core）
+from robot_core.config import CONTROL_DT
 from robot_core.service_watchdog import watchdog
 from line_mission import RTK_HOLD_S, LineMission
 from motion_client import MotionClient
 
-CONTROL_DT = 0.05
 SELECT_RETRY_S = 0.5
 # 已取消的固定基线参数（天线间距改由两根天线固定解的平面实时距离核对）；旧版 fusion.json 里可能还有，读取时丢掉
 OBSOLETE_FUSION_KEYS = ('baseline_m', 'baseline_tol_m', 'baseline_check')
@@ -203,9 +203,10 @@ def load_fusion_config(gnss_fusion, path):
         # 另一次 0.55 → 1.78°（转完要 1–2 s 才跟回测向）；3% 时 0.45 / 0.67°，直走的抖动照样少
         overrides.setdefault('yaw_scale_sigma', 0.03)
         overrides.setdefault('yaw_walk_deg_sqrt_s', 0.03)
-        # 卫星位置不可信（双天线位置互检不过）或固定解中断（平板中转断流、浮点）时只靠推算走，最多 RTK_HOLD_S（8 s）
-        # 再停车（2026-09-30 用户规则：IMU 航向 5 秒内肯定没问题；2026-10-01 用户：断流也维持，5 → 8 s）
+        # 卫星位置不可信（双天线位置互检不过）或固定解中断（平板中转断流、浮点）时只靠推算走，最多 RTK_HOLD_S（5 s）。
+        # 误差预算仍可提前停车；恢复可信 RTK 后接回。
         overrides.setdefault('rtk_hold_s', RTK_HOLD_S)
+        overrides.setdefault('hold_budget_enabled', True)
         # 测向基线超出 0.40–0.43 m 就立马按 IMU 航向（2026-10-01 用户；有效范围 0.30–0.50 m 不改）
         overrides.setdefault('heading_length_band_m', (0.40, 0.43))
         # 两根天线互检偏差超过 2 cm 就逐步少信卫星（空旷处 p95 1.4 cm 不受影响）；推算维持后每秒最多挪 4 cm 接回

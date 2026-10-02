@@ -475,10 +475,10 @@ class TestClosedLoop(unittest.TestCase):
         self.assertLessEqual(pooled_p95_cm(self.fast), 2.5)
 
     def test_inner_loop_at_20hz_is_as_good_as_50hz(self):
-        """HeadingHold 的 Smith 预估按 50 Hz 调、实车验证过；定点画线在 20 Hz 控制周期里跑，两者差别在种子间的散布以内。"""
-        at50 = [sim.run('cascade', v=0.8, seed=s, rate_hz=50.0) for s in range(1, 5)]
-        self.assertLessEqual(pooled_p95_cm(self.fast), pooled_p95_cm(at50) + 0.3)
-        self.assertLessEqual(max(r['max_cm'] for r in self.fast), max(r['max_cm'] for r in at50) + 0.8)
+        """定点画线现在以 50 Hz 控制；保留旧 20 Hz 的显式对照，差别须在种子间的散布以内。"""
+        at20 = [sim.run('cascade', v=0.8, seed=s, rate_hz=20.0) for s in range(1, 5)]
+        self.assertLessEqual(pooled_p95_cm(at20), pooled_p95_cm(self.fast) + 0.3)
+        self.assertLessEqual(max(r['max_cm'] for r in at20), max(r['max_cm'] for r in self.fast) + 0.8)
 
     def test_0p5_mps_40m(self):
         for s in range(1, 5):
