@@ -44,6 +44,7 @@ if '--gen5' in sys.argv:
 
 import app_link  # noqa: E402
 import car_display  # noqa: E402
+import car_network  # noqa: E402
 from line_sim import Chassis  # noqa: E402
 from runtime_config import PROFILE, profile_hash  # noqa: E402
 from robot_core.kinematics import ChassisGeometry  # noqa: E402
@@ -297,6 +298,7 @@ class DemoCar:
                 'motion_fresh': True,
                 'manual_override': {'active': self.mode == 'MANUAL' and abs(vx) > 0, 'steer_deg': deg},
                 'straight': self.straight.status(self.sim.t),
+                'network': DEMO_NETWORK.status(),
                 'gnss': {'_rx_monotonic': time.monotonic(), 'receiver_ok': True, 'rtk': 'FIXED', 'sats': 31,
                          'diff_age': 1.0, 'sigma_h': 0.008, 'heading_ok': True, 'baseline_m': 0.331,
                          'antennas': {
@@ -400,7 +402,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         def pump():
             seq = 0
             try:
-                ws.send_json(app_link.build_hello(PROFILE, name='演示车 (仿真)', session=session))
+                ws.send_json(app_link.build_hello(PROFILE, name='演示车 (仿真)', session=session,
+                                                  network=DEMO_NETWORK.hotspot_info()))
                 while not done.is_set():
                     seq += 1
                     ws.send_json(app_link.build_telemetry(CAR.snapshot(), now=time.monotonic(), seq=seq))
@@ -449,6 +452,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         ack(cmd, False, str(exc))
                 elif kind == 'view':
                     VIEW.set(session, cmd['file'])
+                elif kind == 'network':
+                    problem = app_link.network_switch_blocker(CAR.snapshot(), time.monotonic())
+                    ack(cmd, *((False, problem) if problem else DEMO_NETWORK.request(cmd['mode'])))
                 elif kind == 'ping':
                     ws.send_json({'type': 'pong', 't': cmd.get('t'), 'server': time.monotonic()})
         except (app_link.WebSocketClosed, OSError):
@@ -464,6 +470,40 @@ class Handler(http.server.BaseHTTPRequestHandler):
 SESSIONS = car_display.Sessions()
 NETWORK = car_display.Network()
 VIEW = car_display.AppView()
+
+
+class DemoNmcli:
+    """演示用的 nmcli：假装有一块 WiFi 网卡，「切换」只改这里的状态，不碰电脑的网络（app 的连接不会真断）。"""
+
+    def __init__(self):
+        self.active, self.profiles = 'demo-wifi', ['demo-wifi']
+
+    def __call__(self, args, timeout=None):
+        a = list(args)
+        if a[:4] == ['-t', '-f', 'DEVICE,TYPE', 'dev']:
+            return True, 'wlan0:wifi\n'
+        if a[:3] == ['-t', '-f', 'NAME,TYPE,DEVICE']:
+            return True, ('%s:802-11-wireless:wlan0\n' % self.active) if self.active else ''
+        if a[:3] == ['-t', '-g', '802-11-wireless.ssid']:
+            return True, a[-1] + '\n'
+        if a[:4] == ['-t', '-f', 'NAME', 'con']:
+            return True, '\n'.join(self.profiles) + '\n'
+        if a[:2] == ['con', 'add']:
+            self.profiles.append(car_network.HOTSPOT_CON)
+        elif a[:2] == ['con', 'up']:
+            time.sleep(2.0)
+            self.active = a[2]
+        elif a[:2] == ['con', 'down'] and self.active == a[2]:
+            self.active = None
+        elif a[:2] == ['dev', 'connect']:
+            time.sleep(2.0)
+            self.active = 'demo-wifi'
+        return True, ''
+
+
+# 演示：车的 WiFi 方式切换（真车见 car_network.py）。连接不会真断，所以切过去 45 s 没有新连接就自动切回，能看到倒计时
+DEMO_NETWORK = car_network.CarNetwork(nmcli=DemoNmcli(), app_joined=SESSIONS.joined,
+                                      read_mac=lambda dev: '02:00:00:00:a2:10', revert_s=45.0)
 
 
 class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
@@ -497,6 +537,7 @@ def main():
     if args.route_demo:
         CAR.preset_route()
     NETWORK.start()
+    DEMO_NETWORK.start()
     threading.Thread(target=CAR.run_forever, daemon=True).start()
     threading.Thread(target=beacon_loop, args=(args.port,), daemon=True).start()
     server = Server(('0.0.0.0', args.port), Handler)

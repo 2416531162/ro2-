@@ -6,7 +6,7 @@ radar_web_server.py 用它给平板 app 提供两样东西:
 
 1. ``/ws`` WebSocket 长连接(RFC 6455,标准库实现,板端不用装新包)
    - 车 -> 平板:``hello``(车体尺寸、手动档位、直行参数)一次,之后 ``tel`` 遥测 10Hz;
-   - 平板 -> 车:摇杆、IMU 直行、急停/复位、直线 / 路线 / 场地作业、ping;
+   - 平板 -> 车:摇杆、IMU 直行、急停/复位、直线 / 路线 / 场地作业、切换 WiFi 方式、ping;
    - 连接断开或摇杆心跳超时,车端自己停车,不依赖平板。
 2. UDP 广播 ``DISCOVERY_PORT``,app 在路由器 WiFi 或车载热点下都能自动找到车。
 
@@ -171,6 +171,7 @@ SPEED_TIERS = ('low', 'med', 'high')
 LINE_ACTIONS = ('mark', 'start', 'stop', 'clear')
 ROUTE_ACTIONS = ('set', 'start', 'start_current', 'clear', 'pause', 'preview', 'resume', 'rework', 'field_start')
 STRAIGHT_ACTIONS = ('go', 'stop')
+NETWORK_MODES = ('hotspot', 'client')     # 车自己发热点 / 连现场 WiFi（car_network.py）
 RTK_STALE_S = 2.0      # /gnss/status 2 Hz
 LINE_STALE_S = 1.5     # /line/status 5 Hz
 
@@ -228,6 +229,12 @@ def parse_command(text):
         out['seq'] = int(seq) if isinstance(seq, int) and not isinstance(seq, bool) else None
     elif kind == 'ping':
         out['t'] = msg.get('t')
+    elif kind == 'network':
+        # 切换车的 WiFi 方式：hotspot 车自己发热点、client 连存着的 WiFi；车停着、没作业才切（radar_web_server 判断）
+        mode = msg.get('mode')
+        if mode not in NETWORK_MODES:
+            raise CommandError('network.mode 必须是 ' + '/'.join(NETWORK_MODES))
+        out['mode'] = mode
     elif kind == 'line':
         action = msg.get('action')
         if action not in LINE_ACTIONS:
@@ -389,7 +396,7 @@ def _num(value, digits=2):
     return round(float(value), digits)
 
 
-def build_hello(profile, *, name, session=None):
+def build_hello(profile, *, name, session=None, network=None):
     g, drive = profile['geometry'], profile['drive']
     tan = math.tan(g['max_steer_rad'])
     differential = drive['type'] == 'differential'
@@ -407,7 +414,48 @@ def build_hello(profile, *, name, session=None):
         # IMU 定向直行（只用 IMU 偏航，不用 RTK）：固定车速、目标精度、偏差超过 abort_deg 停车
         'straight': {'speed_mps': STRAIGHT.speed, 'tolerance_deg': STRAIGHT.tolerance_deg,
                      'abort_deg': STRAIGHT.abort_deg},
+        # 车热点（car_network.CarNetwork.hotspot_info）：名字、密码、车的地址，app 帮平板连上；旧车端没有为 None
+        'network': _hello_network(network),
     }
+
+
+def _hello_network(n):
+    if not isinstance(n, dict) or not n.get('hotspot_ssid'):
+        return None
+    return {'hotspot_ssid': str(n['hotspot_ssid'])[:32], 'hotspot_psk': str(n.get('hotspot_psk') or '')[:63],
+            'hotspot_ip': n.get('hotspot_ip')}
+
+
+def network_switch_blocker(snap, now):
+    """切换车的 WiFi 方式前的检查：切换要断网 10–30 s，只在车停着、没有作业、没在手动开时切。可以切返回 None。"""
+    motion = snap.get('motion') or {}
+    mode = motion.get('mode')
+    if mode in ('NAVIGATION', 'MANUAL', 'FOLLOW'):
+        return '车在行驶（%s），停下再切' % mode
+    ln = _fresh(snap.get('line'), now, LINE_STALE_S)
+    if ln is not None and ln.get('phase') not in (None, 'IDLE'):
+        return '有作业在进行，先结束或暂停作业'
+    straight = snap.get('straight') or {}
+    if straight.get('state') == 'running':
+        return 'IMU 直行中，先停下'
+    vel = ((snap.get('wheeltec') or {}).get('telemetry') or {}).get('velocity') or [None]
+    v = _num(vel[0])
+    if v is not None and abs(v) > 0.05:
+        return '车还在动，停稳再切'
+    return None
+
+
+def network_telemetry(n):
+    """car_network.CarNetwork.status() → 遥测 network；没有时 None（不带这一项）。"""
+    if not isinstance(n, dict):
+        return None
+    mode = n.get('mode') if n.get('mode') in NETWORK_MODES else None
+    out = {'mode': mode, 'ssid': n.get('ssid'), 'hotspot_ssid': n.get('hotspot_ssid'),
+           'hotspot_ip': n.get('hotspot_ip'), 'busy': bool(n.get('busy')), 'error': n.get('error')}
+    if n.get('revert_to') in NETWORK_MODES:
+        out['revert_to'] = n['revert_to']
+        out['revert_in_s'] = n.get('revert_in_s')
+    return out
 
 
 def _fresh(section, now, max_age_s):
@@ -575,6 +623,9 @@ def build_telemetry(snap, *, now, seq):
     straight = straight_telemetry(snap.get('straight'))
     if straight is not None:
         out['straight'] = straight
+    network = network_telemetry(snap.get('network'))
+    if network is not None:
+        out['network'] = network
     return out
 
 

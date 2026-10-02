@@ -38,6 +38,7 @@ from manual_drive import ManualDriveLatch
 from heading_hold import HeadingHold, yaw_from_quaternion
 import app_link
 import car_display
+import car_network
 from display_control import ScreenControl
 from ntrip_config import CorsConfigStore, configuration_allowed
 from runtime_config import profile_hash
@@ -50,6 +51,8 @@ APP_RECV_TIMEOUT_S = 3.0     # app 每秒 ping 一次;3 秒没有任何消息视
 APP_SESSIONS = car_display.Sessions()
 NETWORK = car_display.Network()
 APP_VIEW = car_display.AppView()          # 平板地图上正在预览的图纸，车载屏幕跟着显示
+# 车的 WiFi 方式：车自己发热点 / 连现场 WiFi，app 一条 network 指令切换（car_network.py）
+CAR_NETWORK = car_network.CarNetwork(app_joined=APP_SESSIONS.joined)
 CORS_CONFIG = CorsConfigStore(os.environ.get('RK3588_NTRIP_ENV', '~/rtk/ntrip.env'))
 SCREEN_CONTROL = ScreenControl()
 from field_plan_service import FieldPlanService
@@ -135,6 +138,7 @@ def snapshot_state():
             snapshot['motion'] = dict(bridge_node.motion.state)
         snapshot['motion_fresh'] = bridge_node.motion.fresh()
         snapshot['straight'] = bridge_node.straight.status()
+    snapshot['network'] = CAR_NETWORK.status()
     return snapshot
 
 
@@ -610,7 +614,8 @@ class RadarHTTPHandler(http.server.BaseHTTPRequestHandler):
         def pump():
             seq = 0
             try:
-                ws.send_json(app_link.build_hello(PROFILE, name=CAR_NAME, session=session))
+                ws.send_json(app_link.build_hello(PROFILE, name=CAR_NAME, session=session,
+                                                  network=CAR_NETWORK.hotspot_info()))
                 while not done.is_set():
                     seq += 1
                     ws.send_json(app_link.build_telemetry(snapshot_state(), now=time.monotonic(), seq=seq))
@@ -685,6 +690,13 @@ class RadarHTTPHandler(http.server.BaseHTTPRequestHandler):
                             reply(cmd,False,str(exc))
                 elif kind == 'view':
                     APP_VIEW.set(session, cmd['file'])
+                elif kind == 'network':
+                    # 切换车的 WiFi 方式：先回 ack，1.5 s 后才动网卡；切过去 2 分钟没有平板连上来自动切回
+                    problem = app_link.network_switch_blocker(snapshot_state(), time.monotonic())
+                    if problem:
+                        reply(cmd, False, problem)
+                    else:
+                        reply(cmd, *CAR_NETWORK.request(cmd['mode']))
                 elif kind == 'ping':
                     ws.send_json({'type': 'pong', 't': cmd.get('t'), 'server': time.monotonic()})
         except (app_link.WebSocketClosed, OSError):
@@ -846,6 +858,7 @@ def main():
     t.start()
     threading.Thread(target=discovery_beacon, daemon=True).start()
     NETWORK.start()
+    CAR_NETWORK.start()
     try:
         print(f"网页服务: http://0.0.0.0:{PORT}")
         while not stopping.is_set():

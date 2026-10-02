@@ -859,8 +859,13 @@ function renderPanels(now) {
   const apps = live ? msg.apps : null;
   row(L, '平板 app', apps == null ? '—' : apps > 0 ? `已连接 ${apps} 台` : '未连接', apps > 0 ? 'ok' : apps == null ? 'idle' : 'warn');
   const net = msg ? msg.net : null, addrs = net && net.addresses ? net.addresses.map((a) => a.ip) : [];
-  row(L, '网络', net && net.wifi ? `WiFi ${net.wifi}` : addrs.length ? '有线 / 热点' : '没有网络', net && (net.wifi || addrs.length) ? 'ok' : 'warn',
+  // 车的 WiFi 方式（car_network.py）：车自己发热点时写热点名，平板照着连
+  const cn = tel && tel.network ? tel.network : null;
+  if (cn && cn.mode === 'hotspot') row(L, '网络', `车热点 ${cn.hotspot_ssid || ''}`, 'ok', cn.hotspot_ip || null);
+  else row(L, '网络', net && net.wifi ? `WiFi ${net.wifi}` : addrs.length ? '有线 / 热点' : '没有网络', net && (net.wifi || addrs.length) ? 'ok' : 'warn',
     addrs.length ? addrs.slice(0, 2).join(' · ') : null);
+  if (cn && (cn.busy || cn.revert_to)) row(L, '切换网络', cn.busy ? '正在切换…' : `等平板连上来 · ${cn.revert_in_s ?? '—'} s 后切回`, 'warn', null);
+  else { const dt = L.querySelector('dt[data-k="切换网络"]'); if (dt) { dt.nextElementSibling.remove(); dt.remove(); } }
   const n = rtk && !rtk.stale ? rtk.ntrip : null;
   row(L, 'CORS 差分', !n ? '—' : n.connected ? '已连接' : n.configured ? '未连接' : '未配置', !n ? 'idle' : n.connected ? 'ok' : 'warn',
     n && n.connected ? `改正数 ${Math.round((n.bytes || 0) / 1024)} KB` : n && n.configured && n.error ? String(n.error).slice(0, 28) : null);

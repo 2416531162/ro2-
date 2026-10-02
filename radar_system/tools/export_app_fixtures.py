@@ -319,11 +319,15 @@ def fixture_messages():
     snap['straight'] = {'imu_ok': True, 'yaw_deg': 30.42, 'run': ('app-1', 3), 'state': 'running', 'reason': None,
                         'target_deg': 30.0, 'error_deg': 0.42, 'max_error_deg': 0.83, 'within_pct': 98.5,
                         'elapsed_s': 12.3, 'speed': 0.4, 'wz': -0.021}
+    snap['network'] = {'mode': 'hotspot', 'ssid': 'RTKCAR-A2-10', 'hotspot_ssid': 'RTKCAR-A2-10', 'hotspot_ip': '192.168.42.1',
+                       'busy': False, 'error': None, 'revert_to': 'client', 'revert_in_s': 87}
     tel = app_link.build_telemetry(snap, now=100.0, seq=42)
     line = sample_snapshot()
     line.update(motion={'mode': 'NAVIGATION', 'healthy': True}, gnss=sample_gnss(), line=sample_line())
     tel_line = app_link.build_telemetry(line, now=100.0, seq=43)
-    hello = app_link.build_hello(PROFILE, name='测试车', session='app-1')
+    # 车热点（car_network.py）：名字、密码、地址；遥测里是现在用哪种方式、等平板连上来的倒计时
+    network_info = {'hotspot_ssid': 'RTKCAR-A2-10', 'hotspot_psk': 'rtkcar2026', 'hotspot_ip': '192.168.42.1'}
+    hello = app_link.build_hello(PROFILE, name='测试车', session='app-1', network=network_info)
     route = sample_snapshot()
     route.update(motion={'mode': 'NAVIGATION', 'healthy': True}, gnss=sample_bad_heading_gnss(),
                  line=sample_route_line())

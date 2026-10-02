@@ -13,6 +13,7 @@
 | 车载热点 | 手机连车的热点时，手机网关就是车。app 先 `GET http://网关:8088/app/beacon`（内容与 UDP 广播相同），`magic` 对上才列出，家里路由器之类的网关不会误列成车 |
 | 平板串口转发 | UM982 接在平板（cpdevice 工业平板）串口上时，app 连车的 TCP **48622**（`rtk_node` 监听，`RK3588_RTK_TABLET_PORT` 可改，0 不监听），把串口收到的字节原样发给车。单向：车不往平板写；差分由平板 app 用本机保存的 CORS 账号自己连、直接写进串口，这时车端暂停自己的 CORS（同一账号两处登录会互相顶掉，遥测 `rtk.ntrip.paused` 为 `tablet`），换回 USB 串口再连。副天线日志 `BESTNAVHA` 车不发（USB 串口时车连上就发 `BESTNAVHA 0.05`），由 app 按串口波特率和主天线日志频率补上，免得 115200 的平板串口被 20 Hz 挤满。没有握手、没有分帧，就是一根通过 Wi-Fi 的串口线。一次只接一个平板，新连接顶替旧的。车上 USB 串口和平板两路都在听：正在出数据的那一路一直用，它 2 s 没数据才换另一路，两路数据不混用。和其他接口一样不鉴权 |
 | 手动 | 输入 IP，记住上次成功的地址 |
+| 车自己发热点 | 车可以切成自己发 WiFi 热点（`radar_system/car_network.py`，参考 SWOZI）：热点名 `RTKCAR-XX-XX`（WiFi 网卡 MAC 末两字节）、WPA2 密码固定（缺省 `rtkcar2026`，运行环境 `RTK_HOTSPOT_PSK` 可改）、车的地址固定 **192.168.42.1**，热点不通外网，平板差分用自己的 4G 连 CORS。名字、密码、地址在 `hello.network` 里。切换用上行 `network` 指令，见下文「切换车的 WiFi 方式」 |
 
 车名来自环境变量 `RK3588_CAR_NAME`，缺省为主机名。
 
@@ -28,7 +29,7 @@
 
 ## 下行
 
-`hello`：`v`、`name`、`session`、`car`（`front_m`/`rear_m`/`half_width_m`/`wheelbase_m`/`track_m`/`max_steer_deg`/`min_turn_radius_m`/`drive`（`ackermann` 前轮转向，`differential` 两后轮差速、能原地转，此时 `min_turn_radius_m` 是跟踪圆弧的最小半径、没有前轮转角）/`nozzle_x_m` 喷头在后轴前多少米，车体系原点后轴中心、x 前 y 左）、`speed_tiers`（手动三档 m/s）、`straight`（IMU 定向直行：`speed_mps` 固定车速 0.8、`tolerance_deg` 目标精度 1、`abort_deg` 偏差超过就停车 5；旧车端没有这一项，app 不显示直行）。
+`hello`：`v`、`name`、`session`、`car`（`front_m`/`rear_m`/`half_width_m`/`wheelbase_m`/`track_m`/`max_steer_deg`/`min_turn_radius_m`/`drive`（`ackermann` 前轮转向，`differential` 两后轮差速、能原地转，此时 `min_turn_radius_m` 是跟踪圆弧的最小半径、没有前轮转角）/`nozzle_x_m` 喷头在后轴前多少米，车体系原点后轴中心、x 前 y 左）、`speed_tiers`（手动三档 m/s）、`straight`（IMU 定向直行：`speed_mps` 固定车速 0.8、`tolerance_deg` 目标精度 1、`abort_deg` 偏差超过就停车 5；旧车端没有这一项，app 不显示直行）、`network`（车热点：`hotspot_ssid`、`hotspot_psk`、`hotspot_ip`；车上没有 WiFi 网卡或旧车端为 null，app 不显示「车的网络」切换）。
 
 `tel`（10 Hz）：
 
@@ -48,6 +49,8 @@
 | `line`（车身姿态） | `attitude`：`roll_deg` 横滚、`pitch_deg` 俯仰、`yaw_deg` IMU 偏航，度，ROS REP-103 车体系（x 车头、y 左、z 上）：横滚左侧抬起（右侧压低）为正，俯仰车头压低为正，偏航左转为正（−180…180）；`source` 为 `imu_madgwick`（旧车：`imu` 组件是 ROS 2 `imu_filter_madgwick`，gain 0.01，读底盘原始 `/imu`，发 `/imu/data`）或 `hda536t`（Gen5：`imu` 组件是瑞芬 HDA536T 驱动，姿态是传感器自己算的，偏航上电为 0），这一项只给 app 显示（填了天线高度时融合用同一份横滚俯仰做倾斜补偿，见下一行）；0.5 s 没有新姿态或车端没有 `imu` 组件时为 null。没有磁力计，`yaw_deg` 没有绝对参考：0 大致是 `imu` 组件启动时的车头方向，随陀螺零偏漂移（实测静止约 3°/分钟），组件重启归零；旧车端没有这一项。绝对航向：`rtk.heading.yaw_deg`（双天线，只在固定时有）、`pose.yaw_deg`（RTK 融合，控制用）|
 | `line`（倾斜补偿） | `tilt`：融合按 IMU 横滚俯仰把 ANT1 的三维杠杆臂投到水平面（`docs/GNSS_FUSION.md`「倾斜补偿」）。`height_m` 天线相位中心离地高度（`~/rtk/fusion.json` 的 `antenna_height_m`，0 表示没填、不补）、`active` 这会儿在不在补、`reason` 没补的原因（`no_height` 没填高度 / `attitude_stale` 0.2 s 没有新姿态 / `too_steep` 横滚或俯仰超过 15° / `imu_mismatch` IMU 已不用），`active` 时再给用的 `roll_deg` / `pitch_deg`（度，REP-103）和补偿量 `forward_m` / `left_m`（天线水平位置比平地时偏了多少，车体系前、左，米），不在补时这四项为 null。没补只降级：`pose.reasons` 加 `tilt_uncompensated`（没填高度时不加），不影响 `usable`。旧车端没有这一项（null） |
 
+`network`（车的 WiFi 方式，`car_network.CarNetwork.status`，每秒查一次）：`mode`（`hotspot` 车自己发热点 / `client` 连存着的 WiFi / null 没有 WiFi 网卡或查不到）、`ssid` 现在的 WiFi 名（车热点时是热点名）、`hotspot_ssid`、`hotspot_ip`、`busy` 正在切、`error` 上一次切换没成功或自动切回的原因、`revert_to` + `revert_in_s` 刚切过去、等平板连上来（这么多秒内没有新的 app 连接就切回 `revert_to`）。不含热点密码。旧车端没有这一项。
+
 `rtk` 超过 2 s、`line` 超过 1.5 s 未更新时只发 `{"stale": true}`，界面不得显示旧的定位等级或偏差。
 
 `ack`：`{"type":"ack","id":…,"cmd":…,"ok":…,"message":…}`；`pong`：原样带回 `t`。不认识的指令（包括已去掉的 `follow`、`select_target`）回 `ok=false`。
@@ -61,8 +64,20 @@
 | `estop` | — | 先清零手动，再锁存 ESTOP，不等其他操作的锁 |
 | `reset` | — | 健康且停稳时复位 |
 | `ping` | `t` | 回 `pong`，app 用来量往返延迟 |
+| `network` | `mode`（`hotspot` 车自己发热点 / `client` 连存着的 WiFi）、`id` | 切换车的 WiFi 方式，见下文「切换车的 WiFi 方式」。车在行驶（NAVIGATION/MANUAL）、有作业（`line.phase` 不是 IDLE）、IMU 直行中、车速 > 0.05 m/s 时回 `ok=false` 和原因；已经是这种方式、正在切也回 `ok=false` |
 | `route` | `action`（set/start/start_current/clear）、`route`（set 必带，start 可带：带了就先保存再开始）：`kind`（`path` 连线路线，app 默认：操作员点的点按连线顺序走直线，没连回起点就走一遍不绕圈；`circle`；旧版 `points` 自动圆弧过弯）、`points`（≤400 个，本地 ENU 米）、`closed`、`center`、`radius`、`clockwise`、`laps`（1–10，开放路线只跑一次）、`turn_radius`（米）、`cruise`（0.1–1.0 m/s） | 转发 `/line/command`（`route_set`/`route_start`/`route_clear`），结果同样看 `line.last_result`。车上把路点换算成经纬度存进 `~/rtk/route.json`。几何见 `radar_system/route_plan.py`：`path` 要让车身中心（车长中点，后轴前 (front−rear)/2）压过全部连线：缓弯（车身中心离拐角 ≤ 5 cm）直接转过去；急弯掉头补角——车身中心开过拐角 5 cm，整车开出拐角（车尾也过 5 cm）后倒车一次、车头摆向下一条边，再往前开上下一条边，三段都可打方向，在"前进-倒车-前进"里按 Reeds-Shepp 取最短（90° 多开 R·π/2 ≈ 3.0 m、换向 2 次），不要求拐角两边的线有多长；起步用 Reeds-Shepp 最短路径（可以倒车）开到第一段延长线上、车身中心到第 1 个点前 0.5 m 对正，已压在延长线上就直接开过去（app 用同一算法画预览、做仿真）。`points` 拐角按 `turn_radius` 圆弧过渡，圆从最南点出发，二者用 Dubins 接入段（只前进，最长 30 m）。然后申请 NAVIGATION；跑完停在终点。`start_current`（app 的「开始作业」）不分起点终点：从离车最近的地方开始、跑完整条路线（圆和闭合路线绕完整圈回到起步处，开放路线从近的那一头画到另一头），差速车喷头离起点 0.5 m 内倒车 0.8 m 助跑进线，见 `route_plan.plan_current`、docs/DIFFERENTIAL_DRIVE.md。NAVIGATION 默认不经过雷达防撞（底盘驱动参数 `navigation_uses_lidar`，遥测 `motion.nav_lidar`）。运行中停止用 `line` 的 stop；定位丢失暂停后，定位连续可用 1 s 自动从暂停处继续（`line.message`「定位恢复，自动继续」），也可以再发 route start。测向浮点（无效）时航向靠陀螺维持：主、副天线都是固定解、航向 1σ ≤ 2° 就照样走，`line.pose.reasons` 带 `gyro_hold` |
 | `line` | `action`（mark/start/stop/clear）、`point`（mark 时 A/B）、`cruise`（start 时可选，0.05–1.0 m/s） | 转发 `/line/command`；ack 只表示已转发，执行结果看遥测 `line.last_result`。记点需要 RTK 固定解；start 先检查起步条件（离线 ≤0.5 m、车头偏 ≤30°），再申请 NAVIGATION。融合位姿不能用于控制时结果是 `pose_unusable：原因代码`（多个用顿号连接，代码见 `docs/GNSS_FUSION.md`），由 app 翻译 |
+
+## 切换车的 WiFi 方式
+
+用 NetworkManager：车热点是单独一个连接配置 `rtk-car-hotspot`（2.4 GHz、`ipv4.method shared`、地址 192.168.42.1/24，没有就建），其它 WiFi 配置（pattern、手机热点……）一律不动。
+
+1. app 发 `{"type":"network","mode":"hotspot"}`，车先回 ack（`ok=true`），1.5 s 后才动网卡，平板来得及收到回复。
+2. 切到热点：打开 `rtk-car-hotspot` 的自动连接、启用它；切回 WiFi：关掉它的自动连接、停用它，让 NetworkManager 按优先级连存着的 WiFi。自动连接跟着方式走，车重启后还是上次选的方式。
+3. 切换要断网 10–30 s。切好以后 120 s 内要有新的 app 连接（`/ws`），否则自动切回原来的方式，不会把人锁在车外面；`tel.network` 带倒计时，自动切回后 `error` 写原因。切换失败（比如网卡不支持热点）立即切回，`error` 写 nmcli 的报错。
+4. 车载屏幕的「网络」一行写现在的方式和热点名，切换中另起一行写倒计时。
+
+平板这边：连车热点时平板没有外网（差分用 4G），安卓会把默认网络放在 4G 上，发给车的连接（app 的 `/ws`、HTTP，平板串口转发的 TCP 48622）要绑到 WiFi 上才到得了车；CORS 照旧走默认网络。
 
 ## 安全约定
 

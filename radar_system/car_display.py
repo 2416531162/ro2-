@@ -44,10 +44,12 @@ class Sessions:
     def __init__(self):
         self._lock = threading.Lock()
         self._count = 0
+        self._joined = 0       # 一共连上来过几次（只增不减）：切换 WiFi 后用它判断有没有平板重新连上
 
     def enter(self):
         with self._lock:
             self._count += 1
+            self._joined += 1
 
     def leave(self):
         with self._lock:
@@ -56,6 +58,10 @@ class Sessions:
     def count(self):
         with self._lock:
             return self._count
+
+    def joined(self):
+        with self._lock:
+            return self._joined
 
 
 class AppView:
