@@ -18,11 +18,13 @@ import car_network as cn  # noqa: E402
 class FakeNmcli:
     """记下每条 nmcli 命令；按「连着谁、有哪些配置」回输出。fail 里的子命令返回失败。"""
 
-    def __init__(self, active='pattern', profiles=('pattern', 'vivo-hotspot'), fail=()):
+    def __init__(self, active='pattern', profiles=('pattern', 'vivo-hotspot'), fail=(), security=None):
         self.active = active
         self.profiles = list(profiles)
         self.fail = set(fail)
         self.calls = []
+        # 车热点配置现在的 psk / proto / pairwise / group / pmf（nmcli -s -g 的输出顺序）
+        self.security = list(security or [cn.HOTSPOT_PSK, 'rsn', 'ccmp', 'ccmp', '1'])
 
     def __call__(self, args, timeout=None):
         self.calls.append(list(args))
@@ -33,6 +35,10 @@ class FakeNmcli:
             return True, ('%s:802-11-wireless:wlan0\n' % self.active) if self.active else ''
         if a[:3] == ['-t', '-g', '802-11-wireless.ssid']:
             return True, {'pattern': 'pattern\n', 'vivo-hotspot': 'vivo#iQOO\n'}.get(a[-1], a[-1] + '\n')
+        if a[:2] == ['-s', '-g']:
+            if a[-1] not in self.profiles:
+                return False, 'Error: %s - no such connection profile.' % a[-1]
+            return True, '\n'.join(self.security) + '\n'
         if a[:4] == ['-t', '-f', 'NAME', 'con']:
             return True, '\n'.join(self.profiles) + '\n'
         if a[:2] == ['con', 'add']:
@@ -101,7 +107,8 @@ class CarNetworkTest(unittest.TestCase):
         self.assertEqual(1, len(add))
         cmd = add[0]
         for key, value in (('802-11-wireless.mode', 'ap'), ('ipv4.method', 'shared'), ('ipv4.addresses', '192.168.42.1/24'),
-                           ('ssid', 'RTKCAR-A2-10'), ('wifi-sec.psk', cn.HOTSPOT_PSK), ('autoconnect', 'no')):
+                           ('ssid', 'RTKCAR-A2-10'), ('wifi-sec.psk', cn.HOTSPOT_PSK), ('autoconnect', 'no'),
+                           ('wifi-sec.proto', 'rsn'), ('wifi-sec.pairwise', 'ccmp'), ('wifi-sec.pmf', 'disable')):
             self.assertEqual(value, cmd[cmd.index(key) + 1], key)
         self.assertIn(['con', 'modify', cn.HOTSPOT_CON, 'connection.autoconnect', 'yes'], nm.calls)
         self.assertIn(['con', 'up', cn.HOTSPOT_CON, 'ifname', 'wlan0'], nm.calls)
@@ -122,6 +129,54 @@ class CarNetworkTest(unittest.TestCase):
         self.assertIn(['con', 'down', cn.HOTSPOT_CON], nm.calls)
         self.assertIn(['dev', 'connect', 'wlan0'], nm.calls)
         self.assertEqual(('client', 'pattern'), (net.status()['mode'], net.status()['ssid']))
+        self.assertFalse(nm.ran('con', 'add'))
+
+    def test_existing_hotspot_profile_gets_wpa2_only_security(self):
+        # 早先建的配置（WPA/TKIP + PMF）切过去时也要改成 WPA2-CCMP、关 PMF，否则有的平板连不上
+        nm = FakeNmcli(active='pattern', profiles=('pattern', cn.HOTSPOT_CON))
+        net, _ = network(nm)
+        self.assertTrue(net.request('hotspot')[0])
+        self.assertFalse(nm.ran('con', 'add'))
+        mod = [c for c in nm.calls if c[:3] == ['con', 'modify', cn.HOTSPOT_CON] and 'wifi-sec.psk' in c]
+        self.assertEqual(1, len(mod))
+        for key, value in (('wifi-sec.proto', 'rsn'), ('wifi-sec.group', 'ccmp'), ('wifi-sec.pmf', 'disable')):
+            self.assertEqual(value, mod[0][mod[0].index(key) + 1], key)
+
+    def test_sync_profile_leaves_matching_hotspot_alone(self):
+        nm = FakeNmcli(active=cn.HOTSPOT_CON, profiles=('pattern', cn.HOTSPOT_CON))
+        net, _ = network(nm)
+        self.assertFalse(net.sync_profile())
+        self.assertFalse(nm.ran('con', 'modify'))
+        self.assertFalse(nm.ran('con', 'up'))
+
+    def test_sync_profile_fixes_old_password_and_restarts_running_hotspot(self):
+        # 早先版本的密码 + WPA/TKIP + PMF：改成这一版的，热点正开着就重启让它生效，hello 报的密码才是真的
+        nm = FakeNmcli(active=cn.HOTSPOT_CON, profiles=('pattern', cn.HOTSPOT_CON),
+                       security=['rtkcar2026', 'wpa,rsn', 'tkip,ccmp', 'tkip,ccmp', '0'])
+        net, _ = network(nm)
+        self.assertTrue(net.sync_profile())
+        mod = nm.ran('con', 'modify', cn.HOTSPOT_CON)
+        self.assertEqual(1, len(mod))
+        for key, value in (('wifi-sec.psk', cn.HOTSPOT_PSK), ('wifi-sec.proto', 'rsn'), ('wifi-sec.pmf', 'disable')):
+            self.assertEqual(value, mod[0][mod[0].index(key) + 1], key)
+        self.assertEqual([['con', 'up', cn.HOTSPOT_CON, 'ifname', 'wlan0']], nm.ran('con', 'up'))
+        st = net.status()
+        self.assertEqual(('hotspot', False, None), (st['mode'], st['busy'], st['error']))
+        self.assertNotIn('revert_to', st)     # 不是切换，不等平板、不切回
+
+    def test_sync_profile_in_client_mode_only_edits_profile(self):
+        nm = FakeNmcli(active='pattern', profiles=('pattern', cn.HOTSPOT_CON), security=['rtkcar2026', 'rsn', 'ccmp', 'ccmp', '1'])
+        net, _ = network(nm)
+        self.assertTrue(net.sync_profile())
+        self.assertEqual(1, len(nm.ran('con', 'modify', cn.HOTSPOT_CON)))
+        self.assertFalse(nm.ran('con', 'up'))
+        self.assertEqual('client', net.status()['mode'])
+
+    def test_sync_profile_without_hotspot_profile_does_nothing(self):
+        nm = FakeNmcli(active='pattern')
+        net, _ = network(nm)
+        self.assertIsNone(net.sync_profile())
+        self.assertFalse(nm.ran('con', 'modify'))
         self.assertFalse(nm.ran('con', 'add'))
 
     def test_no_tablet_within_window_reverts(self):
@@ -203,9 +258,9 @@ class AppProtocolNetworkTest(unittest.TestCase):
 
     def test_hello_and_telemetry_fields(self):
         from runtime_config import PROFILE
-        hello = self.al.build_hello(PROFILE, name='车', network={'hotspot_ssid': 'RTKCAR-A2-10', 'hotspot_psk': 'rtkcar2026',
+        hello = self.al.build_hello(PROFILE, name='车', network={'hotspot_ssid': 'RTKCAR-A2-10', 'hotspot_psk': '12345678',
                                                                 'hotspot_ip': '192.168.42.1'})
-        self.assertEqual({'hotspot_ssid': 'RTKCAR-A2-10', 'hotspot_psk': 'rtkcar2026', 'hotspot_ip': '192.168.42.1'}, hello['network'])
+        self.assertEqual({'hotspot_ssid': 'RTKCAR-A2-10', 'hotspot_psk': '12345678', 'hotspot_ip': '192.168.42.1'}, hello['network'])
         self.assertIsNone(self.al.build_hello(PROFILE, name='车')['network'])
         tel = self.al.build_telemetry({'network': {'mode': 'hotspot', 'ssid': 'RTKCAR-A2-10', 'hotspot_ssid': 'RTKCAR-A2-10',
                                                    'hotspot_ip': '192.168.42.1', 'busy': False, 'error': None,

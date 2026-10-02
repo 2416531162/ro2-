@@ -326,7 +326,7 @@ def fixture_messages():
     line.update(motion={'mode': 'NAVIGATION', 'healthy': True}, gnss=sample_gnss(), line=sample_line())
     tel_line = app_link.build_telemetry(line, now=100.0, seq=43)
     # 车热点（car_network.py）：名字、密码、地址；遥测里是现在用哪种方式、等平板连上来的倒计时
-    network_info = {'hotspot_ssid': 'RTKCAR-A2-10', 'hotspot_psk': 'rtkcar2026', 'hotspot_ip': '192.168.42.1'}
+    network_info = {'hotspot_ssid': 'RTKCAR-A2-10', 'hotspot_psk': '12345678', 'hotspot_ip': '192.168.42.1'}
     hello = app_link.build_hello(PROFILE, name='测试车', session='app-1', network=network_info)
     route = sample_snapshot()
     route.update(motion={'mode': 'NAVIGATION', 'healthy': True}, gnss=sample_bad_heading_gnss(),

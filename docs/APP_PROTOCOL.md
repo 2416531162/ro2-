@@ -13,7 +13,7 @@
 | 车载热点 | 手机连车的热点时，手机网关就是车。app 先 `GET http://网关:8088/app/beacon`（内容与 UDP 广播相同），`magic` 对上才列出，家里路由器之类的网关不会误列成车 |
 | 平板串口转发 | UM982 接在平板（cpdevice 工业平板）串口上时，app 连车的 TCP **48622**（`rtk_node` 监听，`RK3588_RTK_TABLET_PORT` 可改，0 不监听），把串口收到的字节原样发给车。单向：车不往平板写；差分由平板 app 用本机保存的 CORS 账号自己连、直接写进串口，这时车端暂停自己的 CORS（同一账号两处登录会互相顶掉，遥测 `rtk.ntrip.paused` 为 `tablet`），换回 USB 串口再连。副天线日志 `BESTNAVHA` 车不发（USB 串口时车连上就发 `BESTNAVHA 0.05`），由 app 按串口波特率和主天线日志频率补上，免得 115200 的平板串口被 20 Hz 挤满。没有握手、没有分帧，就是一根通过 Wi-Fi 的串口线。一次只接一个平板，新连接顶替旧的。车上 USB 串口和平板两路都在听：正在出数据的那一路一直用，它 2 s 没数据才换另一路，两路数据不混用。和其他接口一样不鉴权 |
 | 手动 | 输入 IP，记住上次成功的地址 |
-| 车自己发热点 | 车可以切成自己发 WiFi 热点（`radar_system/car_network.py`，参考 SWOZI）：热点名 `RTKCAR-XX-XX`（WiFi 网卡 MAC 末两字节）、WPA2 密码固定（缺省 `rtkcar2026`，运行环境 `RTK_HOTSPOT_PSK` 可改）、车的地址固定 **192.168.42.1**，热点不通外网，平板差分用自己的 4G 连 CORS。名字、密码、地址在 `hello.network` 里。切换用上行 `network` 指令，见下文「切换车的 WiFi 方式」 |
+| 车自己发热点 | 车可以切成自己发 WiFi 热点（`radar_system/car_network.py`，参考 SWOZI）：热点名 `RTKCAR-XX-XX`（WiFi 网卡 MAC 末两字节）、WPA2-CCMP、不开 PMF（有的平板 WiFi 驱动连不上 PSK-SHA256），密码固定（缺省 `12345678`，运行环境 `RTK_HOTSPOT_PSK` 可改；车端服务起来时会把已有的热点配置对齐到这个密码和加密方式）、车的地址固定 **192.168.42.1**，热点不通外网，平板差分用自己的 4G 连 CORS。名字、密码、地址在 `hello.network` 里。切换用上行 `network` 指令，见下文「切换车的 WiFi 方式」 |
 
 车名来自环境变量 `RK3588_CAR_NAME`，缺省为主机名。
 

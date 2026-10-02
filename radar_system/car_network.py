@@ -25,9 +25,13 @@ import subprocess
 HOTSPOT_CON = 'rtk-car-hotspot'
 HOTSPOT_PREFIX = 'RTKCAR'
 # 热点密码固定（与 SWOZI 一样写死，平板不用输）；现场要换就在运行环境里设 RTK_HOTSPOT_PSK（至少 8 位）
-HOTSPOT_PSK = os.environ.get('RTK_HOTSPOT_PSK') or 'rtkcar2026'
+HOTSPOT_PSK = os.environ.get('RTK_HOTSPOT_PSK') or '12345678'
 HOTSPOT_IP = '192.168.42.1'
 HOTSPOT_PREFIX_LEN = 24
+# 只用 WPA2-CCMP、关掉受保护管理帧：NetworkManager 默认会同时广播 WPA/TKIP 和 PSK-SHA256，
+# 有的平板 WiFi 驱动（10-02 现场 SPRING2_MIX）因此连关联请求都发不出去（Association request to the driver failed）
+HOTSPOT_SECURITY = ['wifi-sec.proto', 'rsn', 'wifi-sec.pairwise', 'ccmp', 'wifi-sec.group', 'ccmp',
+                    'wifi-sec.pmf', 'disable']
 SWITCH_DELAY_S = 1.5
 REVERT_S = 120.0
 NMCLI_TIMEOUT_S = 40.0
@@ -210,14 +214,14 @@ class CarNetwork:
         ssid = hotspot_ssid(self.read_mac(dev))
         if ok and HOTSPOT_CON in connection_names(names):
             self.nmcli(['con', 'modify', HOTSPOT_CON, '802-11-wireless.ssid', ssid,
-                        'wifi-sec.psk', HOTSPOT_PSK, 'connection.interface-name', dev], timeout=5)
+                        'wifi-sec.psk', HOTSPOT_PSK, 'connection.interface-name', dev] + HOTSPOT_SECURITY, timeout=5)
             return True, ''
         ok, out = self.nmcli([
             'con', 'add', 'type', 'wifi', 'ifname', dev, 'con-name', HOTSPOT_CON, 'autoconnect', 'no',
             'ssid', ssid, '802-11-wireless.mode', 'ap', '802-11-wireless.band', 'bg',
             'ipv4.method', 'shared', 'ipv4.addresses', '%s/%d' % (HOTSPOT_IP, HOTSPOT_PREFIX_LEN),
             'ipv6.method', 'disabled', 'wifi-sec.key-mgmt', 'wpa-psk', 'wifi-sec.psk', HOTSPOT_PSK,
-            'connection.autoconnect-priority', '100'], timeout=10)
+            'connection.autoconnect-priority', '100'] + HOTSPOT_SECURITY, timeout=10)
         return (True, '') if ok else (False, '建车热点配置失败：' + _short(out))
 
     def tick(self):
@@ -237,14 +241,43 @@ class CarNetwork:
         note = '%d 秒内没有平板连上来，已切回原来的方式' % int(self.revert_s)
         self.spawn(lambda: self._switch(previous, previous, delay=False, guard=False, note=note))
 
+    def sync_profile(self):
+        """服务起来时对一次：已有的车热点配置（早先的版本建的、或手改过的）密码 / 加密方式和这一版不同就改过来，
+        hello 里报的密码必须是热点真在用的。热点正开着时重启热点让它生效（连着的平板要用新密码重连）。
+        返回 None（没有车热点配置）、False（本来就一致）、True（改了）。"""
+        fields = ['802-11-wireless-security.' + k for k in ('psk', 'proto', 'pairwise', 'group', 'pmf')]
+        ok, out = self.nmcli(['-s', '-g', ','.join(fields), 'con', 'show', HOTSPOT_CON], timeout=5)
+        if not ok:
+            return None
+        got = [v.replace('\\:', ':').replace('\\\\', '\\') for v in (out or '').splitlines()] + [''] * len(fields)
+        if got[:4] == [HOTSPOT_PSK, 'rsn', 'ccmp', 'ccmp'] and got[4] in ('1', 'disable'):
+            return False
+        self.nmcli(['con', 'modify', HOTSPOT_CON, 'wifi-sec.psk', HOTSPOT_PSK] + HOTSPOT_SECURITY, timeout=5)
+        with self._lock:
+            restart = self.mode == 'hotspot' and not self.busy and self.device is not None
+            if restart:
+                self.busy = True
+            dev = self.device
+        if restart:
+            ok, out = self.nmcli(['con', 'up', HOTSPOT_CON, 'ifname', dev])
+            self.refresh()
+            with self._lock:
+                self.busy = False
+                if not ok:
+                    self.error = '车热点按新密码重启没成功：' + _short(out)
+        return True
+
     def start(self, period=1.0, refresh_every=5):
-        """后台线程：每 period 秒 tick 一次；nmcli 查网络每 refresh_every 次才查一回（切换完会立即查），省板子的 CPU。"""
+        """后台线程：每 period 秒 tick 一次；nmcli 查网络每 refresh_every 次才查一回（切换完会立即查），省板子的 CPU。
+        第一次查完先对一次车热点配置（sync_profile）。"""
         def loop():
             n = 0
             while True:
                 try:
                     if n % refresh_every == 0:
                         self.refresh()
+                    if n == 0:
+                        self.sync_profile()
                     self.tick()
                 except Exception:      # 查网络出错不影响网页 / app 服务
                     pass
