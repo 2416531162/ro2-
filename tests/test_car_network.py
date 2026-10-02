@@ -23,8 +23,9 @@ class FakeNmcli:
         self.profiles = list(profiles)
         self.fail = set(fail)
         self.calls = []
-        # 车热点配置现在的 psk / proto / pairwise / group / pmf（nmcli -s -g 的输出顺序）
-        self.security = list(security or [cn.HOTSPOT_PSK, 'rsn', 'ccmp', 'ccmp', '1'])
+        # 车热点配置现在的 psk / proto / pairwise / group / pmf / band / channel（nmcli -s -g 的输出顺序）
+        self.security = list(security or [cn.HOTSPOT_PSK, 'rsn', 'ccmp', 'ccmp', '1', 'a', '36'])
+        self.band = None        # 车热点配置的频段（add / modify 里设的）；fail 里有 'up5' 时 5 GHz 起不来
 
     def __call__(self, args, timeout=None):
         self.calls.append(list(args))
@@ -41,12 +42,16 @@ class FakeNmcli:
             return True, '\n'.join(self.security) + '\n'
         if a[:4] == ['-t', '-f', 'NAME', 'con']:
             return True, '\n'.join(self.profiles) + '\n'
+        if '802-11-wireless.band' in a and a[:2] in (['con', 'add'], ['con', 'modify']):
+            self.band = a[a.index('802-11-wireless.band') + 1]
         if a[:2] == ['con', 'add']:
             if 'add' in self.fail:
                 return False, 'Error: failed'
             self.profiles.append(cn.HOTSPOT_CON)
             return True, ''
         if a[:2] == ['con', 'up']:
+            if 'up5' in self.fail and self.band == 'a':
+                return False, 'Error: Connection activation failed: 802.1X supplicant took too long to authenticate'
             if 'up' in self.fail:
                 return False, 'Error: Connection activation failed: AP mode not supported'
             self.active = a[2]
@@ -108,7 +113,8 @@ class CarNetworkTest(unittest.TestCase):
         cmd = add[0]
         for key, value in (('802-11-wireless.mode', 'ap'), ('ipv4.method', 'shared'), ('ipv4.addresses', '192.168.42.1/24'),
                            ('ssid', 'RTKCAR-A2-10'), ('wifi-sec.psk', cn.HOTSPOT_PSK), ('autoconnect', 'no'),
-                           ('wifi-sec.proto', 'rsn'), ('wifi-sec.pairwise', 'ccmp'), ('wifi-sec.pmf', 'disable')):
+                           ('wifi-sec.proto', 'rsn'), ('wifi-sec.pairwise', 'ccmp'), ('wifi-sec.pmf', 'disable'),
+                           ('802-11-wireless.band', 'a'), ('802-11-wireless.channel', '36')):
             self.assertEqual(value, cmd[cmd.index(key) + 1], key)
         self.assertIn(['con', 'modify', cn.HOTSPOT_CON, 'connection.autoconnect', 'yes'], nm.calls)
         self.assertIn(['con', 'up', cn.HOTSPOT_CON, 'ifname', 'wlan0'], nm.calls)
@@ -141,6 +147,38 @@ class CarNetworkTest(unittest.TestCase):
         self.assertEqual(1, len(mod))
         for key, value in (('wifi-sec.proto', 'rsn'), ('wifi-sec.group', 'ccmp'), ('wifi-sec.pmf', 'disable')):
             self.assertEqual(value, mod[0][mod[0].index(key) + 1], key)
+
+    def test_hotspot_falls_back_to_2g_when_5g_will_not_start(self):
+        # 5 GHz 起不来（驱动 / 管制区域）：配置改回 2.4 GHz 再起，车不能因此没网；原因给 app 看
+        nm = FakeNmcli(active='pattern', fail={'up5'})
+        net, _ = network(nm)
+        self.assertTrue(net.request('hotspot')[0])
+        ups = nm.ran('con', 'up', cn.HOTSPOT_CON)
+        self.assertEqual(2, len(ups))
+        self.assertIn(['con', 'modify', cn.HOTSPOT_CON] + cn.FALLBACK_BAND, nm.calls)
+        st = net.status()
+        self.assertEqual('hotspot', st['mode'])
+        self.assertIn('已改用 2.4 GHz', st['error'])
+
+    def test_sync_profile_moves_old_2g_hotspot_to_5g(self):
+        # 早先建在 2.4 GHz 的热点（密码、加密都对）：服务起来时改到 5 GHz 36 信道并重启热点
+        nm = FakeNmcli(active=cn.HOTSPOT_CON, profiles=('pattern', cn.HOTSPOT_CON),
+                       security=[cn.HOTSPOT_PSK, 'rsn', 'ccmp', 'ccmp', '1', 'bg', '0'])
+        net, _ = network(nm)
+        self.assertTrue(net.sync_profile())
+        mod = nm.ran('con', 'modify', cn.HOTSPOT_CON)[0]
+        self.assertEqual(('a', '36'), (mod[mod.index('802-11-wireless.band') + 1], mod[mod.index('802-11-wireless.channel') + 1]))
+        self.assertEqual(1, len(nm.ran('con', 'up', cn.HOTSPOT_CON)))
+        self.assertEqual(('hotspot', None), (net.status()['mode'], net.status()['error']))
+
+    def test_sync_profile_falls_back_when_5g_will_not_start(self):
+        nm = FakeNmcli(active=cn.HOTSPOT_CON, profiles=('pattern', cn.HOTSPOT_CON), fail={'up5'},
+                       security=[cn.HOTSPOT_PSK, 'rsn', 'ccmp', 'ccmp', '1', 'bg', '0'])
+        net, _ = network(nm)
+        self.assertTrue(net.sync_profile())
+        self.assertEqual('bg', nm.band)
+        self.assertEqual('hotspot', net.status()['mode'])
+        self.assertIn('已改用 2.4 GHz', net.status()['error'])
 
     def test_sync_profile_leaves_matching_hotspot_alone(self):
         nm = FakeNmcli(active=cn.HOTSPOT_CON, profiles=('pattern', cn.HOTSPOT_CON))

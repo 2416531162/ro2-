@@ -32,6 +32,23 @@ HOTSPOT_PREFIX_LEN = 24
 # 有的平板 WiFi 驱动（10-02 现场 SPRING2_MIX）因此连关联请求都发不出去（Association request to the driver failed）
 HOTSPOT_SECURITY = ['wifi-sec.proto', 'rsn', 'wifi-sec.pairwise', 'ccmp', 'wifi-sec.group', 'ccmp',
                     'wifi-sec.pmf', 'disable']
+# 热点开在 5 GHz（36 信道，不用雷达避让）：车上 RTL8733BU 的 WiFi 和蓝牙是同一块芯片、同一根天线，
+# 热点在 2.4 GHz 时和平板蓝牙转发（RFCOMM）轮流占空口。5 GHz 起不来（驱动 / 管制区域不让）就退回 2.4 GHz。
+# 现场要换：RTK_HOTSPOT_BAND=bg（2.4 GHz）/ a，RTK_HOTSPOT_CHANNEL（0 = 自动）
+HOTSPOT_BAND = os.environ.get('RTK_HOTSPOT_BAND') or 'a'
+HOTSPOT_CHANNEL = int(os.environ.get('RTK_HOTSPOT_CHANNEL') or (36 if HOTSPOT_BAND == 'a' else 0))
+FALLBACK_BAND = ['802-11-wireless.band', 'bg', '802-11-wireless.channel', '0']
+
+
+def band_settings(band=None, channel=None):
+    """nmcli 的频段 / 信道参数。
+
+    >>> band_settings('a', 36)
+    ['802-11-wireless.band', 'a', '802-11-wireless.channel', '36']
+    """
+    band = HOTSPOT_BAND if band is None else band
+    channel = HOTSPOT_CHANNEL if channel is None else channel
+    return ['802-11-wireless.band', band, '802-11-wireless.channel', str(channel)]
 SWITCH_DELAY_S = 1.5
 REVERT_S = 120.0
 NMCLI_TIMEOUT_S = 40.0
@@ -115,6 +132,7 @@ class CarNetwork:
         self.revert = None        # (原来的方式, 截止时刻, 切好时平板累计连接次数)：等平板连上来
         self.error = None         # 上一次切换失败的原因（给 app 看）
         self.last_switch = None   # 上一次切换的结果说明
+        self.fallback = None      # 5 GHz 热点起不来、退回 2.4 GHz 的原因
 
     # ---- 查 ----
     def refresh(self):
@@ -141,7 +159,7 @@ class CarNetwork:
         """给遥测 / 车载屏幕：方式、WiFi 名、车热点名和地址、正在切 / 等平板连上来。"""
         with self._lock:
             out = {'mode': self.mode, 'ssid': self.ssid, 'hotspot_ssid': self.hotspot,
-                   'hotspot_ip': HOTSPOT_IP, 'busy': self.busy, 'error': self.error}
+                   'hotspot_ip': HOTSPOT_IP, 'busy': self.busy, 'error': self.error or self.fallback}
             if self.revert is not None:
                 out['revert_to'] = self.revert[0]
                 out['revert_in_s'] = max(0, int(round(self.revert[1] - self.clock())))
@@ -197,8 +215,23 @@ class CarNetwork:
         if not ok:
             return False, why
         self.nmcli(['con', 'modify', HOTSPOT_CON, 'connection.autoconnect', 'yes'], timeout=5)
-        ok, out = self.nmcli(['con', 'up', HOTSPOT_CON, 'ifname', dev])
+        ok, out = self._up_hotspot(dev)
         return (True, '') if ok else (False, '车热点没起来：' + _short(out))
+
+    def _up_hotspot(self, dev):
+        """起车热点；5 GHz 起不来就把配置改回 2.4 GHz 再起一次，原因写进 error（给 app 看）。返回 (成功, 输出)。"""
+        ok, out = self.nmcli(['con', 'up', HOTSPOT_CON, 'ifname', dev])
+        if ok:
+            with self._lock:
+                self.fallback = None
+        if ok or HOTSPOT_BAND == 'bg':
+            return ok, out
+        self.nmcli(['con', 'modify', HOTSPOT_CON] + FALLBACK_BAND, timeout=5)
+        ok2, out2 = self.nmcli(['con', 'up', HOTSPOT_CON, 'ifname', dev])
+        if ok2:
+            with self._lock:
+                self.fallback = '5 GHz 热点起不来（%s），已改用 2.4 GHz' % _short(out)
+        return ok2, out2
 
     def _to_client(self):
         self.nmcli(['con', 'modify', HOTSPOT_CON, 'connection.autoconnect', 'no'], timeout=5)
@@ -214,11 +247,12 @@ class CarNetwork:
         ssid = hotspot_ssid(self.read_mac(dev))
         if ok and HOTSPOT_CON in connection_names(names):
             self.nmcli(['con', 'modify', HOTSPOT_CON, '802-11-wireless.ssid', ssid,
-                        'wifi-sec.psk', HOTSPOT_PSK, 'connection.interface-name', dev] + HOTSPOT_SECURITY, timeout=5)
+                        'wifi-sec.psk', HOTSPOT_PSK, 'connection.interface-name', dev] + HOTSPOT_SECURITY + band_settings(),
+                       timeout=5)
             return True, ''
         ok, out = self.nmcli([
             'con', 'add', 'type', 'wifi', 'ifname', dev, 'con-name', HOTSPOT_CON, 'autoconnect', 'no',
-            'ssid', ssid, '802-11-wireless.mode', 'ap', '802-11-wireless.band', 'bg',
+            'ssid', ssid, '802-11-wireless.mode', 'ap'] + band_settings() + [
             'ipv4.method', 'shared', 'ipv4.addresses', '%s/%d' % (HOTSPOT_IP, HOTSPOT_PREFIX_LEN),
             'ipv6.method', 'disabled', 'wifi-sec.key-mgmt', 'wpa-psk', 'wifi-sec.psk', HOTSPOT_PSK,
             'connection.autoconnect-priority', '100'] + HOTSPOT_SECURITY, timeout=10)
@@ -242,24 +276,27 @@ class CarNetwork:
         self.spawn(lambda: self._switch(previous, previous, delay=False, guard=False, note=note))
 
     def sync_profile(self):
-        """服务起来时对一次：已有的车热点配置（早先的版本建的、或手改过的）密码 / 加密方式和这一版不同就改过来，
+        """服务起来时对一次：已有的车热点配置（早先的版本建的、或手改过的）密码 / 加密方式 / 频段和这一版不同就改过来，
         hello 里报的密码必须是热点真在用的。热点正开着时重启热点让它生效（连着的平板要用新密码重连）。
         返回 None（没有车热点配置）、False（本来就一致）、True（改了）。"""
         fields = ['802-11-wireless-security.' + k for k in ('psk', 'proto', 'pairwise', 'group', 'pmf')]
+        fields += ['802-11-wireless.band', '802-11-wireless.channel']
         ok, out = self.nmcli(['-s', '-g', ','.join(fields), 'con', 'show', HOTSPOT_CON], timeout=5)
         if not ok:
             return None
         got = [v.replace('\\:', ':').replace('\\\\', '\\') for v in (out or '').splitlines()] + [''] * len(fields)
-        if got[:4] == [HOTSPOT_PSK, 'rsn', 'ccmp', 'ccmp'] and got[4] in ('1', 'disable'):
+        if (got[:4] == [HOTSPOT_PSK, 'rsn', 'ccmp', 'ccmp'] and got[4] in ('1', 'disable')
+                and got[5] == HOTSPOT_BAND and got[6] == str(HOTSPOT_CHANNEL)):
             return False
-        self.nmcli(['con', 'modify', HOTSPOT_CON, 'wifi-sec.psk', HOTSPOT_PSK] + HOTSPOT_SECURITY, timeout=5)
+        self.nmcli(['con', 'modify', HOTSPOT_CON, 'wifi-sec.psk', HOTSPOT_PSK] + HOTSPOT_SECURITY + band_settings(),
+                   timeout=5)
         with self._lock:
             restart = self.mode == 'hotspot' and not self.busy and self.device is not None
             if restart:
                 self.busy = True
             dev = self.device
         if restart:
-            ok, out = self.nmcli(['con', 'up', HOTSPOT_CON, 'ifname', dev])
+            ok, out = self._up_hotspot(dev)
             self.refresh()
             with self._lock:
                 self.busy = False
