@@ -473,9 +473,11 @@ def rtk_telemetry(gnss, now):
             'diff_age': _num(g.get('diff_age'), 1), 'sigma_h': _num(g.get('sigma_h'), 3),
             'heading_ok': bool(g.get('heading_ok')), 'baseline_m': _num(g.get('baseline_m'), 3),
             'receiver_ok': bool(g.get('receiver_ok')),
-            # 接收机数据从哪来：'usb'（车上串口）/ 'tablet'（平板串口转发，见 gnss_bridge）；旧 RTK 节点没有
-            'source': g.get('source') if g.get('source') in ('usb', 'tablet') else None,
-            'tablet_connected': bool((g.get('tablet') or {}).get('connected')),
+            # 接收机数据从哪来：'usb'（车上串口）/ 'tablet'（平板 WiFi 转发）/ 'bluetooth'（平板蓝牙转发，见 gnss_bridge）；
+            # 旧 RTK 节点没有
+            'source': g.get('source') if g.get('source') in ('usb', 'tablet', 'bluetooth') else None,
+            # 平板转发（WiFi 或蓝牙）连着车
+            'tablet_connected': bool((g.get('tablet') or {}).get('connected') or (g.get('bluetooth') or {}).get('connected')),
             'antennas': {name: {
                 'available': bool(a.get('available')), 'source': a.get('source'),
                 'sol': a.get('sol'), 'fix': a.get('fix', 'NONE'),
@@ -496,7 +498,7 @@ def rtk_telemetry(gnss, now):
                       'error': n.get('error'), 'age_s': _num(n.get('age_s'), 1),
                       'config_revision': n.get('config_revision'), 'config_error': n.get('config_error'),
                       'bytes': n.get('bytes', 0),
-                      # 车端 CORS 暂停的原因：'tablet' = 数据来自平板串口，差分由平板自己连；没暂停为 None
+                      # 车端 CORS 暂停的原因：'tablet' = 数据来自平板（WiFi 或蓝牙转发），差分由平板自己连；没暂停为 None
                       'paused': n.get('paused') if n.get('paused') in ('tablet',) else None}}
 
 

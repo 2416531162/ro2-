@@ -10,7 +10,7 @@
 | 服务 | 程序 | 干什么 |
 | --- | --- | --- |
 | `rk3588-wheeltec`（chassis） | `oid_protocol/oid_driver.py`（差速车）；旧车 `wheeltec_protocol/wheeltec_driver.py` | 唯一的电机出口：控制权仲裁（`wheeltec_protocol/motion_authority.py`）、指令超时停车、驱动器心跳、轮速里程 `/odom` |
-| `rk3588-perception@rtk` | `radar_system/rtk_node.py` | UM982 串口或平板串口转发（TCP 48622，`gnss_bridge.py`）→ `/gnss/raw`（JSON）、`/gnss/fix`、`/gnss/heading`；车端 CORS（`ntrip_config.py`） |
+| `rk3588-perception@rtk` | `radar_system/rtk_node.py` | UM982 串口或平板串口转发（WiFi TCP 48622 / 蓝牙 RFCOMM 通道 22，`gnss_bridge.py`）→ `/gnss/raw`（JSON）、`/gnss/fix`、`/gnss/heading`；车端 CORS（`ntrip_config.py`） |
 | `rk3588-perception@imu` | `rion_protocol/hda536t_imu.py` | CAN 上的 HDA536T → `/imu`、`/imu/data`（航向角、横滚俯仰） |
 | `rk3588-perception@line` | `radar_system/line_node.py` | 融合（`gnss_fusion.py`）+ 作业状态机（`line_mission.py`）→ `/navigation/command`、`/line/status` |
 | `rk3588-perception@web` | `radar_system/radar_web_server.py` | 平板 app 的 WebSocket（`/ws`，协议 `app_link.py`、[APP_PROTOCOL.md](APP_PROTOCOL.md)）；手动、IMU 定向直行（`heading_hold.py`）；转发 `/line/command`；车载屏幕 `/display`；网页手动遥控兜底页 `/`（`templates/index.html`：方向键、急停、状态） |

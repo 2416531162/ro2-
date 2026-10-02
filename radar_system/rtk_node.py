@@ -3,9 +3,10 @@
 """RTK 节点：独占 UM982 串口（雷迅 CUAV 双天线），发布测量和状态；有账号文件时跑 NTRIP 差分。
 
 接收机可以接在车上的 USB 串口，也可以接在安卓平板的串口上：平板 app 把串口原始字节经 TCP 48622
-原样转过来（gnss_bridge.TabletSerialServer）。两路同时监听，正在出数据的那一路一直用下去，它 2 s 没数据
-才换另一路；两路的数据从不混在一起（换路时解析状态、钟差全部重来）。平板那一路的差分由平板用同一个
-CORS 账号自己连、直接写进平板串口，车端这时暂停自己的 CORS（同一账号两处登录会互相顶掉），换回 USB 再连。
+原样转过来（gnss_bridge.TabletSerialServer），或者走蓝牙 RFCOMM（gnss_bridge.BluetoothSerialServer，
+平板不用连车的 WiFi）。几路同时监听，正在出数据的那一路一直用下去，它 2 s 没数据才换另一路；几路的数据从不
+混在一起（换路时解析状态、钟差全部重来）。平板转来的数据（WiFi 或蓝牙）的差分由平板用同一个 CORS 账号自己连、
+直接写进平板串口，车端这时暂停自己的 CORS（同一账号两处登录会互相顶掉），换回 USB 再连。
 
     /gnss/raw      std_msgs/String JSON，每条测量一条（fix / heading / vel，字段见 um982.Um982Stream）；
                    时间是本机单调时钟的测量时刻，走直线节点（融合）用它
@@ -36,7 +37,7 @@ from um982 import RTK_FIXED, RTK_FLOAT, NtripClient, Um982Stream
 from ntrip_config import NtripReload
 import runtime_config  # bootstraps the release root for direct script launches
 from robot_core.service_watchdog import watchdog
-from gnss_bridge import TABLET_PORT, TabletSerialServer
+from gnss_bridge import BT_CHANNEL, TABLET_PORT, BluetoothSerialServer, TabletSerialServer
 
 DEFAULT_PORT = ('/dev/serial/by-id/usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_Controller_'
                 'b0d06fec6eabed1183a10e9aa7669f5d-if00-port0')
@@ -44,7 +45,9 @@ DEFAULT_ENV = '~/rtk/ntrip.env'
 FUSION_CONFIG = '~/rtk/fusion.json'     # 标定（安装偏差）与走直线节点共用这一份
 # 只增加副天线 20 Hz 日志（与主天线 BESTPOS 同频，按测量时刻配对检查两天线距离），不清除已有输出、不写接收机闪存
 ANT2_LOG = b'BESTNAVHA 0.05\r\n'
-SOURCE_HOLD_S = 2.0                     # 正在用的一路（USB / 平板）这么久没数据才换另一路
+SOURCE_HOLD_S = 2.0                     # 正在用的一路（USB / 平板 WiFi / 平板蓝牙）这么久没数据才换另一路
+# 平板转来的几路（WiFi TCP、蓝牙）：差分由平板自己连 CORS，车端暂停自己的 CORS、不往这几路写改正数
+TABLET_SOURCES = ('tablet', 'bluetooth')
 
 # sensor_msgs/NavSatStatus 的取值（照 nmea_navsat_driver 的对应：单点 FIX、伪距差分 SBAS、RTK 浮点/固定 GBAS）
 NO_FIX, FIX, SBAS_FIX, GBAS_FIX = -1, 0, 1, 2
@@ -112,7 +115,7 @@ def load_heading_calibration(path=FUSION_CONFIG):
 
 class RtkNode(Node):
     def __init__(self, port, baud=921600, ntrip_env=DEFAULT_ENV, serial_factory=None, fusion_config=FUSION_CONFIG,
-                 tablet_port=None):
+                 tablet_port=None, bt_channel=None, bt_factory=None):
         super().__init__('rtk_node')
         self.port, self.baud = port, baud
         self.serial_factory = serial_factory
@@ -130,7 +133,7 @@ class RtkNode(Node):
         self.write_lock = threading.Lock()
         self.ser = None
         self.port_error = None
-        self.source = None                  # 正在用的接收机数据：'usb' / 'tablet'，还没收到过为 None
+        self.source = None                  # 正在用的接收机数据：'usb' / 'tablet' / 'bluetooth'，还没收到过为 None
         self.source_rx = {}                 # 每一路最后收到数据的时刻
         self.running = True
         self.cors = NtripReload(ntrip_env, lambda env: NtripClient(env, self.gga_report, self.write_corrections))
@@ -142,12 +145,22 @@ class RtkNode(Node):
             except OSError as exc:          # 端口被占：只用 USB，状态里写明
                 self.tablet_error = '%s: %s' % (type(exc).__name__, exc)
                 self.get_logger().error('平板串口转发端口 %s 打不开：%s' % (tablet_port, exc))
+        # 平板蓝牙转发（bt_channel=None 不开；bt_factory 测试用，给一个不碰 BlueZ 的假服务）
+        self.bt = None
+        if bt_channel is not None:
+            factory = bt_factory or (lambda: BluetoothSerialServer(bt_channel, on_connect=self.bt_connected))
+            self.bt = factory()
+            if self.bt.error:
+                self.get_logger().error('平板蓝牙转发不可用：%s' % self.bt.error)
         self.create_timer(0.5, self.publish_status)
         self.reader = threading.Thread(target=self.read_loop, daemon=True)
         self.reader.start()
         if self.tablet is not None:
-            self.tablet_reader = threading.Thread(target=self.tablet_loop, daemon=True)
+            self.tablet_reader = threading.Thread(target=self.bridge_loop, args=(self.tablet, 'tablet'), daemon=True)
             self.tablet_reader.start()
+        if self.bt is not None:
+            self.bt_reader = threading.Thread(target=self.bridge_loop, args=(self.bt, 'bluetooth'), daemon=True)
+            self.bt_reader.start()
 
     # ---- 串口 ----
     def open_serial(self):
@@ -196,21 +209,31 @@ class RtkNode(Node):
         # 照 USB 那样固定发 20 Hz 会把串口挤满）；差分由平板自己连 CORS
         self.get_logger().info('平板串口转发已连接：%s' % self.tablet.peer)
 
-    def tablet_loop(self):
+    def bt_connected(self):
+        self.get_logger().info('平板蓝牙转发已连接：%s' % self.bt.peer)
+
+    def bridge_loop(self, bridge, source):
+        """平板转来的一路（WiFi 'tablet' / 蓝牙 'bluetooth'）的读线程。"""
         while self.running:
-            watchdog.tick("tablet")
+            watchdog.tick(source)
             try:
-                data = self.tablet.read(4096)
+                data = bridge.read(4096)
             except Exception as exc:        # 不让读线程悄悄死掉
-                self.tablet_error = '%s: %s' % (type(exc).__name__, exc)
+                self._bridge_error(source, '%s: %s' % (type(exc).__name__, exc))
                 time.sleep(0.5)
                 continue
             if data:
                 try:
-                    self.on_serial_data(data, time.monotonic(), 'tablet')
+                    self.on_serial_data(data, time.monotonic(), source)
                 except Exception as exc:
-                    self.tablet_error = 'data: %s: %s' % (type(exc).__name__, exc)
-                    self.get_logger().error('处理平板串口数据出错：%r' % exc)
+                    self._bridge_error(source, 'data: %s: %s' % (type(exc).__name__, exc))
+                    self.get_logger().error('处理平板%s数据出错：%r' % ('蓝牙' if source == 'bluetooth' else '串口', exc))
+
+    def _bridge_error(self, source, text):
+        if source == 'bluetooth':
+            self.bt.error = text
+        else:
+            self.tablet_error = text
 
     def on_serial_data(self, data, t_rx, source='usb'):
         # 不能叫 handle：会遮住 rclpy.Node.handle，Node.__init__ 里 `with self.handle:` 就崩了
@@ -243,8 +266,8 @@ class RtkNode(Node):
             return self.stream.gga_report()
 
     def write_corrections(self, data):
-        # 车端 CORS 只给 USB 上的接收机；平板那一路由平板自己连 CORS（这时车端 CORS 已暂停）
-        if self.source == 'tablet':
+        # 车端 CORS 只给 USB 上的接收机；平板转来的几路由平板自己连 CORS（这时车端 CORS 已暂停）
+        if self.source in TABLET_SOURCES:
             return
         with self.write_lock:
             if self.ser is not None:
@@ -265,16 +288,22 @@ class RtkNode(Node):
             st['heading']['yaw_deg'] = round(math.degrees(vehicle_yaw(
                 hd['heading'], self.mount_offset_deg, self.baseline_yaw_body_deg)), 2) if ok else None
         tablet = self.tablet.status() if self.tablet is not None else None
+        bt = self.bt.status() if self.bt is not None else None
         st['source'] = self.source
         if self.source == 'tablet':
             st['port_open'] = bool(tablet and tablet['connected'])
             st['port_error'] = None if st['port_open'] else 'tablet disconnected'
+        elif self.source == 'bluetooth':
+            st['port_open'] = bool(bt and bt['connected'])
+            st['port_error'] = None if st['port_open'] else 'bluetooth disconnected'
         else:
             st['port_open'] = self.ser is not None
             st['port_error'] = self.port_error
         st['usb'] = dict(open=self.ser is not None, error=self.port_error)
         st['tablet'] = dict(listening=tablet is not None, error=self.tablet_error,
                             **(tablet or dict(port=None, connected=False, peer=None)))
+        st['bluetooth'] = dict(listening=bt is not None,
+                               **(bt or dict(channel=None, registered=False, connected=False, peer=None, error=None)))
         if self.cors.client is not None:
             n = self.cors.client.status()
             st['ntrip'] = dict(configured=True, connected=n['connected'], mount=n['mount'],
@@ -289,8 +318,8 @@ class RtkNode(Node):
         return st
 
     def sync_cors(self):
-        """数据来自平板时暂停车端 CORS（平板自己连），换回 USB（或还没数据）时恢复。"""
-        if self.source == 'tablet':
+        """数据来自平板（WiFi 或蓝牙）时暂停车端 CORS（平板自己连），换回 USB（或还没数据）时恢复。"""
+        if self.source in TABLET_SOURCES:
             self.cors.pause('tablet')
         else:
             self.cors.resume()
@@ -305,6 +334,8 @@ class RtkNode(Node):
         self.cors.stop()
         if self.tablet is not None:
             self.tablet.close()
+        if self.bt is not None:
+            self.bt.close()
 
 
 def main():
@@ -314,11 +345,15 @@ def main():
     p.add_argument('--ntrip-env', default=os.environ.get('RK3588_NTRIP_ENV', DEFAULT_ENV))
     p.add_argument('--tablet-port', type=int, default=int(os.environ.get('RK3588_RTK_TABLET_PORT', TABLET_PORT)),
                    help='平板串口转发的 TCP 端口，0 不监听')
+    p.add_argument('--bt-channel', type=int, default=int(os.environ.get('RK3588_RTK_BT_CHANNEL', BT_CHANNEL)),
+                   help='平板蓝牙转发的 RFCOMM 通道，0 不开')
     argv = __import__('sys').argv[1:]
     args = p.parse_args(argv[:argv.index('--ros-args')] if '--ros-args' in argv else argv)
     rclpy.init()
-    node = RtkNode(args.port, args.baud, args.ntrip_env, tablet_port=args.tablet_port or None)
-    watchdog.start("ros", "serial", *(("tablet",) if node.tablet is not None else ()))
+    node = RtkNode(args.port, args.baud, args.ntrip_env, tablet_port=args.tablet_port or None,
+                   bt_channel=args.bt_channel or None)
+    watchdog.start("ros", "serial", *(("tablet",) if node.tablet is not None else ()),
+                   *(("bluetooth",) if node.bt is not None else ()))
     node.create_timer(0.5, lambda: watchdog.tick("ros"))
 
     def on_signal(_sig=None, _frame=None):

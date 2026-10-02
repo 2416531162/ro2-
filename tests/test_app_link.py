@@ -257,6 +257,10 @@ class TestRtkLine(unittest.TestCase):
         old = {k: v for k, v in g.items() if k not in ('source', 'usb', 'tablet')}   # 旧 RTK 节点不报来源
         self.assertEqual((al.rtk_telemetry(old, 100.0)['source'], al.rtk_telemetry(old, 100.0)['tablet_connected']),
                          (None, False))
+        # 平板经蓝牙转发（不连车的 WiFi）
+        g.update(source='bluetooth', bluetooth=dict(listening=True, connected=True, peer='AA:BB:CC:DD:EE:01'))
+        rtk = al.rtk_telemetry(g, 100.0)
+        self.assertEqual((rtk['source'], rtk['tablet_connected']), ('bluetooth', True))
         g['source'] = 'nonsense'
         self.assertIsNone(al.rtk_telemetry(g, 100.0)['source'])
         # 车端 CORS 让给平板：app 据此显示「车端 CORS 已暂停（数据来自平板）」

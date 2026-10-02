@@ -230,6 +230,59 @@ class TestRtkNode(unittest.TestCase):
         finally:
             node.shutdown()
 
+    def test_receiver_on_tablet_bluetooth(self):
+        # 平板经蓝牙转来串口原始字节（不连车的 WiFi）：和 WiFi 那一路一样解析发布、暂停车端 CORS、不往平板写
+        def no_usb():
+            raise OSError('no such device')
+
+        import socket
+        from gnss_bridge import BluetoothSerialServer
+        node = rtk_node.RtkNode('/dev/null', ntrip_env='/nonexistent', serial_factory=no_usb, bt_channel=22,
+                                bt_factory=lambda: BluetoothSerialServer(22, timeout=0.02, register=False))
+        try:
+            car_end, tablet = socket.socketpair()
+            self.addCleanup(tablet.close)
+            node.bt.adopt(car_end, 'AA:BB:CC:DD:EE:01')
+            tablet.sendall(('\r\n'.join([GGA] + epoch_lines(6)) + '\r\n').encode())
+            raw = node.publishers_['/gnss/raw'].sent
+            deadline = time.time() + 2
+            while len(raw) < 18 and time.time() < deadline:
+                time.sleep(0.01)
+            self.assertEqual([json.loads(m.data)['kind'] for m in raw], ['fix', 'fix2', 'heading'] * 6)
+            st = node.status()
+            self.assertEqual((st['source'], st['port_open'], st['port_error'], st['rtk']), ('bluetooth', True, None, 'FIXED'))
+            self.assertEqual((st['bluetooth']['connected'], st['bluetooth']['peer']), (True, 'AA:BB:CC:DD:EE:01'))
+            self.assertFalse(st['tablet']['listening'])
+            node.publish_status()
+            self.assertEqual((node.cors.paused, node.status()['ntrip']['paused']), ('tablet', 'tablet'))
+            node.write_corrections(b'\xd3\x00\x13')                   # 车端不往平板写
+            tablet.settimeout(0.2)
+            with self.assertRaises(socket.timeout):
+                tablet.recv(16)
+            tablet.close()                                              # 平板断开：状态照实报
+            deadline = time.time() + 2
+            while node.status()['bluetooth']['connected'] and time.time() < deadline:
+                time.sleep(0.01)
+            st = node.status()
+            self.assertEqual((st['port_open'], st['port_error']), (False, 'bluetooth disconnected'))
+        finally:
+            node.shutdown()
+
+    def test_wifi_and_bluetooth_from_the_same_tablet_are_never_mixed(self):
+        # 中继两路都连着时同一份数据从 WiFi 和蓝牙各来一遍：只用先出数据的那一路，它停 2 s 才换
+        node = rtk_node.RtkNode('/dev/null', ntrip_env='/nonexistent', serial_factory=lambda: FakeSerial([]))
+        try:
+            usb = (BESTPOS + '\r\n').encode()
+            node.on_serial_data(usb, 100.0, 'bluetooth')
+            node.on_serial_data(usb, 100.01, 'tablet')
+            self.assertEqual((node.source, len(node.publishers_['/gnss/raw'].sent)), ('bluetooth', 1))
+            node.on_serial_data(usb, 103.0, 'tablet')                   # 蓝牙断了 3 s：换 WiFi
+            self.assertEqual(node.source, 'tablet')
+            node.publish_status()
+            self.assertEqual(node.cors.paused, 'tablet')
+        finally:
+            node.shutdown()
+
     def test_car_cors_pauses_while_tablet_is_the_source(self):
         # 平板用同一个 CORS 账号自己连：车端在用平板数据时不能也连（同一账号两处登录会互相顶掉）
         clients = []
