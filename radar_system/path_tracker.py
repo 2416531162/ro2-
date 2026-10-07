@@ -31,7 +31,7 @@ from collections import deque
 from dataclasses import dataclass, field, replace
 
 from robot_core.kinematics import ChassisGeometry
-from line_tracker import lateral_integral_allowed
+from line_tracker import lateral_integral_allowed, position_observation_allowed
 from heading_control import HeadingControl, HeadingControlConfig
 from heading_hold import HoldConfig
 from paint_start import PaintStartGuard
@@ -812,6 +812,7 @@ class PathTracker:
             limited=self._paint_start_speed_limit
             wz*=limited/v
             v=self.st.v_cmd=self._v_prev=limited
+            self._accel_prev=0.  # 保护减速后重新柔和提速，不保留被截断的加速度。
         self._sent.append((self._clock, v, wz))
         if self._straight_weight > 0 and self._imu_now is not None:
             self._straight_core.record_sent(self._imu_now, wz)
@@ -981,6 +982,7 @@ class PathTracker:
 
     def _runup_position_trusted(self, pose):
         """助跑拟合比沿线拟合更严格：位置、测向均新鲜，当前帧也必须合格。"""
+        if not position_observation_allowed(pose):return False
         first = self.cfg.straight_imu_first
         if getattr(pose, 'single_antenna', False):
             # 单天线（2026-10-07）：没有测向、副天线，「卫星可信」（rtk_trusted）和测向帧、两天线距离永远没有，原条件下
@@ -1068,8 +1070,13 @@ class PathTracker:
             measured += (nx-cfg.track_x_m)*math.sin(h) + ny*(math.cos(h)-1.0)
             # 卫星纠偏：拟合按用户定的可信规则（固定解 + 基线 0.30–0.50），观测器老办法仍按 0.40–0.42
             # 助跑冻结的是横偏积分，不是不许用可信位置拟合；否则起步锁住的角度误差一直推到线头。
-            position_ok = (lateral_integral_allowed(pose) and self._runup_position_trusted(pose)
-                           if self.reverse_runup and st.s < self.paint_from_m else not st.integral_frozen)
+            # 起喷前积分按设计冻结，正常融合校正也可冻结积分；二者都不应阻断可信位置拟合。
+            # 所有直线助跑共用当前质量、时效及跳点检查，不能只给倒车接入放行。
+            starting = (st.s < self.paint_from_m or self.paint_start_guard is not None
+                        and not self.paint_start_guard.started)
+            position_ok = (self._runup_position_trusted(pose)
+                           if self.runup_speed_mps is not None and starting
+                           else not st.integral_frozen)
             rtk_ok = position_ok and (self._baseline_ok(fit=True) and self._rtk_quality_ok() if first.rtk_fit
                                       else baseline_ok)
             # steering：IMU 已经在开（上一拍权重 > 0）；rtk_trim、rtk_fit 都关时这以后卫星不再修正
@@ -1500,7 +1507,17 @@ class PathTracker:
             # 若以 paint_from_m 为终点，圆内会再次 0.5→0.3→0.5，积入转向暂态，起喷后仍在回摆。
             runup_to, exit_speed = self.paint_from_m, cfg.cruise_mps
             paint_piece = self.path._piece(self.paint_from_m)
-            if cfg.arc_speed_mps is not None and not paint_piece.straight:
+            if paint_piece.straight:
+                # 从起步起连续提到作业速度，取消前段 0.3 m/s 平台和最后约 1 m 的集中提速。
+                # 起喷资格和未收稳时的制动仍由 PaintStartGuard 独立检查。
+                runup_to=0.
+                v=min(v,exit_speed)
+                if (self.paint_start_guard is not None
+                        and self.paint_start_guard.reason not in (None,'等待连续稳定')):
+                    # 接管及当前误差未合格时先柔和提到 0.6；只差连续确认时已可平滑提速，喷涂仍等确认完成。
+                    # 倒车后需走满 1 m 才交接，直接冲到 0.8 会先触发制动、再重新提速。
+                    v=min(v,.6)
+            elif cfg.arc_speed_mps is not None:
                 runup_to, exit_speed = paint_piece.s0, cfg.arc_speed_mps
             if s_now < runup_to and not constant_arc:
                 target=min(exit_speed,self.runup_speed_mps)
@@ -1550,9 +1567,9 @@ class PathTracker:
                 if upcoming is not None:
                     a,b=upcoming;target=self._planned_paint_speed(a,b)
                     v=min(v,math.sqrt(target*target+2*cfg.decel_mps2*max(0.,a-s)))
-        v = self._accelerate(v, dt)
         if self.speed_limit_mps is not None and (self.constant_paint_speed or not constant_arc or self.speed_limit_mps <= 0.):
             v = min(v, max(0.0, self.speed_limit_mps))
+        v = self._accelerate(v, dt)
         self._v_prev = v
         if v<=0.:self._accel_prev=0.
         st.v_cmd = v
@@ -1712,8 +1729,10 @@ class SectionTracker:
                               steer_gain=reverse_gain, straight_imu_enabled=False, arc_speed_mps=None)
                 if cfg.reverse_section_creep_m is not None:
                     cfg = replace(cfg, start_creep_m=cfg.reverse_section_creep_m)
+            # 前进喷线直线与圆弧、连续转场共用柔和起步。
             if self.geo.differential and sec.direction>0 and (
-                    any(not p.straight for p in sec.path.pieces) or sec.continuous_after
+                    getattr(sec,'field_role',None)=='paint'
+                    or any(not p.straight for p in sec.path.pieces) or sec.continuous_after
                     or i>0 and self.sections[i-1].continuous_after):
                 cfg=replace(cfg,accel_mps2=min(cfg.accel_mps2,.25),accel_jerk_mps3=.5)
             tracker=PathTracker(sec.path, cfg, self.geo)

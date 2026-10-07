@@ -31,18 +31,20 @@ _POSITION_INTEGRAL_BLOCKERS = frozenset({
 ALIGN_PENDING_MAX_M = 0.005
 
 
+def position_observation_allowed(pose):
+    """定位观测可用；融合的平滑校正余量单独约束积分，不作为观测失效。"""
+    return (pose.usable_for_control
+            and not _POSITION_INTEGRAL_BLOCKERS.intersection(getattr(pose, 'reasons', ()) or ())
+            and getattr(pose, 'quality', None) not in ('INVALID', 'DEAD_RECKONING', 'RTK_FLOAT'))
+
+
 def lateral_integral_allowed(pose):
     """位置可信、绝对位置校正已接回时才学习横偏积分；测向质量单独管理。
 
     轻量位姿没有质量字段时保留原控制器行为。航向不确定或测向与 IMU 不一致，仍可用可信
     RTK 横偏消除慢航向偏差；位置靠推算、降权或正在接回时保留原积分，不再积入推算漂移。
     """
-    if not pose.usable_for_control:
-        return False
-    reasons = getattr(pose, 'reasons', ()) or ()
-    if _POSITION_INTEGRAL_BLOCKERS.intersection(reasons):
-        return False
-    if getattr(pose, 'quality', None) in ('INVALID', 'DEAD_RECKONING', 'RTK_FLOAT'):
+    if not position_observation_allowed(pose):
         return False
     try:
         dx, dy = getattr(pose, 'correction_xy', (0.0, 0.0))

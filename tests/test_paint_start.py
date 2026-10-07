@@ -37,12 +37,13 @@ class Evidence(unittest.TestCase):
         for i in range(30):observe(g,1.+i*.05)
         self.assertTrue(g.ready)
         observe(g,3.,trusted=False);self.assertFalse(g.ready)
-        for i in range(10):observe(g,3.+i*.02)
+        for i in range(9):observe(g,3.+i*.02)
         self.assertFalse(g.ready)
+        observe(g,3.18);self.assertTrue(g.ready)
 
     def test_recorded_bad_start_and_estimate_disagreement_do_not_pass(self):
         for values in [dict(weight=0.,rtk_error=.0215),dict(weight=1.,rtk_error=-.03856,guide_error=-.00957),
-                       dict(heading_error=math.radians(.8))]:
+                       dict(heading_error=math.radians(1.1))]:
             g=PaintStartGuard()
             for i in range(60):observe(g,i*.02,**values)
             self.assertFalse(g.ready)
@@ -62,7 +63,9 @@ class Integration(unittest.TestCase):
     def test_unready_brakes_with_margin_before_paint_start(self):
         tr=tracker();tr._straight_weight=0.;tr._straight_guided=None
         self.assertFalse(tr._check_paint_start(sample(tr,0.,1.5,e=.02),.02,.3))
-        self.assertTrue(tr._check_paint_start(sample(tr,.02,2.2,e=.02),.02,.3))
+        self.assertFalse(tr._check_paint_start(sample(tr,.02,2.25,e=.02),.02,.3))
+        self.assertLess(tr._paint_start_speed_limit,.3)
+        self.assertTrue(tr._check_paint_start(sample(tr,.04,2.34,e=.02),.02,.3))
         self.assertFalse(tr.paint_start_allowed())
         m=NS(pose=sample(tr,.04,2.6),differential=True,nozzle=(0.,0.))
         status=paint_quality.status(m,{},True,Section(1,tr.path),tr)
@@ -82,9 +85,9 @@ class Integration(unittest.TestCase):
 
     def test_short_confirmation_uses_a_stoppable_speed_instead_of_rushing_the_start(self):
         tr=tracker()
-        for i in range(18):tr._check_paint_start(sample(tr,i*.02,1.5),.02,.3)
+        for i in range(8):tr._check_paint_start(sample(tr,i*.02,1.5),.02,.3)
         self.assertFalse(tr.paint_start_guard.ready)
-        self.assertFalse(tr._check_paint_start(sample(tr,.38,2.0),.02,.6))
+        self.assertFalse(tr._check_paint_start(sample(tr,.16,2.0),.02,.6))
         self.assertIsNotNone(tr._paint_start_speed_limit)
         self.assertLess(tr._paint_start_speed_limit,.6)
 

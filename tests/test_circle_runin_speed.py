@@ -43,10 +43,11 @@ class CircleRunInSpeed(unittest.TestCase):
         v,_=tr.update(pose(tr.path,.4,v=.3),.02)
         self.assertAlmostEqual(v,.3,places=10)
 
-    def test_plain_straight_runup_still_slows_and_then_releases(self):
+    def test_plain_straight_runup_no_longer_waits_at_point_three(self):
         tr=tracker(0.);tr._v_prev=.3;tr._creep_from=0.;tr.st.s=2.8;tr._hint=2.8
         v,_=tr.update(pose(tr.path,2.8,v=.3),.02)
-        self.assertAlmostEqual(v,.3,places=10)
+        self.assertGreater(v,.3)
+        self.assertLessEqual(v,.3+tr.cfg.accel_mps2*.02)
         tr._v_prev=.8;tr.st.s=3.8;tr._hint=3.8
         v,_=tr.update(pose(tr.path,3.8,v=.8),.02)
         self.assertAlmostEqual(v,.8,places=10)

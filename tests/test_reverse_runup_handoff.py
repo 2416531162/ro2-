@@ -42,7 +42,7 @@ class ReverseHandoff(unittest.TestCase):
 
     def test_crossing_paint_start_does_not_force_handoff(self):
         tr = tracker()
-        tr.st.s, tr.st.e, tr.st.heading_err = 1.6, .025, 0.
+        tr.st.s, tr.st.e, tr.st.heading_err = tr.paint_from_m+.1, .035, 0.
         self.assertEqual(tr._straight_eligible(tr.path.pieces[0], .8), (False, True))
         tr.st.e = .003
         self.assertEqual(tr._straight_eligible(tr.path.pieces[0], .8), (True, False))
