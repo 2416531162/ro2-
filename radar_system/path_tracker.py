@@ -846,21 +846,25 @@ class PathTracker:
         self._straight_status.update(guard.status())
         self._straight_status['start_calibration_span_deg']=math.degrees(span)
         left=self.paint_from_m-self.st.s
+        self._straight_status['start_left_m']=left
+        self._straight_status['start_speed_limit_mps']=None
         if left<=0.:
             if guard.ready:
                 guard.started=True;self._straight_status.update(guard.status());return False
             return True
-        # 预留执行延迟、保守制动距离和余量；任务层继续执行原有平滑减速。
+        # 未收稳先按剩余距离降低速度，继续完成对线和 IMU 交接；不能在制动距离入口直接中止。
         v=max(abs(pose.speed),abs(speed))
         delay=max(self.cfg.delay_s,self._straight_core.cfg.delay_s)
         stopping=v*delay+v*v/(2*self.cfg.decel_mps2)+guard.STOP_MARGIN_M
-        if not guard.ready and left<=stopping and guard.reason=='等待连续稳定' and left>guard.STOP_MARGIN_M+.05:
-            # 当前检查均已通过，只差连续观测时长：在可停车范围内继续确认，不能顶着原速度越线。
+        if guard.ready:return False
+        if left<=guard.STOP_MARGIN_M+.05:return True
+        if left<=stopping+.30:
+            # 不提前开喷、不越过原线头等待；减速仍给转向和 0.8 s IMU 混合留出时间。
             a=self.cfg.decel_mps2
             safe=max(0.,math.sqrt((a*delay)**2+2*a*max(0.,left-guard.STOP_MARGIN_M))-a*delay)
             self._paint_start_speed_limit=min(speed,safe)
-            return False
-        return not guard.ready and left<=stopping
+            self._straight_status['start_speed_limit_mps']=self._paint_start_speed_limit
+        return False
 
     def paint_start_allowed(self):
         return self.paint_start_guard is None or self.paint_start_guard.started
@@ -1750,6 +1754,10 @@ class SectionTracker:
                         and tracker.cfg.straight_imu_first.rtk_fit
                         and tracker.path._piece(mark).straight):
                     tracker.paint_start_guard=PaintStartGuard()
+                    # 渐入 IMU 与允许开喷分开判断。先在助跑内平滑交接，开喷仍需上面的 2 cm / 1° 检查。
+                    tracker.cfg=replace(tracker.cfg,
+                        runup_release_e_m=max(tracker.cfg.runup_release_e_m,.03),
+                        runup_release_heading_deg=max(tracker.cfg.runup_release_heading_deg,2.0))
 
             if (self.geo.differential and sec.direction>0 and getattr(sec,'field_role',None)=='paint'
                     and all(p.straight for p in sec.path.pieces)):
