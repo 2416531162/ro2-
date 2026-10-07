@@ -28,7 +28,6 @@ import math
 from types import SimpleNamespace
 from motion_speeds import MAX_SECTION_SPEED, TURN_SPEED_MPS, PAINT_ARC_SPEED_MPS
 from robot_core.config import CONTROL_DT
-from position_agreement import PositionAgreement, HOLD_MOTION_STOP_S
 from collections import deque
 from dataclasses import dataclass, field, replace
 
@@ -610,8 +609,8 @@ class PathTracker:
         self._arc_e = None              # 喷头横偏估计（IMU 推算 + 往卫星拉），m
         self._arc_rel = None
         self._arc_travel = 0.0
+        self._arc_hist = deque()        # 最近 jump_window_m 内的 (路程, 卫星 − 推算)
         self._arc_hold = None           # 卫星突然跳开、先不拉：[已等的秒数, 跳开时的差]
-        self._arc_agreement = PositionAgreement()
         self._arc_jumps = 0
         self._arc_guided = None         # IMU 为主时喷头横偏估计、车头相对圆切线：偏离中止用
         self._arc_status = {'active': False, 'weight': 0.0}
@@ -746,7 +745,6 @@ class PathTracker:
     def start(self, pose, integral=None, *, preserve_startup=False):
         # 暂停后继续：在暂停处附近找投影，多圈路线不会跳回第一圈、8 字交叉处不会跳到另一支
         resume = self.st.state == 'PAUSED'
-        if resume and self.st.reason=='arc_position_disagreement' and not self.position_reference_ready():return False
         hint = self._hint if resume else None
         ok, why = self.check_start(pose, hint, resume=resume)
         if not ok:
@@ -886,10 +884,9 @@ class PathTracker:
         self._clock += dt
         self._advance_cruise(dt)
         steer = None
-        mismatch_paused=self.st.state=='PAUSED' and self.st.reason=='arc_position_disagreement'
-        if (self.st.state == 'RUNNING' or mismatch_paused) and pose.usable_for_control:
+        if self.st.state == 'RUNNING' and pose.usable_for_control:
             steer = self._arc_first(pose, dt)
-        elif self._arc_piece is not None and not mismatch_paused:
+        elif self._arc_piece is not None:
             self._reset_arc()
         v, kappa, w_hold = self._control(pose, dt, steer)
         wz = v * kappa + w_hold
@@ -1239,19 +1236,13 @@ class PathTracker:
         """画圆 IMU 为主（PathConfig.arc_imu_first）：返回原弯道控制律这一拍转向用的位姿（x, y, yaw），不在整圆上或还没
         学好换算时返回 None（按融合位姿开）。互补滤波：车头 = IMU 偏航 + 换算（换算按 arc_heading_tau_s 慢慢跟融合航向），
         喷头横偏 = IMU 推算 + 往卫星拉（距离常数 arc_pull_m、每米最多 arc_pull_rate_m；突然跳开 > jump_m 先不拉，
-        定位与推算连续一致后才平缓接回），沿圆路程按走过的路推、慢慢靠向卫星。不估角度 β：圆一圈只有十几米，
+        回来或 jump_accept_s 后再拉），沿圆路程按走过的路推、慢慢靠向卫星。不估角度 β：圆一圈只有十几米，
         直线那套角度拟合在卫星小台阶上会学偏（05:41 那圈回放学出 −0.5°、推算和卫星差到 10 cm）。"""
         cfg, st, guide = self.cfg, self.st, self._arc_guide
         if not cfg.arc_imu_first or guide is None or not cfg.straight_imu_enabled or not self.geo.differential:
             return None
         imu = self._fresh_straight_imu()
         piece = next((p for p in self.path.pieces if p.s0 <= st.s < p.s0 + p.length), None)
-        sensor_problem=(imu is None or any(r in getattr(pose,'reasons',()) for r in
-                        ('imu_mismatch','imu_stale','imu_hold','wheel_stale','wheel_hold','wheel_motion_conflict')))
-        if self._arc_agreement.holding and sensor_problem:
-            # 已隔离定位后，IMU/轮速再失效不能退回使用同一份可疑定位继续行驶。
-            st.state,st.reason='PAUSED','arc_position_disagreement'
-            return None
         if (imu is None or piece is None or piece.straight or piece.length * abs(piece.kappa) < 2 * math.pi - 1e-3
                 or 'imu_mismatch' in getattr(pose, 'reasons', ())):
             if self._arc_piece is not None:
@@ -1276,6 +1267,8 @@ class PathTracker:
                 self._arc_status = dict(active=False, weight=0.0, baseline_ok=baseline_ok, first_offset_n=guide.offset_n)
                 return None
             self._arc_off = guide.offset
+        elif heading_ok:
+            self._arc_off = wrap(self._arc_off + wrap(difference - self._arc_off) * min(1.0, dt / cfg.arc_heading_tau_s))
         reference = wrap(imu_yaw + self._arc_off)
         x, y = pose.x, pose.y
         if self._imu_lever is not None:
@@ -1292,6 +1285,11 @@ class PathTracker:
             # 沿圆路程按走过的路（× 学到的比例）推，再往卫星挪：卫星沿圆跳 1 cm 圆切线就转 κ·1 cm（R 2 m 约 0.3°），
             # 一下跳开的按距离慢慢吃进去；车速读数比例不准由比例项慢慢学掉，不留稳态差
             self._arc_s += distance * self._arc_scale
+            if rtk_ok and self._arc_hold is None:
+                gap = s_rtk - self._arc_s
+                lim = cfg.arc_s_rate_m * distance
+                self._arc_s += max(-lim, min(lim, gap * distance / cfg.arc_s_tau_m))
+                self._arc_scale = max(0.8, min(1.2, self._arc_scale + gap * distance / cfg.arc_scale_tau_m ** 2))
         px, py, pyaw = self.path.pose(self._arc_s)
         rel = wrap(reference - pyaw)
         nx, ny = self._straight_nozzle
@@ -1307,55 +1305,43 @@ class PathTracker:
             self._arc_rel = rel
             self._arc_travel += distance
         r = measured - self._arc_e
-        gap=s_rtk-self._arc_s
-        heading_gap=wrap(difference-self._arc_off)
-        # 必须先检查未吸收本拍观测的惯性预测，再学习位置、轮速比例和航向。
-        # 质量短暂失效也保留惯性参考；不能清空跳点历史后仅凭恢复固定解就接受偏移。
-        agreement=self._arc_agreement
-        correction=agreement.update(dt,quality_ok=rtk_ok,
-            position_error=math.hypot(gap,r),heading_error=heading_gap)
-        self._arc_hold=[agreement.age_s,r] if agreement.holding else None
-        self._arc_jumps=agreement.disagreements
-        if agreement.holding and sensor_problem:st.state,st.reason='PAUSED','arc_position_disagreement'
-        if correction>0.:
-            lim=cfg.arc_s_rate_m*distance
-            self._arc_s+=correction*max(-lim,min(lim,gap*distance/cfg.arc_s_tau_m))
-            self._arc_scale=max(.8,min(1.2,self._arc_scale+correction*gap*distance/cfg.arc_scale_tau_m**2))
-            if baseline_ok:
-                self._arc_off=wrap(self._arc_off+correction*heading_gap*min(1.,dt/cfg.arc_heading_tau_s))
+        hist = self._arc_hist
+        if not rtk_ok:
+            hist.clear()
+            if self._arc_hold is not None:
+                self._arc_hold[0] = 0.0   # 连续稳定计时不能跨过定位质量中断
+        elif self._arc_hold is None:
+            while len(hist) >= 2 and hist[1][0] <= self._arc_travel - first.jump_window_m:
+                hist.popleft()
+            if self._arc_travel > first.trust_from_m and any(abs(r - rr) > first.jump_m for _, rr in hist):
+                self._arc_hold = [0.0, r]             # 突然跳开：先不拉，[已等的秒数, 跳开那一拍的差]
+                self._arc_jumps += 1
+                hist.clear()
+            else:
+                hist.append((self._arc_travel, r))
+        if self._arc_hold is not None and rtk_ok:
+            self._arc_hold[0] += dt
+            if abs(r) <= first.rejoin_m or self._arc_hold[0] >= first.jump_accept_s:
+                self._arc_hold = None                 # 卫星回来和推算对上了，或等够了按卫星慢慢拉
+        if rtk_ok and self._arc_hold is None:
             lim = cfg.arc_pull_rate_m * distance
-            self._arc_e += correction*max(-lim, min(lim, r * distance / cfg.arc_pull_m))
-            # 接回后的参考坐标变化不算成车身在下一拍突然转动。
-            px,py,pyaw=self.path.pose(self._arc_s)
-            reference=wrap(imu_yaw+self._arc_off)
-            rel=wrap(reference-pyaw)
-            new_lever=fx*math.sin(rel)+ny*(math.cos(rel)-1.)
-            self._arc_e+=new_lever-lever
-            lever=new_lever;self._arc_rel=rel
+            self._arc_e += max(-lim, min(lim, r * distance / cfg.arc_pull_m))
         e_track = self._arc_e - lever
         yaw_v = wrap(pyaw + rel)
         cx = px - math.sin(pyaw)*e_track - cfg.track_x_m*math.cos(yaw_v)
         cy = py + math.cos(pyaw)*e_track - cfg.track_x_m*math.sin(yaw_v)
         self._arc_weight = min(1.0, self._arc_weight + dt / cfg.straight_blend_s)
-        if agreement.holding:self._arc_weight=1.  # 隔离期间不能通过渐入权重继续混入坏定位。
         w = self._arc_weight
         self._arc_guided = (self._arc_e, rel)
-        self._arc_status = dict(active=True, weight=w, baseline_ok=baseline_ok, rtk_ok=correction>0., arc_s=self._arc_s,
+        self._arc_status = dict(active=True, weight=w, baseline_ok=baseline_ok, rtk_ok=rtk_ok, arc_s=self._arc_s,
                                 rtk_s=s_rtk, e_est=self._arc_e, e_rtk=measured, heading_deg=math.degrees(rel),
                                 offset_deg=math.degrees(self._arc_off), holding=self._arc_hold is not None,
-                                jumps=self._arc_jumps, scale=self._arc_scale,quality_ok=rtk_ok,
-                                position_error_m=agreement.position_error,
-                                heading_disagreement_deg=math.degrees(heading_gap),
-                                hold_age_s=agreement.age_s,hold_reason=agreement.reason,
-                                rejoin_stable_s=agreement.agree_s,correction_weight=correction)
+                                jumps=self._arc_jumps, scale=self._arc_scale)
         return SimpleNamespace(x=pose.x + w*(cx-pose.x), y=pose.y + w*(cy-pose.y), yaw=wrap(pose.yaw + w*wrap(yaw_v-pose.yaw)))
 
     def straight_guide_estimate(self):
         """直线 IMU 为主、内环已接管时的喷头横偏估计（m，线左为正）；其余时候 None（按卫星位置算）。"""
         return None if self._straight_guided is None else self._straight_guided[0]
-
-    def position_reference_ready(self):
-        return not self._arc_agreement.holding
 
     def predict(self, x, y, yaw, delay=None):
         """已发出、还在执行延迟里的指令都执行完后的 (x, y, yaw)。
@@ -1574,13 +1560,8 @@ class PathTracker:
             st.v_cmd, self._v_prev = 0.0, 0.0
             return 0.0, 0.0, 0.0
         if st.state == 'PAUSED':
-            if st.reason!='arc_position_disagreement':st.reason = 'pose_recovered_waiting_operator'
+            st.reason = 'pose_recovered_waiting_operator'
             return 0.0, 0.0, 0.0
-        if self._arc_agreement.holding and self._arc_agreement.age_s>=HOLD_MOTION_STOP_S-1e-9:
-            # 保留惯性参考，停稳后仍用它核对恢复；不能暂停一下就拿坏定位重新初始化。
-            st.state,st.reason='PAUSED','arc_position_disagreement'
-            st.v_cmd=self._v_prev=0.
-            return 0.,0.,0.
 
         # 执行延迟：先按已发出的指令把位姿推到 delay_s 之后，现在算的指令正好在那时生效（Smith 预估）；
         # 再按当前速度和角速度推 lead_s（弯道上角速度不为 0，推出去的是一段圆弧）
@@ -1595,8 +1576,6 @@ class PathTracker:
         self._hint = s
         # 报给操作员、记录、偏离中止用车现在的位置；控制用预估的位置
         s_now, e_now, he_now, _ = self.locate(pose.x, pose.y, pose.yaw, s)
-        if self._arc_agreement.holding and steer is not None:
-            s_now=self._arc_s  # 隔离期间路线进度也不被错误定位跳动推进。
         st.e, st.heading_err, st.s, st.kappa_ref = e_now, he_now, s_now, k_r
         constant_straight = self.constant_straight_speed and abs(k_r) < 1e-9
         constant_arc = self.constant_arc_speed_here()
@@ -2125,16 +2104,6 @@ class SectionTracker:
         """原地转向/倒车仍由原控制器处理，前进子段才允许长直线内环。"""
         for tracker in self.trackers:
             tracker.sync(now, imu, lever)
-
-    def position_reference_ready(self):
-        return self.trackers[self.index].position_reference_ready()
-
-    def notice(self):
-        guard=self.trackers[self.index]._arc_agreement
-        if guard.holding:
-            if self.st.state=='PAUSED':return '定位与惯导推算尚未对齐，等待恢复'
-            return '正在核对定位，IMU＋轮速维持（%.1f 秒）' % guard.age_s
-        return None
 
     def set_heading_baseline(self, t, length_m):
         for tracker in self.trackers:

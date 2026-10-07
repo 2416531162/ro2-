@@ -591,7 +591,7 @@ class PaintGate(unittest.TestCase):
         self.assertEqual(out['paint_control_source'], 'imu_line')
         self.assertAlmostEqual(out['nozzle_deviation_m'], .004)
         out = paint(.05)
-        self.assertEqual(out['paint_blocked'], 'paint_off_line')
+        self.assertTrue(out['painting']);self.assertEqual(out['paint_warning'], 'paint_off_line')
 
     def test_short_rtk_loss_keeps_painting_within_fusion_hold(self):
         out = paint(.004, rtk_trusted=False, quality='RTK_FLOAT', reasons=('rtk_hold',), hold_age=1.)

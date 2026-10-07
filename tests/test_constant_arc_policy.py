@@ -81,7 +81,7 @@ class ConstantArcPolicy(unittest.TestCase):
         self.assertAlmostEqual(q['nozzle_deviation_m'],.06)
         old=tracker(fixed=False)
         q=paint_quality.status(mission(p,old),{},True,Section(1,old.path),old)
-        self.assertFalse(q['painting']);self.assertEqual(q['paint_blocked'],'paint_off_line')
+        self.assertTrue(q['painting']);self.assertEqual(q['paint_warning'],'paint_off_line')
 
     def test_imu_keeps_arc_spraying_when_rtk_is_not_trusted(self):
         tr=tracker();p=pose(y=.06,trusted=False,age=4.9)

@@ -58,7 +58,6 @@ REASON_TEXT = {
     'pivot_timeout': '原地转向没转到位（转了 20 s，或补转 2 次仍差 5° 以上）',
     'not_stopped_at_cusp': '换向前车没停稳',
     'off_line': '偏离路线太远',
-    'arc_position_disagreement': '定位与惯导推算不一致，等待可信定位恢复',
     'paint_start_unready': '起步尚未收稳，已停止起喷；请继续作业预览重新接入原线头',
 }
 

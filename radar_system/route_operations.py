@@ -595,6 +595,9 @@ class RouteOperations:
             self._paint_marks.clear()
             self._paint_mark_job, self._paint_mark_on = job, False
         painting = bool(painting) and job is not None
+        if painting and isinstance(self.m.tracker,SectionTracker):
+            guard=getattr(self.m.tracker.trackers[self.m.tracker.index],'paint_start_guard',None)
+            if guard is not None:guard.started=True
         if painting == self._paint_mark_on:
             return
         self._paint_mark_on = painting

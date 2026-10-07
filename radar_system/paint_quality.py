@@ -1,15 +1,14 @@
-"""喷线资格：检查实际喷头和目标几何的距离，不改变车辆导航判定。"""
+"""按正式喷线区间放行；偏差仅供显示和诊断，不再等待收稳或偏差达标才喷。"""
 from robot_core.standstill import moving
 import math
 import os
 import route_plan as rp
-from position_agreement import HOLD_PAINT_STOP_S, HOLD_MOTION_STOP_S
 
 # Gen5 没有固定解（浮点、单点、平板中转断流）时按 IMU + 轮速推算接着走、接着喷；满 RTK_LOST_PAINT_STOP_S 先停喷，
 # 再走 RTK_LOST_STOP_DELAY_S 才停车（融合 rtk_hold_s = 两者之和，line_node 设），恢复后自动继续
 # （2026-10-07 用户：「8 秒内没有一个可用的卫星坐标就停止，停喷也有讲究，先停喷 1 秒，再停止」）
-RTK_LOST_PAINT_STOP_S = HOLD_PAINT_STOP_S
-RTK_LOST_STOP_DELAY_S = HOLD_MOTION_STOP_S-HOLD_PAINT_STOP_S
+RTK_LOST_PAINT_STOP_S = 8.0
+RTK_LOST_STOP_DELAY_S = 1.0
 
 DEFAULT_OFFSET_M=.03
 
@@ -56,13 +55,10 @@ def imu_arc_hold(m, tracker, pose):
     cfg=getattr(getattr(m,'fusion',None),'config',None)
     maximum=getattr(cfg,'rtk_hold_s',5.)
     age=getattr(pose,'hold_age_s',math.inf)
-    agreement=getattr(tracker,'_arc_agreement',None)
-    if agreement is not None and agreement.holding:age=max(age,agreement.age_s)
     reasons=getattr(pose,'reasons',())
     fresh=getattr(tracker,'_fresh_straight_imu',lambda:None)()
     return (fresh is not None and math.isfinite(age) and 0<=age<=maximum+1e-9
-            and not any(r in reasons for r in ('imu_stale','imu_mismatch','imu_hold','imu_hold_timeout',
-                                               'wheel_stale','wheel_hold','wheel_motion_conflict','rtk_fixed_timeout')))
+            and not any(r in reasons for r in ('imu_stale','imu_mismatch','imu_hold_timeout','rtk_fixed_timeout')))
 
 
 def imu_straight(tracker):
@@ -77,32 +73,23 @@ def status(m,record,phase,section,tracker):
     out=dict(paint_phase=bool(phase),painting=False,paint_blocked=None,
              nozzle_deviation_m=None,paint_offset_limit_m=limit)
     if not phase:out['paint_blocked']='not_painting';return out
-    if not getattr(tracker,'paint_start_allowed',lambda:True)():
-        out['paint_blocked']='paint_start_unready';return out
-    # 到达喷线区且起喷检查通过即可喷；加减速或低于设定速度不单独阻断喷涂。
-    # 实际停车、定位失效和喷头越线仍由下面的独立条件检查。
+    # 起点必须喷：起步收稳、速度达标和偏差大小不作为额外放行门槛。
+    # 任务暂停、真实定位失效、实际静止等原有运行状态仍独立处理。
     pose=m.pose
     arc=continuous_arc(m,section,tracker)
-    agreement=getattr(tracker,'_arc_agreement',None)
-    mismatch_hold=bool(arc and agreement is not None and agreement.holding)
     # 2026-10-06 用户：直线 IMU 为主，「只要和 IMU 推算对不上，直线上也听 IMU 的」：卫星跳了、暂时不是固定解时
     # 按 IMU 推算的喷头横偏判，照常喷；卫星断的时长受融合 rtk_hold_s 限制（同圆弧），Gen5 满 8 s 先停喷
     guided=None if arc else imu_straight(tracker)
-    if limit is None and not arc:out['paint_blocked']='paint_configuration_invalid';return out
+    if limit is None:out['paint_warning']='paint_configuration_invalid'
     if pose is None or not pose.usable_for_control:
-        out['paint_blocked']='paint_position_untrusted';return out
-    if mismatch_hold and agreement.age_s>=RTK_LOST_PAINT_STOP_S-1e-9:
         out['paint_blocked']='paint_position_untrusted';return out
     if not getattr(pose,'rtk_trusted',False) and getattr(pose,'hold_age_s',0.)>=RTK_LOST_PAINT_STOP_S-1e-9:
         # 固定解断满 8 s：先停喷，车再走 1 s 才停（见 RTK_LOST_PAINT_STOP_S）
         out['paint_blocked']='paint_position_untrusted';return out
-    holding=mismatch_hold or (arc or guided is not None) and not getattr(pose,'rtk_trusted',False)
+    holding=(arc or guided is not None) and not getattr(pose,'rtk_trusted',False)
     if holding and not imu_arc_hold(m,tracker,pose):
         out['paint_blocked']='paint_position_untrusted';return out
-    if not arc and guided is None and pose.quality!='RTK_FIXED':
-        out['paint_blocked']='paint_position_untrusted';return out
-    if not arc and guided is None and any(r in pose.reasons for r in ('rtk_hold_pending','rtk_hold','rtk_suspect','gnss_displacement_conflict','position_reset','paint_budget_exceeded','transit_budget_slow')):
-        out['paint_blocked']='paint_position_unconfirmed';return out
+    # 控制器已经允许执行的位姿，不再按定位标签或“尚待确认”的诊断重复拦喷。
     if not all(math.isfinite(v) for v in (pose.x,pose.y,pose.yaw,pose.speed)):
         out['paint_blocked']='paint_position_invalid';return out
     if not moving(pose):out['paint_blocked']='paint_stationary';return out
@@ -112,7 +99,7 @@ def status(m,record,phase,section,tracker):
     if guided is not None:
         out['nozzle_deviation_m']=abs(guided)
         out['paint_control_source']='imu_line_hold' if holding else 'imu_line'
-        if abs(guided)>limit:out['paint_blocked']='paint_off_line';return out
+        if limit is not None and abs(guided)>limit:out['paint_warning']='paint_off_line'
         out['painting']=True
         return out
     point=rp.nozzle_at(pose.x,pose.y,pose.yaw,f,l)
@@ -135,6 +122,6 @@ def status(m,record,phase,section,tracker):
     if not math.isfinite(deviation):out['paint_blocked']='paint_reference_invalid';return out
     out['nozzle_deviation_m']=deviation
     if arc:out['paint_control_source']='imu_hold' if holding else 'rtk_imu'
-    if not arc and deviation>limit:out['paint_blocked']='paint_off_line';return out
+    if limit is not None and deviation>limit:out['paint_warning']='paint_off_line'
     out['painting']=True
     return out

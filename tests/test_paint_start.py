@@ -94,7 +94,7 @@ class Integration(unittest.TestCase):
         self.assertFalse(tr.paint_start_allowed())
         m=NS(pose=sample(tr,.04,2.6),differential=True,nozzle=(0.,0.))
         status=paint_quality.status(m,{},True,Section(1,tr.path),tr)
-        self.assertFalse(status['painting']);self.assertEqual(status['paint_blocked'],'paint_start_unready')
+        self.assertTrue(status['painting']);self.assertIsNone(status['paint_blocked'])
 
     def test_ready_state_does_not_survive_bad_observation_at_the_start(self):
         tr=tracker()

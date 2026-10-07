@@ -134,9 +134,9 @@ class PaintSpeedInvariant(unittest.TestCase):
   m.pose.usable_for_control=False
   self.assertEqual(check()['paint_blocked'],'paint_position_untrusted')
   m.pose=at(child,2.,.35,offset=.04)
-  self.assertEqual(check()['paint_blocked'],'paint_off_line')
+  self.assertTrue(check()['painting']);self.assertEqual(check()['paint_warning'],'paint_off_line')
   m.pose=at(child,2.,.35);child.paint_start_guard=NS(started=False)
-  self.assertEqual(check()['paint_blocked'],'paint_start_unready')
+  self.assertTrue(check()['painting']);self.assertIsNone(check()['paint_blocked'])
 
  def test_partial_line_and_circle_rework_have_a_dry_tail(self):
   specs=[rp.RouteSpec(kind='path',points=((0.,0.),(10.,0.)),closed=False),rp.RouteSpec(kind='circle',center=(0.,0.),radius=2.)]
