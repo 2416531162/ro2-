@@ -1,0 +1,46 @@
+# 两台欧艾迪单路驱动器（左右轮各一台，Gen5 差速底盘），每台走 CAN 或 RS485。本车（2026-09-29）：左轮 485、右轮 CAN。
+# 上位机「应用类型」：CAN 那台设 CAN 总线，485 那台设串口（485）。
+# 共享配置要用 robot_core/robot_gen5.json（drive.type = differential），deployment/run_component.sh 的 chassis
+# 会按它选这个驱动。改完重启 rk3588-wheeltec.service。
+oid_driver:
+  ros__parameters:
+    # false：只收不发（不写驱动器配置、不发心跳和转速）。架空轮子，核对 pole_pairs、左右轮和方向后改 true
+    confirmed: true           # 2026-09-29 两轮架空核对完（磁极对数、方向、左 485 / 右 CAN）
+    # ---- 每台走哪条总线：can 或 rs485 ----
+    left_bus: rs485
+    right_bus: can
+    # ---- CAN（在上位机「CAN 总线」页设）----
+    can_channel: can0         # sudo ip link set can0 up type can bitrate 500000（与驱动器的「CAN 波特率」一致）
+    can_left_id: 1            # 左轮驱动器的「CAN 节点 ID」（左轮走 CAN 时才用）
+    can_right_id: 116         # 右轮驱动器的「CAN 节点 ID」（2026-09-29 上位机重配后变成 116，原为出厂 1）；两台都在 CAN 上时不能相同
+    # ---- RS485（Modbus RTU，在上位机「串口（485）参数」里设）----
+    # 正点原子 RK3588 板载 485 = UART3 = /dev/ttyS3（与 RS232 复用：JP6 两个跳线帽插到下面）；A 接 A、B 接 B
+    rs485_port: /dev/ttyS3
+    rs485_baud: 115200        # 与上位机「串口（485）」页的「波特率」一致（手册截图 115200）
+    rs485_parity: "N"         # 校验："N" / "E" / "O"，与上位机一致（要加引号：YAML 会把不带引号的 N 当成 false）
+    rs485_left_id: 1          # 左轮驱动器的 485 地址：上位机「串口（485）」页的「串口ID」（出厂 1）
+    rs485_right_id: 2         # 右轮也走 485 时才用；同一条 485 上不能相同
+    rs485_word_order: big     # 32 位数据字序，上位机默认大端；上位机改成小端时填 little
+    rs485_timeout_s: 0.03     # 应答等待（驱动器处理时间，不含线上传输时间）
+    rs485_echo: false         # 板载 485 不回显；换成会把自己发的也收回来的 USB 转 485 时填 true
+    # ---- 心跳（CAN 发心跳帧，485 写 6000 寄存器、每次换个值）：两台的上位机「心跳超时时间」都要大于
+    #      2 倍 heartbeat_s（默认 1000 ms 足够）----
+    heartbeat_s: 0.1
+    # ---- 轮子与电机 ----
+    pole_pairs: 20            # 磁极对数，必须与驱动器上位机设的一致（用户 2026-09-30：驱动器设的是 20）；0 = 没填，confirmed 不能为 true。
+                              # 2026-09-30 按 11 跑路线作业：RTK 实际位移只有轮速里程的 0.55–0.56（= 11/20），融合每 5 s 重置定位一次。
+                              # 09-29 的「200 erpm 时 18.4 rpm → 11」不可信（很可能读的是按上位机当时极对数换算的显示值）
+    wheel_radius_m: 0.194     # 有效滚动半径（CAD 0.2046，实物直径约 42 cm；压在草地上每圈实际走得少）。
+                              # 2026-09-30 晚 6 次作业，直行时 RTK 位移 / 轮速里程 = 0.93–0.96、中位数 0.948（只用两根天线
+                              # 固定解互检过的时段）→ 0.2046 × 0.948；按 0.2046 时设 0.8 m/s 实际只有 0.76
+    gear_ratio: 1.0           # 轮毂电机直驱
+    left_sign: 1              # 2026-09-29 架空实测（上位机重配电机后）：左轮驱动器正转时轮子往前
+    right_sign: 1             # 2026-09-29 架空实测：右轮驱动器正转时轮子往前
+    wheel_accel_mps2: 1.0     # 写进驱动器速度环的加速度（轮子线速度）
+    wheel_decel_mps2: 3.0     # 驱动器减速度；急停、指令超时、换向刹车按它停。2026-09-29 实车换向实测：2.0 时
+                              # 从 0.9 m/s 刹到 0 要 0.45 s（另有约 0.25 s 驱动器响应），手感慢半拍，提到 3.0
+    tx_hz: 30.0               # 每轮写一次转速、查一次状态；2026-10-06 用户要求 10 → 30 Hz，周期约 33 ms。
+    yaw_acceleration_rad_s2: 2.0
+    manual_stop_decel_mps2: 1.5 # 普通手动松手两轮同步渐停；不改变急停和掉线制动
+    publish_tf: true          # 唯一的 odom → base_link 动态 TF（与 wheeltec 驱动相同）
+    navigation_uses_lidar: false

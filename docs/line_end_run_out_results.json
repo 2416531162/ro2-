@@ -1,0 +1,4682 @@
+{
+  "base": {
+    "base-field-0.5-1": {
+      "state": [
+        "DONE",
+        ""
+      ],
+      "seconds": 132.8,
+      "speed": 0.5,
+      "ramp": true,
+      "ends": [
+        {
+          "line": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              12.0,
+              0.0
+            ]
+          ],
+          "v_at_end": 0.014,
+          "v_min_last_1m": 0.016,
+          "v_cmd_min_last_1m": 0.0,
+          "slow_from_m": 0.299,
+          "paint_off_rel_m": -0.0055,
+          "stop_rel_m": 0.002,
+          "peak_decel": 0.43
+        },
+        {
+          "line": [
+            [
+              12.0,
+              4.0
+            ],
+            [
+              0.0,
+              4.0
+            ]
+          ],
+          "v_at_end": 0.076,
+          "v_min_last_1m": 0.0,
+          "v_cmd_min_last_1m": 0.0,
+          "slow_from_m": 0.305,
+          "paint_off_rel_m": -0.0142,
+          "stop_rel_m": -0.008,
+          "peak_decel": 0.44
+        },
+        {
+          "line": [
+            [
+              0.0,
+              8.0
+            ],
+            [
+              12.0,
+              8.0
+            ]
+          ],
+          "v_at_end": 0.012,
+          "v_min_last_1m": 0.015,
+          "v_cmd_min_last_1m": 0.0,
+          "slow_from_m": 0.302,
+          "paint_off_rel_m": -0.0059,
+          "stop_rel_m": 0.001,
+          "peak_decel": 0.41
+        }
+      ],
+      "stray_paint_m": 0.0,
+      "stray_examples": []
+    },
+    "base-field-0.5-2": {
+      "state": [
+        "DONE",
+        ""
+      ],
+      "seconds": 134.18,
+      "speed": 0.5,
+      "ramp": true,
+      "ends": [
+        {
+          "line": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              12.0,
+              0.0
+            ]
+          ],
+          "v_at_end": 0.061,
+          "v_min_last_1m": 0.0,
+          "v_cmd_min_last_1m": 0.0,
+          "slow_from_m": 0.302,
+          "paint_off_rel_m": -0.0038,
+          "stop_rel_m": -0.004,
+          "peak_decel": 0.43
+        },
+        {
+          "line": [
+            [
+              12.0,
+              4.0
+            ],
+            [
+              0.0,
+              4.0
+            ]
+          ],
+          "v_at_end": 0.097,
+          "v_min_last_1m": 0.0,
+          "v_cmd_min_last_1m": 0.0,
+          "slow_from_m": 0.305,
+          "paint_off_rel_m": -0.025,
+          "stop_rel_m": -0.025,
+          "peak_decel": 0.42
+        },
+        {
+          "line": [
+            [
+              0.0,
+              8.0
+            ],
+            [
+              12.0,
+              8.0
+            ]
+          ],
+          "v_at_end": null,
+          "v_min_last_1m": 0.001,
+          "v_cmd_min_last_1m": 0.0,
+          "slow_from_m": 0.293,
+          "paint_off_rel_m": -0.0191,
+          "stop_rel_m": -0.02,
+          "peak_decel": 0.42
+        }
+      ],
+      "stray_paint_m": 0.0,
+      "stray_examples": []
+    },
+    "base-field-0.5-3": {
+      "state": [
+        "DONE",
+        ""
+      ],
+      "seconds": 133.04,
+      "speed": 0.5,
+      "ramp": true,
+      "ends": [
+        {
+          "line": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              12.0,
+              0.0
+            ]
+          ],
+          "v_at_end": 0.002,
+          "v_min_last_1m": 0.003,
+          "v_cmd_min_last_1m": 0.0,
+          "slow_from_m": 0.302,
+          "paint_off_rel_m": -0.007,
+          "stop_rel_m": -0.001,
+          "peak_decel": 0.42
+        },
+        {
+          "line": [
+            [
+              12.0,
+              4.0
+            ],
+            [
+              0.0,
+              4.0
+            ]
+          ],
+          "v_at_end": 0.098,
+          "v_min_last_1m": -0.0,
+          "v_cmd_min_last_1m": 0.0,
+          "slow_from_m": 0.295,
+          "paint_off_rel_m": -0.0188,
+          "stop_rel_m": -0.021,
+          "peak_decel": 0.43
+        },
+        {
+          "line": [
+            [
+              0.0,
+              8.0
+            ],
+            [
+              12.0,
+              8.0
+            ]
+          ],
+          "v_at_end": null,
+          "v_min_last_1m": 0.001,
+          "v_cmd_min_last_1m": 0.0,
+          "slow_from_m": 0.306,
+          "paint_off_rel_m": -0.0129,
+          "stop_rel_m": -0.004,
+          "peak_decel": 0.41
+        }
+      ],
+      "stray_paint_m": 0.0,
+      "stray_examples": []
+    },
+    "base-field-0.8-1": {
+      "state": [
+        "DONE",
+        ""
+      ],
+      "seconds": 104.06,
+      "speed": 0.8,
+      "ramp": true,
+      "ends": [
+        {
+          "line": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              12.0,
+              0.0
+            ]
+          ],
+          "v_at_end": 0.03,
+          "v_min_last_1m": 0.035,
+          "v_cmd_min_last_1m": 0.0,
+          "slow_from_m": 0.715,
+          "paint_off_rel_m": -0.0071,
+          "stop_rel_m": 0.003,
+          "peak_decel": 0.46
+        },
+        {
+          "line": [
+            [
+              12.0,
+              4.0
+            ],
+            [
+              0.0,
+              4.0
+            ]
+          ],
+          "v_at_end": 0.08,
+          "v_min_last_1m": 0.0,
+          "v_cmd_min_last_1m": 0.0,
+          "slow_from_m": 0.71,
+          "paint_off_rel_m": -0.0081,
+          "stop_rel_m": -0.009,
+          "peak_decel": 0.46
+        },
+        {
+          "line": [
+            [
+              0.0,
+              8.0
+            ],
+            [
+              12.0,
+              8.0
+            ]
+          ],
+          "v_at_end": null,
+          "v_min_last_1m": 0.001,
+          "v_cmd_min_last_1m": 0.0,
+          "slow_from_m": 0.709,
+          "paint_off_rel_m": -0.0142,
+          "stop_rel_m": -0.015,
+          "peak_decel": 0.46
+        }
+      ],
+      "stray_paint_m": 0.0,
+      "stray_examples": []
+    },
+    "base-field-0.8-2": {
+      "state": [
+        "DONE",
+        ""
+      ],
+      "seconds": 107.82000000000001,
+      "speed": 0.8,
+      "ramp": true,
+      "ends": [
+        {
+          "line": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              12.0,
+              0.0
+            ]
+          ],
+          "v_at_end": 0.061,
+          "v_min_last_1m": 0.0,
+          "v_cmd_min_last_1m": 0.0,
+          "slow_from_m": 0.725,
+          "paint_off_rel_m": -0.0084,
+          "stop_rel_m": -0.01,
+          "peak_decel": 0.46
+        },
+        {
+          "line": [
+            [
+              12.0,
+              4.0
+            ],
+            [
+              0.0,
+              4.0
+            ]
+          ],
+          "v_at_end": 0.087,
+          "v_min_last_1m": -0.0,
+          "v_cmd_min_last_1m": 0.0,
+          "slow_from_m": 0.703,
+          "paint_off_rel_m": -0.0118,
+          "stop_rel_m": -0.013,
+          "peak_decel": 0.46
+        },
+        {
+          "line": [
+            [
+              0.0,
+              8.0
+            ],
+            [
+              12.0,
+              8.0
+            ]
+          ],
+          "v_at_end": null,
+          "v_min_last_1m": 0.001,
+          "v_cmd_min_last_1m": 0.0,
+          "slow_from_m": 0.722,
+          "paint_off_rel_m": -0.0091,
+          "stop_rel_m": -0.01,
+          "peak_decel": 0.45
+        }
+      ],
+      "stray_paint_m": 0.0,
+      "stray_examples": []
+    },
+    "base-field-0.8-3": {
+      "state": [
+        "DONE",
+        ""
+      ],
+      "seconds": 105.06,
+      "speed": 0.8,
+      "ramp": true,
+      "ends": [
+        {
+          "line": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              12.0,
+              0.0
+            ]
+          ],
+          "v_at_end": 0.088,
+          "v_min_last_1m": 0.0,
+          "v_cmd_min_last_1m": 0.0,
+          "slow_from_m": 0.721,
+          "paint_off_rel_m": -0.0292,
+          "stop_rel_m": -0.03,
+          "peak_decel": 0.45
+        },
+        {
+          "line": [
+            [
+              12.0,
+              4.0
+            ],
+            [
+              0.0,
+              4.0
+            ]
+          ],
+          "v_at_end": 0.089,
+          "v_min_last_1m": -0.0,
+          "v_cmd_min_last_1m": 0.0,
+          "slow_from_m": 0.715,
+          "paint_off_rel_m": -0.0128,
+          "stop_rel_m": -0.013,
+          "peak_decel": 0.46
+        },
+        {
+          "line": [
+            [
+              0.0,
+              8.0
+            ],
+            [
+              12.0,
+              8.0
+            ]
+          ],
+          "v_at_end": null,
+          "v_min_last_1m": 0.001,
+          "v_cmd_min_last_1m": 0.0,
+          "slow_from_m": 0.703,
+          "paint_off_rel_m": -0.0133,
+          "stop_rel_m": -0.012,
+          "peak_decel": 0.47
+        }
+      ],
+      "stray_paint_m": 0.0,
+      "stray_examples": []
+    },
+    "base-field-1.0-1": {
+      "state": [
+        "DONE",
+        ""
+      ],
+      "seconds": 96.22,
+      "speed": 1.0,
+      "ramp": true,
+      "ends": [
+        {
+          "line": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              12.0,
+              0.0
+            ]
+          ],
+          "v_at_end": 0.085,
+          "v_min_last_1m": 0.0,
+          "v_cmd_min_last_1m": 0.0,
+          "slow_from_m": 0.986,
+          "paint_off_rel_m": -0.0206,
+          "stop_rel_m": -0.022,
+          "peak_decel": 0.46
+        },
+        {
+          "line": [
+            [
+              12.0,
+              4.0
+            ],
+            [
+              0.0,
+              4.0
+            ]
+          ],
+          "v_at_end": 0.085,
+          "v_min_last_1m": 0.0,
+          "v_cmd_min_last_1m": 0.0,
+          "slow_from_m": 0.998,
+          "paint_off_rel_m": -0.0065,
+          "stop_rel_m": -0.007,
+          "peak_decel": 0.47
+        },
+        {
+          "line": [
+            [
+              0.0,
+              8.0
+            ],
+            [
+              12.0,
+              8.0
+            ]
+          ],
+          "v_at_end": null,
+          "v_min_last_1m": 0.001,
+          "v_cmd_min_last_1m": 0.0,
+          "slow_from_m": 0.99,
+          "paint_off_rel_m": -0.0077,
+          "stop_rel_m": -0.008,
+          "peak_decel": 0.48
+        }
+      ],
+      "stray_paint_m": 0.0,
+      "stray_examples": []
+    },
+    "base-field-1.0-2": {
+      "state": [
+        "DONE",
+        ""
+      ],
+      "seconds": 97.42,
+      "speed": 1.0,
+      "ramp": true,
+      "ends": [
+        {
+          "line": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              12.0,
+              0.0
+            ]
+          ],
+          "v_at_end": 0.061,
+          "v_min_last_1m": 0.0,
+          "v_cmd_min_last_1m": 0.0,
+          "slow_from_m": 0.996,
+          "paint_off_rel_m": -0.007,
+          "stop_rel_m": -0.008,
+          "peak_decel": 0.46
+        },
+        {
+          "line": [
+            [
+              12.0,
+              4.0
+            ],
+            [
+              0.0,
+              4.0
+            ]
+          ],
+          "v_at_end": 0.094,
+          "v_min_last_1m": -0.0,
+          "v_cmd_min_last_1m": 0.0,
+          "slow_from_m": 0.992,
+          "paint_off_rel_m": -0.0135,
+          "stop_rel_m": -0.015,
+          "peak_decel": 0.47
+        },
+        {
+          "line": [
+            [
+              0.0,
+              8.0
+            ],
+            [
+              12.0,
+              8.0
+            ]
+          ],
+          "v_at_end": null,
+          "v_min_last_1m": 0.001,
+          "v_cmd_min_last_1m": 0.0,
+          "slow_from_m": 0.99,
+          "paint_off_rel_m": -0.0203,
+          "stop_rel_m": -0.021,
+          "peak_decel": 0.47
+        }
+      ],
+      "stray_paint_m": 0.0,
+      "stray_examples": []
+    },
+    "base-field-1.0-3": {
+      "state": [
+        "DONE",
+        ""
+      ],
+      "seconds": 96.88,
+      "speed": 1.0,
+      "ramp": true,
+      "ends": [
+        {
+          "line": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              12.0,
+              0.0
+            ]
+          ],
+          "v_at_end": 0.086,
+          "v_min_last_1m": 0.0,
+          "v_cmd_min_last_1m": 0.0,
+          "slow_from_m": 0.985,
+          "paint_off_rel_m": -0.0176,
+          "stop_rel_m": -0.018,
+          "peak_decel": 0.46
+        },
+        {
+          "line": [
+            [
+              12.0,
+              4.0
+            ],
+            [
+              0.0,
+              4.0
+            ]
+          ],
+          "v_at_end": 0.099,
+          "v_min_last_1m": 0.0,
+          "v_cmd_min_last_1m": 0.0,
+          "slow_from_m": 0.993,
+          "paint_off_rel_m": -0.0297,
+          "stop_rel_m": -0.03,
+          "peak_decel": 0.47
+        },
+        {
+          "line": [
+            [
+              0.0,
+              8.0
+            ],
+            [
+              12.0,
+              8.0
+            ]
+          ],
+          "v_at_end": null,
+          "v_min_last_1m": 0.001,
+          "v_cmd_min_last_1m": 0.0,
+          "slow_from_m": 0.994,
+          "paint_off_rel_m": -0.0272,
+          "stop_rel_m": -0.028,
+          "peak_decel": 0.48
+        }
+      ],
+      "stray_paint_m": 0.0,
+      "stray_examples": []
+    },
+    "base-route-0.5-1": {
+      "state": [
+        "DONE",
+        ""
+      ],
+      "seconds": 95.5,
+      "speed": 0.5,
+      "ramp": true,
+      "ends": [
+        {
+          "line": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              10.0,
+              0.0
+            ]
+          ],
+          "v_at_end": -0.0,
+          "v_min_last_1m": -0.0,
+          "v_cmd_min_last_1m": 0.0,
+          "slow_from_m": 0.289,
+          "paint_off_rel_m": -0.0039,
+          "stop_rel_m": -0.005,
+          "peak_decel": 0.43
+        },
+        {
+          "line": [
+            [
+              10.0,
+              0.0
+            ],
+            [
+              10.0,
+              6.0
+            ]
+          ],
+          "v_at_end": 0.0,
+          "v_min_last_1m": 0.0,
+          "v_cmd_min_last_1m": 0.0,
+          "slow_from_m": 0.305,
+          "paint_off_rel_m": -0.0107,
+          "stop_rel_m": -0.006,
+          "peak_decel": 0.43
+        },
+        {
+          "line": [
+            [
+              10.0,
+              6.0
+            ],
+            [
+              0.0,
+              6.0
+            ]
+          ],
+          "v_at_end": null,
+          "v_min_last_1m": 0.001,
+          "v_cmd_min_last_1m": 0.0,
+          "slow_from_m": 0.299,
+          "paint_off_rel_m": -0.0177,
+          "stop_rel_m": -0.018,
+          "peak_decel": 0.43
+        }
+      ],
+      "stray_paint_m": 5.106,
+      "stray_examples": [
+        [
+          10.24,
+          0.63,
+          0.235
+        ],
+        [
+          10.16,
+          0.07,
+          0.156
+        ],
+        [
+          10.06,
+          -0.73,
+          0.734
+        ],
+        [
+          10.0,
+          -0.85,
+          0.849
+        ],
+        [
+          10.0,
+          -0.08,
+          0.083
+        ],
+        [
+          9.88,
+          6.16,
+          0.163
+        ],
+        [
+          10.68,
+          6.07,
+          0.688
+        ],
+        [
+          10.86,
+          6.02,
+          0.859
+        ]
+      ]
+    },
+    "base-route-0.5-2": {
+      "state": [
+        "DONE",
+        ""
+      ],
+      "seconds": 96.94,
+      "speed": 0.5,
+      "ramp": true,
+      "ends": [
+        {
+          "line": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              10.0,
+              0.0
+            ]
+          ],
+          "v_at_end": 0.012,
+          "v_min_last_1m": 0.014,
+          "v_cmd_min_last_1m": 0.0,
+          "slow_from_m": 0.302,
+          "paint_off_rel_m": -0.007,
+          "stop_rel_m": 0.003,
+          "peak_decel": 0.42
+        },
+        {
+          "line": [
+            [
+              10.0,
+              0.0
+            ],
+            [
+              10.0,
+              6.0
+            ]
+          ],
+          "v_at_end": 0.0,
+          "v_min_last_1m": 0.0,
+          "v_cmd_min_last_1m": 0.0,
+          "slow_from_m": 0.3,
+          "paint_off_rel_m": -0.0095,
+          "stop_rel_m": -0.012,
+          "peak_decel": 0.42
+        },
+        {
+          "line": [
+            [
+              10.0,
+              6.0
+            ],
+            [
+              0.0,
+              6.0
+            ]
+          ],
+          "v_at_end": null,
+          "v_min_last_1m": 0.001,
+          "v_cmd_min_last_1m": 0.0,
+          "slow_from_m": 0.293,
+          "paint_off_rel_m": -0.0341,
+          "stop_rel_m": -0.035,
+          "peak_decel": 0.42
+        }
+      ],
+      "stray_paint_m": 5.138,
+      "stray_examples": [
+        [
+          10.23,
+          0.64,
+          0.227
+        ],
+        [
+          10.15,
+          0.04,
+          0.152
+        ],
+        [
+          10.05,
+          -0.77,
+          0.774
+        ],
+        [
+          10.01,
+          -0.87,
+          0.868
+        ],
+        [
+          10.01,
+          -0.06,
+          0.064
+        ],
+        [
+          9.94,
+          6.16,
+          0.161
+        ],
+        [
+          10.75,
+          6.06,
+          0.756
+        ],
+        [
+          10.82,
+          6.0,
+          0.818
+        ]
+      ]
+    },
+    "base-route-0.5-3": {
+      "state": [
+        "DONE",
+        ""
+      ],
+      "seconds": 96.82000000000001,
+      "speed": 0.5,
+      "ramp": true,
+      "ends": [
+        {
+          "line": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              10.0,
+              0.0
+            ]
+          ],
+          "v_at_end": -0.0,
+          "v_min_last_1m": -0.0,
+          "v_cmd_min_last_1m": 0.0,
+          "slow_from_m": 0.299,
+          "paint_off_rel_m": -0.0059,
+          "stop_rel_m": -0.004,
+          "peak_decel": 0.42
+        },
+        {
+          "line": [
+            [
+              10.0,
+              0.0
+            ],
+            [
+              10.0,
+              6.0
+            ]
+          ],
+          "v_at_end": 0.0,
+          "v_min_last_1m": 0.0,
+          "v_cmd_min_last_1m": 0.0,
+          "slow_from_m": 0.309,
+          "paint_off_rel_m": -0.0216,
+          "stop_rel_m": -0.024,
+          "peak_decel": 0.42
+        },
+        {
+          "line": [
+            [
+              10.0,
+              6.0
+            ],
+            [
+              0.0,
+              6.0
+            ]
+          ],
+          "v_at_end": null,
+          "v_min_last_1m": 0.001,
+          "v_cmd_min_last_1m": 0.0,
+          "slow_from_m": 0.295,
+          "paint_off_rel_m": -0.0247,
+          "stop_rel_m": -0.026,
+          "peak_decel": 0.43
+        }
+      ],
+      "stray_paint_m": 5.143,
+      "stray_examples": [
+        [
+          10.23,
+          0.63,
+          0.232
+        ],
+        [
+          10.16,
+          0.04,
+          0.16
+        ],
+        [
+          10.06,
+          -0.77,
+          0.772
+        ],
+        [
+          10.02,
+          -0.86,
+          0.857
+        ],
+        [
+          10.01,
+          -0.05,
+          0.056
+        ],
+        [
+          9.93,
+          6.16,
+          0.155
+        ],
+        [
+          10.75,
+          6.06,
+          0.75
+        ],
+        [
+          10.85,
+          6.01,
+          0.855
+        ]
+      ]
+    },
+    "base-route-0.8-1": {
+      "state": [
+        "DONE",
+        ""
+      ],
+      "seconds": 77.5,
+      "speed": 0.8,
+      "ramp": true,
+      "ends": [
+        {
+          "line": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              10.0,
+              0.0
+            ]
+          ],
+          "v_at_end": -0.0,
+          "v_min_last_1m": -0.0,
+          "v_cmd_min_last_1m": 0.0,
+          "slow_from_m": 0.716,
+          "paint_off_rel_m": -0.018,
+          "stop_rel_m": -0.018,
+          "peak_decel": 0.46
+        },
+        {
+          "line": [
+            [
+              10.0,
+              0.0
+            ],
+            [
+              10.0,
+              6.0
+            ]
+          ],
+          "v_at_end": 0.0,
+          "v_min_last_1m": 0.0,
+          "v_cmd_min_last_1m": 0.0,
+          "slow_from_m": 0.743,
+          "paint_off_rel_m": -0.0199,
+          "stop_rel_m": -0.02,
+          "peak_decel": 0.46
+        },
+        {
+          "line": [
+            [
+              10.0,
+              6.0
+            ],
+            [
+              0.0,
+              6.0
+            ]
+          ],
+          "v_at_end": null,
+          "v_min_last_1m": 0.001,
+          "v_cmd_min_last_1m": 0.0,
+          "slow_from_m": 0.714,
+          "paint_off_rel_m": -0.0339,
+          "stop_rel_m": -0.034,
+          "peak_decel": 0.46
+        }
+      ],
+      "stray_paint_m": 5.073,
+      "stray_examples": [
+        [
+          10.23,
+          0.62,
+          0.232
+        ],
+        [
+          10.17,
+          0.12,
+          0.166
+        ],
+        [
+          10.08,
+          -0.63,
+          0.639
+        ],
+        [
+          10.01,
+          -0.9,
+          0.902
+        ],
+        [
+          10.01,
+          -0.05,
+          0.05
+        ],
+        [
+          9.88,
+          6.15,
+          0.152
+        ],
+        [
+          10.62,
+          6.06,
+          0.625
+        ],
+        [
+          10.92,
+          6.0,
+          0.915
+        ]
+      ]
+    },
+    "base-route-0.8-2": {
+      "state": [
+        "DONE",
+        ""
+      ],
+      "seconds": 74.84,
+      "speed": 0.8,
+      "ramp": true,
+      "ends": [
+        {
+          "line": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              10.0,
+              0.0
+            ]
+          ],
+          "v_at_end": -0.0,
+          "v_min_last_1m": -0.0,
+          "v_cmd_min_last_1m": 0.0,
+          "slow_from_m": 0.699,
+          "paint_off_rel_m": -0.0234,
+          "stop_rel_m": -0.023,
+          "peak_decel": 0.47
+        },
+        {
+          "line": [
+            [
+              10.0,
+              0.0
+            ],
+            [
+              10.0,
+              6.0
+            ]
+          ],
+          "v_at_end": 0.0,
+          "v_min_last_1m": 0.0,
+          "v_cmd_min_last_1m": 0.0,
+          "slow_from_m": 0.717,
+          "paint_off_rel_m": -0.0277,
+          "stop_rel_m": -0.028,
+          "peak_decel": 0.45
+        },
+        {
+          "line": [
+            [
+              10.0,
+              6.0
+            ],
+            [
+              0.0,
+              6.0
+            ]
+          ],
+          "v_at_end": 0.031,
+          "v_min_last_1m": 0.037,
+          "v_cmd_min_last_1m": 0.0,
+          "slow_from_m": 0.699,
+          "paint_off_rel_m": 0.002,
+          "stop_rel_m": 0.004,
+          "peak_decel": 0.46
+        }
+      ],
+      "stray_paint_m": 4.887,
+      "stray_examples": [
+        [
+          10.23,
+          0.63,
+          0.23
+        ],
+        [
+          10.17,
+          0.13,
+          0.173
+        ],
+        [
+          10.09,
+          -0.61,
+          0.616
+        ],
+        [
+          10.01,
+          -0.94,
+          0.938
+        ],
+        [
+          10.01,
+          -0.21,
+          0.213
+        ],
+        [
+          9.97,
+          6.14,
+          0.14
+        ],
+        [
+          10.71,
+          6.06,
+          0.712
+        ],
+        [
+          10.9,
+          6.01,
+          0.903
+        ]
+      ]
+    },
+    "base-route-0.8-3": {
+      "state": [
+        "DONE",
+        ""
+      ],
+      "seconds": 76.92,
+      "speed": 0.8,
+      "ramp": true,
+      "ends": [
+        {
+          "line": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              10.0,
+              0.0
+            ]
+          ],
+          "v_at_end": -0.0,
+          "v_min_last_1m": -0.0,
+          "v_cmd_min_last_1m": 0.0,
+          "slow_from_m": 0.711,
+          "paint_off_rel_m": -0.0147,
+          "stop_rel_m": -0.016,
+          "peak_decel": 0.46
+        },
+        {
+          "line": [
+            [
+              10.0,
+              0.0
+            ],
+            [
+              10.0,
+              6.0
+            ]
+          ],
+          "v_at_end": 0.0,
+          "v_min_last_1m": 0.0,
+          "v_cmd_min_last_1m": 0.0,
+          "slow_from_m": 0.73,
+          "paint_off_rel_m": -0.0201,
+          "stop_rel_m": -0.021,
+          "peak_decel": 0.44
+        },
+        {
+          "line": [
+            [
+              10.0,
+              6.0
+            ],
+            [
+              0.0,
+              6.0
+            ]
+          ],
+          "v_at_end": null,
+          "v_min_last_1m": 0.001,
+          "v_cmd_min_last_1m": 0.0,
+          "slow_from_m": 0.711,
+          "paint_off_rel_m": -0.0177,
+          "stop_rel_m": -0.018,
+          "peak_decel": 0.46
+        }
+      ],
+      "stray_paint_m": 5.12,
+      "stray_examples": [
+        [
+          10.23,
+          0.63,
+          0.227
+        ],
+        [
+          10.16,
+          0.12,
+          0.161
+        ],
+        [
+          10.07,
+          -0.64,
+          0.642
+        ],
+        [
+          10.0,
+          -0.91,
+          0.908
+        ],
+        [
+          10.0,
+          -0.04,
+          0.037
+        ],
+        [
+          9.89,
+          6.16,
+          0.157
+        ],
+        [
+          10.64,
+          6.06,
+          0.641
+        ],
+        [
+          10.94,
+          6.0,
+          0.936
+        ]
+      ]
+    },
+    "base-route-1.0-1": {
+      "state": [
+        "DONE",
+        ""
+      ],
+      "seconds": 72.44,
+      "speed": 1.0,
+      "ramp": true,
+      "ends": [
+        {
+          "line": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              10.0,
+              0.0
+            ]
+          ],
+          "v_at_end": 0.013,
+          "v_min_last_1m": 0.016,
+          "v_cmd_min_last_1m": 0.0,
+          "slow_from_m": 0.999,
+          "paint_off_rel_m": -0.0016,
+          "stop_rel_m": 0.003,
+          "peak_decel": 0.46
+        },
+        {
+          "line": [
+            [
+              10.0,
+              0.0
+            ],
+            [
+              10.0,
+              6.0
+            ]
+          ],
+          "v_at_end": 0.0,
+          "v_min_last_1m": 0.0,
+          "v_cmd_min_last_1m": 0.0,
+          "slow_from_m": 1.0,
+          "paint_off_rel_m": -0.016,
+          "stop_rel_m": -0.018,
+          "peak_decel": 0.49
+        },
+        {
+          "line": [
+            [
+              10.0,
+              6.0
+            ],
+            [
+              0.0,
+              6.0
+            ]
+          ],
+          "v_at_end": null,
+          "v_min_last_1m": 0.001,
+          "v_cmd_min_last_1m": 0.0,
+          "slow_from_m": 0.989,
+          "paint_off_rel_m": -0.0256,
+          "stop_rel_m": -0.026,
+          "peak_decel": 0.48
+        }
+      ],
+      "stray_paint_m": 5.113,
+      "stray_examples": [
+        [
+          10.23,
+          0.63,
+          0.232
+        ],
+        [
+          10.17,
+          0.1,
+          0.165
+        ],
+        [
+          10.08,
+          -0.66,
+          0.667
+        ],
+        [
+          10.02,
+          -0.91,
+          0.913
+        ],
+        [
+          9.37,
+          6.23,
+          0.231
+        ],
+        [
+          9.91,
+          6.16,
+          0.157
+        ],
+        [
+          10.66,
+          6.06,
+          0.668
+        ],
+        [
+          10.91,
+          6.0,
+          0.911
+        ]
+      ]
+    },
+    "base-route-1.0-2": {
+      "state": [
+        "DONE",
+        ""
+      ],
+      "seconds": 70.0,
+      "speed": 1.0,
+      "ramp": true,
+      "ends": [
+        {
+          "line": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              10.0,
+              0.0
+            ]
+          ],
+          "v_at_end": 0.022,
+          "v_min_last_1m": 0.026,
+          "v_cmd_min_last_1m": 0.0,
+          "slow_from_m": 0.985,
+          "paint_off_rel_m": -0.0016,
+          "stop_rel_m": 0.007,
+          "peak_decel": 0.48
+        },
+        {
+          "line": [
+            [
+              10.0,
+              0.0
+            ],
+            [
+              10.0,
+              6.0
+            ]
+          ],
+          "v_at_end": 0.0,
+          "v_min_last_1m": 0.0,
+          "v_cmd_min_last_1m": 0.0,
+          "slow_from_m": 0.999,
+          "paint_off_rel_m": -0.0125,
+          "stop_rel_m": -0.013,
+          "peak_decel": 0.48
+        },
+        {
+          "line": [
+            [
+              10.0,
+              6.0
+            ],
+            [
+              0.0,
+              6.0
+            ]
+          ],
+          "v_at_end": null,
+          "v_min_last_1m": 0.001,
+          "v_cmd_min_last_1m": 0.0,
+          "slow_from_m": 0.987,
+          "paint_off_rel_m": -0.0185,
+          "stop_rel_m": -0.02,
+          "peak_decel": 0.48
+        }
+      ],
+      "stray_paint_m": 5.095,
+      "stray_examples": [
+        [
+          10.23,
+          0.63,
+          0.234
+        ],
+        [
+          10.17,
+          0.12,
+          0.17
+        ],
+        [
+          10.08,
+          -0.64,
+          0.643
+        ],
+        [
+          10.01,
+          -0.9,
+          0.899
+        ],
+        [
+          9.37,
+          6.23,
+          0.226
+        ],
+        [
+          9.89,
+          6.16,
+          0.159
+        ],
+        [
+          10.64,
+          6.07,
+          0.648
+        ],
+        [
+          10.91,
+          6.01,
+          0.908
+        ]
+      ]
+    },
+    "base-route-1.0-3": {
+      "state": [
+        "DONE",
+        ""
+      ],
+      "seconds": 72.60000000000001,
+      "speed": 1.0,
+      "ramp": true,
+      "ends": [
+        {
+          "line": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              10.0,
+              0.0
+            ]
+          ],
+          "v_at_end": -0.0,
+          "v_min_last_1m": -0.0,
+          "v_cmd_min_last_1m": 0.0,
+          "slow_from_m": 0.984,
+          "paint_off_rel_m": -0.0181,
+          "stop_rel_m": -0.018,
+          "peak_decel": 0.47
+        },
+        {
+          "line": [
+            [
+              10.0,
+              0.0
+            ],
+            [
+              10.0,
+              6.0
+            ]
+          ],
+          "v_at_end": 0.0,
+          "v_min_last_1m": 0.0,
+          "v_cmd_min_last_1m": 0.0,
+          "slow_from_m": 0.983,
+          "paint_off_rel_m": -0.0281,
+          "stop_rel_m": -0.028,
+          "peak_decel": 0.49
+        },
+        {
+          "line": [
+            [
+              10.0,
+              6.0
+            ],
+            [
+              0.0,
+              6.0
+            ]
+          ],
+          "v_at_end": null,
+          "v_min_last_1m": 0.001,
+          "v_cmd_min_last_1m": 0.0,
+          "slow_from_m": 0.991,
+          "paint_off_rel_m": -0.0351,
+          "stop_rel_m": -0.036,
+          "peak_decel": 0.48
+        }
+      ],
+      "stray_paint_m": 5.117,
+      "stray_examples": [
+        [
+          10.23,
+          0.63,
+          0.235
+        ],
+        [
+          10.17,
+          0.11,
+          0.168
+        ],
+        [
+          10.07,
+          -0.66,
+          0.664
+        ],
+        [
+          10.01,
+          -0.93,
+          0.935
+        ],
+        [
+          10.01,
+          -0.08,
+          0.084
+        ],
+        [
+          9.87,
+          6.16,
+          0.157
+        ],
+        [
+          10.63,
+          6.06,
+          0.633
+        ],
+        [
+          10.93,
+          6.0,
+          0.931
+        ]
+      ]
+    },
+    "base-route_arc-0.5-1": {
+      "state": [
+        "DONE",
+        ""
+      ],
+      "seconds": 88.12,
+      "speed": 0.5,
+      "ramp": true,
+      "ends": [
+        {
+          "line": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              10.0,
+              0.0
+            ]
+          ],
+          "v_at_end": 0.446,
+          "v_min_last_1m": 0.446,
+          "v_cmd_min_last_1m": 0.447,
+          "slow_from_m": 0.198,
+          "paint_off_rel_m": 0.4837,
+          "stop_rel_m": 0.484,
+          "peak_decel": 0.24
+        },
+        {
+          "line": [
+            [
+              10.0,
+              0.0
+            ],
+            [
+              10.0,
+              6.0
+            ]
+          ],
+          "v_at_end": 0.448,
+          "v_min_last_1m": 0.448,
+          "v_cmd_min_last_1m": 0.447,
+          "slow_from_m": 0.217,
+          "paint_off_rel_m": 0.4667,
+          "stop_rel_m": 0.467,
+          "peak_decel": 0.24
+        },
+        {
+          "line": [
+            [
+              10.0,
+              6.0
+            ],
+            [
+              0.0,
+              6.0
+            ]
+          ],
+          "v_at_end": null,
+          "v_min_last_1m": 0.001,
+          "v_cmd_min_last_1m": 0.0,
+          "slow_from_m": 0.313,
+          "paint_off_rel_m": -0.0138,
+          "stop_rel_m": -0.009,
+          "peak_decel": 0.42
+        }
+      ],
+      "stray_paint_m": 9.201,
+      "stray_examples": [
+        [
+          10.04,
+          -0.0,
+          0.037
+        ],
+        [
+          11.01,
+          -0.82,
+          1.302
+        ],
+        [
+          10.8,
+          -1.66,
+          1.845
+        ],
+        [
+          10.01,
+          -1.38,
+          1.377
+        ],
+        [
+          9.97,
+          -0.05,
+          0.048
+        ],
+        [
+          10.83,
+          7.0,
+          1.297
+        ],
+        [
+          11.66,
+          6.8,
+          1.843
+        ],
+        [
+          11.38,
+          6.0,
+          1.38
+        ]
+      ]
+    },
+    "base-route_arc-0.5-2": {
+      "state": [
+        "DONE",
+        ""
+      ],
+      "seconds": 88.26,
+      "speed": 0.5,
+      "ramp": true,
+      "ends": [
+        {
+          "line": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              10.0,
+              0.0
+            ]
+          ],
+          "v_at_end": 0.447,
+          "v_min_last_1m": 0.448,
+          "v_cmd_min_last_1m": 0.447,
+          "slow_from_m": 0.201,
+          "paint_off_rel_m": 0.4843,
+          "stop_rel_m": 0.484,
+          "peak_decel": 0.24
+        },
+        {
+          "line": [
+            [
+              10.0,
+              0.0
+            ],
+            [
+              10.0,
+              6.0
+            ]
+          ],
+          "v_at_end": 0.448,
+          "v_min_last_1m": 0.449,
+          "v_cmd_min_last_1m": 0.447,
+          "slow_from_m": 0.198,
+          "paint_off_rel_m": 0.4744,
+          "stop_rel_m": 0.474,
+          "peak_decel": 0.23
+        },
+        {
+          "line": [
+            [
+              10.0,
+              6.0
+            ],
+            [
+              0.0,
+              6.0
+            ]
+          ],
+          "v_at_end": null,
+          "v_min_last_1m": 0.001,
+          "v_cmd_min_last_1m": 0.0,
+          "slow_from_m": 0.311,
+          "paint_off_rel_m": -0.0266,
+          "stop_rel_m": -0.027,
+          "peak_decel": 0.43
+        }
+      ],
+      "stray_paint_m": 8.966,
+      "stray_examples": [
+        [
+          10.03,
+          0.01,
+          0.034
+        ],
+        [
+          10.98,
+          -0.79,
+          1.261
+        ],
+        [
+          10.84,
+          -1.64,
+          1.841
+        ],
+        [
+          10.04,
+          -1.44,
+          1.437
+        ],
+        [
+          9.97,
+          -0.08,
+          0.079
+        ],
+        [
+          10.92,
+          7.08,
+          1.42
+        ],
+        [
+          11.7,
+          6.74,
+          1.849
+        ],
+        [
+          11.35,
+          5.99,
+          1.352
+        ]
+      ]
+    },
+    "base-route_arc-0.5-3": {
+      "state": [
+        "DONE",
+        ""
+      ],
+      "seconds": 88.08,
+      "speed": 0.5,
+      "ramp": true,
+      "ends": [
+        {
+          "line": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              10.0,
+              0.0
+            ]
+          ],
+          "v_at_end": 0.447,
+          "v_min_last_1m": 0.448,
+          "v_cmd_min_last_1m": 0.447,
+          "slow_from_m": 0.2,
+          "paint_off_rel_m": 0.4815,
+          "stop_rel_m": 0.482,
+          "peak_decel": 0.24
+        },
+        {
+          "line": [
+            [
+              10.0,
+              0.0
+            ],
+            [
+              10.0,
+              6.0
+            ]
+          ],
+          "v_at_end": 0.448,
+          "v_min_last_1m": 0.448,
+          "v_cmd_min_last_1m": 0.447,
+          "slow_from_m": 0.195,
+          "paint_off_rel_m": 0.4781,
+          "stop_rel_m": 0.478,
+          "peak_decel": 0.24
+        },
+        {
+          "line": [
+            [
+              10.0,
+              6.0
+            ],
+            [
+              0.0,
+              6.0
+            ]
+          ],
+          "v_at_end": 0.019,
+          "v_min_last_1m": 0.022,
+          "v_cmd_min_last_1m": 0.0,
+          "slow_from_m": 0.3,
+          "paint_off_rel_m": -0.004,
+          "stop_rel_m": 0.005,
+          "peak_decel": 0.42
+        }
+      ],
+      "stray_paint_m": 9.236,
+      "stray_examples": [
+        [
+          10.03,
+          0.0,
+          0.034
+        ],
+        [
+          11.05,
+          -0.87,
+          1.363
+        ],
+        [
+          10.77,
+          -1.69,
+          1.855
+        ],
+        [
+          9.99,
+          -1.36,
+          1.363
+        ],
+        [
+          10.0,
+          6.05,
+          0.049
+        ],
+        [
+          10.83,
+          7.02,
+          1.319
+        ],
+        [
+          11.67,
+          6.8,
+          1.849
+        ],
+        [
+          11.39,
+          6.0,
+          1.391
+        ]
+      ]
+    },
+    "base-route_arc-0.8-1": {
+      "state": [
+        "DONE",
+        ""
+      ],
+      "seconds": 67.92,
+      "speed": 0.8,
+      "ramp": true,
+      "ends": [
+        {
+          "line": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              10.0,
+              0.0
+            ]
+          ],
+          "v_at_end": 0.446,
+          "v_min_last_1m": 0.446,
+          "v_cmd_min_last_1m": 0.447,
+          "slow_from_m": 0.62,
+          "paint_off_rel_m": 0.4768,
+          "stop_rel_m": 0.477,
+          "peak_decel": 0.46
+        },
+        {
+          "line": [
+            [
+              10.0,
+              0.0
+            ],
+            [
+              10.0,
+              6.0
+            ]
+          ],
+          "v_at_end": 0.448,
+          "v_min_last_1m": 0.448,
+          "v_cmd_min_last_1m": 0.447,
+          "slow_from_m": 0.633,
+          "paint_off_rel_m": 0.4797,
+          "stop_rel_m": 0.48,
+          "peak_decel": 0.45
+        },
+        {
+          "line": [
+            [
+              10.0,
+              6.0
+            ],
+            [
+              0.0,
+              6.0
+            ]
+          ],
+          "v_at_end": null,
+          "v_min_last_1m": 0.001,
+          "v_cmd_min_last_1m": 0.0,
+          "slow_from_m": 0.708,
+          "paint_off_rel_m": -0.0051,
+          "stop_rel_m": -0.006,
+          "peak_decel": 0.46
+        }
+      ],
+      "stray_paint_m": 8.842,
+      "stray_examples": [
+        [
+          10.03,
+          -0.0,
+          0.034
+        ],
+        [
+          11.08,
+          -0.92,
+          1.419
+        ],
+        [
+          10.79,
+          -1.68,
+          1.853
+        ],
+        [
+          10.03,
+          -1.43,
+          1.431
+        ],
+        [
+          10.0,
+          6.05,
+          0.052
+        ],
+        [
+          10.79,
+          6.98,
+          1.259
+        ],
+        [
+          11.61,
+          6.87,
+          1.833
+        ],
+        [
+          11.52,
+          6.08,
+          1.517
+        ]
+      ]
+    },
+    "base-route_arc-0.8-2": {
+      "state": [
+        "DONE",
+        ""
+      ],
+      "seconds": 67.94,
+      "speed": 0.8,
+      "ramp": true,
+      "ends": [
+        {
+          "line": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              10.0,
+              0.0
+            ]
+          ],
+          "v_at_end": 0.447,
+          "v_min_last_1m": 0.448,
+          "v_cmd_min_last_1m": 0.447,
+          "slow_from_m": 0.616,
+          "paint_off_rel_m": 0.4876,
+          "stop_rel_m": 0.488,
+          "peak_decel": 0.47
+        },
+        {
+          "line": [
+            [
+              10.0,
+              0.0
+            ],
+            [
+              10.0,
+              6.0
+            ]
+          ],
+          "v_at_end": 0.448,
+          "v_min_last_1m": 0.449,
+          "v_cmd_min_last_1m": 0.447,
+          "slow_from_m": 0.642,
+          "paint_off_rel_m": 0.4759,
+          "stop_rel_m": 0.476,
+          "peak_decel": 0.45
+        },
+        {
+          "line": [
+            [
+              10.0,
+              6.0
+            ],
+            [
+              0.0,
+              6.0
+            ]
+          ],
+          "v_at_end": null,
+          "v_min_last_1m": 0.001,
+          "v_cmd_min_last_1m": 0.0,
+          "slow_from_m": 0.711,
+          "paint_off_rel_m": -0.0125,
+          "stop_rel_m": -0.011,
+          "peak_decel": 0.45
+        }
+      ],
+      "stray_paint_m": 9.229,
+      "stray_examples": [
+        [
+          10.04,
+          0.0,
+          0.035
+        ],
+        [
+          11.0,
+          -0.81,
+          1.281
+        ],
+        [
+          10.85,
+          -1.64,
+          1.842
+        ],
+        [
+          10.05,
+          -1.46,
+          1.457
+        ],
+        [
+          10.0,
+          6.03,
+          0.035
+        ],
+        [
+          10.81,
+          7.0,
+          1.286
+        ],
+        [
+          11.65,
+          6.84,
+          1.849
+        ],
+        [
+          11.46,
+          6.05,
+          1.465
+        ]
+      ]
+    },
+    "base-route_arc-0.8-3": {
+      "state": [
+        "DONE",
+        ""
+      ],
+      "seconds": 67.7,
+      "speed": 0.8,
+      "ramp": true,
+      "ends": [
+        {
+          "line": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              10.0,
+              0.0
+            ]
+          ],
+          "v_at_end": 0.448,
+          "v_min_last_1m": 0.448,
+          "v_cmd_min_last_1m": 0.447,
+          "slow_from_m": 0.63,
+          "paint_off_rel_m": 0.4799,
+          "stop_rel_m": 0.48,
+          "peak_decel": 0.44
+        },
+        {
+          "line": [
+            [
+              10.0,
+              0.0
+            ],
+            [
+              10.0,
+              6.0
+            ]
+          ],
+          "v_at_end": 0.448,
+          "v_min_last_1m": 0.449,
+          "v_cmd_min_last_1m": 0.447,
+          "slow_from_m": 0.652,
+          "paint_off_rel_m": 0.4701,
+          "stop_rel_m": 0.47,
+          "peak_decel": 0.44
+        },
+        {
+          "line": [
+            [
+              10.0,
+              6.0
+            ],
+            [
+              0.0,
+              6.0
+            ]
+          ],
+          "v_at_end": null,
+          "v_min_last_1m": 0.001,
+          "v_cmd_min_last_1m": 0.0,
+          "slow_from_m": 0.726,
+          "paint_off_rel_m": -0.0241,
+          "stop_rel_m": -0.024,
+          "peak_decel": 0.46
+        }
+      ],
+      "stray_paint_m": 9.096,
+      "stray_examples": [
+        [
+          10.04,
+          0.0,
+          0.036
+        ],
+        [
+          10.97,
+          -0.79,
+          1.25
+        ],
+        [
+          10.87,
+          -1.62,
+          1.838
+        ],
+        [
+          10.08,
+          -1.51,
+          1.507
+        ],
+        [
+          9.98,
+          -0.24,
+          0.244
+        ],
+        [
+          10.85,
+          7.03,
+          1.334
+        ],
+        [
+          11.65,
+          6.84,
+          1.847
+        ],
+        [
+          11.48,
+          6.05,
+          1.478
+        ]
+      ]
+    },
+    "base-route_arc-1.0-1": {
+      "state": [
+        "DONE",
+        ""
+      ],
+      "seconds": 61.879999999999995,
+      "speed": 1.0,
+      "ramp": true,
+      "ends": [
+        {
+          "line": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              10.0,
+              0.0
+            ]
+          ],
+          "v_at_end": 0.445,
+          "v_min_last_1m": 0.446,
+          "v_cmd_min_last_1m": 0.447,
+          "slow_from_m": 0.993,
+          "paint_off_rel_m": 0.4807,
+          "stop_rel_m": 0.481,
+          "peak_decel": 0.46
+        },
+        {
+          "line": [
+            [
+              10.0,
+              0.0
+            ],
+            [
+              10.0,
+              6.0
+            ]
+          ],
+          "v_at_end": 0.448,
+          "v_min_last_1m": 0.448,
+          "v_cmd_min_last_1m": 0.447,
+          "slow_from_m": 0.994,
+          "paint_off_rel_m": 0.4715,
+          "stop_rel_m": 0.472,
+          "peak_decel": 0.47
+        },
+        {
+          "line": [
+            [
+              10.0,
+              6.0
+            ],
+            [
+              0.0,
+              6.0
+            ]
+          ],
+          "v_at_end": null,
+          "v_min_last_1m": 0.001,
+          "v_cmd_min_last_1m": 0.0,
+          "slow_from_m": 0.986,
+          "paint_off_rel_m": -0.0006,
+          "stop_rel_m": -0.001,
+          "peak_decel": 0.48
+        }
+      ],
+      "stray_paint_m": 9.621,
+      "stray_examples": [
+        [
+          10.04,
+          0.0,
+          0.038
+        ],
+        [
+          11.0,
+          -0.82,
+          1.294
+        ],
+        [
+          10.83,
+          -1.64,
+          1.84
+        ],
+        [
+          10.03,
+          -1.44,
+          1.442
+        ],
+        [
+          10.0,
+          6.12,
+          0.116
+        ],
+        [
+          10.89,
+          7.06,
+          1.381
+        ],
+        [
+          11.67,
+          6.79,
+          1.848
+        ],
+        [
+          11.4,
+          6.01,
+          1.401
+        ]
+      ]
+    },
+    "base-route_arc-1.0-2": {
+      "state": [
+        "DONE",
+        ""
+      ],
+      "seconds": 62.0,
+      "speed": 1.0,
+      "ramp": true,
+      "ends": [
+        {
+          "line": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              10.0,
+              0.0
+            ]
+          ],
+          "v_at_end": 0.447,
+          "v_min_last_1m": 0.448,
+          "v_cmd_min_last_1m": 0.447,
+          "slow_from_m": 1.0,
+          "paint_off_rel_m": 0.4905,
+          "stop_rel_m": 0.49,
+          "peak_decel": 0.48
+        },
+        {
+          "line": [
+            [
+              10.0,
+              0.0
+            ],
+            [
+              10.0,
+              6.0
+            ]
+          ],
+          "v_at_end": 0.448,
+          "v_min_last_1m": 0.449,
+          "v_cmd_min_last_1m": 0.447,
+          "slow_from_m": 0.995,
+          "paint_off_rel_m": 0.4746,
+          "stop_rel_m": 0.475,
+          "peak_decel": 0.46
+        },
+        {
+          "line": [
+            [
+              10.0,
+              6.0
+            ],
+            [
+              0.0,
+              6.0
+            ]
+          ],
+          "v_at_end": null,
+          "v_min_last_1m": 0.001,
+          "v_cmd_min_last_1m": 0.0,
+          "slow_from_m": 0.982,
+          "paint_off_rel_m": -0.0108,
+          "stop_rel_m": -0.012,
+          "peak_decel": 0.48
+        }
+      ],
+      "stray_paint_m": 9.229,
+      "stray_examples": [
+        [
+          10.03,
+          -0.0,
+          0.031
+        ],
+        [
+          10.99,
+          -0.79,
+          1.266
+        ],
+        [
+          10.86,
+          -1.62,
+          1.835
+        ],
+        [
+          10.07,
+          -1.49,
+          1.487
+        ],
+        [
+          9.98,
+          -0.09,
+          0.094
+        ],
+        [
+          10.79,
+          6.98,
+          1.257
+        ],
+        [
+          11.62,
+          6.87,
+          1.84
+        ],
+        [
+          11.5,
+          6.06,
+          1.503
+        ]
+      ]
+    },
+    "base-route_arc-1.0-3": {
+      "state": [
+        "DONE",
+        ""
+      ],
+      "seconds": 61.66,
+      "speed": 1.0,
+      "ramp": true,
+      "ends": [
+        {
+          "line": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              10.0,
+              0.0
+            ]
+          ],
+          "v_at_end": 0.447,
+          "v_min_last_1m": 0.448,
+          "v_cmd_min_last_1m": 0.447,
+          "slow_from_m": 0.998,
+          "paint_off_rel_m": 0.4817,
+          "stop_rel_m": 0.482,
+          "peak_decel": 0.47
+        },
+        {
+          "line": [
+            [
+              10.0,
+              0.0
+            ],
+            [
+              10.0,
+              6.0
+            ]
+          ],
+          "v_at_end": 0.448,
+          "v_min_last_1m": 0.449,
+          "v_cmd_min_last_1m": 0.447,
+          "slow_from_m": 0.989,
+          "paint_off_rel_m": 0.4773,
+          "stop_rel_m": 0.477,
+          "peak_decel": 0.48
+        },
+        {
+          "line": [
+            [
+              10.0,
+              6.0
+            ],
+            [
+              0.0,
+              6.0
+            ]
+          ],
+          "v_at_end": null,
+          "v_min_last_1m": 0.001,
+          "v_cmd_min_last_1m": 0.0,
+          "slow_from_m": 0.988,
+          "paint_off_rel_m": -0.0171,
+          "stop_rel_m": -0.018,
+          "peak_decel": 0.47
+        }
+      ],
+      "stray_paint_m": 9.209,
+      "stray_examples": [
+        [
+          10.03,
+          0.0,
+          0.031
+        ],
+        [
+          10.99,
+          -0.8,
+          1.273
+        ],
+        [
+          10.85,
+          -1.63,
+          1.838
+        ],
+        [
+          10.06,
+          -1.47,
+          1.475
+        ],
+        [
+          9.98,
+          -0.05,
+          0.053
+        ],
+        [
+          10.79,
+          6.96,
+          1.244
+        ],
+        [
+          11.63,
+          6.85,
+          1.836
+        ],
+        [
+          11.5,
+          6.06,
+          1.497
+        ]
+      ]
+    }
+  },
+  "new": {
+    "field-0.5-1": {
+      "state": [
+        "DONE",
+        ""
+      ],
+      "seconds": 133.14000000000001,
+      "speed": 0.5,
+      "ramp": true,
+      "ends": [
+        {
+          "line": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              12.0,
+              0.0
+            ]
+          ],
+          "v_at_end": 0.5,
+          "v_min_last_1m": 0.498,
+          "v_cmd_min_last_1m": 0.5,
+          "slow_from_m": 0.0,
+          "paint_off_rel_m": -0.0161,
+          "stop_rel_m": 0.424,
+          "peak_decel": 0.61
+        },
+        {
+          "line": [
+            [
+              12.0,
+              4.0
+            ],
+            [
+              0.0,
+              4.0
+            ]
+          ],
+          "v_at_end": 0.499,
+          "v_min_last_1m": 0.498,
+          "v_cmd_min_last_1m": 0.5,
+          "slow_from_m": 0.0,
+          "paint_off_rel_m": -0.0222,
+          "stop_rel_m": 0.426,
+          "peak_decel": 0.63
+        },
+        {
+          "line": [
+            [
+              0.0,
+              8.0
+            ],
+            [
+              12.0,
+              8.0
+            ]
+          ],
+          "v_at_end": 0.502,
+          "v_min_last_1m": 0.497,
+          "v_cmd_min_last_1m": 0.5,
+          "slow_from_m": 0.0,
+          "paint_off_rel_m": -0.0091,
+          "stop_rel_m": 0.432,
+          "peak_decel": 0.63
+        }
+      ],
+      "stray_paint_m": 0.0,
+      "stray_examples": []
+    },
+    "field-0.5-2": {
+      "state": [
+        "DONE",
+        ""
+      ],
+      "seconds": 137.64000000000001,
+      "speed": 0.5,
+      "ramp": true,
+      "ends": [
+        {
+          "line": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              12.0,
+              0.0
+            ]
+          ],
+          "v_at_end": 0.499,
+          "v_min_last_1m": 0.497,
+          "v_cmd_min_last_1m": 0.5,
+          "slow_from_m": 0.0,
+          "paint_off_rel_m": -0.0105,
+          "stop_rel_m": 0.415,
+          "peak_decel": 0.64
+        },
+        {
+          "line": [
+            [
+              12.0,
+              4.0
+            ],
+            [
+              0.0,
+              4.0
+            ]
+          ],
+          "v_at_end": 0.498,
+          "v_min_last_1m": 0.498,
+          "v_cmd_min_last_1m": 0.5,
+          "slow_from_m": 0.0,
+          "paint_off_rel_m": -0.0166,
+          "stop_rel_m": 0.437,
+          "peak_decel": 0.63
+        },
+        {
+          "line": [
+            [
+              0.0,
+              8.0
+            ],
+            [
+              12.0,
+              8.0
+            ]
+          ],
+          "v_at_end": 0.502,
+          "v_min_last_1m": 0.498,
+          "v_cmd_min_last_1m": 0.5,
+          "slow_from_m": 0.0,
+          "paint_off_rel_m": -0.0112,
+          "stop_rel_m": 0.437,
+          "peak_decel": 0.62
+        }
+      ],
+      "stray_paint_m": 0.0,
+      "stray_examples": []
+    },
+    "field-0.5-3": {
+      "state": [
+        "DONE",
+        ""
+      ],
+      "seconds": 133.54,
+      "speed": 0.5,
+      "ramp": true,
+      "ends": [
+        {
+          "line": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              12.0,
+              0.0
+            ]
+          ],
+          "v_at_end": 0.503,
+          "v_min_last_1m": 0.497,
+          "v_cmd_min_last_1m": 0.5,
+          "slow_from_m": 0.0,
+          "paint_off_rel_m": -0.0117,
+          "stop_rel_m": 0.433,
+          "peak_decel": 0.6
+        },
+        {
+          "line": [
+            [
+              12.0,
+              4.0
+            ],
+            [
+              0.0,
+              4.0
+            ]
+          ],
+          "v_at_end": 0.499,
+          "v_min_last_1m": 0.498,
+          "v_cmd_min_last_1m": 0.5,
+          "slow_from_m": 0.0,
+          "paint_off_rel_m": -0.0101,
+          "stop_rel_m": 0.441,
+          "peak_decel": 0.62
+        },
+        {
+          "line": [
+            [
+              0.0,
+              8.0
+            ],
+            [
+              12.0,
+              8.0
+            ]
+          ],
+          "v_at_end": 0.499,
+          "v_min_last_1m": 0.496,
+          "v_cmd_min_last_1m": 0.5,
+          "slow_from_m": 0.0,
+          "paint_off_rel_m": -0.0203,
+          "stop_rel_m": 0.431,
+          "peak_decel": 0.62
+        }
+      ],
+      "stray_paint_m": 0.0,
+      "stray_examples": []
+    },
+    "field-0.8-1": {
+      "state": [
+        "DONE",
+        ""
+      ],
+      "seconds": 103.72,
+      "speed": 0.8,
+      "ramp": true,
+      "ends": [
+        {
+          "line": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              12.0,
+              0.0
+            ]
+          ],
+          "v_at_end": 0.787,
+          "v_min_last_1m": 0.794,
+          "v_cmd_min_last_1m": 0.688,
+          "slow_from_m": 0.0,
+          "paint_off_rel_m": -0.025,
+          "stop_rel_m": 0.442,
+          "peak_decel": 0.97
+        },
+        {
+          "line": [
+            [
+              12.0,
+              4.0
+            ],
+            [
+              0.0,
+              4.0
+            ]
+          ],
+          "v_at_end": 0.784,
+          "v_min_last_1m": 0.79,
+          "v_cmd_min_last_1m": 0.686,
+          "slow_from_m": 0.0,
+          "paint_off_rel_m": -0.0232,
+          "stop_rel_m": 0.443,
+          "peak_decel": 0.98
+        },
+        {
+          "line": [
+            [
+              0.0,
+              8.0
+            ],
+            [
+              12.0,
+              8.0
+            ]
+          ],
+          "v_at_end": 0.789,
+          "v_min_last_1m": 0.796,
+          "v_cmd_min_last_1m": 0.682,
+          "slow_from_m": 0.0,
+          "paint_off_rel_m": -0.0212,
+          "stop_rel_m": 0.436,
+          "peak_decel": 0.96
+        }
+      ],
+      "stray_paint_m": 0.0,
+      "stray_examples": []
+    },
+    "field-0.8-2": {
+      "state": [
+        "DONE",
+        ""
+      ],
+      "seconds": 107.4,
+      "speed": 0.8,
+      "ramp": true,
+      "ends": [
+        {
+          "line": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              12.0,
+              0.0
+            ]
+          ],
+          "v_at_end": 0.783,
+          "v_min_last_1m": 0.79,
+          "v_cmd_min_last_1m": 0.681,
+          "slow_from_m": 0.0,
+          "paint_off_rel_m": -0.0208,
+          "stop_rel_m": 0.429,
+          "peak_decel": 0.95
+        },
+        {
+          "line": [
+            [
+              12.0,
+              4.0
+            ],
+            [
+              0.0,
+              4.0
+            ]
+          ],
+          "v_at_end": 0.785,
+          "v_min_last_1m": 0.791,
+          "v_cmd_min_last_1m": 0.691,
+          "slow_from_m": 0.0,
+          "paint_off_rel_m": -0.0278,
+          "stop_rel_m": 0.442,
+          "peak_decel": 0.97
+        },
+        {
+          "line": [
+            [
+              0.0,
+              8.0
+            ],
+            [
+              12.0,
+              8.0
+            ]
+          ],
+          "v_at_end": 0.793,
+          "v_min_last_1m": 0.796,
+          "v_cmd_min_last_1m": 0.693,
+          "slow_from_m": 0.0,
+          "paint_off_rel_m": -0.0281,
+          "stop_rel_m": 0.437,
+          "peak_decel": 0.98
+        }
+      ],
+      "stray_paint_m": 0.0,
+      "stray_examples": []
+    },
+    "field-0.8-3": {
+      "state": [
+        "DONE",
+        ""
+      ],
+      "seconds": 107.42,
+      "speed": 0.8,
+      "ramp": true,
+      "ends": [
+        {
+          "line": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              12.0,
+              0.0
+            ]
+          ],
+          "v_at_end": 0.795,
+          "v_min_last_1m": 0.794,
+          "v_cmd_min_last_1m": 0.694,
+          "slow_from_m": 0.0,
+          "paint_off_rel_m": -0.0129,
+          "stop_rel_m": 0.431,
+          "peak_decel": 0.96
+        },
+        {
+          "line": [
+            [
+              12.0,
+              4.0
+            ],
+            [
+              0.0,
+              4.0
+            ]
+          ],
+          "v_at_end": 0.782,
+          "v_min_last_1m": 0.789,
+          "v_cmd_min_last_1m": 0.681,
+          "slow_from_m": 0.0,
+          "paint_off_rel_m": -0.022,
+          "stop_rel_m": 0.421,
+          "peak_decel": 0.97
+        },
+        {
+          "line": [
+            [
+              0.0,
+              8.0
+            ],
+            [
+              12.0,
+              8.0
+            ]
+          ],
+          "v_at_end": 0.783,
+          "v_min_last_1m": 0.79,
+          "v_cmd_min_last_1m": 0.679,
+          "slow_from_m": 0.0,
+          "paint_off_rel_m": -0.0406,
+          "stop_rel_m": 0.429,
+          "peak_decel": 0.98
+        }
+      ],
+      "stray_paint_m": 0.0,
+      "stray_examples": []
+    },
+    "field-1.0-1": {
+      "state": [
+        "DONE",
+        ""
+      ],
+      "seconds": 94.56,
+      "speed": 1.0,
+      "ramp": true,
+      "ends": [
+        {
+          "line": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              12.0,
+              0.0
+            ]
+          ],
+          "v_at_end": 0.922,
+          "v_min_last_1m": 0.937,
+          "v_cmd_min_last_1m": 0.76,
+          "slow_from_m": 0.056,
+          "paint_off_rel_m": -0.0182,
+          "stop_rel_m": 0.463,
+          "peak_decel": 0.99
+        },
+        {
+          "line": [
+            [
+              12.0,
+              4.0
+            ],
+            [
+              0.0,
+              4.0
+            ]
+          ],
+          "v_at_end": 0.917,
+          "v_min_last_1m": 0.931,
+          "v_cmd_min_last_1m": 0.756,
+          "slow_from_m": 0.065,
+          "paint_off_rel_m": -0.0282,
+          "stop_rel_m": 0.489,
+          "peak_decel": 1.0
+        },
+        {
+          "line": [
+            [
+              0.0,
+              8.0
+            ],
+            [
+              12.0,
+              8.0
+            ]
+          ],
+          "v_at_end": 0.91,
+          "v_min_last_1m": 0.926,
+          "v_cmd_min_last_1m": 0.74,
+          "slow_from_m": 0.058,
+          "paint_off_rel_m": -0.0384,
+          "stop_rel_m": 0.469,
+          "peak_decel": 1.0
+        }
+      ],
+      "stray_paint_m": 0.0,
+      "stray_examples": []
+    },
+    "field-1.0-2": {
+      "state": [
+        "DONE",
+        ""
+      ],
+      "seconds": 97.66,
+      "speed": 1.0,
+      "ramp": true,
+      "ends": [
+        {
+          "line": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              12.0,
+              0.0
+            ]
+          ],
+          "v_at_end": 0.916,
+          "v_min_last_1m": 0.931,
+          "v_cmd_min_last_1m": 0.755,
+          "slow_from_m": 0.069,
+          "paint_off_rel_m": -0.0306,
+          "stop_rel_m": 0.484,
+          "peak_decel": 1.0
+        },
+        {
+          "line": [
+            [
+              12.0,
+              4.0
+            ],
+            [
+              0.0,
+              4.0
+            ]
+          ],
+          "v_at_end": 0.909,
+          "v_min_last_1m": 0.924,
+          "v_cmd_min_last_1m": 0.746,
+          "slow_from_m": 0.065,
+          "paint_off_rel_m": -0.0271,
+          "stop_rel_m": 0.478,
+          "peak_decel": 1.01
+        },
+        {
+          "line": [
+            [
+              0.0,
+              8.0
+            ],
+            [
+              12.0,
+              8.0
+            ]
+          ],
+          "v_at_end": 0.911,
+          "v_min_last_1m": 0.927,
+          "v_cmd_min_last_1m": 0.743,
+          "slow_from_m": 0.061,
+          "paint_off_rel_m": -0.0418,
+          "stop_rel_m": 0.482,
+          "peak_decel": 1.0
+        }
+      ],
+      "stray_paint_m": 0.0,
+      "stray_examples": []
+    },
+    "field-1.0-3": {
+      "state": [
+        "DONE",
+        ""
+      ],
+      "seconds": 94.76,
+      "speed": 1.0,
+      "ramp": true,
+      "ends": [
+        {
+          "line": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              12.0,
+              0.0
+            ]
+          ],
+          "v_at_end": 0.915,
+          "v_min_last_1m": 0.93,
+          "v_cmd_min_last_1m": 0.744,
+          "slow_from_m": 0.059,
+          "paint_off_rel_m": -0.021,
+          "stop_rel_m": 0.47,
+          "peak_decel": 1.0
+        },
+        {
+          "line": [
+            [
+              12.0,
+              4.0
+            ],
+            [
+              0.0,
+              4.0
+            ]
+          ],
+          "v_at_end": 0.912,
+          "v_min_last_1m": 0.926,
+          "v_cmd_min_last_1m": 0.749,
+          "slow_from_m": 0.066,
+          "paint_off_rel_m": -0.0279,
+          "stop_rel_m": 0.476,
+          "peak_decel": 1.0
+        },
+        {
+          "line": [
+            [
+              0.0,
+              8.0
+            ],
+            [
+              12.0,
+              8.0
+            ]
+          ],
+          "v_at_end": 0.91,
+          "v_min_last_1m": 0.925,
+          "v_cmd_min_last_1m": 0.745,
+          "slow_from_m": 0.062,
+          "paint_off_rel_m": -0.0241,
+          "stop_rel_m": 0.475,
+          "peak_decel": 1.01
+        }
+      ],
+      "stray_paint_m": 0.0,
+      "stray_examples": []
+    },
+    "route-0.5-1": {
+      "state": [
+        "DONE",
+        ""
+      ],
+      "seconds": 98.5,
+      "speed": 0.5,
+      "ramp": true,
+      "ends": [
+        {
+          "line": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              10.0,
+              0.0
+            ]
+          ],
+          "v_at_end": 0.497,
+          "v_min_last_1m": 0.498,
+          "v_cmd_min_last_1m": 0.5,
+          "slow_from_m": 0.0,
+          "paint_off_rel_m": -0.0161,
+          "stop_rel_m": 0.42,
+          "peak_decel": 0.64
+        },
+        {
+          "line": [
+            [
+              10.0,
+              0.0
+            ],
+            [
+              10.0,
+              6.0
+            ]
+          ],
+          "v_at_end": 0.5,
+          "v_min_last_1m": 0.497,
+          "v_cmd_min_last_1m": 0.5,
+          "slow_from_m": 0.0,
+          "paint_off_rel_m": -0.0196,
+          "stop_rel_m": 0.416,
+          "peak_decel": 0.65
+        },
+        {
+          "line": [
+            [
+              10.0,
+              6.0
+            ],
+            [
+              0.0,
+              6.0
+            ]
+          ],
+          "v_at_end": 0.501,
+          "v_min_last_1m": 0.498,
+          "v_cmd_min_last_1m": 0.5,
+          "slow_from_m": 0.0,
+          "paint_off_rel_m": -0.0311,
+          "stop_rel_m": 0.406,
+          "peak_decel": 0.63
+        }
+      ],
+      "stray_paint_m": 0.0,
+      "stray_examples": []
+    },
+    "route-0.5-2": {
+      "state": [
+        "DONE",
+        ""
+      ],
+      "seconds": 100.98,
+      "speed": 0.5,
+      "ramp": true,
+      "ends": [
+        {
+          "line": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              10.0,
+              0.0
+            ]
+          ],
+          "v_at_end": 0.5,
+          "v_min_last_1m": 0.498,
+          "v_cmd_min_last_1m": 0.5,
+          "slow_from_m": 0.0,
+          "paint_off_rel_m": -0.0098,
+          "stop_rel_m": 0.407,
+          "peak_decel": 0.61
+        },
+        {
+          "line": [
+            [
+              10.0,
+              0.0
+            ],
+            [
+              10.0,
+              6.0
+            ]
+          ],
+          "v_at_end": 0.499,
+          "v_min_last_1m": 0.497,
+          "v_cmd_min_last_1m": 0.5,
+          "slow_from_m": 0.0,
+          "paint_off_rel_m": -0.0066,
+          "stop_rel_m": 0.431,
+          "peak_decel": 0.63
+        },
+        {
+          "line": [
+            [
+              10.0,
+              6.0
+            ],
+            [
+              0.0,
+              6.0
+            ]
+          ],
+          "v_at_end": 0.499,
+          "v_min_last_1m": 0.498,
+          "v_cmd_min_last_1m": 0.5,
+          "slow_from_m": 0.0,
+          "paint_off_rel_m": -0.0174,
+          "stop_rel_m": 0.422,
+          "peak_decel": 0.59
+        }
+      ],
+      "stray_paint_m": 0.0,
+      "stray_examples": []
+    },
+    "route-0.5-3": {
+      "state": [
+        "DONE",
+        ""
+      ],
+      "seconds": 98.8,
+      "speed": 0.5,
+      "ramp": true,
+      "ends": [
+        {
+          "line": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              10.0,
+              0.0
+            ]
+          ],
+          "v_at_end": 0.5,
+          "v_min_last_1m": 0.498,
+          "v_cmd_min_last_1m": 0.5,
+          "slow_from_m": 0.0,
+          "paint_off_rel_m": -0.0176,
+          "stop_rel_m": 0.427,
+          "peak_decel": 0.64
+        },
+        {
+          "line": [
+            [
+              10.0,
+              0.0
+            ],
+            [
+              10.0,
+              6.0
+            ]
+          ],
+          "v_at_end": 0.502,
+          "v_min_last_1m": 0.497,
+          "v_cmd_min_last_1m": 0.5,
+          "slow_from_m": 0.0,
+          "paint_off_rel_m": -0.0286,
+          "stop_rel_m": 0.408,
+          "peak_decel": 0.6
+        },
+        {
+          "line": [
+            [
+              10.0,
+              6.0
+            ],
+            [
+              0.0,
+              6.0
+            ]
+          ],
+          "v_at_end": 0.501,
+          "v_min_last_1m": 0.497,
+          "v_cmd_min_last_1m": 0.5,
+          "slow_from_m": 0.0,
+          "paint_off_rel_m": -0.0125,
+          "stop_rel_m": 0.434,
+          "peak_decel": 0.65
+        }
+      ],
+      "stray_paint_m": 0.0,
+      "stray_examples": []
+    },
+    "route-0.8-1": {
+      "state": [
+        "DONE",
+        ""
+      ],
+      "seconds": 77.46000000000001,
+      "speed": 0.8,
+      "ramp": true,
+      "ends": [
+        {
+          "line": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              10.0,
+              0.0
+            ]
+          ],
+          "v_at_end": 0.783,
+          "v_min_last_1m": 0.789,
+          "v_cmd_min_last_1m": 0.687,
+          "slow_from_m": 0.0,
+          "paint_off_rel_m": -0.0228,
+          "stop_rel_m": 0.436,
+          "peak_decel": 0.97
+        },
+        {
+          "line": [
+            [
+              10.0,
+              0.0
+            ],
+            [
+              10.0,
+              6.0
+            ]
+          ],
+          "v_at_end": 0.78,
+          "v_min_last_1m": 0.788,
+          "v_cmd_min_last_1m": 0.673,
+          "slow_from_m": 0.0,
+          "paint_off_rel_m": -0.0323,
+          "stop_rel_m": 0.425,
+          "peak_decel": 0.94
+        },
+        {
+          "line": [
+            [
+              10.0,
+              6.0
+            ],
+            [
+              0.0,
+              6.0
+            ]
+          ],
+          "v_at_end": 0.784,
+          "v_min_last_1m": 0.791,
+          "v_cmd_min_last_1m": 0.677,
+          "slow_from_m": 0.0,
+          "paint_off_rel_m": -0.0406,
+          "stop_rel_m": 0.422,
+          "peak_decel": 0.96
+        }
+      ],
+      "stray_paint_m": 0.0,
+      "stray_examples": []
+    },
+    "route-0.8-2": {
+      "state": [
+        "DONE",
+        ""
+      ],
+      "seconds": 79.5,
+      "speed": 0.8,
+      "ramp": true,
+      "ends": [
+        {
+          "line": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              10.0,
+              0.0
+            ]
+          ],
+          "v_at_end": 0.788,
+          "v_min_last_1m": 0.794,
+          "v_cmd_min_last_1m": 0.688,
+          "slow_from_m": 0.0,
+          "paint_off_rel_m": -0.0237,
+          "stop_rel_m": 0.429,
+          "peak_decel": 0.95
+        },
+        {
+          "line": [
+            [
+              10.0,
+              0.0
+            ],
+            [
+              10.0,
+              6.0
+            ]
+          ],
+          "v_at_end": 0.785,
+          "v_min_last_1m": 0.791,
+          "v_cmd_min_last_1m": 0.683,
+          "slow_from_m": 0.0,
+          "paint_off_rel_m": -0.0294,
+          "stop_rel_m": 0.434,
+          "peak_decel": 0.97
+        },
+        {
+          "line": [
+            [
+              10.0,
+              6.0
+            ],
+            [
+              0.0,
+              6.0
+            ]
+          ],
+          "v_at_end": 0.786,
+          "v_min_last_1m": 0.793,
+          "v_cmd_min_last_1m": 0.685,
+          "slow_from_m": 0.0,
+          "paint_off_rel_m": -0.0253,
+          "stop_rel_m": 0.426,
+          "peak_decel": 0.96
+        }
+      ],
+      "stray_paint_m": 0.0,
+      "stray_examples": []
+    },
+    "route-0.8-3": {
+      "state": [
+        "DONE",
+        ""
+      ],
+      "seconds": 79.32000000000001,
+      "speed": 0.8,
+      "ramp": true,
+      "ends": [
+        {
+          "line": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              10.0,
+              0.0
+            ]
+          ],
+          "v_at_end": 0.785,
+          "v_min_last_1m": 0.792,
+          "v_cmd_min_last_1m": 0.682,
+          "slow_from_m": 0.0,
+          "paint_off_rel_m": -0.0196,
+          "stop_rel_m": 0.455,
+          "peak_decel": 0.96
+        },
+        {
+          "line": [
+            [
+              10.0,
+              0.0
+            ],
+            [
+              10.0,
+              6.0
+            ]
+          ],
+          "v_at_end": 0.79,
+          "v_min_last_1m": 0.795,
+          "v_cmd_min_last_1m": 0.686,
+          "slow_from_m": 0.0,
+          "paint_off_rel_m": -0.0245,
+          "stop_rel_m": 0.424,
+          "peak_decel": 0.96
+        },
+        {
+          "line": [
+            [
+              10.0,
+              6.0
+            ],
+            [
+              0.0,
+              6.0
+            ]
+          ],
+          "v_at_end": 0.783,
+          "v_min_last_1m": 0.79,
+          "v_cmd_min_last_1m": 0.677,
+          "slow_from_m": 0.0,
+          "paint_off_rel_m": -0.0186,
+          "stop_rel_m": 0.431,
+          "peak_decel": 0.97
+        }
+      ],
+      "stray_paint_m": 0.0,
+      "stray_examples": []
+    },
+    "route-1.0-1": {
+      "state": [
+        "DONE",
+        ""
+      ],
+      "seconds": 70.8,
+      "speed": 1.0,
+      "ramp": true,
+      "ends": [
+        {
+          "line": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              10.0,
+              0.0
+            ]
+          ],
+          "v_at_end": 0.915,
+          "v_min_last_1m": 0.93,
+          "v_cmd_min_last_1m": 0.757,
+          "slow_from_m": 0.072,
+          "paint_off_rel_m": -0.0345,
+          "stop_rel_m": 0.49,
+          "peak_decel": 1.0
+        },
+        {
+          "line": [
+            [
+              10.0,
+              0.0
+            ],
+            [
+              10.0,
+              6.0
+            ]
+          ],
+          "v_at_end": 0.908,
+          "v_min_last_1m": 0.924,
+          "v_cmd_min_last_1m": 0.743,
+          "slow_from_m": 0.058,
+          "paint_off_rel_m": -0.0197,
+          "stop_rel_m": 0.489,
+          "peak_decel": 1.0
+        },
+        {
+          "line": [
+            [
+              10.0,
+              6.0
+            ],
+            [
+              0.0,
+              6.0
+            ]
+          ],
+          "v_at_end": 0.914,
+          "v_min_last_1m": 0.93,
+          "v_cmd_min_last_1m": 0.751,
+          "slow_from_m": 0.045,
+          "paint_off_rel_m": -0.0257,
+          "stop_rel_m": 0.466,
+          "peak_decel": 1.0
+        }
+      ],
+      "stray_paint_m": 0.0,
+      "stray_examples": []
+    },
+    "route-1.0-2": {
+      "state": [
+        "DONE",
+        ""
+      ],
+      "seconds": 71.76,
+      "speed": 1.0,
+      "ramp": true,
+      "ends": [
+        {
+          "line": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              10.0,
+              0.0
+            ]
+          ],
+          "v_at_end": 0.909,
+          "v_min_last_1m": 0.924,
+          "v_cmd_min_last_1m": 0.744,
+          "slow_from_m": 0.058,
+          "paint_off_rel_m": -0.0203,
+          "stop_rel_m": 0.494,
+          "peak_decel": 1.0
+        },
+        {
+          "line": [
+            [
+              10.0,
+              0.0
+            ],
+            [
+              10.0,
+              6.0
+            ]
+          ],
+          "v_at_end": 0.918,
+          "v_min_last_1m": 0.932,
+          "v_cmd_min_last_1m": 0.755,
+          "slow_from_m": 0.075,
+          "paint_off_rel_m": -0.037,
+          "stop_rel_m": 0.468,
+          "peak_decel": 0.99
+        },
+        {
+          "line": [
+            [
+              10.0,
+              6.0
+            ],
+            [
+              0.0,
+              6.0
+            ]
+          ],
+          "v_at_end": 0.907,
+          "v_min_last_1m": 0.922,
+          "v_cmd_min_last_1m": 0.742,
+          "slow_from_m": 0.058,
+          "paint_off_rel_m": -0.0202,
+          "stop_rel_m": 0.475,
+          "peak_decel": 0.99
+        }
+      ],
+      "stray_paint_m": 0.0,
+      "stray_examples": []
+    },
+    "route-1.0-3": {
+      "state": [
+        "DONE",
+        ""
+      ],
+      "seconds": 71.16,
+      "speed": 1.0,
+      "ramp": true,
+      "ends": [
+        {
+          "line": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              10.0,
+              0.0
+            ]
+          ],
+          "v_at_end": 0.908,
+          "v_min_last_1m": 0.924,
+          "v_cmd_min_last_1m": 0.743,
+          "slow_from_m": 0.057,
+          "paint_off_rel_m": -0.0191,
+          "stop_rel_m": 0.473,
+          "peak_decel": 1.0
+        },
+        {
+          "line": [
+            [
+              10.0,
+              0.0
+            ],
+            [
+              10.0,
+              6.0
+            ]
+          ],
+          "v_at_end": 0.921,
+          "v_min_last_1m": 0.936,
+          "v_cmd_min_last_1m": 0.753,
+          "slow_from_m": 0.054,
+          "paint_off_rel_m": -0.0348,
+          "stop_rel_m": 0.467,
+          "peak_decel": 0.99
+        },
+        {
+          "line": [
+            [
+              10.0,
+              6.0
+            ],
+            [
+              0.0,
+              6.0
+            ]
+          ],
+          "v_at_end": 0.923,
+          "v_min_last_1m": 0.938,
+          "v_cmd_min_last_1m": 0.76,
+          "slow_from_m": 0.056,
+          "paint_off_rel_m": -0.0373,
+          "stop_rel_m": 0.47,
+          "peak_decel": 1.0
+        }
+      ],
+      "stray_paint_m": 0.0,
+      "stray_examples": []
+    },
+    "route_arc-0.5-1": {
+      "state": [
+        "DONE",
+        ""
+      ],
+      "seconds": 88.9,
+      "speed": 0.5,
+      "ramp": true,
+      "ends": [
+        {
+          "line": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              10.0,
+              0.0
+            ]
+          ],
+          "v_at_end": 0.446,
+          "v_min_last_1m": 0.446,
+          "v_cmd_min_last_1m": 0.447,
+          "slow_from_m": 0.198,
+          "paint_off_rel_m": -0.0078,
+          "stop_rel_m": 0.484,
+          "peak_decel": 0.24
+        },
+        {
+          "line": [
+            [
+              10.0,
+              0.0
+            ],
+            [
+              10.0,
+              6.0
+            ]
+          ],
+          "v_at_end": 0.448,
+          "v_min_last_1m": 0.448,
+          "v_cmd_min_last_1m": 0.447,
+          "slow_from_m": 0.217,
+          "paint_off_rel_m": -0.0256,
+          "stop_rel_m": 0.467,
+          "peak_decel": 0.24
+        },
+        {
+          "line": [
+            [
+              10.0,
+              6.0
+            ],
+            [
+              0.0,
+              6.0
+            ]
+          ],
+          "v_at_end": 0.498,
+          "v_min_last_1m": 0.498,
+          "v_cmd_min_last_1m": 0.5,
+          "slow_from_m": 0.0,
+          "paint_off_rel_m": -0.0207,
+          "stop_rel_m": 0.423,
+          "peak_decel": 0.63
+        }
+      ],
+      "stray_paint_m": 0.279,
+      "stray_examples": [
+        [
+          9.81,
+          5.97,
+          0.035
+        ],
+        [
+          9.78,
+          5.97,
+          0.034
+        ],
+        [
+          9.75,
+          5.97,
+          0.034
+        ],
+        [
+          9.72,
+          5.97,
+          0.033
+        ],
+        [
+          9.69,
+          5.97,
+          0.033
+        ],
+        [
+          9.66,
+          5.97,
+          0.032
+        ],
+        [
+          9.63,
+          5.97,
+          0.032
+        ],
+        [
+          9.6,
+          5.97,
+          0.031
+        ]
+      ]
+    },
+    "route_arc-0.5-2": {
+      "state": [
+        "DONE",
+        ""
+      ],
+      "seconds": 89.04,
+      "speed": 0.5,
+      "ramp": true,
+      "ends": [
+        {
+          "line": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              10.0,
+              0.0
+            ]
+          ],
+          "v_at_end": 0.447,
+          "v_min_last_1m": 0.448,
+          "v_cmd_min_last_1m": 0.447,
+          "slow_from_m": 0.201,
+          "paint_off_rel_m": -0.011,
+          "stop_rel_m": 0.484,
+          "peak_decel": 0.24
+        },
+        {
+          "line": [
+            [
+              10.0,
+              0.0
+            ],
+            [
+              10.0,
+              6.0
+            ]
+          ],
+          "v_at_end": 0.448,
+          "v_min_last_1m": 0.449,
+          "v_cmd_min_last_1m": 0.447,
+          "slow_from_m": 0.198,
+          "paint_off_rel_m": -0.0062,
+          "stop_rel_m": 0.474,
+          "peak_decel": 0.23
+        },
+        {
+          "line": [
+            [
+              10.0,
+              6.0
+            ],
+            [
+              0.0,
+              6.0
+            ]
+          ],
+          "v_at_end": 0.499,
+          "v_min_last_1m": 0.498,
+          "v_cmd_min_last_1m": 0.5,
+          "slow_from_m": 0.0,
+          "paint_off_rel_m": -0.0205,
+          "stop_rel_m": 0.414,
+          "peak_decel": 0.65
+        }
+      ],
+      "stray_paint_m": 0.0,
+      "stray_examples": []
+    },
+    "route_arc-0.5-3": {
+      "state": [
+        "DONE",
+        ""
+      ],
+      "seconds": 88.86,
+      "speed": 0.5,
+      "ramp": true,
+      "ends": [
+        {
+          "line": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              10.0,
+              0.0
+            ]
+          ],
+          "v_at_end": 0.447,
+          "v_min_last_1m": 0.448,
+          "v_cmd_min_last_1m": 0.447,
+          "slow_from_m": 0.2,
+          "paint_off_rel_m": -0.0197,
+          "stop_rel_m": 0.482,
+          "peak_decel": 0.24
+        },
+        {
+          "line": [
+            [
+              10.0,
+              0.0
+            ],
+            [
+              10.0,
+              6.0
+            ]
+          ],
+          "v_at_end": 0.448,
+          "v_min_last_1m": 0.448,
+          "v_cmd_min_last_1m": 0.447,
+          "slow_from_m": 0.195,
+          "paint_off_rel_m": -0.0138,
+          "stop_rel_m": 0.478,
+          "peak_decel": 0.24
+        },
+        {
+          "line": [
+            [
+              10.0,
+              6.0
+            ],
+            [
+              0.0,
+              6.0
+            ]
+          ],
+          "v_at_end": 0.499,
+          "v_min_last_1m": 0.497,
+          "v_cmd_min_last_1m": 0.5,
+          "slow_from_m": 0.0,
+          "paint_off_rel_m": -0.0094,
+          "stop_rel_m": 0.431,
+          "peak_decel": 0.63
+        }
+      ],
+      "stray_paint_m": 0.0,
+      "stray_examples": []
+    },
+    "route_arc-0.8-1": {
+      "state": [
+        "DONE",
+        ""
+      ],
+      "seconds": 68.18,
+      "speed": 0.8,
+      "ramp": true,
+      "ends": [
+        {
+          "line": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              10.0,
+              0.0
+            ]
+          ],
+          "v_at_end": 0.446,
+          "v_min_last_1m": 0.446,
+          "v_cmd_min_last_1m": 0.447,
+          "slow_from_m": 0.62,
+          "paint_off_rel_m": -0.0108,
+          "stop_rel_m": 0.477,
+          "peak_decel": 0.46
+        },
+        {
+          "line": [
+            [
+              10.0,
+              0.0
+            ],
+            [
+              10.0,
+              6.0
+            ]
+          ],
+          "v_at_end": 0.448,
+          "v_min_last_1m": 0.448,
+          "v_cmd_min_last_1m": 0.447,
+          "slow_from_m": 0.633,
+          "paint_off_rel_m": -0.0112,
+          "stop_rel_m": 0.48,
+          "peak_decel": 0.45
+        },
+        {
+          "line": [
+            [
+              10.0,
+              6.0
+            ],
+            [
+              0.0,
+              6.0
+            ]
+          ],
+          "v_at_end": 0.784,
+          "v_min_last_1m": 0.791,
+          "v_cmd_min_last_1m": 0.684,
+          "slow_from_m": 0.0,
+          "paint_off_rel_m": -0.0195,
+          "stop_rel_m": 0.44,
+          "peak_decel": 0.98
+        }
+      ],
+      "stray_paint_m": 0.0,
+      "stray_examples": []
+    },
+    "route_arc-0.8-2": {
+      "state": [
+        "DONE",
+        ""
+      ],
+      "seconds": 68.2,
+      "speed": 0.8,
+      "ramp": true,
+      "ends": [
+        {
+          "line": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              10.0,
+              0.0
+            ]
+          ],
+          "v_at_end": 0.447,
+          "v_min_last_1m": 0.448,
+          "v_cmd_min_last_1m": 0.447,
+          "slow_from_m": 0.616,
+          "paint_off_rel_m": -0.0092,
+          "stop_rel_m": 0.488,
+          "peak_decel": 0.47
+        },
+        {
+          "line": [
+            [
+              10.0,
+              0.0
+            ],
+            [
+              10.0,
+              6.0
+            ]
+          ],
+          "v_at_end": 0.448,
+          "v_min_last_1m": 0.449,
+          "v_cmd_min_last_1m": 0.447,
+          "slow_from_m": 0.642,
+          "paint_off_rel_m": -0.0098,
+          "stop_rel_m": 0.476,
+          "peak_decel": 0.45
+        },
+        {
+          "line": [
+            [
+              10.0,
+              6.0
+            ],
+            [
+              0.0,
+              6.0
+            ]
+          ],
+          "v_at_end": 0.781,
+          "v_min_last_1m": 0.788,
+          "v_cmd_min_last_1m": 0.678,
+          "slow_from_m": 0.0,
+          "paint_off_rel_m": -0.0227,
+          "stop_rel_m": 0.446,
+          "peak_decel": 0.99
+        }
+      ],
+      "stray_paint_m": 0.0,
+      "stray_examples": []
+    },
+    "route_arc-0.8-3": {
+      "state": [
+        "DONE",
+        ""
+      ],
+      "seconds": 67.9,
+      "speed": 0.8,
+      "ramp": true,
+      "ends": [
+        {
+          "line": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              10.0,
+              0.0
+            ]
+          ],
+          "v_at_end": 0.448,
+          "v_min_last_1m": 0.448,
+          "v_cmd_min_last_1m": 0.447,
+          "slow_from_m": 0.63,
+          "paint_off_rel_m": -0.0172,
+          "stop_rel_m": 0.48,
+          "peak_decel": 0.44
+        },
+        {
+          "line": [
+            [
+              10.0,
+              0.0
+            ],
+            [
+              10.0,
+              6.0
+            ]
+          ],
+          "v_at_end": 0.448,
+          "v_min_last_1m": 0.449,
+          "v_cmd_min_last_1m": 0.447,
+          "slow_from_m": 0.652,
+          "paint_off_rel_m": -0.0255,
+          "stop_rel_m": 0.47,
+          "peak_decel": 0.44
+        },
+        {
+          "line": [
+            [
+              10.0,
+              6.0
+            ],
+            [
+              0.0,
+              6.0
+            ]
+          ],
+          "v_at_end": 0.778,
+          "v_min_last_1m": 0.785,
+          "v_cmd_min_last_1m": 0.674,
+          "slow_from_m": 0.0,
+          "paint_off_rel_m": -0.0383,
+          "stop_rel_m": 0.427,
+          "peak_decel": 0.96
+        }
+      ],
+      "stray_paint_m": 0.0,
+      "stray_examples": []
+    },
+    "route_arc-1.0-1": {
+      "state": [
+        "DONE",
+        ""
+      ],
+      "seconds": 61.879999999999995,
+      "speed": 1.0,
+      "ramp": true,
+      "ends": [
+        {
+          "line": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              10.0,
+              0.0
+            ]
+          ],
+          "v_at_end": 0.445,
+          "v_min_last_1m": 0.446,
+          "v_cmd_min_last_1m": 0.447,
+          "slow_from_m": 0.993,
+          "paint_off_rel_m": -0.0147,
+          "stop_rel_m": 0.481,
+          "peak_decel": 0.46
+        },
+        {
+          "line": [
+            [
+              10.0,
+              0.0
+            ],
+            [
+              10.0,
+              6.0
+            ]
+          ],
+          "v_at_end": 0.448,
+          "v_min_last_1m": 0.448,
+          "v_cmd_min_last_1m": 0.447,
+          "slow_from_m": 0.994,
+          "paint_off_rel_m": -0.0165,
+          "stop_rel_m": 0.472,
+          "peak_decel": 0.47
+        },
+        {
+          "line": [
+            [
+              10.0,
+              6.0
+            ],
+            [
+              0.0,
+              6.0
+            ]
+          ],
+          "v_at_end": 0.909,
+          "v_min_last_1m": 0.924,
+          "v_cmd_min_last_1m": 0.747,
+          "slow_from_m": 0.058,
+          "paint_off_rel_m": -0.0195,
+          "stop_rel_m": 0.488,
+          "peak_decel": 1.0
+        }
+      ],
+      "stray_paint_m": 0.398,
+      "stray_examples": [
+        [
+          9.69,
+          5.97,
+          0.03
+        ],
+        [
+          9.65,
+          5.97,
+          0.031
+        ],
+        [
+          9.61,
+          5.97,
+          0.031
+        ],
+        [
+          9.57,
+          5.97,
+          0.032
+        ],
+        [
+          9.53,
+          5.97,
+          0.032
+        ],
+        [
+          9.49,
+          5.97,
+          0.032
+        ],
+        [
+          9.45,
+          5.97,
+          0.032
+        ],
+        [
+          9.41,
+          5.97,
+          0.032
+        ]
+      ]
+    },
+    "route_arc-1.0-2": {
+      "state": [
+        "DONE",
+        ""
+      ],
+      "seconds": 61.980000000000004,
+      "speed": 1.0,
+      "ramp": true,
+      "ends": [
+        {
+          "line": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              10.0,
+              0.0
+            ]
+          ],
+          "v_at_end": 0.447,
+          "v_min_last_1m": 0.448,
+          "v_cmd_min_last_1m": 0.447,
+          "slow_from_m": 1.0,
+          "paint_off_rel_m": -0.0046,
+          "stop_rel_m": 0.49,
+          "peak_decel": 0.48
+        },
+        {
+          "line": [
+            [
+              10.0,
+              0.0
+            ],
+            [
+              10.0,
+              6.0
+            ]
+          ],
+          "v_at_end": 0.448,
+          "v_min_last_1m": 0.449,
+          "v_cmd_min_last_1m": 0.447,
+          "slow_from_m": 0.995,
+          "paint_off_rel_m": -0.0184,
+          "stop_rel_m": 0.475,
+          "peak_decel": 0.46
+        },
+        {
+          "line": [
+            [
+              10.0,
+              6.0
+            ],
+            [
+              0.0,
+              6.0
+            ]
+          ],
+          "v_at_end": 0.901,
+          "v_min_last_1m": 0.916,
+          "v_cmd_min_last_1m": 0.736,
+          "slow_from_m": 0.079,
+          "paint_off_rel_m": -0.0403,
+          "stop_rel_m": 0.48,
+          "peak_decel": 1.0
+        }
+      ],
+      "stray_paint_m": 0.0,
+      "stray_examples": []
+    },
+    "route_arc-1.0-3": {
+      "state": [
+        "DONE",
+        ""
+      ],
+      "seconds": 61.64,
+      "speed": 1.0,
+      "ramp": true,
+      "ends": [
+        {
+          "line": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              10.0,
+              0.0
+            ]
+          ],
+          "v_at_end": 0.447,
+          "v_min_last_1m": 0.448,
+          "v_cmd_min_last_1m": 0.447,
+          "slow_from_m": 0.998,
+          "paint_off_rel_m": -0.0138,
+          "stop_rel_m": 0.482,
+          "peak_decel": 0.47
+        },
+        {
+          "line": [
+            [
+              10.0,
+              0.0
+            ],
+            [
+              10.0,
+              6.0
+            ]
+          ],
+          "v_at_end": 0.448,
+          "v_min_last_1m": 0.449,
+          "v_cmd_min_last_1m": 0.447,
+          "slow_from_m": 0.989,
+          "paint_off_rel_m": -0.0091,
+          "stop_rel_m": 0.477,
+          "peak_decel": 0.48
+        },
+        {
+          "line": [
+            [
+              10.0,
+              6.0
+            ],
+            [
+              0.0,
+              6.0
+            ]
+          ],
+          "v_at_end": 0.904,
+          "v_min_last_1m": 0.919,
+          "v_cmd_min_last_1m": 0.741,
+          "slow_from_m": 0.083,
+          "paint_off_rel_m": -0.026,
+          "stop_rel_m": 0.472,
+          "peak_decel": 1.0
+        }
+      ],
+      "stray_paint_m": 0.0,
+      "stray_examples": []
+    }
+  },
+  "validation": {
+    "base_commit": "501a763eb2d2f89b76e1f25797e8b61fb25bef05",
+    "date": "2026-10-05",
+    "speeds": [
+      0.5,
+      0.8,
+      1.0
+    ],
+    "seeds": [
+      1,
+      2,
+      3
+    ],
+    "mutations": [
+      {
+        "name": "wrong_brake_delay",
+        "killed": true,
+        "summary": "2 failed, 17 passed in 0.08s"
+      },
+      {
+        "name": "wrong_decel_cap",
+        "killed": true,
+        "summary": "2 failed, 17 passed in 0.10s"
+      },
+      {
+        "name": "early_zero",
+        "killed": true,
+        "summary": "3 failed, 16 passed in 0.08s"
+      },
+      {
+        "name": "no_run_out",
+        "killed": true,
+        "summary": "6 failed, 13 passed in 0.07s"
+      },
+      {
+        "name": "transit_paints",
+        "killed": true,
+        "summary": "6 failed, 13 passed in 0.07s"
+      },
+      {
+        "name": "labels_overwrite",
+        "killed": true,
+        "summary": "6 failed, 13 passed in 0.07s"
+      },
+      {
+        "name": "tail_endpoint",
+        "killed": true,
+        "summary": "2 failed, 17 passed in 0.06s"
+      },
+      {
+        "name": "lost_resume_boundary",
+        "killed": true,
+        "summary": "1 failed, 18 passed in 0.09s"
+      },
+      {
+        "name": "lost_span_key",
+        "killed": true,
+        "summary": "1 failed, 18 passed in 0.05s"
+      },
+      {
+        "name": "no_field_run_out",
+        "killed": true,
+        "summary": "3 failed, 16 passed in 0.05s"
+      },
+      {
+        "name": "lost_serialized_end",
+        "killed": true,
+        "summary": "6 failed, 13 passed in 0.05s"
+      },
+      {
+        "name": "lost_record_end",
+        "killed": true,
+        "summary": "1 failed, 18 passed in 0.06s"
+      }
+    ]
+  }
+}

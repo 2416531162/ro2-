@@ -1,0 +1,14 @@
+# 瑞芬 HDA536T 动态倾角传感器（Gen5 的 IMU），与两台欧艾迪驱动器挂同一条 CAN（500K）。
+# 共享配置 drive.type = differential（robot_core/robot_gen5.json）时，deployment/run_component.sh 的 imu 组件
+# 启动本驱动（旧车是 imu_filter_madgwick）。上车前先用 hda536t_setup.py gen5 设好传感器，见 README.md。
+hda536t_imu:
+  ros__parameters:
+    can_channel: can0
+    node_id: 5              # 传感器节点号（出厂 5）；数据帧 0x580+5 = 0x585，设置 0x605，不与驱动器的 1、2 冲突
+    pdo_id: 0               # 0：数据帧 ID 按 0x180/0x280/0x380/0x480/0x580 + 节点号都认；出厂定了别的就填那个
+    extended: false         # 本车是 C2（CAN2.0A 标准帧）：false；换成 C3（CAN2.0B 扩展帧）才改 true
+    stale_s: 0.1            # 陀螺帧到时，同一周期的角度帧、加速度帧不超过这么久才带上
+    invert_accel: false     # 车停在平地上 /imu 的 linear_acceleration.z 读成 −9.8 时改 true（传感器报的是重力方向）
+    # 外壳 X 箭头在车上朝哪（从上往下看逆时针为正）：0 朝车头、90 朝车左、-90 朝车右、180 朝车尾。
+    # 本车 2026-09-29 实测：垫高车头时变的是传感器横滚、且传感器右侧抬起，箭头朝车左 → 90
+    mount_yaw_deg: 90.0

@@ -1,0 +1,13 @@
+wheeltec_driver:
+  ros__parameters:
+    port: /dev/serial/by-id/usb-WCH.CN_USB_Single_Serial_0002-if00
+    baud: 115200
+    legacy_commands: false  # 唯一入口：带租约的 /follow|manual|navigation/command
+    receive_only: false
+    protocol: twist
+    protocol_confirmed: true
+    mode_byte: 0
+    steering_scale: 1.0
+    # 唯一的 odom -> base_link 动态 TF 发布者；重启驱动生效。
+    # base_link 与测量几何统一为后轴中心。不要再给它静态 map 父坐标。
+    publish_tf: true

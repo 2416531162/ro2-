@@ -1,0 +1,510 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#10151c">
+<title>Gen5 划线车 · 手动遥控</title>
+<style>
+:root{color-scheme:dark;--bg:#10151c;--panel:#181f29;--line:#303c4b;--muted:#a1afc0;--text:#ecf2f8;--mint:#69dec4;--amber:#f6c879;--red:#ff8c91;--radius:12px;font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-size:13px}button{font:inherit;color:inherit;cursor:pointer}button:disabled{opacity:.45;cursor:default}button,a{touch-action:manipulation}button:focus-visible,a:focus-visible{outline:2px solid var(--mint);outline-offset:3px}a{color:var(--mint)}
+.mono{font-family:"SFMono-Regular",Consolas,"Liberation Mono",monospace;font-variant-numeric:tabular-nums}.muted{color:var(--muted)}[hidden]{display:none!important}
+.app-header{min-height:64px;padding:10px 20px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--line);gap:12px;flex-wrap:wrap}.brand h1{font-size:16px;margin:0;font-weight:650}.brand p{font-size:11px;color:var(--muted);margin:4px 0 0}
+.header-right{display:flex;align-items:center;gap:14px;flex-wrap:wrap}.connection{display:flex;align-items:center;gap:8px;font-size:12px;white-space:nowrap}.status-dot{width:7px;height:7px;border-radius:50%;background:var(--amber)}.connection[data-status="live"] .status-dot{background:var(--mint)}.connection[data-status="offline"] .status-dot{background:var(--red)}
+.button{display:inline-flex;justify-content:center;align-items:center;gap:6px;min-height:34px;padding:7px 12px;border:1px solid var(--line);background:#1b232e;border-radius:7px;white-space:nowrap;text-decoration:none;color:var(--text)}.button:hover:not(:disabled){border-color:#65817f;background:#273740}
+.workspace{max-width:980px;margin:0 auto;padding:18px 16px 24px;display:grid;gap:14px}
+.metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.metric{border:1px solid var(--line);border-radius:var(--radius);background:var(--panel);padding:12px 14px;min-width:0}.metric-label{color:var(--muted);font-size:11px}.metric .value{font-size:19px;font-weight:500;margin-top:6px;overflow-wrap:anywhere}.metric-note{color:var(--muted);font-size:10px;margin-top:4px;line-height:1.5;overflow-wrap:anywhere}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:16px}.panel-heading{display:flex;justify-content:space-between;align-items:center;gap:10px;margin:0 0 12px;flex-wrap:wrap}.panel-heading h2{font-size:14px;font-weight:600;margin:0}
+.motion-lock{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 12px;border-left:3px solid var(--red);background:#38242c;color:#ffb4b7;border-radius:6px}.motion-lock strong{display:block;font-size:13px}.motion-lock p{margin:4px 0 0;font-size:11px;line-height:1.5;color:#f4c9cb}.motion-lock .button{flex-shrink:0;border-color:#b86770;background:#46282e;color:#ffe2e2;font-weight:600;white-space:normal;text-align:center}
+.dpad-container{display:flex;flex-direction:column;align-items:center;gap:9px;touch-action:none}.dpad-speed-bar{display:flex;gap:5px;width:100%;max-width:320px}.speed-btn,.steer-btn{flex:1;padding:6px;font-size:11px;border-radius:6px;border:1px solid var(--line);background:#18222d;color:var(--muted)}.speed-btn.active,.steer-btn.active{background:#233d39;border-color:var(--mint);color:var(--mint);font-weight:600}
+.dpad-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;width:100%;max-width:320px;touch-action:none}.dpad-btn{min-height:58px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;padding:6px 2px;border-radius:8px;border:1px solid #364858;background:#1a2734;font-size:12px;font-weight:600;touch-action:none!important;user-select:none!important;-webkit-user-select:none!important;-webkit-touch-callout:none!important;transition:transform .08s,background .1s}.dpad-btn .arrow{font-size:17px}.dpad-btn.pressed{transform:scale(.94);box-shadow:inset 0 2px 6px #0008}.dpad-btn.diagonal{background:#152731;border-color:#2a5057;color:#8be3d4}.dpad-btn.fwd{background:#193430;border-color:#2f685c;color:#7bf3d9}.dpad-btn.stop{background:#421d23;border-color:#8a323f;color:#ff98a0}.dpad-btn.rev{background:#262130;border-color:#4d3d5f;color:#cfb5ee}.dpad-btn.pressed:not(.stop){border-color:var(--mint);color:#fff}
+.dpad-hint{font-size:11px;color:var(--muted);text-align:center;line-height:1.6;max-width:420px}.manual-badge{font-size:11px;color:var(--muted)}
+.estop-row{display:flex;gap:10px;flex-wrap:wrap}.estop{flex:1;min-height:48px;border:1px solid #9f525a;background:#4a1f27;color:#ffd0d3;font-weight:700;font-size:15px;border-radius:8px}
+.toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);padding:12px 20px;background:#263a38;border:1px solid #537f75;color:#d6fff2;border-radius:9px;box-shadow:0 10px 30px #0005;z-index:10;max-width:calc(100% - 32px);font-size:12px}
+@media(max-width:720px){.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.motion-lock{flex-direction:column;align-items:stretch}}
+@media(max-width:420px){.app-header{padding:10px 16px}.workspace{padding:12px 16px 20px}.dpad-btn{min-height:62px;font-size:13px}}
+@media(prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+<header class="app-header">
+ <div class="brand"><h1>Gen5 划线车 · 手动遥控</h1><p>网页兜底遥控；日常操作用平板 app</p></div>
+ <div class="header-right">
+  <a class="button" href="/display" target="_blank" rel="noopener">车载屏幕</a>
+  <a class="button" id="screenMirrorBtn" href="#" target="_blank" rel="noopener">屏幕镜像（VNC）</a>
+  <div class="connection" id="connection" data-status="waiting" role="status"><span class="status-dot"></span><span id="connectionText">正在连接</span></div>
+ </div>
+</header>
+<main class="workspace">
+ <section class="metrics" aria-label="车辆状态">
+  <div class="metric"><div class="metric-label">运动模式</div><div class="value mono" id="modeVal">--</div><div class="metric-note" id="modeNote">等待底盘状态</div></div>
+  <div class="metric"><div class="metric-label">车速</div><div class="value mono"><span id="speedVal">--</span> <span class="muted" style="font-size:12px">m/s</span></div><div class="metric-note" id="chassisNote">--</div></div>
+  <div class="metric"><div class="metric-label">电池</div><div class="value mono" id="batteryVal">--</div><div class="metric-note" id="batteryNote">--</div></div>
+  <div class="metric"><div class="metric-label">RTK / 作业</div><div class="value mono" id="rtkVal">--</div><div class="metric-note" id="lineNote">--</div></div>
+ </section>
+
+ <div class="motion-lock" id="motionLock" role="status" aria-live="polite" hidden>
+  <div><strong id="motionLockTitle">急停已锁存</strong><p id="motionLockDetail">请现场检查车辆状态。</p></div>
+  <button class="button" id="motionResetBtn" type="button" disabled>确认复位停车锁存</button>
+ </div>
+
+ <section class="panel" id="manualPanel">
+  <div class="panel-heading"><h2>手动遥控</h2><span class="manual-badge" id="manualActiveBadge">按住方向键行驶，松手即停</span></div>
+  <div class="dpad-container">
+   <div class="dpad-speed-bar" id="speedBar">
+    <button class="speed-btn" data-speed="low">慢</button>
+    <button class="speed-btn active" data-speed="med">中</button>
+    <button class="speed-btn" data-speed="high">快</button>
+   </div>
+   <div class="dpad-speed-bar">
+    <button class="steer-btn" data-steer="gentle">缓转</button>
+    <button class="steer-btn active" data-steer="normal">常规</button>
+    <button class="steer-btn" data-steer="full">满舵</button>
+   </div>
+   <div class="dpad-grid">
+    <button class="dpad-btn diagonal" data-action="forward_left"><span class="arrow">↖</span><span>前左</span></button>
+    <button class="dpad-btn fwd" data-action="forward"><span class="arrow">▲</span><span>前进</span></button>
+    <button class="dpad-btn diagonal" data-action="forward_right"><span class="arrow">↗</span><span>前右</span></button>
+    <button class="dpad-btn" data-action="left"><span class="arrow">◀</span><span>左转</span></button>
+    <button class="dpad-btn stop" data-action="stop"><span class="arrow">⏹</span><span>刹车</span></button>
+    <button class="dpad-btn" data-action="right"><span class="arrow">▶</span><span>右转</span></button>
+    <button class="dpad-btn rev" data-action="reverse_left"><span class="arrow">↙</span><span>后左</span></button>
+    <button class="dpad-btn rev" data-action="reverse"><span class="arrow">▼</span><span>后退</span></button>
+    <button class="dpad-btn rev" data-action="reverse_right"><span class="arrow">↘</span><span>后右</span></button>
+   </div>
+   <div class="dpad-hint">短按点动约 0.6 秒，长按持续行驶，松手即停。键盘：WASD / 方向键，Q E 斜向，空格刹车。
+    手动指令会接管正在进行的作业；请在现场目视行驶方向，随时准备使用物理急停。</div>
+  </div>
+ </section>
+
+ <section class="panel">
+  <div class="panel-heading"><h2>急停</h2><span class="manual-badge">锁存停车，需现场检查后单独复位</span></div>
+  <div class="estop-row"><button class="estop" id="estopBtn" type="button">急停</button></div>
+ </section>
+</main>
+<div class="toast" id="toast" role="status" hidden></div>
+
+<script>
+'use strict';
+const $ = id => document.getElementById(id);
+const num = v => typeof v === 'number' && Number.isFinite(v);
+let latestState = null, lastReceived = 0, streamStatus = 'waiting', stream = null, toastTimer = 0;
+let motionResetBusy = false;
+
+function notify(message) {
+  $('toast').textContent = message; $('toast').hidden = false;
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => { $('toast').hidden = true; }, 2600);
+}
+
+const MOTION_MODE_TEXT = { IDLE: '待命', MANUAL: '手动', NAVIGATION: '自动作业', FOLLOW: '跟随', FAULT: '故障锁存', ESTOP: '急停锁存' };
+const MOTION_REASON_TEXT = {
+  command_timeout: '指令超时，运动模式已退出',
+  sensor_or_driver_fault: '传感器或底盘故障，运动模式已锁定',
+  operator_stop: '已手动停车', operator_select: '已选择运动模式',
+  manual_takeover: '手动遥控接管', reset: '故障已复位，等待重新选择',
+  reset_failed: '复位时底盘未就绪，继续锁存停车',
+  startup: '底盘启动中',
+};
+const DRIVER_READY_TEXT = {
+  feedback_stale: '底盘反馈超时', feedback_missing: '等待底盘反馈',
+  disconnected: '底盘连接断开', waiting_for_stationary_feedback: '等待车辆停稳',
+  startup_stop: '底盘启动停车期', receive_only: '底盘只读模式',
+  firmware_profile_unconfirmed: '底盘协议未确认',
+  serial_write_timeout: '底盘串口写超时，已保持零速',
+  serial_output_backlog: '底盘串口发送拥堵，已保持零速',
+};
+
+// ==================== 状态显示 ====================
+function updateStatus(d) {
+  const wheel = d.wheeltec || {};
+  const motion = wheel.motion || d.motion || {};
+  $('modeVal').textContent = MOTION_MODE_TEXT[motion.mode] || motion.mode || '--';
+  const faults = Array.isArray(motion.health_faults) ? motion.health_faults : [];
+  $('modeNote').textContent = [MOTION_REASON_TEXT[motion.reason] || motion.reason, faults.length ? '故障: ' + faults.join(', ') : '']
+    .filter(Boolean).join(' · ') || '—';
+  const vel = (wheel.telemetry && wheel.telemetry.velocity) || [];
+  $('speedVal').textContent = num(vel[0]) ? vel[0].toFixed(2) : '--';
+  const age = d.wheeltec_status_age_s;
+  $('chassisNote').textContent = !num(age) ? '底盘状态未收到' : age > 1 ? `底盘状态中断 ${age.toFixed(1)} 秒`
+    : wheel.ready && wheel.ready !== 'ready' ? (DRIVER_READY_TEXT[wheel.ready] || wheel.ready) : '底盘在线';
+  if (num(d.voltage) && d.voltage > 0) {
+    $('batteryVal').textContent = num(d.battery_pct) ? `${d.battery_pct}%` : '--';
+    $('batteryNote').textContent = `${d.voltage.toFixed(2)} V`;
+  }
+  const g = d.gnss || {};
+  $('rtkVal').textContent = g.rtk ? `${g.rtk}${num(g.sats) ? ' · ' + g.sats + ' 星' : ''}` : '--';
+  const line = d.line || {};
+  $('lineNote').textContent = [g.heading_ok ? '双天线测向有效' : (g.rtk ? '测向无效' : ''),
+    line.phase ? '作业 ' + line.phase : ''].filter(Boolean).join(' · ') || '—';
+}
+
+function motionResetStatus(d) {
+  const wheel = d && d.wheeltec;
+  const motion = (wheel && wheel.motion) || (d && d.motion) || {};
+  const locked = motion.mode === 'ESTOP' || motion.mode === 'FAULT';
+  const fresh = Boolean(wheel && wheel.motion && num(d.wheeltec_status_age_s) &&
+    d.wheeltec_status_age_s <= 1 && lastReceived && performance.now() - lastReceived < 2500);
+  const stopped = Boolean(wheel && wheel.stop_confirmed && wheel.motion.command &&
+    wheel.motion.command.vx === 0 && wheel.motion.command.wz === 0);
+  return { locked, ready: locked && fresh && stopped && motion.healthy === true &&
+    motion.waiting_stationary === false };
+}
+
+function updateMotionLockUI(d) {
+  const status = motionResetStatus(d);
+  $('motionLock').hidden = !status.locked;
+  document.querySelectorAll('.dpad-btn:not(.stop)').forEach(btn => { btn.disabled = status.locked; });
+  if (!status.locked) return;
+  const mode = d && d.wheeltec && d.wheeltec.motion && d.wheeltec.motion.mode;
+  $('motionLockTitle').textContent = mode === 'ESTOP' ? '急停已锁存' : '底盘故障已锁存';
+  $('motionLockDetail').textContent = !d || !num(d.wheeltec_status_age_s) ||
+    d.wheeltec_status_age_s > 1 || performance.now() - lastReceived >= 2500
+    ? '底盘状态已过期，不能复位；请检查连接。'
+    : !status.ready ? '等待底盘健康且确认停稳；请先现场检查停车原因。'
+    : '停车已确认。请现场检查周围安全后复位。';
+  $('motionResetBtn').disabled = !status.ready || motionResetBusy;
+}
+
+async function resetMotionLock() {
+  if (motionResetBusy || !motionResetStatus(latestState).ready) return;
+  if (!window.confirm('请确认你已在现场检查车辆和周围环境，车辆已停稳。复位可能重新使能底盘，不会自动继续作业。确认复位？')) return;
+  if (!motionResetStatus(latestState).ready) { notify('底盘状态已变化或过期，未发送复位请求。'); return; }
+  motionResetBusy = true;
+  updateMotionLockUI(latestState);
+  try {
+    const res = await fetch('/api/motion/reset', { method: 'POST', cache: 'no-store' });
+    const data = await res.json();
+    if (!res.ok || !data.ok) throw new Error(data.message || '底盘拒绝复位');
+    notify('停车锁存已复位。');
+  } catch (e) {
+    notify('复位失败: ' + e.message);
+  } finally {
+    motionResetBusy = false;
+    updateMotionLockUI(latestState);
+  }
+}
+
+async function emergencyStop() {
+  executeStop();
+  try {
+    const res = await fetch('/api/motion/stop', { method: 'POST', cache: 'no-store', keepalive: true });
+    const data = await res.json();
+    notify(res.ok && data.ok ? '急停已锁存' : '急停请求失败，请使用物理急停: ' + (data.message || res.status));
+  } catch (e) {
+    notify('急停请求失败，请使用物理急停: ' + e.message);
+  }
+}
+
+// ==================== 数据流 ====================
+function receiveFrame(event) {
+  try {
+    const d = JSON.parse(event.data);
+    if (!d || typeof d !== 'object' || Array.isArray(d)) throw new Error('bad payload');
+    latestState = d; lastReceived = performance.now(); streamStatus = 'live';
+    confirmStopStatus(d); updateStatus(d); updateMotionLockUI(d); updateConnection();
+  } catch (error) { streamStatus = 'invalid'; updateConnection(); }
+}
+function updateConnection() {
+  const age = lastReceived ? performance.now() - lastReceived : Infinity;
+  const live = streamStatus === 'live' && age < 3000;
+  $('connection').dataset.status = live ? 'live' : streamStatus === 'waiting' ? 'waiting' : 'offline';
+  $('connectionText').textContent = live ? '已连接' : streamStatus === 'invalid' ? '数据格式异常'
+    : streamStatus === 'waiting' ? '正在连接' : '连接中断 · 重连中';
+  updateMotionLockUI(latestState);
+}
+let streamReconnectTimer = null;
+function connectStream(force = false) {
+  if (stream) {
+    if (!force && stream.readyState === EventSource.OPEN) return;
+    try { stream.close(); } catch (e) {}
+    stream = null;
+  }
+  clearTimeout(streamReconnectTimer);
+  try {
+    stream = new EventSource('/api/stream');
+    stream.onopen = () => { streamStatus = 'live'; updateConnection(); };
+    stream.onmessage = receiveFrame;
+    stream.onerror = () => {
+      streamStatus = 'offline'; updateConnection();
+      try { stream.close(); } catch (e) {}
+      stream = null;
+      if (!streamReconnectTimer) streamReconnectTimer = setTimeout(() => { streamReconnectTimer = null; connectStream(true); }, 1200);
+    };
+  } catch (err) { streamStatus = 'offline'; updateConnection(); }
+}
+
+// ==================== 手动遥控（点动 + 长按持续开） ====================
+let currentSpeedTier = 'med';
+let currentSteerTier = 'normal';
+const ACTION_NAMES = {
+  forward_left: '↖ 前左', forward: '▲ 前进', forward_right: '↗ 前右', left: '◀ 左转', right: '▶ 右转',
+  reverse: '▼ 后退', reverse_left: '↙ 后左', reverse_right: '↘ 后右', stop: '⏹ 刹车'
+};
+let currentAction = null, currentBtn = null, isPressing = false, pressStartTime = 0;
+let heartbeatTimer = null, pulseStopTimer = null, pulseActive = false, lastTouchTime = 0;
+
+// 每个页面一个会话号 + 递增序号:后端据此丢弃迟到的旧「前进」,防止松手后车又动。
+const DRIVE_CLIENT_ID = (window.crypto && crypto.randomUUID)
+  ? crypto.randomUUID()
+  : `c${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`;
+const DRIVE_TIMEOUT_MS = 2500;
+const STOP_TIMEOUT_MS = 1200;
+let driveSeq = 0, driveInFlight = 0, lastCompletedDriveSeq = 0;
+const pendingMoves = new Set();
+let stopAwaitingStatus = false, stopPriorEpoch = null, stopConfirmationTimer = null;
+
+// heartbeat=true 的心跳请求在上一条还没回来时直接跳过,绝不在浏览器里排队堆积;
+// 首次按下和刹车永远立即发送。
+async function sendManualDrive(action, { heartbeat = false } = {}) {
+  if (heartbeat) {
+    if (document.hidden) { executeStop(); return false; }
+    if (driveInFlight > 1) return false;
+  }
+  if (action === 'stop') {
+    // 刹车前先放掉被取代的行驶请求占着的浏览器连接；已经发出去的由后端按序号丢弃
+    for (const pending of pendingMoves) pending.abort();
+  }
+  const seq = ++driveSeq;
+  const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  if (controller && action !== 'stop') pendingMoves.add(controller);
+  const timeout = action === 'stop' ? STOP_TIMEOUT_MS : DRIVE_TIMEOUT_MS;
+  const timer = controller ? setTimeout(() => controller.abort(), timeout) : null;
+  driveInFlight += 1;
+  try {
+    const response = await fetch('/api/manual_drive', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, cache: 'no-store',
+      keepalive: action === 'stop', signal: controller ? controller.signal : undefined,
+      body: JSON.stringify({ direction: action, speed_tier: currentSpeedTier, steer_tier: currentSteerTier,
+                             client_id: DRIVE_CLIENT_ID, seq })
+    });
+    const result = await response.json();
+    if (!response.ok || !result.ok) throw new Error(result.error || `HTTP ${response.status}`);
+    if (seq < driveSeq || seq < lastCompletedDriveSeq) return true;
+    lastCompletedDriveSeq = seq;
+    if (action === 'stop') {
+      stopAwaitingStatus = true;
+      updateBadgeStatus('刹车命令已送达，等待底盘状态', 'var(--amber)');
+      confirmStopStatus(latestState);
+      if (stopAwaitingStatus) {
+        stopConfirmationTimer = setTimeout(() => {
+          if (stopAwaitingStatus) updateBadgeStatus('停车状态未确认，请使用物理急停', 'var(--red)');
+        }, 1800);
+      }
+      return true;
+    }
+    if ($('manualActiveBadge').textContent.startsWith('控制链路异常')) {
+      updateBadgeStatus(currentAction ? '控制链路已恢复' : '已刹停', 'var(--muted)');
+    }
+    return true;
+  } catch (error) {
+    if (seq < driveSeq || seq < lastCompletedDriveSeq) return false;
+    lastCompletedDriveSeq = seq;
+    const msg = error && error.name === 'AbortError' ? `响应超时 (>${timeout}ms)` : error.message;
+    updateBadgeStatus(action === 'stop' ? `刹车未确认: ${msg}；请使用物理急停` : `控制链路异常: ${msg}`, 'var(--red)');
+    return false;
+  } finally {
+    if (timer) clearTimeout(timer);
+    if (controller) pendingMoves.delete(controller);
+    driveInFlight = Math.max(0, driveInFlight - 1);
+  }
+}
+
+function confirmStopStatus(snapshot) {
+  if (!stopAwaitingStatus) return;
+  const motion = snapshot && snapshot.motion;
+  const command = motion && motion.command;
+  const driver = snapshot && snapshot.wheeltec;
+  if (!motion || !command || motion.epoch === stopPriorEpoch ||
+      !['IDLE', 'ESTOP'].includes(motion.mode) || command.vx !== 0 || command.wz !== 0 ||
+      !driver || !driver.stop_confirmed || !driver.motion || driver.motion.epoch !== motion.epoch) return;
+  stopAwaitingStatus = false;
+  clearTimeout(stopConfirmationTimer);
+  stopConfirmationTimer = null;
+  updateBadgeStatus('底盘反馈已确认停稳', 'var(--muted)');
+}
+
+function updateBadgeStatus(text, color) {
+  const badge = $('manualActiveBadge');
+  badge.textContent = text;
+  if (color) badge.style.color = color;
+}
+
+function executeStop() {
+  if (pulseStopTimer) { clearTimeout(pulseStopTimer); pulseStopTimer = null; }
+  if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
+  pulseActive = false;
+  isPressing = false;
+  currentAction = null;
+  if (currentBtn) { currentBtn.classList.remove('pressed'); currentBtn = null; }
+  document.querySelectorAll('.dpad-btn').forEach(b => b.classList.remove('pressed'));
+  clearTimeout(stopConfirmationTimer);
+  stopAwaitingStatus = false;
+  stopPriorEpoch = latestState && latestState.motion && latestState.motion.epoch;
+  updateBadgeStatus('刹车请求发送中', 'var(--amber)');
+  return sendManualDrive('stop');
+}
+
+function handlePressStart(action, btnEl) {
+  if (action === 'stop') {
+    if (navigator.vibrate) navigator.vibrate([30, 30, 30]);
+    executeStop();
+    notify('刹车请求已发送，等待底盘确认');
+    return;
+  }
+  if (motionResetStatus(latestState).locked) {
+    updateBadgeStatus('停车已锁存，请现场检查后单独复位', 'var(--red)');
+    return;
+  }
+  if (document.hidden) return;
+  clearTimeout(stopConfirmationTimer);
+  stopConfirmationTimer = null;
+  stopAwaitingStatus = false;
+  if (pulseStopTimer) { clearTimeout(pulseStopTimer); pulseStopTimer = null; }
+  if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
+  pulseActive = false;
+  if (currentBtn && currentBtn !== btnEl) currentBtn.classList.remove('pressed');
+  isPressing = true;
+  pressStartTime = performance.now();
+  currentAction = action;
+  currentBtn = btnEl;
+  if (btnEl) btnEl.classList.add('pressed');
+  if (navigator.vibrate) navigator.vibrate(20);
+  const actionText = ACTION_NAMES[action] || action;
+  updateBadgeStatus(`手动请求: ${actionText}（等待底盘反馈）`, 'var(--amber)');
+  sendManualDrive(action);
+  // 后端以 50 Hz 维持指令；网页心跳只刷新指令有效期（0.75 s 收不到就停）
+  heartbeatTimer = setInterval(() => {
+    if (!((isPressing || pulseActive) && currentAction === action)) return;
+    if (motionResetStatus(latestState).locked) {
+      executeStop();
+      updateBadgeStatus('停车已锁存，请使用物理急停并现场检查', 'var(--red)');
+      return;
+    }
+    sendManualDrive(action, { heartbeat: true });
+    const wheel = (latestState && latestState.wheeltec) || {};
+    const motion = wheel.motion || {};
+    const measured = Number(wheel.telemetry && wheel.telemetry.velocity && wheel.telemetry.velocity[0]);
+    if (!latestState || !num(latestState.wheeltec_status_age_s) || latestState.wheeltec_status_age_s > 1) {
+      updateBadgeStatus('底盘状态过期；请使用物理急停', 'var(--red)');
+    } else if (wheel.ready && wheel.ready !== 'ready') {
+      updateBadgeStatus(DRIVER_READY_TEXT[wheel.ready] || wheel.ready, 'var(--red)');
+    } else if (motion.waiting_stationary) {
+      updateBadgeStatus('等待底盘确认静止后接管', 'var(--amber)');
+    } else if (motion.mode !== 'MANUAL') {
+      updateBadgeStatus(`手动请求: ${actionText} · 等待底盘接管`, 'var(--amber)');
+    } else {
+      updateBadgeStatus(`手动: ${actionText} · 实测 ${Number.isFinite(measured) ? measured.toFixed(2) : '--'} m/s`, 'var(--mint)');
+    }
+  }, 180);
+}
+
+function handlePressEnd(action) {
+  if (!isPressing || currentAction !== action) return;
+  const pressDuration = performance.now() - pressStartTime;
+  isPressing = false;
+  // 按下不到 280 ms 算点动：至少开 600 ms（期间照常发心跳），然后自动刹停；长按松手立即刹停
+  const MIN_PULSE_MS = 600;
+  if (pressDuration < 280) {
+    pulseActive = true;
+    const remainPulseMs = Math.max(100, MIN_PULSE_MS - pressDuration);
+    updateBadgeStatus(`点动: ${ACTION_NAMES[action] || action}（${Math.round(remainPulseMs)} ms）`, 'var(--mint)');
+    pulseStopTimer = setTimeout(executeStop, remainPulseMs);
+  } else {
+    pulseActive = false;
+    executeStop();
+  }
+}
+
+document.querySelectorAll('.dpad-btn').forEach(btn => {
+  const action = btn.dataset.action;
+  btn.addEventListener('contextmenu', e => { e.preventDefault(); e.stopPropagation(); });
+  btn.addEventListener('touchstart', e => { e.preventDefault(); lastTouchTime = performance.now(); handlePressStart(action, btn); }, { passive: false });
+  btn.addEventListener('touchmove', e => { e.preventDefault(); }, { passive: false });
+  btn.addEventListener('touchend', e => { e.preventDefault(); lastTouchTime = performance.now(); handlePressEnd(action); }, { passive: false });
+  btn.addEventListener('touchcancel', e => {
+    e.preventDefault(); lastTouchTime = performance.now();
+    if (currentAction === action && isPressing) executeStop();
+  }, { passive: false });
+  // 鼠标事件：lastTouchTime 过滤掉触屏之后浏览器模拟出来的鼠标事件
+  btn.addEventListener('mousedown', e => {
+    if (e.button !== 0 || performance.now() - lastTouchTime < 500) return;
+    e.preventDefault(); handlePressStart(action, btn);
+  });
+  btn.addEventListener('mouseup', e => {
+    if (e.button !== 0 || performance.now() - lastTouchTime < 500) return;
+    e.preventDefault(); handlePressEnd(action);
+  });
+  btn.addEventListener('mouseleave', () => {
+    if (performance.now() - lastTouchTime < 500) return;
+    if (currentAction === action && isPressing) handlePressEnd(action);
+  });
+  btn.addEventListener('click', e => e.preventDefault());
+});
+// 鼠标按下后滑出按钮、在窗口外松手：兜底刹停
+window.addEventListener('mouseup', e => {
+  if (e.button !== 0 || performance.now() - lastTouchTime < 500) return;
+  if (isPressing && currentAction) handlePressEnd(currentAction);
+});
+
+document.querySelectorAll('.speed-btn').forEach(btn => btn.addEventListener('click', () => {
+  document.querySelectorAll('.speed-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  currentSpeedTier = btn.dataset.speed || 'med';
+}));
+document.querySelectorAll('.steer-btn').forEach(btn => btn.addEventListener('click', () => {
+  document.querySelectorAll('.steer-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  currentSteerTier = btn.dataset.steer || 'normal';
+}));
+
+const KEY_ACTIONS = {
+  KeyW: 'forward', ArrowUp: 'forward', KeyS: 'reverse', ArrowDown: 'reverse',
+  KeyA: 'left', ArrowLeft: 'left', KeyD: 'right', ArrowRight: 'right',
+  KeyQ: 'forward_left', KeyE: 'forward_right', Space: 'stop'
+};
+window.addEventListener('keydown', e => {
+  if (['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement.tagName) || e.repeat) return;
+  const action = KEY_ACTIONS[e.code];
+  if (!action) return;
+  e.preventDefault();
+  if (action === 'stop') { executeStop(); notify('刹车请求已发送，等待底盘确认'); return; }
+  if (currentAction !== action) handlePressStart(action, document.querySelector(`.dpad-btn[data-action="${action}"]`));
+});
+window.addEventListener('keyup', e => {
+  if (['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement.tagName)) return;
+  const action = KEY_ACTIONS[e.code];
+  if (action && action !== 'stop' && currentAction === action) handlePressEnd(action);
+});
+
+// 页面切到后台、锁屏或关闭：正在开就刹停（不用 window.blur，手机触屏时会误触发）
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    if (isPressing || pulseActive || heartbeatTimer) executeStop();
+  } else if (!lastReceived || performance.now() - lastReceived > 2500 || !stream || stream.readyState !== EventSource.OPEN) {
+    connectStream(true);
+  }
+});
+window.addEventListener('beforeunload', () => { if (isPressing || pulseActive) executeStop(); if (stream) stream.close(); });
+window.addEventListener('pagehide', () => { if (isPressing || pulseActive) executeStop(); });
+
+$('motionResetBtn').addEventListener('click', resetMotionLock);
+$('estopBtn').addEventListener('click', emergencyStop);
+$('screenMirrorBtn').href = `http://${window.location.hostname || '192.168.2.173'}:6080/vnc.html?autoconnect=true&resize=scale`;
+
+// 档位按钮标上实际车速（车端共享配置）
+fetch('/api/drive_profile', { method: 'POST', cache: 'no-store' }).then(r => r.json()).then(p => {
+  const names = { low: '慢', med: '中', high: '快' };
+  document.querySelectorAll('.speed-btn').forEach(btn => {
+    const v = p.speed_tiers && p.speed_tiers[btn.dataset.speed];
+    if (num(v)) btn.textContent = `${names[btn.dataset.speed]} ${v.toFixed(2)} m/s`;
+  });
+}).catch(() => {});
+
+setInterval(() => {
+  updateConnection();
+  if (lastReceived && performance.now() - lastReceived > 3500) connectStream(true);
+}, 1000);
+connectStream();
+</script>
+</body>
+</html>
