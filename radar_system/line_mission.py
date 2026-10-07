@@ -732,6 +732,8 @@ class LineMission:
         problem = pose_problem(pose)
         if problem:
             return False, problem
+        if not getattr(self.tracker,'position_reference_ready',lambda:True)():
+            return False,'定位与惯导推算尚未对齐，请等待恢复'
         self._sync_imu(self.tracker, now)
         ok = self.tracker.start(pose)
         return ok, '继续' if ok else REASON_TEXT.get(self.tracker.st.reason, self.tracker.st.reason)
@@ -1158,7 +1160,8 @@ class LineMission:
     def _auto_resume(self, now, pose):
         """定位问题暂停后，定位连续可用 AUTO_RESUME_S 就接着走；
         起步检查没过（如离线太远）隔 AUTO_RESUME_S 再试。"""
-        if self.operations.held or self.tracker.st.state != 'PAUSED' or not pose.usable_for_control:
+        if (self.operations.held or self.tracker.st.state != 'PAUSED' or not pose.usable_for_control
+                or not getattr(self.tracker,'position_reference_ready',lambda:True)()):
             self._usable_since = self._resume_failed = None
             return
         if self._usable_since is None:

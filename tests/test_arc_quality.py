@@ -9,6 +9,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT/'radar_system'), str(ROOT)]
 from path_tracker import PathConfig, PathTracker, circle, differential_config
 from robot_core.kinematics import ChassisGeometry
+import paint_quality
+from path_tracker import Section
 
 DT=.02
 GEO=ChassisGeometry(drive='differential', track_m=.675, diff_min_radius_m=.5)
@@ -68,9 +70,67 @@ class ArcQuality(unittest.TestCase):
     def test_trusted_progress_still_corrects_wheel_scale(self):
         a,b=self.warmed_pair()
         for i in range(151,251):
-            feed(a,i);feed(b,i,shift=.04)
+            feed(a,i);feed(b,i,shift=.005)
         self.assertTrue(b._arc_status['rtk_ok'])
-        self.assertGreater(b._arc_s,a._arc_s+.01)
+        self.assertGreater(b._arc_s,a._arc_s+.001)
         self.assertGreater(b._arc_scale,a._arc_scale)
+
+    def test_fixed_solution_cannot_relearn_a_disagreement_after_quality_gap(self):
+        a,b=self.warmed_pair()
+        for i in range(151,166):
+            feed(a,i,quality='RTK_FLOAT');feed(b,i,quality='RTK_FLOAT')
+        scale,offset=b._arc_scale,b._arc_off
+        for i in range(166,366):
+            reference=feed(a,i,quality='RTK_FLOAT')
+            shifted=feed(b,i,shift=.05,yaw_error=math.radians(1.2))
+            self.assertTrue(b._arc_status['holding'])
+            self.assertFalse(b._arc_status['rtk_ok'])
+            self.assertEqual(b._arc_scale,scale)
+            self.assertEqual(b._arc_off,offset)
+            self.assertAlmostEqual(reference.x,shifted.x,places=9)
+            self.assertAlmostEqual(reference.y,shifted.y,places=9)
+        self.assertGreater(b._arc_status['hold_age_s'],3.)
+        for i in range(366,415):
+            feed(b,i)
+            self.assertTrue(b._arc_status['holding'])
+        feed(b,415)
+        self.assertFalse(b._arc_status['holding'])
+        self.assertEqual(b._arc_status['correction_weight'],0.)
+        feed(b,416)
+        self.assertGreater(b._arc_status['correction_weight'],0.)
+        self.assertLess(b._arc_status['correction_weight'],.1)
+
+    def test_mismatch_uses_existing_eight_second_paint_and_nine_second_motion_limits(self):
+        tr,_=self.warmed_pair();tr.set_nozzle(0.,0.)
+        for i in range(151,550):feed(tr,i,shift=.05)
+        self.assertTrue(tr._arc_status['holding'])
+        def sample():
+            x,y,h=tr.path.pose(tr.st.s)
+            return NS(x=x,y=y,yaw=h,speed=.5,yaw_rate=-.5/2.4,usable_for_control=True,
+                      quality='RTK_FIXED',rtk_trusted=True,reasons=(),hold_age_s=.05)
+        m=NS(pose=sample(),nozzle=(0.,0.),differential=True,fusion=NS(config=NS(rtk_hold_s=9.)),
+             _route_local=lambda:NS(kind='circle',center=(2.,-2.4),radius=2.4))
+        q=lambda:paint_quality.status(m,{},True,Section(1,tr.path),tr)
+        self.assertTrue(q()['painting']);self.assertEqual(q()['paint_control_source'],'imu_hold')
+        feed(tr,550,shift=.05)
+        self.assertEqual(q()['paint_blocked'],'paint_position_untrusted')
+        for i in range(551,601):feed(tr,i,shift=.05)
+        tr._hint=tr.st.s
+        self.assertEqual(tr._control(sample(),DT),(0.,0.,0.))
+        self.assertEqual(tr.st.state,'PAUSED')
+        self.assertEqual(tr.st.reason,'arc_position_disagreement')
+        self.assertFalse(tr.position_reference_ready())
+        self.assertFalse(tr.start(sample()))
+
+    def test_wheel_or_imu_failure_during_hold_does_not_fall_back_to_rejected_position(self):
+        for failure in ('wheel_hold','imu_hold'):
+            tr,_=self.warmed_pair();feed(tr,151,shift=.05)
+            self.assertTrue(tr._arc_status['holding'])
+            x,y,h=tr.path.pose(tr.st.s)
+            p=NS(x=x,y=y,yaw=h,speed=.5,yaw_rate=-.5/2.4,usable_for_control=True,
+                 quality='RTK_FIXED',rtk_trusted=True,reasons=(failure,),correction_xy=(0.,0.))
+            self.assertEqual(tr.update(p,DT),(0.,0.))
+            self.assertEqual(tr.st.state,'PAUSED')
+            self.assertFalse(tr.position_reference_ready())
 
 if __name__=='__main__':unittest.main()
