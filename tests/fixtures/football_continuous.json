@@ -1,0 +1,271 @@
+{
+  "boundary": [
+    [
+      0,
+      0
+    ],
+    [
+      105,
+      0
+    ],
+    [
+      105,
+      68
+    ],
+    [
+      0,
+      68
+    ]
+  ],
+  "elements": [
+    {
+      "points": [
+        [
+          0.06,
+          0.06
+        ],
+        [
+          104.94,
+          0.06
+        ],
+        [
+          104.94,
+          67.94
+        ],
+        [
+          0.06,
+          67.94
+        ]
+      ],
+      "closed": true,
+      "id": "boundary",
+      "name": "边线与球门线",
+      "kind": "polyline"
+    },
+    {
+      "center": [
+        0,
+        0
+      ],
+      "radius": 0.94,
+      "start_deg": 0,
+      "sweep_deg": 90,
+      "id": "corner-ll",
+      "name": "左下角球弧",
+      "kind": "arc"
+    },
+    {
+      "points": [
+        [
+          0.06,
+          13.9
+        ],
+        [
+          16.44,
+          13.9
+        ],
+        [
+          16.44,
+          54.1
+        ],
+        [
+          0.06,
+          54.1
+        ]
+      ],
+      "closed": false,
+      "id": "left-penalty-area",
+      "name": "左罚球区",
+      "kind": "polyline"
+    },
+    {
+      "center": [
+        0,
+        68
+      ],
+      "radius": 0.94,
+      "start_deg": 270,
+      "sweep_deg": 90,
+      "id": "corner-ul",
+      "name": "左上角球弧",
+      "kind": "arc"
+    },
+    {
+      "points": [
+        [
+          0.06,
+          24.9
+        ],
+        [
+          5.44,
+          24.9
+        ],
+        [
+          5.44,
+          43.1
+        ],
+        [
+          0.06,
+          43.1
+        ]
+      ],
+      "closed": false,
+      "id": "left-goal-area",
+      "name": "左球门区",
+      "kind": "polyline"
+    },
+    {
+      "center": [
+        11,
+        34
+      ],
+      "radius": 9.09,
+      "start_deg": -53.2403,
+      "sweep_deg": 106.4807,
+      "id": "left-penalty-arc",
+      "name": "左罚球弧",
+      "kind": "arc"
+    },
+    {
+      "points": [
+        [
+          52.5,
+          0.06
+        ],
+        [
+          52.5,
+          67.94
+        ]
+      ],
+      "closed": false,
+      "id": "halfway",
+      "name": "中线",
+      "kind": "polyline"
+    },
+    {
+      "center": [
+        52.5,
+        34
+      ],
+      "radius": 9.09,
+      "id": "centre-circle",
+      "name": "中圈",
+      "kind": "circle"
+    },
+    {
+      "center": [
+        94,
+        34
+      ],
+      "radius": 9.09,
+      "start_deg": 126.7597,
+      "sweep_deg": 106.4807,
+      "id": "right-penalty-arc",
+      "name": "右罚球弧",
+      "kind": "arc"
+    },
+    {
+      "points": [
+        [
+          104.94,
+          24.9
+        ],
+        [
+          99.56,
+          24.9
+        ],
+        [
+          99.56,
+          43.1
+        ],
+        [
+          104.94,
+          43.1
+        ]
+      ],
+      "closed": false,
+      "id": "right-goal-area",
+      "name": "右球门区",
+      "kind": "polyline"
+    },
+    {
+      "center": [
+        105,
+        0
+      ],
+      "radius": 0.94,
+      "start_deg": 90,
+      "sweep_deg": 90,
+      "id": "corner-lr",
+      "name": "右下角球弧",
+      "kind": "arc"
+    },
+    {
+      "points": [
+        [
+          104.94,
+          13.9
+        ],
+        [
+          88.56,
+          13.9
+        ],
+        [
+          88.56,
+          54.1
+        ],
+        [
+          104.94,
+          54.1
+        ]
+      ],
+      "closed": false,
+      "id": "right-penalty-area",
+      "name": "右罚球区",
+      "kind": "polyline"
+    },
+    {
+      "center": [
+        105,
+        68
+      ],
+      "radius": 0.94,
+      "start_deg": 180,
+      "sweep_deg": 90,
+      "id": "corner-ur",
+      "name": "右上角球弧",
+      "kind": "arc"
+    },
+    {
+      "center": [
+        52.5,
+        34
+      ],
+      "diameter": 0.2,
+      "id": "centre-mark",
+      "name": "中点",
+      "kind": "point"
+    },
+    {
+      "center": [
+        11,
+        34
+      ],
+      "diameter": 0.2,
+      "id": "left-penalty-mark",
+      "name": "左罚球点",
+      "kind": "point"
+    },
+    {
+      "center": [
+        94,
+        34
+      ],
+      "diameter": 0.2,
+      "id": "right-penalty-mark",
+      "name": "右罚球点",
+      "kind": "point"
+    }
+  ],
+  "name": "Gen5 足球场 · 用时优先 · 只规划 · 只规划"
+}

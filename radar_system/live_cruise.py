@@ -89,4 +89,4 @@ def change(operations,cmd,now):
             tr.set_cruise(value)
     m.cruise=cruise
     operations.preview=None
-    return '划线巡航目标已设为 %.1f m/s，正在平滑调整' % cruise
+    return '划线巡航目标已设为 %.1f m/s，停喷后平滑切换，当前这一笔保持原速度' % cruise

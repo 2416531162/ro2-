@@ -1,0 +1,8 @@
+{
+  "paint_phase": true,
+  "painting": false,
+  "paint_blocked": "paint_speed_not_ready",
+  "nozzle_deviation_m": null,
+  "paint_offset_limit_m": 0.03,
+  "paint_geometry_allowed": false
+}

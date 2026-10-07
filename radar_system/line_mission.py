@@ -972,12 +972,22 @@ class LineMission:
         return dict(x=round(x, 3), y=round(y, 3), sol=a[3], sigma=round(a[4], 4))
 
     # ---- 控制周期 ----
+    def _check_paint_output_speed(self, vx):
+        # 水泵必须核对最终发给底盘的速度，不能只看渐停限幅之前的跟踪器原始指令。
+        t=self.tracker
+        if self.task=='route' and isinstance(t,SectionTracker):
+            child=t.trackers[t.index]
+            if child.constant_paint_speed:
+                child.paint_speed_ready=(child.paint_speed_ready and child.paint_target_mps is not None
+                                         and abs(vx-child.paint_target_mps)<=1e-6)
+
     def tick(self, now, motion_mode):
         """返回 (vx, wz, select)。select=True/False 表示节点要调用 /motion/navigation，None 不动。
         除急停外的停车都渐停（SOFT_STOP_DECEL_MPS2）：没停下前不交还控制权，节点看 braking 照常下发。"""
         dt = CONTROL_DT if self._last_tick is None else max(0.0, min(0.2, now - self._last_tick))
         vx, wz, select = self._tick(now, motion_mode)
         vx, wz = self._limit_decel(now, motion_mode, vx, wz, dt)
+        self._check_paint_output_speed(vx)
         self.braking = (vx, wz) != (0.0, 0.0) and self.phase not in ('RUNNING', 'PAUSING', 'ORIENTING')
         # 任务已结束但车还在渐停：如实告诉操作员，停住后去掉
         if self.braking and not self.message.endswith(STOPPING_NOTE):
@@ -1056,6 +1066,7 @@ class LineMission:
         self.tracker.speed_limit_mps = limit
         vx, wz = self.tracker.update(pose, dt)
         vx, wz = self._limit_decel(now, motion_mode, vx, wz, dt)
+        self._check_paint_output_speed(vx)
         self.operations.update_paint_tail(now)
         self._sent_motion.append((now, vx, wz))
         if self.tracker.st.state != 'RUNNING':
@@ -1286,7 +1297,7 @@ class LineMission:
         from paint_quality import offset_limit
         return dict(pivot_rate=self.geo.pivot_rate_rad_s, pivot_accel=self.geo.pivot_accel_rad_s2, reverse_gain=1.0,
                     reverse_mps=DIFF_REVERSE_MPS, settle_s=DIFF_SETTLE_S, paint_offset_limit_m=offset_limit(),
-                    constant_straight_speed=True, **({'reverse_runup': True} if route else {}))
+                    constant_straight_speed=True, constant_paint_speed=True, **({'reverse_runup': True} if route else {}))
 
     def _diag(self, calibration):
         """诊断：下发曲率与车实际走出的曲率（融合角速度 / 车速），RTK 与融合推算之差，离群、重置次数。"""

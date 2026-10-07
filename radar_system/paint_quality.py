@@ -75,6 +75,9 @@ def status(m,record,phase,section,tracker):
     if not phase:out['paint_blocked']='not_painting';return out
     if not getattr(tracker,'paint_start_allowed',lambda:True)():
         out['paint_blocked']='paint_start_unready';return out
+    if getattr(tracker,'constant_paint_speed',False) and not tracker.paint_speed_ready:
+        # 起步/恢复尚未达到本笔速度，或保护正在减速：先停喷，不边加减速边喷。
+        out['paint_blocked']='paint_speed_not_ready';return out
     pose=m.pose
     arc=continuous_arc(m,section,tracker)
     # 2026-10-06 用户：直线 IMU 为主，「只要和 IMU 推算对不上，直线上也听 IMU 的」：卫星跳了、暂时不是固定解时

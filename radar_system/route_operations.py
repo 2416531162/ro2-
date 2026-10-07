@@ -53,6 +53,7 @@ def tail(sections, distance):
             remaining.cruise_mps=getattr(section,'cruise_mps',None)
             remaining.entry_speed_mps=getattr(section,'entry_speed_mps',None)
             remaining.field_role=getattr(section,'field_role',None)
+            remaining.continuous_after=section.continuous_after
             remaining.paint_from_m=max(0.0,getattr(section,'paint_from_m',0.0)-max(0.0,distance-offset))
             consumed=max(0.,distance-offset)
             remaining.paint_to_m=None if section.paint_to_m is None else max(0.,section.paint_to_m-consumed)
@@ -138,6 +139,7 @@ def pivot_entry_to(sections, car, radius, nozzle):
     sec=head[-1];shift=sec.path.length-first.path.length
     sec.cruise_mps=getattr(first,'cruise_mps',None)
     sec.field_role=getattr(first,'field_role',None) or 'paint'
+    sec.continuous_after=first.continuous_after
     sec.paint_from_m=getattr(first,'paint_from_m',0.)+shift
     sec.paint_to_m=None if first.paint_to_m is None else first.paint_to_m+shift
     sec.paint_spans=None if first.paint_spans is None else [(a+shift,b+shift) for a,b in first.paint_spans]
@@ -174,7 +176,12 @@ def rework_sections(spec, element, start, end, radius, body, track_x=0.0, nozzle
         raise ValueError('补画范围须在线段内且至少 %.1f m' % rp.MIN_LEG_M)
     end = min(end, length)
     if nozzle is not None and spec.kind in ('path', 'circle'):
-        return [Section(1, _nozzle_rework_path(spec, element, start, end, radius, nozzle))], choices[element]['name']
+        # 补画也必须保留图纸终点，再沿原切线/圆弧增加不喷缓停段；预览、快照和执行同一份几何。
+        path=_nozzle_rework_path(spec, element, start, end, radius, nozzle)
+        last=path.pieces[-1];run=rp.LINE_RUN_OUT_M if last.straight else rp.CIRCLE_RUN_OUT_M
+        sec=Section(1,Path(path.pose(0.),[(p.length,p.kappa) for p in path.pieces]+[(run,last.kappa)]))
+        sec.paint_to_m=path.length
+        return [sec], choices[element]['name']
     if spec.kind == 'path':
         a, b = spec.points[element], spec.points[(element + 1) % len(spec.points)]
         yaw = math.atan2(b[1] - a[1], b[0] - a[0])
@@ -283,7 +290,7 @@ class RouteOperations:
                             heading_point=f.to_geodetic(x + math.cos(yaw), y + math.sin(yaw)),
                             pieces=[[p.length, p.kappa] for p in sec.path.pieces],speed=getattr(sec,'cruise_mps',None),
                             field_role=getattr(sec,'field_role',None),paint_from=getattr(sec,'paint_from_m',0.0),
-                            paint_to=sec.paint_to_m,paint_spans=sec.paint_spans,
+                            paint_to=sec.paint_to_m,paint_spans=sec.paint_spans,continuous_after=sec.continuous_after,
                             entry_speed=getattr(sec,'entry_speed_mps',None)))
         return out
 
@@ -299,6 +306,7 @@ class RouteOperations:
             restored.paint_from_m=float(sec.get('paint_from') or 0.0)
             restored.paint_to_m=sec.get('paint_to')
             restored.paint_spans=sec.get('paint_spans')
+            restored.continuous_after=sec.get('continuous_after',False)
             out.append(restored)
         return out
 
@@ -350,6 +358,8 @@ class RouteOperations:
             rp._number(r['cruise'],'任务巡航速度',.1,1.2)
         total = 0.0
         for s in r['plan']:
+            if type(s.get('continuous_after',False)) is not bool:
+                raise ValueError('连续前进标记必须为布尔值')
             if s.get('direction') not in (-1, 1):
                 raise ValueError('无效行驶方向')
             if s.get('speed') is not None:
@@ -552,7 +562,7 @@ class RouteOperations:
         phase=role=='paint' and (sec.direction>0 or not self.m.differential) and not leading and (not t.switching or coast) and self.m.phase=='RUNNING'
         phase=phase and not (tail is not None and closed)
         current=paint_quality.status(self.m,r,phase and (t.st.state=='RUNNING' or coast),sec,tr)
-        if current['painting'] and tail is not None:
+        if phase and tail is not None:
             delay=paint_quality.close_delay()
             if delay is None:
                 current.update(painting=False,paint_blocked='paint_configuration_invalid')
@@ -718,6 +728,7 @@ class RouteOperations:
             sec=Section(direction,Path(tuple(pose),pieces))
             sec.cruise_mps=rp._number(item.get('speed'),'分段速度',.02,MAX_SECTION_SPEED)
             sec.field_role=item.get('role')
+            sec.continuous_after=item.get('continuous_after',False)
             sec.entry_speed_mps=rp._number(item['entry_speed'],'接入速度',.02,MAX_SECTION_SPEED) if item.get('entry_speed') is not None else None
             # 刷线段前面的直线助跑不喷（field_planner.RUN_IN_M）；旧规划没有这一项按 0
             sec.paint_from_m=rp._number(item.get('paint_from',0.0),'助跑长度',0,sec.path.length)
@@ -735,7 +746,7 @@ class RouteOperations:
         self.record['field_context'] = dict(
             boundary=[self.m.fusion.to_geodetic(*q) for q in value['boundary']],
             forward=value['nozzle_forward_m'], right=value['nozzle_right_m'],
-            transit_speed=value['transit_speed'])
+            transit_speed=value['transit_speed'],turn=value.get('turn','pivot'),turn_radius=value.get('turn_radius') or 1.)
         if isinstance(value.get('source_job'), dict):
             from field_rework import encode_source
             self.record['field_source'] = encode_source(value['source_job'], self.m.fusion)
@@ -839,7 +850,7 @@ class RouteOperations:
             cfg=Settings(saved['forward'],saved['right'],self.m.body,self.m.min_route_radius+.001,
                          r['cruise'],saved['transit_speed'],yaw_rate=self.m.geo.pivot_rate_rad_s,
                          yaw_accel=self.m.geo.pivot_accel_rad_s2,accel=self.m.path_cfg.accel_mps2,
-                         lateral_accel=self.m.path_cfg.lat_accel_mps2)
+                         lateral_accel=self.m.path_cfg.lat_accel_mps2,turn=saved.get('turn','pivot'),turn_radius=saved.get('turn_radius',1.))
             first=rest[0]
             extra=max(0.0,cfg.run_in-first.paint_from_m) if first.field_role=='paint' and first.direction>0 else 0.0
             if extra>1e-6:
@@ -851,6 +862,7 @@ class RouteOperations:
                 lead.paint_to_m=None if first.paint_to_m is None else first.paint_to_m+extra
                 lead.paint_spans=None if first.paint_spans is None else [(a+extra,b+extra) for a,b in first.paint_spans]
                 lead.entry_speed_mps=getattr(first,'entry_speed_mps',None)
+                lead.continuous_after=first.continuous_after
                 rest=[lead]+rest[1:]
             entry,cost,_=transit(car,rest[0].car_pose(0),planes,cfg)
             for sec in entry:
@@ -858,7 +870,10 @@ class RouteOperations:
             entry_m=sum(s.path.length for s in entry)
             if entry_m>rp.MAX_ENTRY_M:raise ValueError('请先手动开到断点附近，再预览接入')
             entry_m+=extra    # 助跑接在剩余路线前面，进度从断点算起
-            plan=entry+rest;outside=cost[1];pose=rest[0].car_pose(0)
+            plan=entry+rest
+            if cfg.turn=='arc':
+                for sec in entry:sec.continuous_after=True
+            outside=cost[1];pose=rest[0].car_pose(0)
             for sec in rest:
                 outside=max(outside,pivot_violation(pose,sec.car_pose(0)[2],planes,cfg),path_violation(sec,planes,cfg))
                 pose=sec.car_pose(sec.path.length)

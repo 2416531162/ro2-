@@ -24,8 +24,7 @@ PRE_ARC_FRACTION = 0.5
 OUTSIDE_SPACE_M = 2.0
 # 转场的掉头方式（2026-10-03 用户：原地掉头太僵硬，app 可选，再加一种像阿克曼那样方向打满的掉头）：
 #   pivot  原地转：停车原地转向 → 直线 → 原地转（默认，原来的做法）
-#   arc    圆弧：只往前开，按 turn_radius 绕 Dubins 弧线接到下一条线的助跑起点；场外 2 m 空地放不下时允许倒一把，
-#          还放不下才用原地转（plan 的 turn_fallbacks 计次数）
+#   arc    圆弧：始终向前，按 turn_radius 绕 Dubins 弧线接入；相切段连续交接，实际外伸仍进入预览确认。
 #   lock   打满方向：用车能稳定跟踪的最小半径（cfg.radius），前进 / 倒车弧线（Reeds–Shepp，可三点掉头），不原地转
 # arc / lock 转场最后一段往前开时与「助跑 + 刷线」合成一段（paint_from 往后挪），进线不停车。
 # 默认仍是 pivot：10-03 Gen5 标定整场仿真（6 场）arc R1.0 用时 +1%、95% 与全场最大误差相当，但线头 1 m 内最大中位
@@ -334,9 +333,9 @@ def stroke_options(stroke,cfg,planes):
                 h=angle+sign*math.pi/2-math.atan2(sign*a,root)
                 cx,cy=stroke['c'];qx=cx+r*math.cos(angle);qy=cy+r*math.sin(angle)
                 axle=(qx-a*math.cos(h)+b*math.sin(h),qy-a*math.sin(h)-b*math.cos(h),h)
-                sec,run=with_run_in(axle,[(rear_radius*abs(sweep),sign/rear_radius)],cfg,planes)
+                sec,run=with_run_in(axle,[(rear_radius*abs(sweep),sign/rear_radius),(rp.CIRCLE_RUN_OUT_M,sign/rear_radius)],cfg,planes)
                 out.append(dict(section=sec,reverse=reverse,target_arc=(cx,cy,r,angle,sweep),
-                                nozzle_length=r*abs(sweep),nozzle_radius=r,paint_from=run))
+                                nozzle_length=r*abs(sweep),nozzle_radius=r,paint_from=run,paint_to=run+rear_radius*abs(sweep)))
                 if stroke['kind']=='arc':
                     out[-1]['circle']=dict(pose=axle,kappa=sign/rear_radius,length=rear_radius*abs(sweep))
     circle_scores={}
@@ -421,6 +420,16 @@ def turn_routes(start,goal,planes,cfg,align=0.0):
 
 
 def transit(start,goal,planes,cfg):
+    if cfg.turn=='arc':
+        # 圆弧走法始终向前；外伸照实进入预览，由既有场外范围确认把关，不暗中降级为倒车/原地转。
+        if math.dist(start[:2],goal[:2])<1e-6 and abs(rp.wrap(start[2]-goal[2]))<1e-6:
+            return [],(0.,0.,0.),[]
+        routes=[]
+        for pieces in dubins_paths(start,goal,cfg.turn_radius):
+            sec=Section(1,Path(start,[(length,k) for _,length,k in pieces]))
+            routes.append(([sec],path_score(sec,planes,cfg,speed_for(sec,cfg)),[]))
+        if not routes:raise ValueError('圆弧转场无法连续向前接入，请调整车位或转弯半径')
+        return min(routes,key=lambda r:score_key(r[1]))
     if cfg.turn!='pivot':
         # 摆正直线从长到短试；arc 放得下就只往前开，lock 前进 / 倒车里挑最快的。
         # 都放不下（车身超出场外空地）才回到原地转的走法
@@ -513,7 +522,7 @@ def loop_entry(start,option,planes,cfg):
     best=None
     for _,pre,pieces in sorted(found,key=lambda v:v[0])[:3]:
         lead=Section(1,Path(start,pieces));x,y,h=lead.path.pose(lead.path.length)
-        paint=Section(1,Path((x,y,h),[(pre,kappa),(circle['length'],kappa)]))
+        paint=Section(1,Path((x,y,h),[(pre,kappa),(circle['length'],kappa),(rp.CIRCLE_RUN_OUT_M,kappa)]))
         cost=add_scores(path_score(lead,planes,cfg,speed_for(lead,cfg)),path_score(paint,planes,cfg,option['speed']))
         if cost[1]>LOOP_SPACE_M+1e-6:continue
         cost=(cost[0],min(cost[1],OUTSIDE_SPACE_M),cost[2]-merge_saving(cfg))
@@ -611,7 +620,9 @@ def assemble(selected,start,planes,cfg,connect=None):
     motions=[];pivots=[];score=(0,0,0);pose=start
     for option in selected:
         path,cost,turns,section,paint_from=connect(pose,option) if connect else entry(pose,option,planes,cfg)
+        # 绕圈切入可改变助跑长度，划线终点必须随新的起喷点平移。
         paint_to=option.get('paint_to')
+        if paint_to is not None:paint_to+=paint_from-option.get('paint_from',0.)
         entry_speed=None
         score=add_scores(score,cost);pivots.extend(turns);path=list(path)
         if cfg.turn!='pivot' and path and path[-1].direction>0 and not turns:
@@ -673,7 +684,7 @@ def improve_actual_order(selected,baseline,groups,start,planes,cfg):
 def serialize_motion(m):
     s=m['section'];x,y,h=s.path.pose(0)
     return dict(direction=s.direction,start=[x,y,h],pieces=[[p.length,p.kappa] for p in s.path.pieces],
-                speed=m['speed'],role=m['role'],element_id=m['id'],paint_from=m.get('paint_from',0.0),paint_to=m.get('paint_to'),entry_speed=m.get('entry_speed'))
+                speed=m['speed'],role=m['role'],element_id=m['id'],paint_from=m.get('paint_from',0.0),paint_to=m.get('paint_to'),entry_speed=m.get('entry_speed'),continuous_after=m.get('continuous_after',False))
 
 
 def corner_best(candidates):
@@ -767,6 +778,10 @@ def plan(job,start,cfg):
     else:
         selected,baseline=optimize_order(groups,start,cfg)
         selected,(motions,score,pivots)=improve_actual_order(selected,baseline,groups,start,planes,cfg)
+    # 分段仍保留独立的喷线范围，控制器只把相切前进段无停顿交接。
+    if cfg.turn=='arc':
+        for i,m in enumerate(motions):
+            m['continuous_after']=i<len(motions)-1
     preview=[];outside=[];outside_seconds=0.0
     for motion in motions:
         sec=motion['section'];n=max(1,min(2048,math.ceil(sec.path.length/.5)))

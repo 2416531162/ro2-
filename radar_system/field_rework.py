@@ -87,7 +87,7 @@ def configuration(record, mission):
     return Settings(saved['forward'], saved['right'], mission.body, mission.min_route_radius + .001,
                     record['cruise'], saved['transit_speed'], yaw_rate=mission.geo.pivot_rate_rad_s,
                     yaw_accel=mission.geo.pivot_accel_rad_s2, accel=mission.path_cfg.accel_mps2,
-                    lateral_accel=mission.path_cfg.lat_accel_mps2)
+                    lateral_accel=mission.path_cfg.lat_accel_mps2,turn=saved.get('turn','pivot'),turn_radius=saved.get('turn_radius',1.))
 
 
 def prepare(record, mission, command, car):
@@ -120,6 +120,7 @@ def prepare(record, mission, command, car):
     for sec in entry:
         sec.cruise_mps = transit_limit(sec, cfg)
         sec.field_role = 'transit'
+        sec.continuous_after = cfg.turn=='arc'
     sec = option['section']
     sec.cruise_mps = option['speed']
     sec.field_role = 'paint'
