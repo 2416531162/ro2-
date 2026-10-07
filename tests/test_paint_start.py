@@ -1,4 +1,4 @@
-"""开喷前完成稳定交接；未收稳不越过线头开始喷，恢复接入保留未画线头。"""
+"""起步检查决定喷涂许可；未收稳继续沿线纠偏，不能自动中止车辆行驶。"""
 from pathlib import Path
 from types import SimpleNamespace as NS
 import math,sys,unittest
@@ -36,10 +36,34 @@ class Evidence(unittest.TestCase):
         self.assertFalse(g.ready)
         for i in range(30):observe(g,1.+i*.05)
         self.assertTrue(g.ready)
-        observe(g,3.,trusted=False);self.assertFalse(g.ready)
+        for i in range(6):observe(g,3.+i*.02,trusted=False)
+        self.assertFalse(g.ready)
         for i in range(9):observe(g,3.+i*.02)
         self.assertFalse(g.ready)
         observe(g,3.18);self.assertTrue(g.ready)
+
+    def test_brief_missing_observation_preserves_only_completed_stability(self):
+        g=PaintStartGuard()
+        for i in range(10):observe(g,i*.02)
+        self.assertTrue(g.ready)
+        for i in range(3):
+            self.assertFalse(observe(g,.2+i*.02,trusted=False))
+            self.assertFalse(g.ready)
+        self.assertTrue(observe(g,.26))
+        # 首次收稳前不得凑不连续时间。
+        g=PaintStartGuard()
+        for i in range(8):observe(g,i*.02)
+        observe(g,.16,trusted=False)
+        for i in range(9):self.assertFalse(observe(g,.18+i*.02))
+        self.assertTrue(observe(g,.36))
+
+    def test_missing_observation_cannot_preserve_bad_geometry_or_imu_handoff(self):
+        for bad in (dict(rtk_error=.025),dict(guide_error=.03),dict(heading_error=math.radians(1.1)),dict(weight=.98)):
+            g=PaintStartGuard()
+            for i in range(10):observe(g,i*.02)
+            self.assertFalse(observe(g,.2,trusted=False,**bad))
+            self.assertEqual(g.stable_s,0.)
+            self.assertFalse(observe(g,.22))
 
     def test_recorded_bad_start_and_estimate_disagreement_do_not_pass(self):
         for values in [dict(weight=0.,rtk_error=.0215),dict(weight=1.,rtk_error=-.03856,guide_error=-.00957),
@@ -60,12 +84,13 @@ class Integration(unittest.TestCase):
         # 已经开始的喷线不被起步门反复打断；后续保护仍交回原控制。
         self.assertFalse(tr._check_paint_start(sample(tr,.72,2.6,e=.04),.02,.8))
 
-    def test_unready_brakes_with_margin_before_paint_start(self):
+    def test_unready_start_does_not_request_stop_before_or_after_line_head(self):
         tr=tracker();tr._straight_weight=0.;tr._straight_guided=None
         self.assertFalse(tr._check_paint_start(sample(tr,0.,1.5,e=.02),.02,.3))
         self.assertFalse(tr._check_paint_start(sample(tr,.02,2.25,e=.02),.02,.3))
-        self.assertLess(tr._paint_start_speed_limit,.3)
-        self.assertTrue(tr._check_paint_start(sample(tr,.04,2.34,e=.02),.02,.3))
+        self.assertFalse(tr._check_paint_start(sample(tr,.04,2.34,e=.02),.02,.3))
+        self.assertFalse(tr._check_paint_start(sample(tr,.06,2.6,e=.02),.02,.5))
+        self.assertEqual(tr.st.state,'RUNNING')
         self.assertFalse(tr.paint_start_allowed())
         m=NS(pose=sample(tr,.04,2.6),differential=True,nozzle=(0.,0.))
         status=paint_quality.status(m,{},True,Section(1,tr.path),tr)
@@ -75,7 +100,7 @@ class Integration(unittest.TestCase):
         tr=tracker()
         for i in range(30):tr._check_paint_start(sample(tr,i*.02,1.5),.02,.3)
         self.assertTrue(tr.paint_start_guard.ready)
-        self.assertTrue(tr._check_paint_start(sample(tr,.7,2.51,e=.025),.02,.3))
+        self.assertFalse(tr._check_paint_start(sample(tr,.7,2.51,e=.025),.02,.3))
         self.assertFalse(tr.paint_start_allowed())
 
     def test_pause_after_paint_preserves_start_authorization(self):
@@ -83,13 +108,15 @@ class Integration(unittest.TestCase):
         self.assertTrue(tr.start(sample(tr,1.,4.)))
         self.assertTrue(tr.paint_start_allowed())
 
-    def test_short_confirmation_uses_a_stoppable_speed_instead_of_rushing_the_start(self):
+    def test_short_confirmation_keeps_running_and_opens_only_when_ready(self):
         tr=tracker()
         for i in range(8):tr._check_paint_start(sample(tr,i*.02,1.5),.02,.3)
         self.assertFalse(tr.paint_start_guard.ready)
         self.assertFalse(tr._check_paint_start(sample(tr,.16,2.0),.02,.6))
-        self.assertIsNotNone(tr._paint_start_speed_limit)
-        self.assertLess(tr._paint_start_speed_limit,.6)
+        self.assertEqual(tr.st.state,'RUNNING')
+        self.assertFalse(tr.paint_start_allowed())
+        for i in range(8):self.assertFalse(tr._check_paint_start(sample(tr,.18+i*.02,2.51+i*.01),.02,.5))
+        self.assertTrue(tr.paint_start_allowed())
 
     def test_unpainted_start_is_not_lost_if_position_crosses_during_stopping(self):
         from route_operations import RouteOperations

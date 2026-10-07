@@ -8,7 +8,9 @@ def initialise(record,mission,sections,paint_start):
     if 'circle_spray' in record or record.get('field_plan') or record.get('kind')!='route':return
     spec=mission._route_local()
     if spec.kind!='circle' or paint_start is None or sections[-1].direction!=1:return
-    k=sections[-1].path.pieces[-1].kappa
+    last=sections[-1]
+    end=last.path.length if last.paint_to_m is None else last.paint_to_m
+    k=last.path.kappa(max(0.,end-1e-8))
     if abs(k)<1e-6:return
     lap=2*math.pi/abs(k);bins=max(16,min(20000,math.ceil(lap/.02)))
     offset=0.;start=None
@@ -91,6 +93,9 @@ def summary(record,cursor):
 
 
 def append_path(path,lap):
-    k=path.pieces[-1].kappa
-    if abs(k)<1e-6:raise ValueError('补喷圈缺少连续圆弧，不能自动追加')
-    return Path(path.pose(0),[(p.length,p.kappa) for p in path.pieces]+[(lap,k)],name=path.name)
+    # 独立圆尾部现在有直线离开段；补喷圈追加到最后一段圆弧内，离开段仍留在最后。
+    arc=next((i for i in range(len(path.pieces)-1,-1,-1) if not path.pieces[i].straight),None)
+    if arc is None or abs(path.pieces[arc].kappa)<1e-6:
+        raise ValueError('补喷圈缺少连续圆弧，不能自动追加')
+    pieces=[(p.length+(lap if i==arc else 0.),p.kappa) for i,p in enumerate(path.pieces)]
+    return Path(path.pose(0),pieces,name=path.name)

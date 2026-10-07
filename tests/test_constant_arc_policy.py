@@ -15,12 +15,13 @@ from path_tracker import Path as Route, PathConfig, PathTracker, Section, Sectio
 from line_mission import LineMission
 from route_operations import RouteOperations
 from robot_core.kinematics import ChassisGeometry
+from motion_speeds import PAINT_ARC_SPEED_MPS
 
 GEO = ChassisGeometry(drive='differential', track_m=.675, diff_min_radius_m=.5)
 
 
 def pose(x=0., y=0., yaw=0., *, trusted=True, age=.1, usable=True):
-    return NS(x=x, y=y, yaw=yaw, speed=.5, yaw_rate=-.25, usable_for_control=usable,
+    return NS(x=x, y=y, yaw=yaw, speed=PAINT_ARC_SPEED_MPS, yaw_rate=-.25, usable_for_control=usable,
               quality='RTK_FIXED' if trusted else 'DEAD_RECKONING', rtk_trusted=trusted,
               hold_age_s=age, reasons=() if trusted else ('rtk_hold',), correction_xy=(0.,0.))
 
@@ -40,20 +41,20 @@ def mission(p, tr):
 
 
 class ConstantArcPolicy(unittest.TestCase):
-    def test_arc_stays_half_mps_despite_offset_and_soft_hold_limit(self):
+    def test_arc_stays_at_paint_speed_despite_offset_and_soft_hold_limit(self):
         for curvature in (-.5,.5,-1.2):
             with self.subTest(curvature=curvature):
                 cfg=differential_config(PathConfig(cruise_mps=.8))
                 path=Route((0.,0.,0.),[(20.,curvature)])
                 tr=PathTracker(path,cfg,GEO)
-                tr.start(pose());tr._v_prev=.5
+                tr.start(pose());tr._v_prev=PAINT_ARC_SPEED_MPS
                 tr.paint_offset_limit_m=.03;tr.speed_limit_mps=.1
                 for i in range(1,51):
                     x,y,h=path.pose(2.+i*.01)
                     # 12 cm lateral error previously caused a speed reduction.
                     p=pose(x-.12*math.sin(h),y+.12*math.cos(h),h,trusted=False,age=2.)
                     v,_=tr.update(p,.02)
-                    self.assertAlmostEqual(v,.5,places=12)
+                    self.assertAlmostEqual(v,PAINT_ARC_SPEED_MPS,places=12)
                     self.assertEqual(tr.st.state,'RUNNING')
 
     def test_zero_limit_and_unusable_pose_still_stop(self):

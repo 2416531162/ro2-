@@ -20,8 +20,8 @@
 圆        从圆的最南点出发（逆时针时车头朝东、顺时针朝西），转 laps 圈回到这里停车。
           差速车（Gen5）按喷头画圆：喷头在后轴中点前 f、左 l，后轴中点走半径 √(R²−f²) ± l（逆时针 +）的同心圆，
           喷头正好在半径 R 上；最后多走 VERTEX_PASS_M 让喷头盖过起点。接入同连线路线（pivot_entry，原地转向）。
-          开始作业时喷头画过起点（交点）再多喷 CIRCLE_OVERLAP_M 才停喷，停喷后沿同一个圆再转 CIRCLE_RUN_OUT_M
-          才停车（_circle_run_out）。直线助跑之后先沿圆走 CIRCLE_RUN_IN_M 不喷，转弯稳住了再起喷（_circle_run_in）。
+          独立画圆时喷头画过起点（交点）再多喷 CIRCLE_OVERLAP_M 才停喷，停喷后沿后轴切线前进 SOLO_CIRCLE_EXIT_M
+          再停车（_circle_run_out）。直线助跑之后先沿圆走 CIRCLE_RUN_IN_M 不喷，转弯稳住了再起喷（_circle_run_in）。
 喷头位置  nozzle_x 是数时喷头在车中线上、后轴中点前这么多米（共享配置 drive.nozzle_x_m）；是 (前, 左) 二元组时喷头
           可以在侧面（app 的「对准点」，2026-10-02 用户：喷头在右天线右 25 cm），连线路线见 _side_cover。
 开始作业  （app 的 start_current，plan_current）路线不分起点终点：从离车最近的地方开始、跑完整条（圆、闭合路线绕完整圈
@@ -53,6 +53,8 @@ LINE_RUN_OUT_M = 0.40
 # 原来最后约 1 m 边刹车边画（0.5 → 0.06 m/s），交界处喷头往外偏 2.4 cm，喷头只盖过起点 4 cm。
 CIRCLE_OVERLAP_M = 0.20
 CIRCLE_RUN_OUT_M = 0.50
+# 仅独立画圆：停喷后沿当前车头方向离开圆，前进 1 m 再停车；整场圆和补画仍使用原缓停距离。
+SOLO_CIRCLE_EXIT_M = 1.00
 # 差速车画圆起喷（2026-10-06 用户：交界处两条线没重合，「车在圆上转了 1 m，再开始喷」）：直线助跑后先沿圆走
 # 1 m（喷头沿图纸上的圆量）不喷，再从原来的起点开始喷。原来直线助跑到起点才突然转弯，转向延迟约 0.3 s，
 # 开头 0.7–1 m 喷头偏内 1–1.6 cm、航向差 1–2°，一圈回来多喷的 0.2 m 压在线上，交界处错开 1–1.8 cm。
@@ -703,9 +705,14 @@ class _PivotSections:
         self.pose = advance(x, y, yaw, direction * length, kappa)
 
 
-def _straight_run_out(out):
-    if out.out and abs(out.out[-1][2][-1][1]) < 1e-9:
-        out.add(1, LINE_RUN_OUT_M, 0.0)
+def _paint_run_out(out):
+    """停喷后缓停：直线开出 40 cm，曲线沿末端曲率继续 50 cm；不延长喷涂范围。"""
+    if not out.out:
+        return
+    kappa = out.out[-1][2][-1][1]
+    straight = abs(kappa) < 1e-9
+    out.add(1, LINE_RUN_OUT_M if straight else CIRCLE_RUN_OUT_M,
+            0.0 if straight else kappa)
 
 
 def _heading(section, end=False):
@@ -743,7 +750,7 @@ def _pivot_cover(points, radius, nozzle_x, arc_radius=None):
     喷头在两后轮中间（nozzle_x = 0）：缓弯（转向小于 90°、按 radius 圆弧转过去离拐角不超过 PIVOT_ARC_TOL_M）
     直接圆弧转过去；急弯后轴中点开到拐角点停车，原地转到下一条边的方向。
     arc_radius 不为 None（圆弧掉头）：急弯不停车、不原地转，按 arc_radius 绕过去（_arc_turn），缓弯照旧。
-    第一段从喷头在第 1 个点处出发、前进，直线终点停喷后开出 LINE_RUN_OUT_M。
+    第一段从喷头在第 1 个点处出发、前进，线尾停喷后缓停：直线 40 cm、曲线 50 cm。
     """
     if not (math.isfinite(radius) and radius > 0):
         raise ValueError('缓弯半径无效')
@@ -793,7 +800,7 @@ def _pivot_cover(points, radius, nozzle_x, arc_radius=None):
         out.add(1, end(i) - start(i), 0.0, paint=True)
         j = i + 1
         if j == n - 1:
-            _straight_run_out(out)
+            _paint_run_out(out)
             break
         if j in smooth:
             out.add(1, radius * abs(turn[j]), math.copysign(1.0 / radius, turn[j]), paint=True)
@@ -801,7 +808,7 @@ def _pivot_cover(points, radius, nozzle_x, arc_radius=None):
         if arc_radius is not None:
             _arc_turn(out, pts[j], legs[j][1], d, arc_radius)
             continue
-        _straight_run_out(out)
+        _paint_run_out(out)
         run = max(d, PIVOT_REVERSE_MIN_M)-d
         _transit(out, _offset(pts[j], legs[j][1], -(d+run)), legs[j][1])
         out.add(1, run, 0.0)
@@ -834,7 +841,7 @@ def _pulled_cover(pts, radius, d, arc_radius=None):
                 _arc_turn(out, v, head, d, arc_radius)
             else:
                 # 急弯：停喷开出后，从开出终点转场到下一边助跑起点。
-                _straight_run_out(out)
+                _paint_run_out(out)
                 vertex = pts[i-1]
                 head = math.atan2(pts[i][1]-vertex[1], pts[i][0]-vertex[0])
                 run = max(d, PIVOT_REVERSE_MIN_M)-d
@@ -845,7 +852,7 @@ def _pulled_cover(pts, radius, d, arc_radius=None):
         dist = math.hypot(pts[i][0] - nx, pts[i][1] - ny) + (END_PASS_M if i == n - 1 else 0.0)
         _pull(out, wrap(yaw - head), dist, d)
         if i == n-1:
-            _straight_run_out(out)
+            _paint_run_out(out)
     return out.out, corners
 
 
@@ -892,7 +899,7 @@ def _side_cover(pts, f, l, arc_radius=None, radius=None):
     原地转 → 直线挪（前进或倒车，转得少的那个）→ 原地转到下一条边的助跑起点（后轴在「喷头压拐角」处后方
     max(f, PIVOT_REVERSE_MIN_M) − f，与中线喷头的倒车助跑一样长），往前助跑，喷头到拐角接着压下一条边。
     arc_radius 不为 None（圆弧掉头）：急弯时喷头开过拐角 ARC_RUN_OUT_M 后按 arc_radius 绕 Dubins（只往前）到下一条边，
-    喷头在拐角前 ARC_RUN_IN_M 对正（同 _arc_turn）。共线的路点直接接着走。直线终点停喷后开出 LINE_RUN_OUT_M。
+    喷头在拐角前 ARC_RUN_IN_M 对正（同 _arc_turn）。共线的路点直接接着走。线尾停喷后缓停：直线 40 cm、曲线 50 cm。
     每条边都从已接好的路径上的喷头位置量起（朝这条边的终点），拖出来的近似误差不往后面的边累积。
     返回 (分段, 急弯数)。
     """
@@ -919,7 +926,7 @@ def _side_cover(pts, f, l, arc_radius=None, radius=None):
                 out.pose = goal
                 out.add(1, ARC_RUN_IN_M, 0.0)
             else:
-                _straight_run_out(out)
+                _paint_run_out(out)
                 _transit(out, _offset(axle_for(vertex, nxt, f, l), nxt, -run), nxt)
                 out.add(1, run, 0.0)
             x, y, yaw = out.pose
@@ -929,7 +936,7 @@ def _side_cover(pts, f, l, arc_radius=None, radius=None):
         dist = math.hypot(pts[i][0] - nx, pts[i][1] - ny) + (END_PASS_M if i == n - 1 else 0.0)
         _side_pull(out, phi, dist, f, l)
         if i == n-1:
-            _straight_run_out(out)
+            _paint_run_out(out)
     return out.out, corners
 
 
@@ -1391,11 +1398,11 @@ def start_from_nearest(spec, car_pose, min_radius, *, body=None, nozzle_x=None):
 
 def _circle_run_out(spec, loop):
     """差速车的圆（loop_pieces 的后轴圆）：整圈后喷头再多喷 CIRCLE_OVERLAP_M（沿图纸上半径 R 的圆量，
-    后轴圆半径 r 上是 CIRCLE_OVERLAP_M·r/R），停喷后沿同一个圆接着多走 CIRCLE_RUN_OUT_M。"""
+    后轴圆半径 r 上是 CIRCLE_OVERLAP_M·r/R），停喷后沿后轴切线开出 SOLO_CIRCLE_EXIT_M 再停车。仅独立圆。"""
     k = loop[-1][1]
     r = 1.0 / abs(k)
     paint = 2.0 * math.pi * r * spec.laps + CIRCLE_OVERLAP_M * r / spec.radius
-    return loop[:-1] + [(paint + CIRCLE_RUN_OUT_M, k)]
+    return loop[:-1] + [(paint, k), (SOLO_CIRCLE_EXIT_M, 0.0)]
 
 
 def _circle_run_in(spec, route):
@@ -1426,8 +1433,8 @@ def _circle_route(run, car, min_radius, nozzle_x):
 
 
 def _circle_paint_end(sections):
-    """圆在最后一段（助跑 + 整圈 + 多喷 + 多走）里：最后 CIRCLE_RUN_OUT_M 不喷，刹车停车都在这一截里。"""
-    sections[-1].paint_to_m = sections[-1].path.length - CIRCLE_RUN_OUT_M
+    """独立圆保留整圈与重叠喷涂，最后 1 m 切线离开段不喷，停车减速在这段内完成。"""
+    sections[-1].paint_to_m = sections[-1].path.length - SOLO_CIRCLE_EXIT_M
     return sections
 
 

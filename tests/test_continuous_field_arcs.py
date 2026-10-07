@@ -11,6 +11,7 @@ from field_planner import Settings,plan,transit,polygon
 from path_tracker import Path as Route,Section,SectionTracker,PathConfig,differential_config
 from route_operations import RouteOperations,tail
 from robot_core.kinematics import ChassisGeometry
+from motion_speeds import PAINT_ARC_SPEED_MPS
 
 GEO=ChassisGeometry(drive='differential',track_m=.675,diff_min_radius_m=.5)
 CFG=Settings(.24,.4575,(.911,.604,.39),.557,turn='arc',turn_radius=1.,lateral_accel=.2)
@@ -117,7 +118,7 @@ class ContinuousFieldArcs(unittest.TestCase):
   q=rp.nozzle_at(*sec.car_pose(sec.paint_to_m),.24,-.4575)
   self.assertLess(min(math.dist(q,p) for p in ((5.,0.),(6.,1.))),1e-6)
   rows=drive(tr);self.assertEqual(tr.st.state,'DONE',tr.status())
-  last=max(i for i,r in enumerate(rows) if r['paint']);self.assertAlmostEqual(rows[last]['v'],.5,places=5)
+  last=max(i for i,r in enumerate(rows) if r['paint']);self.assertAlmostEqual(rows[last]['v'],PAINT_ARC_SPEED_MPS,places=5)
   self.assertTrue(any(not r['paint'] and r['v']>.1 for r in rows[last+1:]))
 
  def test_forward_only_even_when_outside_space_is_large(self):

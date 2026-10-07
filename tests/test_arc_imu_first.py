@@ -11,6 +11,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / 'radar_system'), str(ROOT)]
 from path_tracker import PathConfig, PathTracker, circle, differential_config
+from motion_speeds import PAINT_ARC_SPEED_MPS
 from robot_core.kinematics import ChassisGeometry
 
 DEG = math.pi / 180.0
@@ -20,11 +21,14 @@ GEO = ChassisGeometry(drive='differential', track_m=.675, diff_min_radius_m=.5)
 R_AXLE = 2.4
 
 
-def drive_circle(arc, rtk_jump=lambda t: 0., seconds=45.):
+def drive_circle(arc, rtk_jump=lambda t: 0., seconds=None):
     """延迟 0.3 s 的差速车：直线 2 m 接右转整圆（后轴半径 R_AXLE）。卫星位置沿半径往外跳 rtk_jump(t) m。
     返回 (tracker, [(t, 路程, 后轴到圆心距离 − R_AXLE)], 圆上最后一拍的 arc_hold)。"""
     cfg = replace(differential_config(PathConfig(cruise_mps=.5)), arc_imu_first=arc)
     path = circle(R_AXLE, left=False, lead_in=2.0, lead_out=1.0)
+    # 画圆固定 0.5；测试期限跟随路线长度和作业速度，另留加减速时间。
+    if seconds is None:
+        seconds = path.length / PAINT_ARC_SPEED_MPS + 15.
     tr = PathTracker(path, cfg, GEO)
     tr.set_nozzle(NX, NY)
     cx, cy = 2.0, -R_AXLE

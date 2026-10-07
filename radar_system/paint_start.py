@@ -12,7 +12,7 @@ class PaintStartGuard:
     CALIBRATION_WINDOW_M = .75
     SETTLE_S = .2
     MIN_FRAMES = 2
-    STOP_MARGIN_M = .12
+    TRUST_GRACE_S = .1  # 已收稳后，短暂欠观测只暂停许可；当前观测恢复合格才可放行。
 
     def __init__(self):
         self.stable_s = 0.
@@ -21,10 +21,13 @@ class PaintStartGuard:
         self.reason = '等待起步稳定'
         self.started = False
         self.rtk_error = self.heading_error = None
+        self._qualified = False
+        self._current_trusted = True
+        self._trust_gap_s = 0.
 
     @property
     def ready(self):
-        return self.stable_s >= self.SETTLE_S-1e-9 and self.frames >= self.MIN_FRAMES
+        return self._current_trusted and self.stable_s >= self.SETTLE_S-1e-9 and self.frames >= self.MIN_FRAMES
 
     def update(self, dt, *, trusted, frame, weight, rtk_error, guide_error, heading_error):
         finite=lambda v:isinstance(v,(int,float)) and math.isfinite(v)
@@ -42,11 +45,25 @@ class PaintStartGuard:
         elif abs(rtk_error-guide_error)>agreement:reason='定位与推算尚未对齐'
         elif abs(heading_error)>heading:reason='方向尚未收稳'
         else:reason=None
+        self._current_trusted=reason is None
+        if not trusted:
+            self._trust_gap_s+=max(0.,dt)
+        else:self._trust_gap_s=0.
+        # 不靠失效观测开喷，也不积累失效期间的稳定时间。已经完成 0.2 s 检查时，
+        # 最多保留 0.1 s 证据，且 IMU 接管、偏差及方向仍须在原始门槛内。
+        retain=(not trusted and self._qualified and self._trust_gap_s<=self.TRUST_GRACE_S+1e-9
+                and all(finite(v) for v in (weight,rtk_error,guide_error,heading_error))
+                and weight>=.99 and abs(rtk_error)<=self.OFFSET_M
+                and abs(guide_error)<=self.OFFSET_M and abs(rtk_error-guide_error)<=self.AGREEMENT_M
+                and abs(heading_error)<=self.HEADING_RAD)
         if reason:
-            self.stable_s=0.;self.frames=0;self.last_frame=None;self.reason=reason
+            if not retain:
+                self.stable_s=0.;self.frames=0;self.last_frame=None;self._qualified=False
+            self.reason=reason
         else:
             self.stable_s+=max(0.,min(.1,dt))
             if frame != self.last_frame:self.frames+=1;self.last_frame=frame
+            self._qualified=self.ready
             self.reason=None if self.ready else '等待连续稳定'
         return self.ready
 

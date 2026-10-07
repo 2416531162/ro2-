@@ -707,7 +707,7 @@ class LineMission:
         if not self.differential:
             return requested
         if self._constant_straight_speed() or self._constant_arc_speed():
-            # 用户指定直线按设定速度、圆弧固定0.5：不叠加信号降级或恢复限速。
+            # 正常速度由路径规划统一处理（含弯前平滑降速），不叠加信号降级或恢复限速。
             # 不改定位许可；真正不可控仍明确给零速，不能绕过暂停/故障保护。
             self._speed_hold.reset()
             return None if pose.usable_for_control else 0.
@@ -973,7 +973,7 @@ class LineMission:
 
     # ---- 控制周期 ----
     def _check_paint_output_speed(self, vx):
-        # 水泵必须核对最终发给底盘的速度，不能只看渐停限幅之前的跟踪器原始指令。
+        # 仅记录最终指令是否符合速度计划；这个诊断值不再作为水泵放行条件。
         t=self.tracker
         if self.task=='route' and isinstance(t,SectionTracker):
             child=t.trackers[t.index]

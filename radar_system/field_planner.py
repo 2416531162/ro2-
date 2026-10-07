@@ -9,7 +9,7 @@ from itertools import product
 from dataclasses import dataclass, replace
 import route_plan as rp
 from path_tracker import Path, Section
-from motion_speeds import DEFAULT_PAINT_SPEED, DEFAULT_TRANSIT_SPEED, MAX_SECTION_SPEED
+from motion_speeds import DEFAULT_PAINT_SPEED, DEFAULT_TRANSIT_SPEED, MAX_SECTION_SPEED, TURN_SPEED_MPS, PAINT_ARC_SPEED_MPS
 
 TAU = 2 * math.pi
 # 每条刷线段在线头前接一段助跑，助跑不喷（motion 的 paint_from）。差速车每段都从停车起步、先慢走（万向轮翻过来、
@@ -185,8 +185,9 @@ def transit_limit(section,cfg):
 def speed_for(section,cfg,paint=False,nozzle_radius=None):
     speed=cfg.paint_speed if paint else min(cfg.transit_speed,.3) if section.direction<0 else cfg.transit_speed
     k=section.path.kappa_abs_max
+    if paint and k>1e-9:return PAINT_ARC_SPEED_MPS
     if paint and nozzle_radius and k>1e-9:speed*=1/k/nozzle_radius
-    return max(.02,min(MAX_SECTION_SPEED,speed,cfg.yaw_rate/k,math.sqrt(cfg.lateral_accel/k))) if k>1e-9 else min(MAX_SECTION_SPEED,speed)
+    return max(.02,min(TURN_SPEED_MPS,speed,cfg.yaw_rate/k,math.sqrt(cfg.lateral_accel/k))) if k>1e-9 else min(MAX_SECTION_SPEED,speed)
 
 
 def creep_time(section,cfg,speed):

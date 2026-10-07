@@ -9,6 +9,7 @@ ROOT=Path(__file__).resolve().parents[1]
 sys.path[:0]=[str(ROOT/'radar_system'),str(ROOT)]
 from path_tracker import Path as Route, PathConfig, PathTracker, differential_config
 from robot_core.kinematics import ChassisGeometry
+from motion_speeds import PAINT_ARC_SPEED_MPS
 
 GEO=ChassisGeometry(drive='differential',track_m=.675,diff_min_radius_m=.5)
 
@@ -27,15 +28,15 @@ def tracker(curvature):
     return tr
 
 class CircleRunInSpeed(unittest.TestCase):
-    def test_both_directions_keep_half_mps_through_the_unpainted_circle(self):
+    def test_both_directions_keep_paint_speed_through_the_unpainted_circle(self):
         for k in (-.40932478145,.654244):
             with self.subTest(curvature=k):
-                tr=tracker(k);tr._v_prev=.5;tr._creep_from=0.
+                tr=tracker(k);tr._v_prev=PAINT_ARC_SPEED_MPS;tr._creep_from=0.
                 for i in range(120):
                     s=1.5+(tr.paint_from_m-1.5)*i/120
                     tr.st.s=s
-                    v,_=tr.update(pose(tr.path,s),.02)
-                    self.assertAlmostEqual(v,.5,places=10)
+                    v,_=tr.update(pose(tr.path,s,v=PAINT_ARC_SPEED_MPS),.02)
+                    self.assertAlmostEqual(v,PAINT_ARC_SPEED_MPS,places=10)
 
     def test_straight_approach_is_slow_before_reaching_the_circle(self):
         tr=tracker(-.40932478145);tr._v_prev=.3;tr._creep_from=0.

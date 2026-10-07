@@ -49,6 +49,29 @@ def drive(speed=.8,reverse=False,broken=None,stop_at=6.):
     return tr,rows
 
 class SmoothRunup(unittest.TestCase):
+    def test_short_runup_is_ready_at_head_without_lower_speed_or_faster_handoff(self):
+        sec=Section(1,Route((0.,0.,0.),[(7.233333333333,0.)]))
+        sec.field_role='paint';sec.paint_from_m=5/6;sec.paint_to_m=sec.path.length-.4
+        route=SectionTracker([sec],differential_config(PathConfig(cruise_mps=.8)),GEO,
+                             constant_straight_speed=True,constant_paint_speed=True)
+        tr=route.trackers[0];tr.set_nozzle(0.,0.);x=0.;v=.35
+        self.assertTrue(tr.start(pose(x,v)))
+        speeds=[];lost=False
+        for i in range(400):
+            t=(i+1)*DT;p=pose(x,v);tr.sync(t,(t,0.,0.))
+            tr.set_heading_baseline(t,.412);tr.set_rtk_quality(t,.008,32,.005)
+            if .775<=x<.796:p.rtk_trusted=False;lost=True
+            v,_=tr.update(p,DT);speeds.append(v)
+            if x>=sec.paint_from_m:
+                self.assertTrue(tr.paint_start_allowed(),tr.status())
+                break
+            self.assertAlmostEqual(v,.35,places=8)
+            x+=v*DT
+        self.assertTrue(lost)
+        self.assertGreaterEqual(x,sec.paint_from_m)
+        self.assertEqual(tr.cfg.straight_blend_s,.8)
+        self.assertLessEqual(speeds[-1]-.35,.5*DT*DT+1e-8)
+
     def test_first_metre_is_half_speed_then_ramps_while_spraying(self):
         for reverse in (False,True):
             for speed in (.5,.8,1.):
@@ -82,8 +105,9 @@ class SmoothRunup(unittest.TestCase):
             with self.subTest(broken=broken):
                 tr,rows=drive(broken=broken)
                 self.assertFalse(tr.paint_start_allowed())
-                self.assertEqual(tr.st.reason,'paint_start_unready')
-                self.assertLess(rows[-1]['x'],2.5)
+                self.assertEqual(tr.st.state,'RUNNING')
+                self.assertGreater(rows[-1]['x'],2.5)
+                self.assertAlmostEqual(rows[-1]['v'],.5)
 
     def test_pending_correction_freezes_integral_but_not_trusted_runup_fit(self):
         tr=make();p=pose(.8,.3)
@@ -146,7 +170,7 @@ class SmoothRunup(unittest.TestCase):
         tr._entry_speed_guard.update(DT,trusted=False,frame=21,weight=1.,rtk_error=0.,guide_error=0.,heading_error=0.)
         self.assertEqual(tr._entry_paint_target(4.01,.8),.8)
 
-    def test_planned_ramp_keeps_spray_on_but_final_output_mismatch_closes_it(self):
+    def test_planned_ramp_and_final_output_mismatch_both_allow_spray(self):
         from line_mission import LineMission
         import paint_quality
         tr,rows=drive(.8,stop_at=4.)
@@ -156,7 +180,15 @@ class SmoothRunup(unittest.TestCase):
         m._check_paint_output_speed(rows[-1]['v'])
         self.assertTrue(paint_quality.status(m,{'field_plan':True},True,m.tracker.sections[0],tr)['painting'])
         m._check_paint_output_speed(.3)
-        self.assertEqual(paint_quality.status(m,{'field_plan':True},True,m.tracker.sections[0],tr)['paint_blocked'],
-                         'paint_speed_not_ready')
+        m.pose.speed=.3
+        self.assertFalse(tr.paint_speed_ready)
+        self.assertTrue(paint_quality.status(m,{'field_plan':True},True,m.tracker.sections[0],tr)['painting'])
+
+    def test_stopped_midline_resume_uses_floor_and_new_stabilization_distance(self):
+        tr=make();tr.start(pose());tr.paint_start_guard.started=True
+        tr._hint=4.;tr.pause();self.assertTrue(tr.start(pose(4.,0.)))
+        self.assertEqual(tr.update(pose(4.,0.),DT)[0],.35)
+        self.assertEqual(tr._entry_hold_from,4.)
+        self.assertEqual(tr.paint_target_mps,.5)
 
 if __name__=='__main__':unittest.main()

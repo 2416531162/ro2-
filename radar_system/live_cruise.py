@@ -2,7 +2,7 @@
 import copy
 import math
 import time
-from motion_speeds import DEFAULT_TRANSIT_SPEED, MAX_SECTION_SPEED
+from motion_speeds import DEFAULT_TRANSIT_SPEED, MAX_SECTION_SPEED, PAINT_ARC_SPEED_MPS
 from path_tracker import SectionTracker, DIFF_REVERSE_MPS
 import route_plan as rp
 
@@ -33,7 +33,7 @@ def label_sections(sections, entry_m, cruise):
 
 def speed_for(sec,record,cruise,reverse_limit=DIFF_REVERSE_MPS,yaw_rate=None,lateral_accel=None):
     """场地刷线段与 field_planner.speed_for(paint=True) 同一公式：喷头按 cruise 走，再按转向角速度、弯道加速度封顶
-    （角球弧 0.8 m/s 时规划 0.52，只换算不封顶会写成 1.16）。刷线部分只有一种曲率，助跑和绕圈不算。"""
+    （角球弧 0.8 m/s 时规划 0.52，只换算不封顶会写成 1.16）。刷线部分只有一种曲率，助跑和绕圈不算；画圆/画弧线最终采用固定 0.5 m/s。"""
     role=getattr(sec,'field_role',None)
     if role=='transit':return None
     if role!='paint':raise ValueError('当前作业缺少速度分段信息，请重新开始作业')
@@ -51,6 +51,10 @@ def speed_for(sec,record,cruise,reverse_limit=DIFF_REVERSE_MPS,yaw_rate=None,lat
         value=cruise/max(1e-9,math.hypot(1-sec.direction*k*l,sec.direction*k*f))
         k=sec.path.kappa_ahead(mark,sec.path.length-mark)
         if k>1e-9:value=max(.02,min(value,yaw_rate/k,math.sqrt(lateral_accel/k)))
+    mark=getattr(sec,'paint_from_m',0.)
+    end=sec.path.length if sec.paint_to_m is None else sec.paint_to_m
+    if sec.direction>0 and any(not p.straight and p.s0<end-1e-8 and p.s0+p.length>mark+1e-8 for p in sec.path.pieces):
+        value=PAINT_ARC_SPEED_MPS
     value=min(MAX_SECTION_SPEED,value)
     return min(value,reverse_limit) if sec.direction<0 else value
 

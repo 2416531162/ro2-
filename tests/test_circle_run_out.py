@@ -1,4 +1,4 @@
-"""差速车画圆收尾（2026-10-06 用户）：交点不停喷，喷头多喷 0.2 m 才停喷，停喷后沿同一个圆再转 0.5 m 才停车。
+"""独立画圆收尾（2026-10-07 用户）：交点不停喷，多喷 0.2 m 停喷后，沿当前车头方向离开圆 1 m 再停车。
 起喷（2026-10-06 用户）：直线助跑后先沿圆走 1 m 不喷，再从原来的起点开始喷。只做纯逻辑测试。"""
 from collections import deque
 from dataclasses import replace
@@ -56,16 +56,20 @@ class CirclePlan(unittest.TestCase):
     def check(self, sp, sections):
         sec = sections[-1]
         self.assertIsNotNone(sec.paint_to_m)
-        self.assertAlmostEqual(sec.path.length-sec.paint_to_m, rp.CIRCLE_RUN_OUT_M, places=9)
+        self.assertAlmostEqual(sec.path.length-sec.paint_to_m, rp.SOLO_CIRCLE_EXIT_M, places=9)
         mark = getattr(sec, 'paint_from_m', 0.)
         # 喷头整圈后过了交点再多喷 0.2 m（沿图纸上的圆量）
         self.assertAlmostEqual(swept(sec, mark, sec.paint_to_m, sp),
                                2*math.pi*sp.radius*sp.laps+rp.CIRCLE_OVERLAP_M, delta=.003)
-        # 停喷后多走的那截还在同一个圆上
-        k = sec.path.kappa(mark+.1)
-        for s in (sec.paint_to_m, sec.paint_to_m+.25, sec.path.length):
-            self.assertAlmostEqual(sec.path.kappa(min(s, sec.path.length-1e-6)), k, places=12)
-            self.assertAlmostEqual(math.hypot(*nozzle(sec, s)), sp.radius, places=6)
+        # 原停喷点仍在圆上，后轴沿此刻车头方向离开 1 m，不在交界处原地转向。
+        self.assertAlmostEqual(math.hypot(*nozzle(sec, sec.paint_to_m)), sp.radius, places=6)
+        start = sec.car_pose(sec.paint_to_m)
+        finish = sec.car_pose(sec.path.length)
+        self.assertAlmostEqual(finish[0], start[0]+math.cos(start[2]), places=9)
+        self.assertAlmostEqual(finish[1], start[1]+math.sin(start[2]), places=9)
+        self.assertAlmostEqual(finish[2], start[2], places=9)
+        for s in (sec.paint_to_m+.01, sec.paint_to_m+.25, sec.path.length):
+            self.assertAlmostEqual(sec.path.kappa(min(s, sec.path.length-1e-6)), 0., places=12)
 
     def test_plan_current_paints_past_junction_then_runs_out(self):
         for radius in (1.5, 2., 3.):

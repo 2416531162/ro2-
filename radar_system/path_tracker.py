@@ -26,7 +26,8 @@
 from robot_core.standstill import stationary
 import math
 from types import SimpleNamespace
-from motion_speeds import MAX_SECTION_SPEED
+from motion_speeds import MAX_SECTION_SPEED, TURN_SPEED_MPS, PAINT_ARC_SPEED_MPS
+from robot_core.config import CONTROL_DT
 from collections import deque
 from dataclasses import dataclass, field, replace
 
@@ -294,6 +295,8 @@ class PathConfig:
     arc_pull_rate_m: float = 0.02    # 每米最多拉这么多
 
     accel_jerk_mps3: float = 0.0   # 正向提速的加速度变化上限；0 保留原控制。减速/保护独立优先。
+    turn_decel_mps2: float = .25   # 正常弯前舒适减速；故障/停车约束独立优先。
+    turn_jerk_mps3: float = .5
 
     def __post_init__(self):
         if not math.isfinite(self.accel_jerk_mps3) or self.accel_jerk_mps3<0:
@@ -306,7 +309,7 @@ class PathConfig:
         for name in ('straight_imu_enabled', 'straight_target_feedforward', 'straight_direct_rate_damping'):
             if type(getattr(self, name)) is not bool:
                 raise ValueError(name + ' 必须是布尔值')
-        for name in ('straight_min_length_m', 'straight_blend_s',
+        for name in ('turn_decel_mps2', 'turn_jerk_mps3', 'straight_min_length_m', 'straight_blend_s',
                      'straight_outer_k_e', 'straight_outer_tau_s', 'straight_bias_max_deg', 'straight_offset_tau_s',
                      'straight_target_rate_deg_s', 'straight_kp', 'straight_drift_tc', 'straight_target_rate_tau_s',
                      'straight_outer_rate_tau_s', 'straight_outer_tau_scale',
@@ -400,7 +403,7 @@ def differential_config(config=PathConfig()):
     # 积分 0.4、外环低通 1.0 s：真喷头 p95 0.8 m/s 0.76–0.80 → 0.42–0.48 cm（原控制 0.44–0.58），车身小摆与现双环相同
     # （最差模型 +6%）；测向偏 2° 时 4.2 → 1.2 cm。外环低通再短、比例再大，小摆就回来了
     ab = CascadeConfig()
-    return replace(config, delay_s=0.30, steer_gain=1.0, ki_per_m2=2.0, lat_accel_mps2=0.20, arc_speed_mps=.5, start_creep_mps=0.1, start_hold_m=0.6,
+    return replace(config, delay_s=0.30, steer_gain=1.0, ki_per_m2=2.0, lat_accel_mps2=0.20, arc_speed_mps=PAINT_ARC_SPEED_MPS, start_creep_mps=0.1, start_hold_m=0.6,
                    reverse_creep_m=0.5, reverse_creep_mps=0.15, reverse_section_creep_m=0.15, stop_delay_s=None,
                    ff_shape_ratio=0.27, ff_shape_gap_s=0.48, ff_shape_kappa_max=1.2,
                    # 2026-10-06：已验证常速顺时针完整圆的入圆收益；低速与其他圆/圆弧沿用原前馈。
@@ -455,6 +458,33 @@ class PathState:
 
 
 class PathTracker:
+    def _straight_stitch(self,pieces,index):
+        """两条近共线直线之间的毫米级拼接弧；几何保持原样，控制与速度不按一次真实转弯重启。"""
+        if not 0<index<len(pieces)-1:return False
+        p=pieces[index]
+        spans=self.paint_spans if self.paint_spans is not None else [(self.paint_from_m,self.paint_to_m)]
+        if p.s0>=self.path.length or any(max(a,p.s0)<min(b,p.s0+p.length)-1e-9 for a,b in spans):return False
+        return (not p.straight and p.length<=.01 and abs(p.length*p.kappa)<=math.radians(.5)
+                and pieces[index-1].straight and pieces[index+1].straight
+                and min(pieces[index-1].length,pieces[index+1].length)>=.1
+                and abs(wrap(pieces[index+1].yaw-pieces[index-1].yaw))<=math.radians(.5))
+
+    def _straight_run_bounds(self,piece):
+        pieces=self.path.pieces;lo=hi=pieces.index(piece)
+        while lo>=2 and self._straight_stitch(pieces,lo-1):lo-=2
+        while hi+2<len(pieces) and self._straight_stitch(pieces,hi+1):hi+=2
+        return lo,hi
+
+    def _same_straight_run(self,a,b):
+        if a is b:return True
+        if a is None or b is None:return False
+        pieces=self.path.pieces
+        if not a.straight and self._straight_stitch(pieces,pieces.index(a)):a=pieces[pieces.index(a)-1]
+        if not b.straight and self._straight_stitch(pieces,pieces.index(b)):b=pieces[pieces.index(b)-1]
+        if not a.straight or not b.straight:return False
+        lo,hi=self._straight_run_bounds(a)
+        return b in self.path.pieces[lo:hi+1]
+
     def __init__(self, path, config=PathConfig(), geometry=None):
         self.cfg = config
         self.geo = geometry or ChassisGeometry()
@@ -463,7 +493,14 @@ class PathTracker:
         if path.kappa_abs_max > usable + 1e-9:
             raise ValueError('路径最小转弯半径 %.2f m，底盘能稳定跟踪的最小半径是 %.2f m'
                              % (1.0 / path.kappa_abs_max, 1.0 / usable))
-        self.path = path
+        # 规划可把助跑、喷线、干尾拆成相邻共线段。控制上合并为一条直线，避免 0.83 m 助跑被
+        # 当作不足 1 m 的独立短线而禁止 IMU 接管，或跨线头时重新初始化直线控制。喷涂边界仍按路程保留。
+        pieces=[]
+        for piece in path.pieces:
+            if piece.straight and pieces and abs(pieces[-1][1])<1e-12:
+                pieces[-1]=(pieces[-1][0]+piece.length,0.)
+            else:pieces.append((piece.length,piece.kappa))
+        self.path = Path(path.pose(0.),pieces,name=path.name) if len(pieces)<len(path.pieces) else path
         self.speed_limit_mps = None
         self._cruise_target = None
         self.continuation = None
@@ -471,10 +508,12 @@ class PathTracker:
         self._preview_path = None
         self._rolling_entry = False
         self._accel_prev = 0.0
+        self._curve_speed_active = False
         self.entry_speed_mps = None
         self.paint_from_m = 0.0
         self.paint_to_m = path.length
         self.paint_spans = None
+        self._arc_work_role = True  # 独立 PathTracker 沿用作业路径；分段转场显式关闭。
         self.run_out_m = 0.0
         self._run_out_started = False
         self.paint_offset_limit_m = None
@@ -486,12 +525,11 @@ class PathTracker:
         self.runup_distance_m = 0.
         self.paint_start_guard = None
         self._paint_start_beta_history = deque(maxlen=2048)
-        self._paint_start_speed_limit = None
         self.reverse_runup = False
         self._runup_released = False    # 这次起步的助跑已收稳、交给 A/B（见 PathConfig.runup_release_e_m）
         self.constant_straight_speed = False
         self.constant_paint_speed = False
-        self.paint_speed_ready = False
+        self.paint_speed_ready = False  # 速度计划符合性诊断，不决定喷涂许可。
         self.paint_target_mps = None
         self.paint_expected_mps = None
         self.entry_stabilize_mps = None
@@ -499,6 +537,7 @@ class PathTracker:
         self._entry_hold_from = 0.
         self._entry_ramp_released = False
         self._entry_speed_guard = PaintStartGuard()
+        self._entry_reference_piece = None
         self._paint_speed_key = None
         self._paint_speed_latched = None
         self.integral_start_m = None    # 长直线助跑只纠偏，真正上线后才学习横偏积分；None 保留原行为
@@ -725,17 +764,19 @@ class PathTracker:
             self._creep_from = None
         self._runup_released = False
         self._v_prev = max(0.0, pose.speed)
-        self._launch_pending = self.runup_start_mps > 0. and self._hint < self.paint_from_m
         self._entry_speed_active = (self.entry_stabilize_mps is not None
             and (self._hint < self.paint_from_m or self._v_prev < min(self.entry_stabilize_mps,self.cfg.cruise_mps)-1e-6))
+        self._launch_pending = self.runup_start_mps > 0. and (self._hint < self.paint_from_m or self._entry_speed_active)
         self._entry_hold_from=max(self.paint_from_m,self._hint)
         self._entry_ramp_released=False
         self._entry_speed_guard=PaintStartGuard()
+        self._entry_reference_piece=None
         if self.paint_start_guard is not None and not (resume and self.paint_start_guard.started):
             self.paint_start_guard=PaintStartGuard()
         self._paint_start_beta_history.clear()
         self._accel_prev = 0.0
         self._rolling_entry = False
+        self._curve_speed_active = False
         self._sum2 = self._n = self._max = 0.0
         self._clock = 0.0
         self._sent.clear()
@@ -779,18 +820,46 @@ class PathTracker:
         cruise=self.cfg.cruise_mps if self._cruise_target is None else self._cruise_target
         curved=any(not p.straight and p.s0<b-1e-8 and p.s0+p.length>a+1e-8 for p in self.path.pieces)
         # 同一笔若有直弯混合，进入该笔前已选好能够全程保持的速度，不到弯前临时压低。
-        return min(cruise,self.cfg.arc_speed_mps) if curved and self.cfg.arc_speed_mps is not None else cruise
+        return self.cfg.arc_speed_mps if curved and self.cfg.arc_speed_mps is not None else cruise
 
     def _entry_paint_target(self, s, cruise):
         """直线起步先以 0.5 走过正式线头后 1 m，稳定后只释放一次平滑提速。"""
         if not self._entry_speed_active:return cruise
-        if self._rolling_entry:
-            self._entry_speed_active=False
-            return cruise
         ready=(self._entry_speed_guard.ready if self.cfg.straight_imu_enabled else
                abs(self.st.e)<=PaintStartGuard.OFFSET_M and abs(self.st.heading_err)<=PaintStartGuard.HEADING_RAD)
         if s>=self._entry_hold_from+1. and ready:self._entry_ramp_released=True
         return cruise if self._entry_ramp_released else min(cruise,self.entry_stabilize_mps)
+
+    def _short_runup_here(self, s):
+        """短直线助跑留足采样、渐入和稳定时间，不缩短起喷检查或扩大场地。"""
+        if self.paint_start_guard is None or self.entry_stabilize_mps is None or s>=self.paint_from_m:return False
+        first=self.cfg.straight_imu_first
+        if first is None:return False
+        target=self.path._piece(self.paint_from_m)
+        if not target.straight:return False
+        begin,_=self._straight_run_bounds(target)
+        run=self.paint_from_m-self.path.pieces[begin].s0
+        required=self.entry_stabilize_mps*(first.lock_samples*CONTROL_DT+self.cfg.straight_blend_s
+                                         +PaintStartGuard.SETTLE_S+self.cfg.delay_s+.2)
+        return 0.<run<required and self._same_straight_run(self.path._piece(max(0.,s)),target)
+
+    def _prepare_entry_window(self, s, window):
+        """一条连续路线可以含多条喷线直边；每次绕弯接入新直边都先稳行，同一直线上的虚线空隙不重置。"""
+        if self.entry_stabilize_mps is None:return
+        upcoming=window or next(((i,a,b) for i,(a,b) in enumerate(self._paint_windows()) if a>s),None)
+        if upcoming is None:return
+        _,a,b=upcoming
+        piece=self.path._piece(a+1e-8)
+        if not piece.straight or self._same_straight_run(piece,self._entry_reference_piece):return
+        first=self._entry_reference_piece is None
+        self._entry_reference_piece=piece
+        if first:
+            self._entry_hold_from=max(a,self._entry_hold_from)
+            return
+        self._entry_speed_active=True
+        self._entry_hold_from=a
+        self._entry_ramp_released=False
+        self._entry_speed_guard=PaintStartGuard()
 
     def set_cruise(self, speed):
         if not math.isfinite(speed) or not .02<=speed<=MAX_SECTION_SPEED:
@@ -829,15 +898,8 @@ class PathTracker:
                 v = self.st.v_cmd = 0.0
                 wz = 0.0
                 self._arc_tail_w = 0.0
-        if self.st.state == 'RUNNING' and self._check_paint_start(pose,dt,v):
-            self.st.state,self.st.reason='ABORTED','paint_start_unready'
-            self.st.v_cmd=self._v_prev=0.
-            v=wz=0.
-        elif self._paint_start_speed_limit is not None and v>self._paint_start_speed_limit:
-            limited=self._paint_start_speed_limit
-            wz*=limited/v
-            v=self.st.v_cmd=self._v_prev=limited
-            self._accel_prev=0.  # 保护减速后重新柔和提速，不保留被截断的加速度。
+        if self.st.state == 'RUNNING':
+            self._check_paint_start(pose,dt,v)
         self._sent.append((self._clock, v, wz))
         if self._straight_weight > 0 and self._imu_now is not None:
             self._straight_core.record_sent(self._imu_now, wz)
@@ -848,12 +910,13 @@ class PathTracker:
         return v, wz
 
     def _check_paint_start(self,pose,dt,speed):
-        self._paint_start_speed_limit=None
+        """起步检查只控制喷涂许可，不触发车辆停车；未收稳沿原路径继续纠偏。"""
         guard=self.paint_start_guard
         if guard is None:return False
         if guard.started and not (self._entry_speed_active and not self._entry_ramp_released):
             self._straight_status.update(guard.status());return False
-        _,e,heading,_=self.locate(pose.x,pose.y,pose.yaw,self.paint_from_m)
+        alignment_mark=self._entry_hold_from if self._entry_speed_active else self.paint_from_m
+        _,e,heading,_=self.locate(pose.x,pose.y,pose.yaw,alignment_mark)
         nx,ny=self._straight_nozzle
         e+=(nx-self.cfg.track_x_m)*math.sin(heading)+ny*(math.cos(heading)-1.)
         guided=self._straight_guided
@@ -878,23 +941,8 @@ class PathTracker:
         self._straight_status['start_calibration_span_deg']=math.degrees(span)
         left=self.paint_from_m-self.st.s
         self._straight_status['start_left_m']=left
-        self._straight_status['start_speed_limit_mps']=None
-        if left<=0.:
-            if guard.ready:
-                guard.started=True;self._straight_status.update(guard.status());return False
-            return True
-        # 未收稳先按剩余距离降低速度，继续完成对线和 IMU 交接；不能在制动距离入口直接中止。
-        v=max(abs(pose.speed),abs(speed))
-        delay=max(self.cfg.delay_s,self._straight_core.cfg.delay_s)
-        stopping=v*delay+v*v/(2*self.cfg.decel_mps2)+guard.STOP_MARGIN_M
-        if guard.ready:return False
-        if left<=guard.STOP_MARGIN_M+.05:return True
-        if left<=stopping+.30:
-            # 不提前开喷、不越过原线头等待；减速仍给转向和 0.8 s IMU 混合留出时间。
-            a=self.cfg.decel_mps2
-            safe=max(0.,math.sqrt((a*delay)**2+2*a*max(0.,left-guard.STOP_MARGIN_M))-a*delay)
-            self._paint_start_speed_limit=min(speed,safe)
-            self._straight_status['start_speed_limit_mps']=self._paint_start_speed_limit
+        if left<=0. and guard.ready:
+            guard.started=True;self._straight_status.update(guard.status())
         return False
 
     def paint_start_allowed(self):
@@ -911,11 +959,14 @@ class PathTracker:
         piece = next((p for p in self.path.pieces if p.s0 <= st.s < p.s0 + p.length), None)
         if piece is None and st.s < 0.0:
             piece = self.path.pieces[0]
+        if piece is not None and not piece.straight:
+            index=self.path.pieces.index(piece)
+            if self._straight_stitch(self.path.pieces,index):piece=self.path.pieces[index-1]
         if piece is None or not piece.straight:
             self._reset_straight()
             return legacy_w
         if piece is not self._straight_piece:
-            self._reset_straight()
+            if not self._same_straight_run(piece,self._straight_piece):self._reset_straight()
             self._straight_piece = piece
         if self._straight_guide is not None:
             return self._straight_first(pose, dt, speed, legacy_w, piece, imu_yaw, gyro)
@@ -930,12 +981,16 @@ class PathTracker:
         self._straight_offset, self._straight_offset_n, _ = learn_heading_offset(
             self._straight_offset, self._straight_offset_n, difference, dt, ab.offset_tau_s)
 
-        u, left = st.s-piece.s0, piece.s0+piece.length-st.s
+        first_index,last_index=self._straight_run_bounds(piece)
+        first_piece,last_piece=self.path.pieces[first_index],self.path.pieces[last_index]
+        u=st.s-first_piece.s0
+        length=last_piece.s0+last_piece.length-first_piece.s0
+        left=last_piece.s0+last_piece.length-st.s
         reserve = max(1.0, speed*cfg.straight_blend_s + speed*cfg.delay_s + speed*speed/(2*cfg.decel_mps2))
-        if cfg.straight_end_reserve_m is not None and piece is self.path.pieces[-1]:
+        if cfg.straight_end_reserve_m is not None and last_piece is self.path.pieces[-1]:
             reserve = cfg.straight_end_reserve_m
-        eligible = (piece.length >= cfg.straight_min_length_m
-                    and (u >= cfg.straight_settle_m or piece is self.path.pieces[0] and u < 0.)
+        eligible = (length >= cfg.straight_min_length_m
+                    and (u >= cfg.straight_settle_m or first_piece is self.path.pieces[0] and u < 0.)
                     and speed > cfg.straight_min_speed_mps and left > reserve)
         runup_wait = False
         if self.runup_speed_mps is not None and st.s < self.paint_from_m and not self._runup_released:
@@ -1042,12 +1097,16 @@ class PathTracker:
     def _straight_eligible(self, piece, speed):
         """这拍能不能（继续）交给直线内环：(可以, 助跑还在等收稳)。"""
         cfg, st = self.cfg, self.st
-        u, left = st.s-piece.s0, piece.s0+piece.length-st.s
+        first_index,last_index=self._straight_run_bounds(piece)
+        first_piece,last_piece=self.path.pieces[first_index],self.path.pieces[last_index]
+        u=st.s-first_piece.s0
+        length=last_piece.s0+last_piece.length-first_piece.s0
+        left=last_piece.s0+last_piece.length-st.s
         reserve = max(1.0, speed*cfg.straight_blend_s + speed*cfg.delay_s + speed*speed/(2*cfg.decel_mps2))
-        if cfg.straight_end_reserve_m is not None and piece is self.path.pieces[-1]:
+        if cfg.straight_end_reserve_m is not None and last_piece is self.path.pieces[-1]:
             reserve = cfg.straight_end_reserve_m
-        eligible = (piece.length >= cfg.straight_min_length_m
-                    and (u >= cfg.straight_settle_m or piece is self.path.pieces[0] and u < 0.)
+        eligible = (length >= cfg.straight_min_length_m
+                    and (u >= cfg.straight_settle_m or first_piece is self.path.pieces[0] and u < 0.)
                     and speed > cfg.straight_min_speed_mps and left > reserve)
         runup_wait = False
         if self.entry_stabilize_mps is not None:
@@ -1380,28 +1439,61 @@ class PathTracker:
                     k = current+ratio*(late-current)
         return k
 
+    def _turn_ramp_distance(self, speed, target):
+        """三次平滑速度包络的保守长度：同时约束加速度和加速度变化率。"""
+        delta=max(0.,speed-target)
+        return max(1.5*delta*speed/self.cfg.turn_decel_mps2,
+                   math.sqrt((6*delta*speed*speed+2.25*delta*delta*speed)/self.cfg.turn_jerk_mps3))
+
+    def _work_arc_piece(self, piece):
+        """喷涂圆弧及同曲率的预走/收尾属于作业；真正转场弯道独立限速。"""
+        if not self._arc_work_role or piece.straight:return False
+        pieces=self.path.pieces;i=pieces.index(piece);lo=hi=i
+        while lo>0 and abs(pieces[lo-1].kappa-piece.kappa)<1e-9:lo-=1
+        while hi+1<len(pieces) and abs(pieces[hi+1].kappa-piece.kappa)<1e-9:hi+=1
+        start,end=pieces[lo].s0,pieces[hi].s0+pieces[hi].length
+        spans=self.paint_spans if self.paint_spans is not None else [(self.paint_from_m,self.paint_to_m)]
+        return any(start<b-1e-8 and end>a+1e-8 for a,b in spans)
+
+    def _curve_target_at(self, s):
+        # 连续路径预瞄必须保留下一段的作业/转场身份，不能只看复制后的曲率。
+        tracker=self
+        while tracker.continuation is not None and s>=tracker.path.length:
+            s-=tracker.path.length;tracker=tracker.continuation
+        piece=tracker.path._piece(max(0.,s))
+        arc=tracker.cfg.arc_speed_mps
+        if arc is not None and tracker._work_arc_piece(piece):return arc
+        return min(TURN_SPEED_MPS,arc if arc is not None else math.inf)
+
     def _curve_speed(self, s, v):
-        """前方弯道按刹车曲线限速：离弯 d 米允许 √(√(a/|κ|)² + 2·减速度·(d − 余量))，到弯前余量处正好降到弯道速度
-        （s 已是执行延迟之后的位置）。原来弯一进刹车距离就一拍降到弯道速度：转场 1.5 m/s 进 R1 弯一拍 1.5 → 0.45，
-        整场圆弧掉头 13–18 次，仿真底盘 3.5–4.7 m/s² 急刹（2026-10-04 用户：不能出现急刹）。"""
+        """Gen5 用首尾斜率为零的速度包络提前准备过弯，其他底盘保留原制动曲线。
+        s 已包含执行延迟预估，额外距离余量使实际到弯口前完成降速；连续分段也统一预瞄。"""
         cfg = self.cfg
+        v=max(v,self._v_prev)
         margin = v * cfg.lead_s + 0.3
-        reach = s + v * v / (2.0 * cfg.decel_mps2) + margin
+        reach = s + max(v*v/(2*cfg.decel_mps2),self._turn_ramp_distance(v,0.)) + margin
         limit = math.inf
-        for p in (self._preview_path if self._preview_path is not None else self.path).pieces:
+        preview_pieces=(self._preview_path if self._preview_path is not None else self.path).pieces
+        for index,p in enumerate(preview_pieces):
             if p.s0 >= reach:
                 break
-            if p.s0 + p.length <= s or abs(p.kappa) <= 1e-6:
+            if p.s0 + p.length <= s or abs(p.kappa) <= 1e-6 or self._straight_stitch(preview_pieces,index):
                 continue
             d = max(0.0, p.s0 - s - margin)
             curve_v2 = cfg.arc_speed_mps**2 if self.geo.differential and cfg.arc_speed_mps is not None else cfg.lat_accel_mps2 / abs(p.kappa)
-            limit = min(limit, math.sqrt(curve_v2 + 2.0 * cfg.decel_mps2 * d))
+            if self.geo.differential:
+                target=self._curve_target_at(p.s0+min(1e-6,p.length/2))
+                length=self._turn_ramp_distance(v,target)
+                u=1. if length<=1e-9 else min(1.,d/length)
+                allowed=target+max(0.,v-target)*u*u*(3.-2.*u)
+            else:allowed=math.sqrt(curve_v2+2.*cfg.decel_mps2*d)
+            limit=min(limit,allowed)
         # 换段前预先满足下一段速度/终点约束，不能交接后才突然减速。
         offset=self.path.length
         nxt=self.continuation
         while nxt is not None and offset-s < v*v/(2*cfg.decel_mps2)+margin:
             target=nxt.entry_speed_mps if nxt.entry_speed_mps is not None and nxt.paint_from_m>0 else nxt.cfg.cruise_mps
-            if nxt.cfg.arc_speed_mps is not None and not nxt.path.pieces[0].straight:target=min(target,nxt.cfg.arc_speed_mps)
+            if nxt.cfg.arc_speed_mps is not None and not nxt.path.pieces[0].straight:target=nxt._curve_target_at(0.)
             limit=min(limit,math.sqrt(target*target+2*cfg.decel_mps2*max(0.,offset-s-margin)))
             offset+=nxt.path.length
             if nxt.continuation is None and nxt.run_out_m<=0:
@@ -1409,8 +1501,8 @@ class PathTracker:
             nxt=nxt.continuation
         return limit
 
-    def _accelerate(self, target, dt):
-        """提速用限加速度的圆滑斜坡；降速与急停始终直接服从上层约束。"""
+    def _accelerate(self, target, dt, *, smooth_decel=False):
+        """提速与正常弯前降速限制加速度变化；保护和停车仍可独立收紧。"""
         if dt<=0:return min(target,self._v_prev)
         if self._launch_pending and target>0.:
             self._launch_pending=False
@@ -1420,6 +1512,21 @@ class PathTracker:
                 self._accel_prev=0.
                 return min(target,self.runup_start_mps)
         gap=target-self._v_prev
+        if smooth_decel:
+            jerk=self.cfg.turn_jerk_mps3
+            direction=1. if gap>=0. else -1.
+            taper=max(0.,math.sqrt((jerk*dt)**2+2*jerk*abs(gap))-jerk*dt)
+            maximum=self.cfg.accel_mps2 if direction>0 else self.cfg.turn_decel_mps2
+            wanted=direction*min(maximum,taper)
+            accel=max(self._accel_prev-jerk*dt,min(self._accel_prev+jerk*dt,wanted))
+            value=self._v_prev+accel*dt
+            if (gap>=0. and self._v_prev<=target<=value or gap<0. and value<=target<=self._v_prev):
+                reached=(target-self._v_prev)/dt
+                # 弯前包络会随位置缓慢移动，不能为追上它而把加速度一拍截断。
+                if abs(reached-self._accel_prev)<=jerk*dt+1e-9:
+                    value=target;accel=reached
+            self._accel_prev=accel
+            return max(0.,value)
         jerk=self.cfg.accel_jerk_mps3
         if gap<=0 or jerk<=0:
             self._accel_prev=0.
@@ -1431,8 +1538,9 @@ class PathTracker:
         return min(target,self._v_prev+accel*dt)
 
     def constant_arc_speed_here(self):
-        return (self.geo.differential and self.cfg.arc_speed_mps is not None
-                and abs(self.path.kappa(max(0., min(self.path.length, self.st.s)))) > 1e-9)
+        piece=self.path._piece(max(0.,min(self.path.length,self.st.s)))
+        return (self.geo.differential and self.cfg.arc_speed_mps is not None and not piece.straight
+                and not self._straight_stitch(self.path.pieces,self.path.pieces.index(piece)))
 
     def _control(self, pose, dt, steer=None):
         """返回 (车速, 下发曲率, 起步锁车头另加的角速度)。steer：画圆 IMU 为主时转向用的位姿（x, y, yaw），
@@ -1472,6 +1580,7 @@ class PathTracker:
         constant_straight = self.constant_straight_speed and abs(k_r) < 1e-9
         constant_arc = self.constant_arc_speed_here()
         paint_window=self._active_paint_window(s_now,pose)
+        self._prepare_entry_window(s_now,paint_window)
         if paint_window is not None:
             key,a,b=paint_window
             if self._paint_speed_key!=(key,a,b):
@@ -1538,22 +1647,26 @@ class PathTracker:
         v = cfg.arc_speed_mps if constant_arc else cfg.cruise_mps
         if self.entry_speed_mps is not None and s < self.paint_from_m:
             # s 已包含执行延迟与前视；在进入划线区之前预留减速距离。
-            allowed = math.sqrt(cfg.cruise_mps**2 + 2*cfg.decel_mps2*max(0.,self.paint_from_m-s))
+            entry_target=self._planned_paint_speed(*self._paint_windows()[0]) if self._paint_windows() else cfg.cruise_mps
+            allowed = math.sqrt(entry_target**2 + 2*cfg.decel_mps2*max(0.,self.paint_from_m-s))
             v = min(self.entry_speed_mps,allowed)
         if self.approach_to_m is not None and s < self.approach_to_m:
             # 接入、转场离正式路线 approach_zone_m 以内不按转场速度：按刹车曲线降到画线速度（段短于它就不提速）
             allowed = math.sqrt(self.approach_mps**2
                                 + 2*cfg.decel_mps2*max(0., self.approach_to_m-cfg.approach_zone_m-s))
             v = min(v, allowed)
-        if self.runup_speed_mps is not None and not self._rolling_entry and s_now < self.paint_from_m:
+        runup_mark=self._entry_hold_from if self._entry_speed_active else self.paint_from_m
+        if (self.runup_speed_mps is not None and (not self._rolling_entry or self._entry_speed_active)
+                and s_now < runup_mark):
             # 直线助跑在入圆切点结束；起喷前的沿圆预走已按圆弧速度运行。
             # 若以 paint_from_m 为终点，圆内会再次 0.5→0.3→0.5，积入转向暂态，起喷后仍在回摆。
-            runup_to, exit_speed = self.paint_from_m, cfg.cruise_mps
-            paint_piece = self.path._piece(self.paint_from_m)
+            runup_to, exit_speed = runup_mark, cfg.cruise_mps
+            paint_piece = self.path._piece(runup_mark)
             if paint_piece.straight:
                 # 助跑平滑提到 0.5；跨过线头不触发提速，正式线上稳定走过 1 m 后才升到设定值。
                 runup_to=0.
-                v=min(v,exit_speed,self.entry_stabilize_mps if self.entry_stabilize_mps is not None else exit_speed)
+                if self._same_straight_run(self.path._piece(max(0.,s_now)),paint_piece):
+                    v=min(v,exit_speed,self.entry_stabilize_mps if self.entry_stabilize_mps is not None else exit_speed)
             elif cfg.arc_speed_mps is not None:
                 runup_to, exit_speed = paint_piece.s0, cfg.arc_speed_mps
             if s_now < runup_to and not constant_arc:
@@ -1566,7 +1679,6 @@ class PathTracker:
                 # 更远的接入直线仍按原巡航速度；只在最后一段助跑内限制到入圆速度。
                 cap=exit_speed if runup_to-s_now <= self.runup_distance_m else cfg.cruise_mps
                 v=min(v,cap)
-        v = min(v, self._curve_speed(s, v))
         painting = any(a <= s_now < b for a,b in self.paint_spans) if self.paint_spans is not None else self.paint_from_m <= s_now < self.paint_to_m
         if not constant_tracking and self.paint_offset_limit_m is not None and painting:
             # 正式直线喷涂：当前/延迟后喷头偏差达到停喷门槛一半就渐降速，
@@ -1586,7 +1698,8 @@ class PathTracker:
         elif self.run_out_m > 0:
             # 线尾前完全不参与停车限速。只用当前实际喷头位置触发，禁止 Smith 前视触发。
             nozzle_remaining,_=self.nozzle_end(pose,*self._straight_nozzle,at=self.paint_to_m)
-            if nozzle_remaining < 0.:
+            if s_now>=self.paint_to_m-.05 and nozzle_remaining < 0.:
+                # 闭合路线起点与终点相邻，转场也可能穿过终点所在直线；仅在最后线尾附近判断真实越线。
                 self._run_out_started=True
             if self._run_out_started:
                 # 越线后按恒定斜率降低非零指令；不靠提前刹车或高速发零追停车点。
@@ -1604,18 +1717,38 @@ class PathTracker:
                 if upcoming is not None:
                     a,b=upcoming;target=self._planned_paint_speed(a,b)
                     v=min(v,math.sqrt(target*target+2*cfg.decel_mps2*max(0.,a-s)))
+        # 弯前规划必须在喷线定速之后执行，助跑、正式喷线、转场均不能覆盖它。
+        short_runup=self._short_runup_here(s_now)
+        if short_runup:v=min(v,TURN_SPEED_MPS)
+        requested=v
+        curve_limit=self._curve_speed(s,max(v,abs(pose.speed)))
+        current_piece=self.path._piece(max(0.,min(self.path.length,s_now)))
+        if paint_window is not None and self.cfg.arc_speed_mps is not None and self._work_arc_piece(current_piece):
+            # 正式画圆/画弧线保持作业定速；停喷后的转场再平缓收至掉头速度。
+            curve_limit=self.cfg.arc_speed_mps
+        if (self.geo.differential and not current_piece.straight
+                and not self._straight_stitch(self.path.pieces,self.path.pieces.index(current_piece))):
+            curve_limit=min(curve_limit,self._curve_target_at(max(0.,s_now)))
+        curve_adjusted=curve_limit<requested-1e-6 or self._v_prev>curve_limit+1e-6
+        if curve_adjusted and not self._run_out_started:self._curve_speed_active=True
+        curve_profile=self._curve_speed_active and not self._run_out_started
+        v=min(v,curve_limit)
         protected=False
         if self.speed_limit_mps is not None and (self.constant_paint_speed or not constant_arc or self.speed_limit_mps <= 0.):
             protected=self.speed_limit_mps<v-1e-6
             v = min(v, max(0.0, self.speed_limit_mps))
-        v = self._accelerate(v, dt)
+        v = self._accelerate(v, dt,smooth_decel=(curve_profile or short_runup) and not protected)
+        if protected or (not curve_adjusted and abs(v-requested)<=1e-6 and abs(self._accel_prev)<=1e-6):
+            self._curve_speed_active=False
         self._v_prev = v
         if v<=0.:self._accel_prev=0.
         st.v_cmd = v
         self.paint_expected_mps=self.paint_target_mps
-        if (paint_window is not None and self._entry_speed_active and self._entry_ramp_released
-                and not protected and v>=min(self.entry_stabilize_mps,self.paint_target_mps)-1e-6):
-            # 用户允许正式线上平滑提速时连续喷涂；只认本周期规划出的速度，保护减速仍停喷。
+        if (paint_window is not None and not protected and (
+                curve_profile and v>=min(TURN_SPEED_MPS,self.paint_target_mps)-1e-6 or
+                self._entry_speed_active and self._entry_ramp_released
+                and v>=min(self.entry_stabilize_mps,self.paint_target_mps)-1e-6)):
+            # 速度计划诊断；起喷资格不依赖此值。
             self.paint_expected_mps=v
         self.paint_speed_ready=(self.paint_expected_mps is not None and not protected
                                 and abs(v-self.paint_expected_mps)<=1e-6)
@@ -1766,6 +1899,14 @@ class SectionTracker:
             if getattr(sec,'cruise_mps',None) is not None:
                 if not math.isfinite(sec.cruise_mps) or not .02<=sec.cruise_mps<=MAX_SECTION_SPEED:raise ValueError('分段速度无效')
                 cfg=replace(cfg,cruise_mps=sec.cruise_mps)
+            mark=getattr(sec,'paint_from_m',0.)
+            end=sec.path.length if sec.paint_to_m is None else sec.paint_to_m
+            spans=sec.paint_spans if sec.paint_spans is not None else [(mark,end)]
+            if (self.geo.differential and sec.direction>0 and getattr(sec,'field_role',None)=='paint'
+                    and cfg.arc_speed_mps is not None
+                    and spans and all(any(not p.straight and p.s0<b-1e-8 and p.s0+p.length>a+1e-8
+                                          for p in sec.path.pieces) for a,b in spans)):
+                cfg=replace(cfg,cruise_mps=cfg.arc_speed_mps)
             if pivot_rate is not None:
                 # 差速车段尾要停准：原地转 90° 后，停车差的那点前后距离就成了下一条边上的横偏。
                 # 最后一段也一样：连线路线终点不再多走（route_plan.END_PASS_M），水泵要正好停在定点上（2026-10-03 用户）；
@@ -1784,6 +1925,7 @@ class SectionTracker:
                     or i>0 and self.sections[i-1].continuous_after):
                 cfg=replace(cfg,accel_mps2=min(cfg.accel_mps2,.25),accel_jerk_mps3=.5)
             tracker=PathTracker(sec.path, cfg, self.geo)
+            tracker._arc_work_role=getattr(sec,'field_role',None)!='transit'
             tracker.constant_straight_speed = constant_straight_speed and self.geo.differential
             mark=getattr(sec,'paint_from_m',0.)
             end = sec.path.length if sec.paint_to_m is None else sec.paint_to_m
@@ -1801,7 +1943,14 @@ class SectionTracker:
                 tracker.paint_spans=[(mark,end)]
             if (self.geo.differential and sec.direction>0 and getattr(sec,'field_role',None)=='paint'
                     and end < sec.path.length and all(p.straight for p in sec.path.pieces if p.s0+p.length>end+1e-9)):
-                tracker.run_out_m = sec.path.length-end
+                from route_plan import SOLO_CIRCLE_EXIT_M
+                paint_tail=sec.path._piece(max(mark,end-1e-8))
+                circle_exit=(not paint_tail.straight
+                    and abs(paint_tail.kappa)*max(0.,end-max(mark,paint_tail.s0))>=2*math.pi-1e-3
+                    and abs(sec.path.length-end-SOLO_CIRCLE_EXIT_M)<1e-7)
+                # 仅整圆的 1 m 切线离开段按剩余距离自然减速，避免整米低速爬行；其他线尾沿用原策略。
+                if not circle_exit:
+                    tracker.run_out_m = sec.path.length-end
             if (constant_straight_speed and self.geo.differential and sec.direction>0
                     and getattr(sec,'field_role',None)=='paint' and mark>0):
                 # 10-05 用户定助跑 0.5 m/s、正常不低于 0.3；10-06 晚用户：「起步的助跑是允许降速的，在进入的直线的
@@ -1907,7 +2056,7 @@ class SectionTracker:
             if tr.continuation is None:continue
             # 覆盖最高 1.5 m/s 的制动/延迟预瞄，不复制整场数千米路线。
             pieces=[(p.length,p.kappa) for p in tr.path.pieces]
-            reach=max(10.,MAX_SECTION_SPEED**2/(2*tr.cfg.decel_mps2)+MAX_SECTION_SPEED*(tr.cfg.delay_s+tr.cfg.lead_s)+1.)
+            reach=max(10.,tr._turn_ramp_distance(MAX_SECTION_SPEED,0.)+MAX_SECTION_SPEED*(tr.cfg.delay_s+tr.cfg.lead_s)+1.)
             extra=0.;nxt=tr.continuation
             while nxt is not None and extra<reach:
                 for p in nxt.path.pieces:
@@ -1929,6 +2078,12 @@ class SectionTracker:
                 self.st.state,self.st.reason='PAUSED',nxt.st.reason
                 return False
             nxt._v_prev,nxt._accel_prev=tr._v_prev,tr._accel_prev
+            nxt._curve_speed_active=tr._curve_speed_active
+            # 已按下一笔作业速度连续直行时无需重新降速；从 0.5 圆弧接入更快直线仍须稳行 1 m。
+            # 不能仅因“连续衔接”就跳过下一条直线的接入稳定阶段。
+            if (nxt._entry_speed_active and tr._v_prev>=
+                    nxt._planned_paint_speed(nxt.paint_from_m,nxt.paint_to_m)-1e-6):
+                nxt._entry_speed_active=False
             nxt._clock,nxt._sent=tr._clock,deque(tr._sent)
             nxt._kfb=tr._kfb
             nxt._creep_from=(tr._creep_from if tr._creep_from is not None else 0.)-tr.path.length

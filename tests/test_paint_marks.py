@@ -69,6 +69,53 @@ def marks(m):
 
 
 class PaintMarks(unittest.TestCase):
+    def low_speed_mission(self):
+        m, fusion = mission()
+        m.tracker.trackers[0].constant_paint_speed = True
+        m._stable_speed_limit = lambda now, pose, dt: .35
+        return m, fusion
+
+    def test_low_speed_starts_pump_at_line_head_and_keeps_one_paint_interval(self):
+        m, fusion = self.low_speed_mission()
+        try:
+            edges, prev = [], False
+            for i in range(1700):
+                painting, tip = step(m, fusion, i)
+                if painting != prev:
+                    edges.append((painting, tip))
+                    prev = painting
+                if painting:
+                    child = m.tracker.trackers[m.tracker.index]
+                    self.assertFalse(child.paint_speed_ready)
+                    self.assertLessEqual(child.st.v_cmd, .35)
+                if m.phase == 'IDLE':
+                    break
+            self.assertEqual(m.operations.record['state'], 'DONE')
+            self.assertEqual([e[0] for e in edges], [True, False])
+            self.assertLess(abs(edges[0][1][0] - NOZZLE['forward'] - 1.), .35 * DT + 1e-6)
+            self.assertEqual([k['on'] for k in marks(m)['items']], [True, False])
+        finally:
+            m._close_log()
+
+    def test_low_speed_spray_stops_on_control_loss_or_unusable_pose(self):
+        for cause in ('control_loss', 'position_lost'):
+            with self.subTest(cause=cause):
+                m, fusion = self.low_speed_mission()
+                try:
+                    for i in range(400):
+                        painting, _ = step(m, fusion, i)
+                        if painting:
+                            break
+                    self.assertTrue(painting)
+                    mode = 'MANUAL' if cause == 'control_loss' else 'NAVIGATION'
+                    if cause == 'position_lost':
+                        fusion.current.usable_for_control = False
+                    m.tick((i + 1) * DT, mode)
+                    self.assertFalse(m.operations.paint_status()['painting'])
+                    self.assertEqual([k['on'] for k in marks(m)['items']], [True, False])
+                finally:
+                    m._close_log()
+
     def test_marks_are_the_pump_edges_at_the_actual_nozzle(self):
         m, fusion = mission()
         edges, prev = [], False
