@@ -978,8 +978,8 @@ class LineMission:
         if self.task=='route' and isinstance(t,SectionTracker):
             child=t.trackers[t.index]
             if child.constant_paint_speed:
-                child.paint_speed_ready=(child.paint_speed_ready and child.paint_target_mps is not None
-                                         and abs(vx-child.paint_target_mps)<=1e-6)
+                child.paint_speed_ready=(child.paint_speed_ready and child.paint_expected_mps is not None
+                                         and abs(vx-child.paint_expected_mps)<=1e-6)
 
     def tick(self, now, motion_mode):
         """返回 (vx, wz, select)。select=True/False 表示节点要调用 /motion/navigation，None 不动。

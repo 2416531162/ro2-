@@ -76,7 +76,7 @@ def status(m,record,phase,section,tracker):
     if not getattr(tracker,'paint_start_allowed',lambda:True)():
         out['paint_blocked']='paint_start_unready';return out
     if getattr(tracker,'constant_paint_speed',False) and not tracker.paint_speed_ready:
-        # 起步/恢复尚未达到本笔速度，或保护正在减速：先停喷，不边加减速边喷。
+        # 尚未达到当前阶段的计划速度，或保护正在减速：停喷。正式线头后经稳定确认的平滑提速可以连续喷涂。
         out['paint_blocked']='paint_speed_not_ready';return out
     pose=m.pose
     arc=continuous_arc(m,section,tracker)

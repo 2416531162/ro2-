@@ -35,15 +35,17 @@ def fused(tr, s=1.2, e=.003):
 
 
 class ReverseHandoff(unittest.TestCase):
-    def test_residual_heading_is_not_released_at_two_degrees(self):
+    def test_residual_heading_is_corrected_by_same_line_controller_during_runup(self):
         tr = tracker()
         tr.st.s, tr.st.e, tr.st.heading_err = 1.2, .003, math.radians(2.)
-        self.assertEqual(tr._straight_eligible(tr.path.pieces[0], .3), (False, True))
+        self.assertEqual(tr._straight_eligible(tr.path.pieces[0], .35), (True, False))
+        self.assertFalse(tr.paint_start_allowed())
 
-    def test_crossing_paint_start_does_not_force_handoff(self):
+    def test_steering_can_correct_offset_without_authorizing_paint(self):
         tr = tracker()
         tr.st.s, tr.st.e, tr.st.heading_err = tr.paint_from_m+.1, .035, 0.
-        self.assertEqual(tr._straight_eligible(tr.path.pieces[0], .8), (False, True))
+        self.assertEqual(tr._straight_eligible(tr.path.pieces[0], .5), (True, False))
+        self.assertFalse(tr.paint_start_allowed())
         tr.st.e = .003
         self.assertEqual(tr._straight_eligible(tr.path.pieces[0], .8), (True, False))
         tr.st.e = .02
@@ -64,7 +66,7 @@ class ReverseHandoff(unittest.TestCase):
             tr._straight_first(fused(tr), .02, .3, 0., tr.path.pieces[0], 0., 0.)
         self.assertGreater(g.fit_points, 0)
         self.assertTrue(tr.st.integral_frozen)
-        self.assertEqual(tr.st.integral, .012)
+        self.assertEqual(tr._straight_guide.beta, 0.)
         # 禁止积分不等于禁止可信拟合，但浮点位置仍不能进入拟合。
         points = g.fit_points
         for i in range(160, 210):

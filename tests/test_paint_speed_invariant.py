@@ -1,4 +1,4 @@
-"""正常喷线从线头到线尾保持一笔速度；转场可减速，保护先停喷。"""
+"""直线首次上线稳定走 1 m 后平滑提速，随后定速；圆弧保持定速，保护先停喷。"""
 from pathlib import Path
 from dataclasses import replace
 from types import SimpleNamespace as NS
@@ -113,12 +113,18 @@ class PaintSpeedInvariant(unittest.TestCase):
   sec=section([(3.,0.)],0.,None)
   with self.assertRaisesRegex(ValueError,'重新规划'):strict([sec])
 
- def test_corner_lines_and_arc_are_constant_through_the_tail(self):
+ def test_corner_start_stabilizes_then_remaining_lines_and_arc_keep_speed(self):
   out=plan(corner(),(-.3,.4,0.),CFG);tr=strict(sections(out));rows=drive(tr)
   self.assertEqual(tr.st.state,'DONE')
   for index,expected in ((0,.8),(1,.5),(2,.8)):
    values=[r['v'] for r in rows if r['index']==index and r['paint']]
-   self.assertTrue(values);self.assertAlmostEqual(min(values),expected);self.assertAlmostEqual(max(values),expected)
+   self.assertTrue(values)
+   if index==0:
+    first=[r['v'] for r in rows if r['index']==0 and r['paint'] and r['s']<tr.sections[0].paint_from_m+1.]
+    self.assertTrue(first);self.assertTrue(all(abs(v-.5)<1e-6 for v in first))
+    self.assertGreaterEqual(min(values),.5-1e-6)
+   else:self.assertAlmostEqual(min(values),expected,delta=1e-6)
+   self.assertAlmostEqual(max(values),expected,delta=1e-6)
   self.assertTrue(all(r['v']>0 for r in rows[:-1]))
 
 if __name__=='__main__':unittest.main()

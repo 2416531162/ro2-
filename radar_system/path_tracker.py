@@ -479,6 +479,8 @@ class PathTracker:
         self._run_out_started = False
         self.paint_offset_limit_m = None
         self.runup_speed_mps = None
+        self.runup_start_mps = 0.0
+        self._launch_pending = False
         self.approach_to_m = None       # 正式路线（喷线起点）在本段的路程处（可在段尾之后）；None 不管（见 approach_zone_m）
         self.approach_mps = None        # 离它 approach_zone_m 以内最多这么快（画线速度）
         self.runup_distance_m = 0.
@@ -491,6 +493,12 @@ class PathTracker:
         self.constant_paint_speed = False
         self.paint_speed_ready = False
         self.paint_target_mps = None
+        self.paint_expected_mps = None
+        self.entry_stabilize_mps = None
+        self._entry_speed_active = False
+        self._entry_hold_from = 0.
+        self._entry_ramp_released = False
+        self._entry_speed_guard = PaintStartGuard()
         self._paint_speed_key = None
         self._paint_speed_latched = None
         self.integral_start_m = None    # 长直线助跑只纠偏，真正上线后才学习横偏积分；None 保留原行为
@@ -717,6 +725,12 @@ class PathTracker:
             self._creep_from = None
         self._runup_released = False
         self._v_prev = max(0.0, pose.speed)
+        self._launch_pending = self.runup_start_mps > 0. and self._hint < self.paint_from_m
+        self._entry_speed_active = (self.entry_stabilize_mps is not None
+            and (self._hint < self.paint_from_m or self._v_prev < min(self.entry_stabilize_mps,self.cfg.cruise_mps)-1e-6))
+        self._entry_hold_from=max(self.paint_from_m,self._hint)
+        self._entry_ramp_released=False
+        self._entry_speed_guard=PaintStartGuard()
         if self.paint_start_guard is not None and not (resume and self.paint_start_guard.started):
             self.paint_start_guard=PaintStartGuard()
         self._paint_start_beta_history.clear()
@@ -766,6 +780,17 @@ class PathTracker:
         curved=any(not p.straight and p.s0<b-1e-8 and p.s0+p.length>a+1e-8 for p in self.path.pieces)
         # 同一笔若有直弯混合，进入该笔前已选好能够全程保持的速度，不到弯前临时压低。
         return min(cruise,self.cfg.arc_speed_mps) if curved and self.cfg.arc_speed_mps is not None else cruise
+
+    def _entry_paint_target(self, s, cruise):
+        """直线起步先以 0.5 走过正式线头后 1 m，稳定后只释放一次平滑提速。"""
+        if not self._entry_speed_active:return cruise
+        if self._rolling_entry:
+            self._entry_speed_active=False
+            return cruise
+        ready=(self._entry_speed_guard.ready if self.cfg.straight_imu_enabled else
+               abs(self.st.e)<=PaintStartGuard.OFFSET_M and abs(self.st.heading_err)<=PaintStartGuard.HEADING_RAD)
+        if s>=self._entry_hold_from+1. and ready:self._entry_ramp_released=True
+        return cruise if self._entry_ramp_released else min(cruise,self.entry_stabilize_mps)
 
     def set_cruise(self, speed):
         if not math.isfinite(speed) or not .02<=speed<=MAX_SECTION_SPEED:
@@ -826,7 +851,7 @@ class PathTracker:
         self._paint_start_speed_limit=None
         guard=self.paint_start_guard
         if guard is None:return False
-        if guard.started:
+        if guard.started and not (self._entry_speed_active and not self._entry_ramp_released):
             self._straight_status.update(guard.status());return False
         _,e,heading,_=self.locate(pose.x,pose.y,pose.yaw,self.paint_from_m)
         nx,ny=self._straight_nozzle
@@ -841,9 +866,14 @@ class PathTracker:
         if beta is not None:history.append((travel,beta))
         while len(history)>1 and travel-history[1][0]>=PaintStartGuard.CALIBRATION_WINDOW_M:history.popleft()
         span=0. if not history else max(b for _,b in history)-min(b for _,b in history)
-        guard.update(dt,trusted=trusted,frame=self._quality_frame_t,weight=self._straight_weight,
+        observation=dict(trusted=trusted,frame=self._quality_frame_t,weight=self._straight_weight,
             rtk_error=e,guide_error=None if guided is None else guided[0],
             heading_error=None if guided is None else guided[1])
+        if self._entry_speed_active and not self._entry_ramp_released:
+            self._entry_speed_guard.update(dt,**observation)
+        if guard.started:
+            self._straight_status.update(guard.status());return False
+        guard.update(dt,**observation)
         self._straight_status.update(guard.status())
         self._straight_status['start_calibration_span_deg']=math.degrees(span)
         left=self.paint_from_m-self.st.s
@@ -1020,6 +1050,10 @@ class PathTracker:
                     and (u >= cfg.straight_settle_m or piece is self.path.pieces[0] and u < 0.)
                     and speed > cfg.straight_min_speed_mps and left > reserve)
         runup_wait = False
+        if self.entry_stabilize_mps is not None:
+            # 助跑就是正式直线的延长线；IMU 参考就绪便渐入同一控制器，不再等走满固定距离或先自行对准。
+            # 开喷仍由独立的起步检查判定。
+            self._runup_released=True
         if self.runup_speed_mps is not None and (st.s < self.paint_from_m or self.reverse_runup) and not self._runup_released:
             # 倒车助跑未收稳时，越过线头仍由原跟踪纠偏；这里只管转向交接，不改变喷涂资格。
             started = 0.0 if self._creep_from is None else st.s - self._creep_from
@@ -1073,7 +1107,8 @@ class PathTracker:
             # 起喷前积分按设计冻结，正常融合校正也可冻结积分；二者都不应阻断可信位置拟合。
             # 所有直线助跑共用当前质量、时效及跳点检查，不能只给倒车接入放行。
             starting = (st.s < self.paint_from_m or self.paint_start_guard is not None
-                        and not self.paint_start_guard.started)
+                        and not self.paint_start_guard.started
+                        or self._entry_speed_active and not self._entry_ramp_released)
             position_ok = (self._runup_position_trusted(pose)
                            if self.runup_speed_mps is not None and starting
                            else not st.integral_frozen)
@@ -1377,6 +1412,13 @@ class PathTracker:
     def _accelerate(self, target, dt):
         """提速用限加速度的圆滑斜坡；降速与急停始终直接服从上层约束。"""
         if dt<=0:return min(target,self._v_prev)
+        if self._launch_pending and target>0.:
+            self._launch_pending=False
+            if not self._rolling_entry and self._v_prev<self.runup_start_mps:
+                # 首个正常前进指令从 0.35 起，底盘驱动仍从静止爬坡；随后由本层缓慢提速。
+                # 仅起步一次生效，不能覆盖更低的保护限速、低速设定或连续行驶的段间交接。
+                self._accel_prev=0.
+                return min(target,self.runup_start_mps)
         gap=target-self._v_prev
         jerk=self.cfg.accel_jerk_mps3
         if gap<=0 or jerk<=0:
@@ -1398,6 +1440,7 @@ class PathTracker:
         st, cfg = self.st, self.cfg
         self.paint_speed_ready=False
         self.paint_target_mps=None
+        self.paint_expected_mps=None
         if st.state != 'RUNNING' or not pose.usable_for_control:
             self._arc_tail_w = 0.0
         if st.state not in ('RUNNING', 'PAUSED'):
@@ -1434,7 +1477,7 @@ class PathTracker:
             if self._paint_speed_key!=(key,a,b):
                 self._paint_speed_key=(key,a,b)
                 self._paint_speed_latched=self._planned_paint_speed(a,b)
-            self.paint_target_mps=self._paint_speed_latched
+            self.paint_target_mps=self._entry_paint_target(s_now,self._paint_speed_latched)
         else:
             self._paint_speed_key=self._paint_speed_latched=None
         constant_tracking = constant_straight or constant_arc or paint_window is not None
@@ -1508,15 +1551,9 @@ class PathTracker:
             runup_to, exit_speed = self.paint_from_m, cfg.cruise_mps
             paint_piece = self.path._piece(self.paint_from_m)
             if paint_piece.straight:
-                # 从起步起连续提到作业速度，取消前段 0.3 m/s 平台和最后约 1 m 的集中提速。
-                # 起喷资格和未收稳时的制动仍由 PaintStartGuard 独立检查。
+                # 助跑平滑提到 0.5；跨过线头不触发提速，正式线上稳定走过 1 m 后才升到设定值。
                 runup_to=0.
-                v=min(v,exit_speed)
-                if (self.paint_start_guard is not None
-                        and self.paint_start_guard.reason not in (None,'等待连续稳定')):
-                    # 接管及当前误差未合格时先柔和提到 0.6；只差连续确认时已可平滑提速，喷涂仍等确认完成。
-                    # 倒车后需走满 1 m 才交接，直接冲到 0.8 会先触发制动、再重新提速。
-                    v=min(v,.6)
+                v=min(v,exit_speed,self.entry_stabilize_mps if self.entry_stabilize_mps is not None else exit_speed)
             elif cfg.arc_speed_mps is not None:
                 runup_to, exit_speed = paint_piece.s0, cfg.arc_speed_mps
             if s_now < runup_to and not constant_arc:
@@ -1567,13 +1604,24 @@ class PathTracker:
                 if upcoming is not None:
                     a,b=upcoming;target=self._planned_paint_speed(a,b)
                     v=min(v,math.sqrt(target*target+2*cfg.decel_mps2*max(0.,a-s)))
+        protected=False
         if self.speed_limit_mps is not None and (self.constant_paint_speed or not constant_arc or self.speed_limit_mps <= 0.):
+            protected=self.speed_limit_mps<v-1e-6
             v = min(v, max(0.0, self.speed_limit_mps))
         v = self._accelerate(v, dt)
         self._v_prev = v
         if v<=0.:self._accel_prev=0.
         st.v_cmd = v
-        self.paint_speed_ready=(self.paint_target_mps is not None and abs(v-self.paint_target_mps)<=1e-6)
+        self.paint_expected_mps=self.paint_target_mps
+        if (paint_window is not None and self._entry_speed_active and self._entry_ramp_released
+                and not protected and v>=min(self.entry_stabilize_mps,self.paint_target_mps)-1e-6):
+            # 用户允许正式线上平滑提速时连续喷涂；只认本周期规划出的速度，保护减速仍停喷。
+            self.paint_expected_mps=v
+        self.paint_speed_ready=(self.paint_expected_mps is not None and not protected
+                                and abs(v-self.paint_expected_mps)<=1e-6)
+        if (paint_window is not None and self._entry_ramp_released and not protected
+                and abs(v-self._paint_speed_latched)<=1e-6):
+            self._entry_speed_active=False
         w_hold = 0.0
         if cfg.start_hold_m > 0 and started < cfg.start_hold_m:
             # 起步锁车头：曲率反馈的车头纠正速度是 车速 × k_theta，不到 start_hold_rate 的差额直接给角速度
@@ -1759,6 +1807,10 @@ class SectionTracker:
                 # 10-05 用户定助跑 0.5 m/s、正常不低于 0.3；10-06 晚用户：「起步的助跑是允许降速的，在进入的直线的
                 # 时候必须直」→ 0.3（仿真线头 2 m 弯中位 0.55 → 0.37–0.53 cm，到线头仍 0.8 m/s，每次起步多约 0.5 s）
                 tracker.runup_speed_mps=.3
+                if tracker.path._piece(mark).straight:
+                    tracker.runup_start_mps=.35
+                    tracker.entry_stabilize_mps=.5
+                    tracker.cfg=replace(tracker.cfg,accel_mps2=min(tracker.cfg.accel_mps2,.20))
                 from route_plan import RUN_UP_M
                 tracker.runup_distance_m=RUN_UP_M
                 if self.reverse_runup and 0 < i == self._first_paint and self.sections[i-1].direction < 0:
