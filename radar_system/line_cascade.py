@@ -270,7 +270,13 @@ class ImuFirstConfig:
     # 10-06 那块坏区靠 σ > 2.5 cm（98%）照样挡住
     fit_max_pair_m: float = 0.05
     fit_pair_settle_s: float = 0.5
-    fit_min_sats: int = 20            # 用户 10-06 晚定 20（数据里正常路段中位 28 颗；25 会把两条 100 m 线的可用时间砍到 28–30%）
+    # 卫星数（主天线）：用户 10-06 晚定 20；10-08 用户改：低于 17 才不信。17–19 颗只在 σ ≤ fit_low_sats_max_sigma_m、
+    # 两天线距离误差 < fit_low_sats_max_pair_m、固定解时照常信（10-06 16:32 那趟靠楼一侧主天线掉到 17–19 颗，σ ≤ 2.0 cm、
+    # 两天线误差 ≤ 2.9 cm、一直固定解，卫星本来是好的，被 20 颗挡掉 18–26 m 没纠，按 IMU 偏了 2.5 cm）
+    fit_min_sats: int = 17
+    fit_full_sats: int = 20
+    fit_low_sats_max_sigma_m: float = 0.020
+    fit_low_sats_max_pair_m: float = 0.03
     fit_quality_frames: int = 2
     fit_settle_s: float = 2.0
 
@@ -280,6 +286,7 @@ class ImuFirstConfig:
                      'fit_prior_m', 'fit_prior_deg', 'jump_window_m', 'jump_slope_deg', 'fit_prior_min_deg',
                      'fit_prior_max_deg', 'carry_fit_sigma_deg', 'fit_rate_m', 'fit_beta_rate_deg', 'jump_accept_s', 'jump_accept_max_m',
                      'fit_max_sigma_m', 'fit_max_pair_m', 'fit_settle_s', 'fit_pair_settle_s',
+                     'fit_low_sats_max_sigma_m', 'fit_low_sats_max_pair_m',
                      'fit_prior_rate_deg', 'fit_walk_r_deg', 'fit_max_rate_deg', 'fit_start_beta_rate_deg',
                      'persist_m', 'persist_e_m', 'fit_anchor_sigma', 'target_accel_deg_s2'):
             value = getattr(self, name)
@@ -300,9 +307,12 @@ class ImuFirstConfig:
             raise ValueError('rtk_trim、rtk_fit 必须是 True 或 False')
         if self.rtk_trim and self.rtk_fit:
             raise ValueError('rtk_trim 和 rtk_fit 只能开一个')
-        for name in ('offset_min_samples', 'lock_samples', 'baseline_bad_frames', 'fit_min_sats', 'fit_quality_frames'):
+        for name in ('offset_min_samples', 'lock_samples', 'baseline_bad_frames', 'fit_min_sats', 'fit_full_sats',
+                     'fit_quality_frames'):
             if type(getattr(self, name)) is not int or getattr(self, name) < 1:
                 raise ValueError(name + ' 必须是正整数')
+        if self.fit_min_sats > self.fit_full_sats:
+            raise ValueError('fit_min_sats 不能大于 fit_full_sats')
 
 
 class ImuFirstGuide:

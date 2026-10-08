@@ -190,7 +190,7 @@ class LineMission:
         self._antenna = None            # 最近一次天线定位 (t, lat, lon, sol, sigma)
         self._imu = None                # 最近一帧 IMU (t, 偏航 rad, 陀螺 z rad/s)，差速车定点画线的内环用
         self._heading_baseline = None   # 最近一帧双天线测向 (测量时刻, 基线长 m)：直线 IMU 为主时基线不对就不用卫星修正
-        self._rtk_quality = None        # 最近一帧主天线定位 (测量时刻, σ m, 卫星数, 两天线距离误差 m)：直线卫星纠偏只在合格时用
+        self._rtk_quality = None        # 最近一帧主天线定位 (测量时刻, σ m, 卫星数, 两天线距离误差 m, 固定解)：直线卫星纠偏只在合格时用
         self._imu_alignment = ImuAlignment()    # 上一条线对好的 IMU → 地面方向，开头基线不对时借（跨作业保留）
         self._fix2_t = None             # 副天线最近一次固定解的时刻
         self._usable_since = None       # 暂停中定位从什么时候起一直可用（自动继续用）
@@ -246,7 +246,7 @@ class LineMission:
             self._antenna = (m['t'], m['lat'], m['lon'], m['sol'], max(m['sigma_n'], m['sigma_e']))
             pb = m.get('position_baseline') or {}
             pair = pb.get('error_m') if pb.get('epoch_aligned') else None
-            self._rtk_quality = (m['t'], math.hypot(m['sigma_n'], m['sigma_e']), m.get('sats'), pair)
+            self._rtk_quality = (m['t'], math.hypot(m['sigma_n'], m['sigma_e']), m.get('sats'), pair, sol in RTK_FIXED_SOLS)
             if sol in RTK_FIXED_SOLS:
                 self._check_innovation(m)
                 self._latency_fix(raw_t, m)

@@ -576,7 +576,7 @@ class PathTracker:
         self._quality_bad_t = None      # 最近一次（连续 fit_quality_frames 帧）不合格的时刻
         self._pair_bad_n = 0            # 两天线距离误差连续超限的帧数（单独计，恢复等 fit_pair_settle_s）
         self._pair_bad_t = None
-        self._quality = None            # 最近一帧 (σ m, 卫星数, 两天线距离误差 m 或 None)
+        self._quality = None            # 最近一帧 (σ m, 卫星数, 两天线距离误差 m 或 None, 固定解 True/False 或 None)
         self._imu_alignment = None      # 任务层的 line_cascade.ImuAlignment：上一条线对好的角度
         self._reset_straight()
         self._reset_arc()
@@ -663,16 +663,16 @@ class PathTracker:
         """任务层给的 ImuAlignment（跨线、跨作业共用）。"""
         self._imu_alignment = alignment
 
-    def set_rtk_quality(self, t, sigma_m, sats, pair_m=None):
-        """最近一帧主天线定位的测量时刻和质量：接收机 σ（hypot(σn, σe)，m）、卫星数、两天线位置距离误差（m，没对齐为空）。
-        直线卫星纠偏只在这几项都合格时用（ImuFirstConfig.fit_max_sigma_m 等）；同一帧重复传只数一次。"""
+    def set_rtk_quality(self, t, sigma_m, sats, pair_m=None, fixed=None):
+        """最近一帧主天线定位的测量时刻和质量：接收机 σ（hypot(σn, σe)，m）、卫星数、两天线位置距离误差（m，没对齐为空）、
+        是不是固定解（不知道为空）。直线卫星纠偏只在这几项都合格时用（见 _quality_good）；同一帧重复传只数一次。"""
         first = self.cfg.straight_imu_first
         try:
             if first is None or not math.isfinite(t) or self._quality_frame_t is not None and t <= self._quality_frame_t:
                 return
             self._quality_frame_t = t
-            self._quality = (sigma_m, sats, pair_m)
-            bad = not math.isfinite(sigma_m) or sigma_m > first.fit_max_sigma_m or sats is None or sats < first.fit_min_sats
+            self._quality = (sigma_m, sats, pair_m, fixed)
+            bad = not self._quality_good(sigma_m, sats, pair_m, fixed)
             self._quality_bad_n = self._quality_bad_n + 1 if bad else 0
             if self._quality_bad_n >= first.fit_quality_frames:
                 self._quality_bad_t = t if self._quality_bad_t is None else max(t, self._quality_bad_t)
@@ -682,6 +682,18 @@ class PathTracker:
                 self._pair_bad_t = t if self._pair_bad_t is None else max(t, self._pair_bad_t)
         except TypeError:
             pass
+
+    def _quality_good(self, sigma, sats, pair, fixed):
+        """一帧定位的 σ、卫星数够不够格（ImuFirstConfig.fit_*）。卫星数到 fit_full_sats 只看 σ；fit_min_sats 到
+        fit_full_sats 之间（17–19 颗，10-08 用户）还要 σ ≤ fit_low_sats_max_sigma_m、两天线距离误差 < fit_low_sats_max_pair_m、
+        固定解，才照常信；低于 fit_min_sats 不信。"""
+        first = self.cfg.straight_imu_first
+        if not math.isfinite(sigma) or sigma > first.fit_max_sigma_m or sats is None or sats < first.fit_min_sats:
+            return False
+        if sats >= first.fit_full_sats:
+            return True
+        return (sigma <= first.fit_low_sats_max_sigma_m and fixed is True
+                and pair is not None and math.isfinite(pair) and pair < first.fit_low_sats_max_pair_m)
 
     def _rtk_quality_ok(self):
         """卫星定位质量合格（σ、卫星数不合格之后连续合格 fit_settle_s；两天线距离误差超限之后 fit_pair_settle_s）。
@@ -1080,8 +1092,8 @@ class PathTracker:
                     or not 0.0 <= self._imu_now - self._quality_frame_t <= 0.5
                     or not self._rtk_quality_ok() or self._quality is None):
                 return False
-            sigma, sats, _ = self._quality
-            return math.isfinite(sigma) and sigma <= first.fit_max_sigma_m and sats is not None and sats >= first.fit_min_sats
+            sigma, sats, pair, fixed = self._quality
+            return self._quality_good(sigma, sats, pair, fixed)
         if (not getattr(pose, 'rtk_trusted', False) or getattr(pose, 'quality', None) != 'RTK_FIXED'
                 or self._imu_now is None or self._quality_frame_t is None or self._baseline_frame_t is None
                 or not 0.0 <= self._imu_now - self._quality_frame_t <= 0.5
@@ -1089,9 +1101,8 @@ class PathTracker:
                 or self._baseline_bad_n or not self._baseline_ok() or not self._rtk_quality_ok()
                 or self._quality is None):
             return False
-        sigma, sats, pair = self._quality
-        return (math.isfinite(sigma) and sigma <= first.fit_max_sigma_m
-                and sats is not None and sats >= first.fit_min_sats
+        sigma, sats, pair, fixed = self._quality
+        return (self._quality_good(sigma, sats, pair, fixed)
                 and pair is not None and math.isfinite(pair) and pair <= first.fit_max_pair_m)
 
     def _straight_eligible(self, piece, speed):
@@ -2109,9 +2120,9 @@ class SectionTracker:
         for tracker in self.trackers:
             tracker.set_heading_baseline(t, length_m)
 
-    def set_rtk_quality(self, t, sigma_m, sats, pair_m=None):
+    def set_rtk_quality(self, t, sigma_m, sats, pair_m=None, fixed=None):
         for tracker in self.trackers:
-            tracker.set_rtk_quality(t, sigma_m, sats, pair_m)
+            tracker.set_rtk_quality(t, sigma_m, sats, pair_m, fixed)
 
     def share_imu_alignment(self, alignment):
         for tracker in self.trackers:

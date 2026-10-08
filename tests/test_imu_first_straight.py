@@ -354,7 +354,7 @@ class BaselineGate(unittest.TestCase):
 
 
 class QualityGate(unittest.TestCase):
-    """接收机定位质量：σ ≤ 2.5 cm、卫星 ≥ 20 颗，连续 2 帧不合格停用，之后连续合格 2 s 再用；两天线位置距离误差 ≤ 5 cm，
+    """接收机定位质量：σ ≤ 2.5 cm、卫星 ≥ 20 颗（17–19 颗的附加条件见 test_sats_band），连续 2 帧不合格停用，之后连续合格 2 s 再用；两天线位置距离误差 ≤ 5 cm，
     连续 2 帧超限停用，0.5 s 后再用（10-07 从 3 cm / 2 s 放宽），两类分开数。"""
 
     def tracker(self):
@@ -368,7 +368,7 @@ class QualityGate(unittest.TestCase):
             for _ in range(3):                               # 同一帧重复传只数一次
                 tr.set_rtk_quality(i * .1, *q)
         self.assertIsNone(tr._quality_bad_t)
-        tr.set_rtk_quality(.3, .015, 19, .004)               # 卫星少
+        tr.set_rtk_quality(.3, .015, 16, .004)               # 卫星少
         tr.set_rtk_quality(.4, .03, 28, .004)                # σ 大
         self.assertAlmostEqual(tr._quality_bad_t, .4)
         tr.sync(1.5, (1.5, 0., 0.))
@@ -399,9 +399,9 @@ class QualityGate(unittest.TestCase):
 
     def test_pair_and_receiver_frames_are_counted_separately(self):
         tr = self.tracker()
-        tr.set_rtk_quality(.0, .015, 19, .004)               # 卫星少
+        tr.set_rtk_quality(.0, .015, 16, .004)               # 卫星少
         tr.set_rtk_quality(.05, .015, 28, .06)               # 两天线位置对不上
-        tr.set_rtk_quality(.10, .015, 19, .004)
+        tr.set_rtk_quality(.10, .015, 16, .004)
         self.assertIsNone(tr._quality_bad_t)
         self.assertIsNone(tr._pair_bad_t)
 
