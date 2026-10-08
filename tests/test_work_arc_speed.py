@@ -1,4 +1,4 @@
-"""画圆/画弧线 0.5，普通转场弯道 0.35；身份随续画、分段预瞄保留。"""
+"""画圆/画弧线 0.5，普通转场弯道 0.35（弯急时提到内侧轮 ≥ 0.3 m/s，R 2 m 0.361）；身份随续画、分段预瞄保留。"""
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace as NS
@@ -9,6 +9,9 @@ from path_tracker import Path as Route,Section,SectionTracker,PathConfig,differe
 from route_operations import RouteOperations,tail,pivot_entry_to,rework_sections
 from live_cruise import label_sections,speed_for
 from test_continuous_field_arcs import GEO,drive
+from motion_speeds import transit_bend_speed
+# R 2 m 转场弯：内侧轮不低于 0.3 m/s（10-08 用户）→ 0.361 m/s
+BEND=transit_bend_speed(.5,GEO.track_m,differential_config(PathConfig()).lat_accel_mps2)
 import route_plan as rp
 
 
@@ -32,7 +35,7 @@ class WorkArcSpeed(unittest.TestCase):
         self.assertEqual(tr.cfg.cruise_mps,.8)
         self.assertEqual(tr._planned_paint_speed(0.,8.),.8)
         self.assertEqual(tr._planned_paint_speed(11.,19.),.8)
-        self.assertEqual(tr._curve_target_at(9.),.35)
+        self.assertAlmostEqual(tr._curve_target_at(9.),BEND)
 
     def test_drawn_arc_and_circle_hold_half_speed_for_every_selected_cruise(self):
         for sweep in (math.pi/2,2*math.pi):
@@ -50,17 +53,17 @@ class WorkArcSpeed(unittest.TestCase):
         sec=Section(1,Route((0.,0.,0.),[(1.,-.5),(3.,0.),(6.,.5),(.5,.5)]))
         sec.field_role='paint';sec.paint_from_m=4.;sec.paint_to_m=10.
         tr=tracker([sec]).trackers[0]
-        self.assertEqual(tr._curve_target_at(.5),.35)
+        self.assertAlmostEqual(tr._curve_target_at(.5),BEND)
         self.assertEqual(tr._curve_target_at(4.5),.5)
         self.assertEqual(tr._curve_target_at(10.1),.5)
 
     def test_continuation_preview_retains_the_next_sections_role(self):
-        for role,want in (('paint',.5),('transit',.35)):
+        for role,want in (('paint',.5),('transit',BEND)):
             a=Section(1,Route((0.,0.,0.),[(8.,0.)]));a.field_role='transit';a.continuous_after=True
             b=Section(1,Route(a.car_pose(8.),[(6.,.5),(.5,.5)]))
             b.field_role=role;b.paint_from_m=0.;b.paint_to_m=6.
             tr=tracker([a,b])
-            self.assertEqual(tr.trackers[0]._curve_target_at(8.1),want)
+            self.assertAlmostEqual(tr.trackers[0]._curve_target_at(8.1),want)
 
     def test_resume_and_saved_plan_keep_work_arc_speed(self):
         sec=stroke(math.pi/2)

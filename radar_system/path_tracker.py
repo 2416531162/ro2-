@@ -26,7 +26,7 @@
 from robot_core.standstill import stationary
 import math
 from types import SimpleNamespace
-from motion_speeds import MAX_SECTION_SPEED, TURN_SPEED_MPS, PAINT_ARC_SPEED_MPS
+from motion_speeds import MAX_SECTION_SPEED, TURN_SPEED_MPS, PAINT_ARC_SPEED_MPS, transit_bend_speed
 from robot_core.config import CONTROL_DT
 from collections import deque
 from dataclasses import dataclass, field, replace
@@ -1566,7 +1566,11 @@ class PathTracker:
         piece=tracker.path._piece(max(0.,s))
         arc=tracker.cfg.arc_speed_mps
         if arc is not None and tracker._work_arc_piece(piece):return arc
-        return min(TURN_SPEED_MPS,arc if arc is not None else math.inf)
+        turn=min(TURN_SPEED_MPS,arc if arc is not None else math.inf)
+        if tracker.geo.differential:
+            # 转场弯：内侧轮不低于 WHEEL_MIN_MPS（10-08 用户），不超过横向加速度（motion_speeds.transit_bend_speed）
+            turn=transit_bend_speed(piece.kappa,tracker.geo.track_m,tracker.cfg.lat_accel_mps2,turn)
+        return turn
 
     def _curve_speed(self, s, v):
         """Gen5 用首尾斜率为零的速度包络提前准备过弯，其他底盘保留原制动曲线。

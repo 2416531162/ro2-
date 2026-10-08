@@ -12,7 +12,7 @@ from route_operations import RouteOperations,rework_sections
 from live_cruise import label_sections
 import route_plan as rp
 import paint_quality
-from motion_speeds import TURN_SPEED_MPS, PAINT_ARC_SPEED_MPS
+from motion_speeds import TURN_SPEED_MPS, PAINT_ARC_SPEED_MPS, transit_bend_speed
 
 def strict(secs):
  # 纯速度/几何模型不输入 IMU；起喷检查另由真实传感器链路测试覆盖。
@@ -39,8 +39,9 @@ class PaintSpeedInvariant(unittest.TestCase):
    if s<10.:
     values.append(v);self.assertTrue(tr.paint_speed_ready)
    s+=v*DT
-  self.assertLess(min(values),TURN_SPEED_MPS+.01)
-  self.assertLessEqual(v,TURN_SPEED_MPS+1e-6);self.assertFalse(tr.paint_speed_ready)
+  bend=transit_bend_speed(-.7,GEO.track_m,tr.cfg.lat_accel_mps2)   # R 1.43 m 转场弯，内侧轮 ≥ 0.3 m/s → 0.393
+  self.assertLess(min(values),bend+.01)
+  self.assertLessEqual(v,bend+1e-6);self.assertFalse(tr.paint_speed_ready)
 
  def test_arc_and_circle_do_not_slow_down_before_paint_end(self):
   for k,length in ((-.7,2.3),(.7,2.3),(-.4,16.),(.6,11.)):

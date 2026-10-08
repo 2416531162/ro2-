@@ -7,6 +7,7 @@ sys.path[:0]=[str(ROOT/'radar_system'),str(ROOT)]
 from path_tracker import Path as Route,PathTracker,PathConfig,differential_config
 from paint_start import PaintStartGuard
 from robot_core.kinematics import ChassisGeometry
+from motion_speeds import transit_bend_speed
 GEO=ChassisGeometry(drive='differential',track_m=.675,diff_min_radius_m=.5);DT=.02
 
 def tracker(bridge=.001160461653204159,k=-1.):
@@ -51,7 +52,8 @@ class StraightStitch(unittest.TestCase):
    tr=tracker(bridge,k)
    self.assertFalse(tr._straight_stitch(tr.path.pieces,1))
    tr._v_prev=.5
-   self.assertLessEqual(tr._curve_speed(2.1596,.5),.35)
+   self.assertLessEqual(tr._curve_speed(2.1596,.5),transit_bend_speed(k,GEO.track_m,tr.cfg.lat_accel_mps2)+1e-9)
+   self.assertLess(tr._curve_speed(2.1596,.5),.5)
   tr=tracker();tr.paint_from_m=0.;tr.paint_spans=[(0.,11.)]
   self.assertFalse(tr._straight_stitch(tr.path.pieces,1))
 

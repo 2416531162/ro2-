@@ -8,8 +8,10 @@ ROOT=Path(__file__).resolve().parents[1]
 sys.path[:0]=[str(ROOT/'radar_system'),str(ROOT)]
 from path_tracker import Path as Route,PathConfig,PathTracker,Section,SectionTracker,differential_config
 from robot_core.kinematics import ChassisGeometry
-from motion_speeds import TURN_SPEED_MPS, PAINT_ARC_SPEED_MPS
+from motion_speeds import TURN_SPEED_MPS, PAINT_ARC_SPEED_MPS, transit_bend_speed
 GEO=ChassisGeometry(drive='differential',track_m=.675,diff_min_radius_m=.5);DT=.02
+# R 2 m 转场弯：内侧轮不低于 0.3 m/s（10-08 用户）→ 0.361 m/s
+BEND=transit_bend_speed(-.5,GEO.track_m,differential_config(PathConfig()).lat_accel_mps2)
 
 def pose(path,s,v):
  x,y,h=path.pose(s)
@@ -39,8 +41,8 @@ class GlobalBendSpeed(unittest.TestCase):
      self.assertEqual(tr.st.state,'RUNNING')
      curve=[r for r in rows if r['s']>=12.]
      self.assertTrue(curve)
-     self.assertLessEqual(max(r['v'] for r in curve),TURN_SPEED_MPS+1e-5)
-     self.assertLessEqual(max(r['actual'] for r in curve),TURN_SPEED_MPS+1e-5)
+     self.assertLessEqual(max(r['v'] for r in curve),BEND+1e-5)
+     self.assertLessEqual(max(r['actual'] for r in curve),BEND+1e-5)
      accel=[(b['v']-a['v'])/DT for a,b in zip(rows,rows[1:])]
      jerk=[(b-a)/DT for a,b in zip(accel,accel[1:])]
      self.assertGreaterEqual(min(accel),-.25001)
@@ -51,7 +53,7 @@ class GlobalBendSpeed(unittest.TestCase):
   tr,rows=drive(1.,straight=2.,painting=False,start_speed=0.)
   self.assertEqual(tr.st.state,'RUNNING')
   self.assertLess(max(r['v'] for r in rows),.65)
-  self.assertLessEqual(max(r['actual'] for r in rows if r['s']>=2.),TURN_SPEED_MPS+1e-5)
+  self.assertLessEqual(max(r['actual'] for r in rows if r['s']>=2.),BEND+1e-5)
   accel=[(b['v']-a['v'])/DT for a,b in zip(rows,rows[1:])]
   self.assertLessEqual(max(abs(b-a)/DT for a,b in zip(accel,accel[1:])),.5001)
 
