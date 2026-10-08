@@ -691,6 +691,10 @@ def build_telemetry(snap, *, now, seq):
     }
     if type(motion.get('push_mode')) is bool:
         out['motion'].update(push_mode=motion['push_mode'], push_released=bool(motion.get('push_released')))
+    if type(motion.get('auto_release')) is bool:
+        out['motion']['auto_release'] = motion['auto_release']
+        if type(motion.get('wheels_released')) is bool:
+            out['motion']['wheels_released'] = motion['wheels_released']
     straight = straight_telemetry(snap.get('straight'))
     if straight is not None:
         out['straight'] = straight

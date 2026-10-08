@@ -77,8 +77,8 @@ class DiffConfig:
 
 
 # 停稳且没有驾驶指令时放空电机：纯霍尔的驱动器锁在零速闭环里会来回找位置，停着也咔哒响、耗电。
-# 先按零速刹停，连续读到静止满 1 s 才放空，之后只读反馈；一有指令、或车被推动
-# （不再静止）就回到速度闭环锁零速
+# 先按零速刹停，连续读到静止满 1 s 才放空，之后只读反馈；手推时保持放空，
+# 新的手动指令或自动作业重新取得控制时恢复速度闭环。
 RELEASE_STATIONARY_S = 1.0
 
 
@@ -442,6 +442,7 @@ class OidDriver(wd.WheeltecDriver):
     def on_stop(self, request, response):
         with self.lock:
             self.push_mode = False
+            self.released = False  # 急停先恢复零速制动，停稳后再自动放空。
             return super().on_stop(request, response)
 
     def on_arm(self, request, response):
@@ -454,7 +455,21 @@ class OidDriver(wd.WheeltecDriver):
             return super().on_arm(request, response)
 
     def motion_extensions(self, now):
-        return {'push_mode': self.push_mode, 'push_released': self.push_mode and self.released}
+        return {'push_mode': self.push_mode, 'push_released': self.push_mode and self.released,
+                'auto_release': True, 'wheels_released': self.released}
+
+    def automatic_release_allowed(self, now, v, w):
+        """无作业、无手动运动请求时自动放空；已放空后手推不能触发零速锁轮。"""
+        if self.push_mode:  # 仅兼容旧客户端的显式推行协议，新 App 不再提供此入口。
+            return True
+        if self.authority.mode in ('NAVIGATION', 'FOLLOW'):
+            return False
+        if v != 0.0 or w != 0.0 or self.policy.manual_stopping(now):
+            return False
+        request = self.authority.request
+        if self.authority.mode == 'MANUAL' and (request.vx != 0.0 or request.wz != 0.0):
+            return False
+        return self.released or self.policy.ready_to_release(now)
 
     def refresh_motion_health(self, now, *, manual_request=False, navigation_request=False):
         """与 WheeltecDriver 相同，另把驱动器故障算进健康检查：任务转 FAULT，故障消失后也要操作员复位才能再动。"""
@@ -552,13 +567,13 @@ class OidDriver(wd.WheeltecDriver):
             self.apply_motion(now)
             v, w = self.policy.tick(now)
             self._cmd = (v, w)
-            idle = (send and (self.push_mode or (v == 0.0 and w == 0.0 and self.policy.latest is None
-                    and self.policy.ready_to_release(now))))
+            idle = send and self.automatic_release_allowed(now, v, w)
             release_epoch = self.authority.epoch
         if idle:
             # 与急停/退出串行化这条放空命令，不能在控制代次已经变更后再执行旧的放空决定。
             with self.lock:
-                idle = release_epoch == self.authority.epoch
+                # MANUAL 同一代次也可能收到新的非零请求，不能执行它到来前的放空决定。
+                idle = (release_epoch == self.authority.epoch and self.automatic_release_allowed(now, v, w))
                 if idle and not self.released:
                     self.chassis.release(now)
                     self.released = True
