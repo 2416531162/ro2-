@@ -96,7 +96,9 @@ class Settings:
     # 助跑让车身伸出场地不超过 run_in_outside_max（米，2026-10-03 用户：场外有 2 m 空地、角旗可拔），这条线本身
     # 已超过的只许再多 run_in_outside；放不下就缩短助跑（2/3、1/3），再不行不接
     run_in_outside: float = .05
-    run_in_outside_max: float = OUTSIDE_SPACE_M
+    # 10-08 用户 2 → 3 m：边线、角弧的线头只剩 1/3 助跑（0.83 m），圆弧掉头（R 1 m）出来偏 12–17 cm 拉不回，线头偏 7 cm
+    # 开喷（10-06 23:44 角弧场地作业）。转场打分的场外空地（OUTSIDE_SPACE_M）没改
+    run_in_outside_max: float = 3.0
     # 用时估算：跟踪器每段起步慢走（path_tracker start_creep_m / reverse_section_creep_m、start_creep_mps，
     # Gen5 0.3 / 0.15 m、0.1 m/s），不算的话整场实际比估算多约 13%
     creep_m: float = .3
