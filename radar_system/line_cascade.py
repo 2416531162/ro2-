@@ -235,7 +235,8 @@ class ImuFirstConfig:
     fit_prior_rate_deg: float = 0.005  # 漂移速度先验，°/m（0.4°/min ≈ 0.008°/m）
     fit_walk_r_deg: float = 0.0003     # 漂移速度随机游走，°/m/√m
     fit_max_rate_deg: float = 0.05    # 漂移速度上限，°/m
-    fit_rate_m: float = 0.01          # 推算上的修正每走 1 m 最多变这么多，m
+    # 推算上的修正每走 1 m 最多变这么多，m。10-08 用户：每 0.8 m 最多 1.5 cm（原来每 1 m 1 cm）
+    fit_rate_m: float = 0.015 / 0.8
     fit_beta_rate_deg: float = 0.15   # 用到目标车头上的角度每走 1 m 最多变这么多，°
     # 前 fit_start_m（推算开始算，含助跑）角度每米最多变 fit_start_beta_rate_deg：10-07 上午起步换算差 0.9°，拟合早就看出来了，
     # 按 0.15°/m 用了 6 m 才用上，线头后 2 m 偏到 2.8 cm。拟合点攒够 fit_start_points_m 以后才放快（一两个点定不了角度）
