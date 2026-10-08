@@ -289,6 +289,15 @@ class ImuFirstConfig:
     antenna_margin_m: float = 0.01
     antenna_offset_samples: int = 10
     antenna_fresh_s: float = 0.5
+    # 助跑段（线头之前，还没喷，10-08 用户）：线头偏 0.5–2.1 cm（助跑起点就偏 1–3 cm，锁车头 1 m 后只剩 ~1.7 m 往回拉，
+    # 按 k_e 0.8 / 1° 每米只拉回 ~55%；推算还在「慢慢修」，16:29 线头车以为 0.8 cm、卫星 2.1 cm）。助跑段推算直接往卫星靠
+    # （每走 runup_rtk_tau_m 靠拢 63%，卫星可用且没判跳才靠），往回拉按 runup_k_e / runup_max_bias_deg，目标车头最快
+    # runup_rate_deg_s、角加速度 runup_target_accel_deg_s2；横偏收小车头偏置跟着收，到线头车头摆正。开喷以后照旧
+    runup_rtk_tau_m: float = 0.3
+    runup_k_e: float = 2.0
+    runup_max_bias_deg: float = 2.0
+    runup_rate_deg_s: float = 3.0
+    runup_target_accel_deg_s2: float = 8.0
     fit_quality_frames: int = 2
     fit_settle_s: float = 2.0
 
@@ -300,6 +309,7 @@ class ImuFirstConfig:
                      'fit_max_sigma_m', 'fit_max_pair_m', 'fit_settle_s', 'fit_pair_settle_s',
                      'fit_low_sats_max_sigma_m', 'fit_low_sats_max_pair_m',
                      'antenna_pick_pair_m', 'antenna_agree_m', 'antenna_margin_m', 'antenna_fresh_s',
+                     'runup_rtk_tau_m', 'runup_k_e', 'runup_max_bias_deg', 'runup_rate_deg_s', 'runup_target_accel_deg_s2',
                      'fit_prior_rate_deg', 'fit_walk_r_deg', 'fit_max_rate_deg', 'fit_start_beta_rate_deg',
                      'persist_m', 'persist_e_m', 'fit_anchor_sigma', 'target_accel_deg_s2'):
             value = getattr(self, name)
@@ -544,6 +554,15 @@ class ImuFirstGuide:
             return False
         hist.append((u, z))
         return True
+
+    def pull_to(self, measured, fraction):
+        """助跑段（还没喷）：推算横偏按 fraction（0–1）直接往卫星横偏 measured 靠；拟合的修正量一起挪，开喷时接着用。"""
+        if self.e is None or self._fit is None or not math.isfinite(measured):
+            return
+        d = max(0.0, min(1.0, fraction)) * (measured - self.e)
+        self._fit['c'] += d
+        self._fit['x'][0] += d
+        self.e += d
 
     def source_changed(self):
         """卫星横偏换了来源（主 / 副天线）：跳点参照从这一拍重新攒，两根天线之间的差不算跳。"""
