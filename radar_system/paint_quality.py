@@ -13,6 +13,23 @@ RTK_LOST_STOP_DELAY_S = 1.0
 DEFAULT_OFFSET_M=.03
 
 
+# 弧（不是整圆）喷到终点前这么远就停：10-08 罚球弧两端落在禁区线上，弧尾越过横线一截（按每拍路程到终点才停 + 关泵余水）。
+# 用户：「可以少喷点，横线喷 10 cm 宽能盖住」。直线线尾、整圆（过交点多喷 0.2 m）不变
+ARC_END_EARLY_M = 0.05
+
+
+def arc_end_early(section, start, end):
+    """喷线区间 [start, end] 结束在弧上、扫过不到一整圈：提前停喷的距离（不超过区间长），否则 0。"""
+    pieces = section.path.pieces
+    last = next((p for p in pieces if p.s0 + p.length >= end - 1e-8), None)
+    if last is None or last.straight:
+        return 0.
+    sweep = sum(abs(p.kappa) * max(0., min(end, p.s0 + p.length) - max(start, p.s0)) for p in pieces if not p.straight)
+    if sweep >= 2 * math.pi - 1e-3:
+        return 0.
+    return min(ARC_END_EARLY_M, max(0., end - start))
+
+
 def close_delay():
     """实测关泵到断料的补偿秒数；默认不补偿，非法配置沿用已有配置保护。"""
     try:

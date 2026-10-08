@@ -552,9 +552,11 @@ class RouteOperations:
         if not r or not isinstance(t,SectionTracker):return empty
         sec=t.sections[t.index];role=getattr(sec,'field_role',None)
         _,start,end=self._paint_window()
-        leading=not start<=t.trackers[t.index].st.s<end
         tr=t.trackers[t.index]
         tail=self._paint_tail_section()
+        # 弧（不是整圆）提前 ARC_END_EARLY_M 停喷，直线段尾照下面的越线截止
+        early=0. if tail is not None else paint_quality.arc_end_early(sec,start,end)
+        leading=not start<=tr.st.s<end-early
         late_cutoff=tail is not None and sec.paint_to_m is not None
         if late_cutoff:leading=not start<=tr.st.s<end+.05
         coast=tail is not None and self._paint_tail_active()
