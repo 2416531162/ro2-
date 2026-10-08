@@ -576,6 +576,9 @@ class PathTracker:
         self._quality_bad_t = None      # 最近一次（连续 fit_quality_frames 帧）不合格的时刻
         self._pair_bad_n = 0            # 两天线距离误差连续超限的帧数（单独计，恢复等 fit_pair_settle_s）
         self._pair_bad_t = None
+        self._receiver_bad_n = 0        # 只看接收机（σ、卫星数、固定解，不看两天线）连续不合格的帧数：选天线时用
+        self._receiver_bad_t = None
+        self._secondary = None          # 副天线最近一帧 (测量时刻, x, y, 固定解, 车体系杠杆臂 (前, 左))
         self._quality = None            # 最近一帧 (σ m, 卫星数, 两天线距离误差 m 或 None, 固定解 True/False 或 None)
         self._imu_alignment = None      # 任务层的 line_cascade.ImuAlignment：上一条线对好的角度
         self._reset_straight()
@@ -583,6 +586,10 @@ class PathTracker:
 
     def _reset_straight(self):
         self._straight_weight = 0.0
+        # 两根天线对不上时选哪根（ImuFirstConfig.antenna_*）：offset 副 − 主横偏的固定差（对得上时学），n 学了几帧，
+        # delta 最近一帧副天线比主天线（扣掉固定差）多偏多少，t 用过的副天线帧，choice 这拍用的 main / second / None
+        # shift：这拍用副天线时，报给 app 的位置要挪多少（世界系 x, y，m），shift_t 是哪一拍算的
+        self._antenna = dict(offset=None, n=0, delta=None, t=None, choice=None, shift=None, shift_t=None)
         if self._straight_guide is not None:
             self._straight_guide.reset()
         self._straight_aligned = False
@@ -672,6 +679,10 @@ class PathTracker:
                 return
             self._quality_frame_t = t
             self._quality = (sigma_m, sats, pair_m, fixed)
+            receiver_bad = not self._quality_good(sigma_m, sats, pair_m, fixed, pair_required=False)
+            self._receiver_bad_n = self._receiver_bad_n + 1 if receiver_bad else 0
+            if self._receiver_bad_n >= first.fit_quality_frames:
+                self._receiver_bad_t = t if self._receiver_bad_t is None else max(t, self._receiver_bad_t)
             bad = not self._quality_good(sigma_m, sats, pair_m, fixed)
             self._quality_bad_n = self._quality_bad_n + 1 if bad else 0
             if self._quality_bad_n >= first.fit_quality_frames:
@@ -683,17 +694,77 @@ class PathTracker:
         except TypeError:
             pass
 
-    def _quality_good(self, sigma, sats, pair, fixed):
-        """一帧定位的 σ、卫星数够不够格（ImuFirstConfig.fit_*）。卫星数到 fit_full_sats 只看 σ；fit_min_sats 到
-        fit_full_sats 之间（17–19 颗，10-08 用户）还要 σ ≤ fit_low_sats_max_sigma_m、两天线距离误差 < fit_low_sats_max_pair_m、
-        固定解，才照常信；低于 fit_min_sats 不信。"""
+    def _quality_good(self, sigma, sats, pair, fixed, pair_required=True):
+        """一帧定位的 σ、卫星数够不够格（ImuFirstConfig.fit_*）。卫星数到 fit_full_sats 只看 σ ≤ fit_max_sigma_m；
+        fit_min_sats 到 fit_full_sats 之间（17–19 颗，10-08 用户）要 σ ≤ fit_low_sats_max_sigma_m、固定解，还要两天线距离
+        误差 < fit_low_sats_max_pair_m（pair_required=False 时不看这条：两根对不上时另由 _pick_antenna 选）；低于
+        fit_min_sats 不信。"""
         first = self.cfg.straight_imu_first
-        if not math.isfinite(sigma) or sigma > first.fit_max_sigma_m or sats is None or sats < first.fit_min_sats:
+        if not math.isfinite(sigma) or sats is None or sats < first.fit_min_sats:
             return False
         if sats >= first.fit_full_sats:
-            return True
+            return sigma <= first.fit_max_sigma_m
         return (sigma <= first.fit_low_sats_max_sigma_m and fixed is True
-                and pair is not None and math.isfinite(pair) and pair < first.fit_low_sats_max_pair_m)
+                and (not pair_required or pair is not None and math.isfinite(pair) and pair < first.fit_low_sats_max_pair_m))
+
+    def _receiver_quality_ok(self):
+        """只看接收机（σ、卫星数、固定解）的 _rtk_quality_ok：不合格之后连续合格 fit_settle_s 才算好。"""
+        first, bad = self.cfg.straight_imu_first, self._receiver_bad_t
+        return self._imu_now is None or bad is None or self._imu_now - bad > first.fit_settle_s
+
+    def set_secondary_fix(self, t, x, y, fixed, lever):
+        """副天线最近一帧：测量时刻、本地坐标（m）、是不是固定解、车体系杠杆臂 (前, 左)（主天线杠杆臂 + 测向基线）。"""
+        try:
+            if all(math.isfinite(v) for v in (t, x, y, *lever)):
+                self._secondary = (float(t), float(x), float(y), fixed is True, (float(lever[0]), float(lever[1])))
+        except (TypeError, ValueError):
+            pass
+
+    def _pick_antenna(self, guide, heading, hint, base_lat, measured):
+        """两根天线对不上时用哪根（ImuFirstConfig.antenna_*，10-08 用户「用和 IMU 对得上的那根」）。
+        base_lat：主天线（融合位置）推出来的控制点横偏；measured：主天线算的喷头横偏。返回 (main / second, 加到 measured 上的量)
+        或 None（照旧）。"""
+        first, a, sec = self.cfg.straight_imu_first, self._antenna, self._secondary
+        fresh = (sec is not None and sec[3] and self._imu_now is not None
+                 and 0.0 <= self._imu_now - sec[0] <= first.antenna_fresh_s)
+        if fresh and sec[0] != a['t']:
+            t2, x2, y2, _, (lx, ly) = sec
+            c, s = math.cos(heading), math.sin(heading)
+            _, lat2, _, _ = self.locate(x2 - (c*lx - s*ly), y2 - (s*lx + c*ly), heading, hint)
+            d = lat2 - base_lat
+            a['t'] = t2
+            pair = self._quality[2] if self._quality is not None else None
+            if pair is not None and math.isfinite(pair) and pair < first.antenna_pick_pair_m and a['choice'] is None:
+                a['offset'] = d if a['offset'] is None else a['offset'] + 0.1*(d - a['offset'])
+                a['n'] += 1
+            a['delta'] = None if a['offset'] is None or a['n'] < first.antenna_offset_samples else d - a['offset']
+        pair = self._quality[2] if self._quality is not None else None
+        if pair is None or not math.isfinite(pair):
+            disagree = a['choice'] is not None                          # 这帧没比：沿用上一拍
+        else:
+            disagree = pair >= first.antenna_pick_pair_m
+        choice = None
+        if disagree and fresh and a['delta'] is not None and guide.e is not None:
+            r_main, r_sec = abs(measured - guide.e), abs(measured + a['delta'] - guide.e)
+            agree, apart = first.antenna_agree_m, first.antenna_agree_m + first.antenna_margin_m
+            if r_sec <= agree and r_main > apart:
+                choice = 'second'
+            elif r_main <= agree and r_sec > apart:
+                choice = 'main'
+        if (choice == 'second') != (a['choice'] == 'second'):
+            guide.source_changed()
+        a['choice'] = choice
+        return None if choice is None else (choice, a['delta'] if choice == 'second' else 0.0)
+
+    def position_correction(self):
+        """这一拍直线修偏在用副天线时，融合位置该挪多少才和副天线一致（世界系 dx, dy，m）；没在用副天线为 None。
+        只给报给 app 的位置用（地图喷线、作业报告），控制照常用融合位置 + 选天线。"""
+        a = self._antenna
+        return a['shift'] if a['shift'] is not None and a['shift_t'] == self._imu_now else None
+
+    def _antenna_status(self):
+        a = self._antenna
+        return dict(rtk_antenna=a['choice'], ant2_offset=a['offset'], ant2_delta=a['delta'], ant2_n=a['n'])
 
     def _rtk_quality_ok(self):
         """卫星定位质量合格（σ、卫星数不合格之后连续合格 fit_settle_s；两天线距离误差超限之后 fit_pair_settle_s）。
@@ -1168,10 +1239,10 @@ class PathTracker:
                 cf, sf, cr, sr = math.cos(pose.yaw), math.sin(pose.yaw), math.cos(heading), math.sin(heading)
                 x += (cf-cr)*ax - (sf-sr)*ay
                 y += (sf-sr)*ax + (cf-cr)*ay
-            _, measured, _, _ = self.locate(x, y, heading, st.s)
+            _, base_lat, _, _ = self.locate(x, y, heading, st.s)
             nx, ny = self._straight_nozzle
             h = rel + guide.beta
-            measured += (nx-cfg.track_x_m)*math.sin(h) + ny*(math.cos(h)-1.0)
+            measured = base_lat + (nx-cfg.track_x_m)*math.sin(h) + ny*(math.cos(h)-1.0)
             # 卫星纠偏：拟合按用户定的可信规则（固定解 + 基线 0.30–0.50），观测器老办法仍按 0.40–0.42
             # 助跑冻结的是横偏积分，不是不许用可信位置拟合；否则起步锁住的角度误差一直推到线头。
             # 起喷前积分按设计冻结，正常融合校正也可冻结积分；二者都不应阻断可信位置拟合。
@@ -1184,6 +1255,15 @@ class PathTracker:
                            else not st.integral_frozen)
             rtk_ok = position_ok and (self._baseline_ok(fit=True) and self._rtk_quality_ok() if first.rtk_fit
                                       else baseline_ok)
+            pick = self._pick_antenna(guide, heading, st.s, base_lat, measured) if first.rtk_fit else None
+            if pick is not None:
+                # 两根天线对不上、有一根和 IMU 推算对得上：用它，两天线的距离误差不再挡；接收机质量照常要合格
+                rtk_ok = position_ok and self._baseline_ok(fit=True) and self._receiver_quality_ok()
+                measured += pick[1]
+            # 用副天线时，融合位置（跟着被干扰的主天线）比副天线多偏的那段沿线法向挪回去，报给 app（地图喷线、作业报告）
+            self._antenna['shift'] = None if pick is None or pick[0] != 'second' else (
+                -math.sin(piece.yaw) * pick[1], math.cos(piece.yaw) * pick[1])
+            self._antenna['shift_t'] = self._imu_now
             # steering：IMU 已经在开（上一拍权重 > 0）；rtk_trim、rtk_fit 都关时这以后卫星不再修正
             guide.update(measured, rel, max(0.0, pose.speed)*dt, dt, (nx, ny), rtk_ok, fast=st.s < self.paint_from_m,
                          steering=self._straight_weight > 0.0)
@@ -1206,7 +1286,7 @@ class PathTracker:
             self._straight_guided = None
             self._straight_status = dict(active=False, weight=0.0, eligible=eligible, control_law='imu_first',
                                          runup_wait=runup_wait, baseline_ok=baseline_ok, **guide.status(),
-                                         **(align.status() if align is not None else {}))
+                                         **self._antenna_status(), **(align.status() if align is not None else {}))
             return legacy_w
 
         if old_weight == 0.0:
@@ -1240,7 +1320,8 @@ class PathTracker:
             bias_deg=math.degrees(self._straight_bias), error_deg=math.degrees(error),
             target_rate_deg_s=math.degrees(self._straight_target_rate), aligning=aligning, baseline_ok=baseline_ok,
             outer_e=guide.e, outer_e_rtk=measured, inner_wz=inner_w, legacy_wz=legacy_w, final_wz=output,
-            **guide.status(), **self._straight_core.status(), **(align.status() if align is not None else {}))
+            **guide.status(), **self._antenna_status(), **self._straight_core.status(),
+            **(align.status() if align is not None else {}))
         return output
 
     def _arc_first(self, pose, dt):
@@ -2123,6 +2204,13 @@ class SectionTracker:
     def set_rtk_quality(self, t, sigma_m, sats, pair_m=None, fixed=None):
         for tracker in self.trackers:
             tracker.set_rtk_quality(t, sigma_m, sats, pair_m, fixed)
+
+    def set_secondary_fix(self, t, x, y, fixed, lever):
+        for tracker in self.trackers:
+            tracker.set_secondary_fix(t, x, y, fixed, lever)
+
+    def position_correction(self):
+        return self.trackers[self.index].position_correction() if 0 <= self.index < len(self.trackers) else None
 
     def share_imu_alignment(self, alignment):
         for tracker in self.trackers:

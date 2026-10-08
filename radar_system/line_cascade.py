@@ -276,8 +276,19 @@ class ImuFirstConfig:
     # 两天线误差 ≤ 2.9 cm、一直固定解，卫星本来是好的，被 20 颗挡掉 18–26 m 没纠，按 IMU 偏了 2.5 cm）
     fit_min_sats: int = 17
     fit_full_sats: int = 20
-    fit_low_sats_max_sigma_m: float = 0.020
+    fit_low_sats_max_sigma_m: float = 0.027    # 10-08 下午用户 2.0 → 2.7 cm：10-06 22:08 那条线 8–14 m 17–19 颗、σ 2.2–2.4 cm，
+                                                # 卫星报的往右 2.7 cm 和地上实际一致，被 2.0 挡掉只按 IMU 走偏了
     fit_low_sats_max_pair_m: float = 0.03
+    # 两根天线对不上（位置距离误差 ≥ antenna_pick_pair_m）时，用和 IMU 推算对得上的那根（10-08 用户）。10-06 22:08 那条线
+    # 15–20 m 主天线被干扰往左 5–9 cm、两天线差到 9–10 cm，副天线和 IMU 都说车没偏（地上实际也没偏）。
+    # 副天线横偏 − 主天线横偏 在两根对得上时慢慢学成固定差（antenna_offset_samples 帧以上才算学好），用副天线时扣掉；
+    # 一根和推算差 ≤ antenna_agree_m、另一根差超过 antenna_agree_m + antenna_margin_m 才选，不然照旧（≥ 20 颗且误差
+    # ≤ fit_max_pair_m 用主天线，否则不用卫星）
+    antenna_pick_pair_m: float = 0.03
+    antenna_agree_m: float = 0.015
+    antenna_margin_m: float = 0.01
+    antenna_offset_samples: int = 10
+    antenna_fresh_s: float = 0.5
     fit_quality_frames: int = 2
     fit_settle_s: float = 2.0
 
@@ -288,6 +299,7 @@ class ImuFirstConfig:
                      'fit_prior_max_deg', 'carry_fit_sigma_deg', 'fit_rate_m', 'fit_beta_rate_deg', 'jump_accept_s', 'jump_accept_max_m',
                      'fit_max_sigma_m', 'fit_max_pair_m', 'fit_settle_s', 'fit_pair_settle_s',
                      'fit_low_sats_max_sigma_m', 'fit_low_sats_max_pair_m',
+                     'antenna_pick_pair_m', 'antenna_agree_m', 'antenna_margin_m', 'antenna_fresh_s',
                      'fit_prior_rate_deg', 'fit_walk_r_deg', 'fit_max_rate_deg', 'fit_start_beta_rate_deg',
                      'persist_m', 'persist_e_m', 'fit_anchor_sigma', 'target_accel_deg_s2'):
             value = getattr(self, name)
@@ -309,7 +321,7 @@ class ImuFirstConfig:
         if self.rtk_trim and self.rtk_fit:
             raise ValueError('rtk_trim 和 rtk_fit 只能开一个')
         for name in ('offset_min_samples', 'lock_samples', 'baseline_bad_frames', 'fit_min_sats', 'fit_full_sats',
-                     'fit_quality_frames'):
+                     'fit_quality_frames', 'antenna_offset_samples'):
             if type(getattr(self, name)) is not int or getattr(self, name) < 1:
                 raise ValueError(name + ' 必须是正整数')
         if self.fit_min_sats > self.fit_full_sats:
@@ -532,6 +544,10 @@ class ImuFirstGuide:
             return False
         hist.append((u, z))
         return True
+
+    def source_changed(self):
+        """卫星横偏换了来源（主 / 副天线）：跳点参照从这一拍重新攒，两根天线之间的差不算跳。"""
+        self._fit_hist.clear()
 
     def _settled(self):
         """跳开以后最近 jump_accept_s 的卫星点自己稳定：扣掉直线趋势后散布 ≤ rejoin_m。"""

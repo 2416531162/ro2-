@@ -191,6 +191,7 @@ class LineMission:
         self._imu = None                # 最近一帧 IMU (t, 偏航 rad, 陀螺 z rad/s)，差速车定点画线的内环用
         self._heading_baseline = None   # 最近一帧双天线测向 (测量时刻, 基线长 m)：直线 IMU 为主时基线不对就不用卫星修正
         self._rtk_quality = None        # 最近一帧主天线定位 (测量时刻, σ m, 卫星数, 两天线距离误差 m, 固定解)：直线卫星纠偏只在合格时用
+        self._fix2 = None               # 最近一帧副天线 (测量时刻, 本地 x, y, 固定解, 两天线标称距离 m)：两根对不上时直线选天线用
         self._imu_alignment = ImuAlignment()    # 上一条线对好的 IMU → 地面方向，开头基线不对时借（跨作业保留）
         self._fix2_t = None             # 副天线最近一次固定解的时刻
         self._usable_since = None       # 暂停中定位从什么时候起一直可用（自动继续用）
@@ -259,6 +260,12 @@ class LineMission:
             # 副天线固定状态与相对位置进入融合；相对偏差只降权，不否决主天线固定解。
             if m.get('sol') in RTK_FIXED_SOLS:
                 self._fix2_t = m['t']
+            try:
+                x2, y2 = self.fusion.to_local(m['lat'], m['lon'])
+                nominal = (m.get('position_baseline') or {}).get('nominal_m') or 0.41
+                self._fix2 = (m['t'], x2, y2, m.get('sol') in RTK_FIXED_SOLS, float(nominal))
+            except (AttributeError, KeyError, TypeError, ValueError):
+                pass
             add_fix2 = getattr(self.fusion, 'add_fix2', None)
             if callable(add_fix2) and m.get('lat') is not None and m.get('lon') is not None:
                 add_fix2(s.GnssFix(t=m['t'], lat_deg=m['lat'], lon_deg=m['lon'], height_m=m.get('height', 0.0),
@@ -788,6 +795,13 @@ class LineMission:
             quality = getattr(tracker, 'set_rtk_quality', None)
             if callable(quality) and self._rtk_quality is not None:
                 quality(*self._rtk_quality)
+            secondary = getattr(tracker, 'set_secondary_fix', None)
+            lever = self._antenna_lever()
+            if callable(secondary) and self._fix2 is not None and lever is not None:
+                # 副天线杠杆臂 = 主天线（含倾斜补偿）+ 测向基线（车体系方向 baseline_yaw_body_deg，长度取标称）
+                t2, x2, y2, fixed2, length = self._fix2
+                b = math.radians(getattr(self.fusion.config, 'baseline_yaw_body_deg', -90.0))
+                secondary(t2, x2, y2, fixed2, (lever[0] + length * math.cos(b), lever[1] + length * math.sin(b)))
             share = getattr(tracker, 'share_imu_alignment', None)
             if callable(share):
                 share(self._imu_alignment)
@@ -1244,8 +1258,13 @@ class LineMission:
 
     def status(self):
         p = self.pose
+        # 直线修偏在用副天线（主天线被干扰）时，报给 app 的位置按副天线挪回去，地图喷线和作业报告不出现假偏差
+        correction = getattr(self.tracker, 'position_correction', None)
+        shift = correction() if callable(correction) and p is not None else None
+        dx, dy = shift if shift is not None else (0.0, 0.0)
         pose = None if p is None else dict(
-            x=round(p.x, 3), y=round(p.y, 3), yaw_deg=round(math.degrees(p.yaw), 2),
+            x=round(p.x + dx, 3), y=round(p.y + dy, 3), yaw_deg=round(math.degrees(p.yaw), 2),
+            **({'antenna_corrected_m': round(math.hypot(dx, dy), 3)} if shift is not None else {}),
             speed=round(p.speed, 3), quality=p.quality, usable=p.usable_for_control,
             sigma_xy=round(p.sigma_xy, 4), sigma_yaw_deg=round(math.degrees(p.sigma_yaw), 3),
             reasons=list(p.reasons), rtk_trusted=bool(getattr(p, 'rtk_trusted', False)))
