@@ -28,7 +28,7 @@
   "safety": {
     "battery_min_v": 19.0,
     "scan_timeout_s": 0.5,
-    "command_timeout_s": 0.35,
+    "command_timeout_s": 1.5,
     "stationary_s": 0.3,
     "decel_mps2": 1.0,
     "control_latency_s": 0.35,

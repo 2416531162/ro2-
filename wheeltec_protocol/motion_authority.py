@@ -179,7 +179,9 @@ class MotionAuthority:
                 and not self.unhealthy_since_transition)
 
     def output(self, now):
-        if self.received is not None and not 0 <= now - self.received <= self.timeout_s:
+        # 只有真的 timeout_s 没收到指令才算超时。IO 线程在拿锁之前取的 now，ROS 线程可能正好插进来收了一条，
+        # 收到时刻比 now 还晚一点、间隔为负：那是刚收到，不是超时（10-06 16:34 实车整条指令都准时，被这样切回空闲）
+        if self.received is not None and now - self.received > self.timeout_s:
             self._transition('IDLE', 'command_timeout')
         if not self.healthy or self.wait_stationary or self.received is None:
             return Request()

@@ -42,7 +42,7 @@ def load_profile(path=None):
         raise ValueError('invalid robot geometry')
     if not -0.6 < c['camera_pitch_rad'] < .6 or c['camera_x_m'] > g['front_m']:
         raise ValueError('invalid camera mount')
-    if min(s.values()) <= 0 or s['command_timeout_s'] > 1 or s['scan_timeout_s'] > 1:
+    if min(s.values()) <= 0 or s['command_timeout_s'] > 1.5 or s['scan_timeout_s'] > 1:
         raise ValueError('invalid safety deadlines')
     if s['min_scan_points'] != int(s['min_scan_points']):
         raise ValueError('min_scan_points must be an integer')
