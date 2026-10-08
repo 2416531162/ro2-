@@ -37,7 +37,7 @@ from heading_control import HeadingControl, HeadingControlConfig
 from heading_hold import HoldConfig
 from paint_start import PaintStartGuard
 from line_cascade import (CascadeConfig, ImuFirstConfig, ImuFirstGuide, imu_first_target, learn_heading_offset,
-                          lateral_heading_step)
+                          lateral_heading_step, paint_pull)
 
 
 def wrap(a):
@@ -535,6 +535,7 @@ class PathTracker:
         self.entry_stabilize_mps = None
         self._entry_speed_active = False
         self._entry_hold_from = 0.
+        self._started_at = 0.0          # 这次起步 / 继续时在路线上的路程（画线时往回拉的线头段从这里也重新算）
         self._entry_ramp_released = False
         self._entry_speed_guard = PaintStartGuard()
         self._entry_reference_piece = None
@@ -841,6 +842,7 @@ class PathTracker:
         if integral is not None:
             self.st.integral = integral
         self._hint = self.locate(pose.x, pose.y, pose.yaw, hint)[0]
+        self._started_at = self._hint
         self._kfb = 0.0
         self._arc_tail_w = 0.0
         if not (preserve_startup and resume):
@@ -1205,6 +1207,17 @@ class PathTracker:
             eligible = eligible and not runup_wait
         return eligible, runup_wait
 
+    def _paint_along(self, piece):
+        """开喷后在这条直线上走了多远（画线时往回拉的线头段用，line_cascade.paint_pull）：从这段喷线的起点（线头）、
+        直线开头（弯道出口）、这次起步 / 继续的位置里最后那个算起。不在喷（转场段、停喷后的收尾）按 0（往回拉照旧）。"""
+        s = self.st.s
+        spans = self.paint_spans if self.paint_spans is not None else [(self.paint_from_m, self.paint_to_m)]
+        head = next((a for a, b in spans if a <= s < b), None)
+        if not self._arc_work_role or head is None:
+            return 0.0
+        lo, _ = self._straight_run_bounds(piece)
+        return s - max(head, self.path.pieces[lo].s0, self._started_at)
+
     def _straight_first(self, pose, dt, speed, legacy_w, piece, imu_yaw, gyro):
         """长直线 IMU 为主、卫星辅助（line_cascade.ImuFirstGuide 的说明）。车速、停车、弯道交接仍归路径跟踪；
         这里只出转向，另把喷头横偏估计留给偏离中止、降速和喷线资格（卫星跳了时它们也按 IMU 推算）。"""
@@ -1305,11 +1318,12 @@ class PathTracker:
             self._runup_law = replace(first, k_e=first.runup_k_e, max_bias_deg=first.runup_max_bias_deg,
                                                   rate_deg_s=first.runup_rate_deg_s,
                                                   target_accel_deg_s2=first.runup_target_accel_deg_s2)
-        # 助跑段（线头之前）按更积极的往回拉（ImuFirstConfig.runup_*），开喷以后照旧
+        # 助跑段（线头之前）按更积极的往回拉（ImuFirstConfig.runup_*）；开喷以后线头段照旧，之后慢慢修（paint_pull）
+        pull = None if runup else paint_pull(first, self._paint_along(piece))
         self._straight_target, self._straight_bias, aligning, self._straight_aligned = imu_first_target(
             self._runup_law if runup else first, guide, self._straight_target, piece.yaw, dt,
             max(cfg.straight_target_rate_deg_s, first.runup_rate_deg_s) if runup else cfg.straight_target_rate_deg_s,
-            CascadeConfig.align_deg, self._straight_aligned)
+            CascadeConfig.align_deg, self._straight_aligned, pull=pull)
         self._straight_target_rate = wrap(self._straight_target-previous_target)/dt
         # β 相当于原 A/B 积分给的车头偏置（−β）：换成路径积分单位，交回原跟踪（进弯）时接着用
         self._straight_integral = -guide.beta
@@ -1329,6 +1343,7 @@ class PathTracker:
         self._straight_status = dict(active=True, weight=self._straight_weight, eligible=eligible,
             control_law='imu_first', target_deg=math.degrees(self._straight_target),
             bias_deg=math.degrees(self._straight_bias), error_deg=math.degrees(error),
+            pull_k_e=None if pull is None else pull[0], pull_max_bias_deg=None if pull is None else pull[1],
             target_rate_deg_s=math.degrees(self._straight_target_rate), aligning=aligning, baseline_ok=baseline_ok,
             outer_e=guide.e, outer_e_rtk=measured, inner_wz=inner_w, legacy_wz=legacy_w, final_wz=output,
             **guide.status(), **self._antenna_status(), **self._straight_core.status(),

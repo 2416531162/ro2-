@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """助跑段（线头之前，还没喷）更积极地拉回线上（2026-10-08 用户）：推算直接往卫星靠，往回拉 k_e 2.0 / 车头最多 2°，
-开喷以后照旧（k_e 0.8 / 1°）。10-06 下午 6 趟直线线头偏 0.5–2.1 cm：助跑起点就偏 1–3 cm，锁车头 1 m 后只剩 ~1.7 m。"""
+开喷以后线头段照旧（k_e 0.8 / 1°，之后慢慢修见 test_gentle_correction）。10-06 下午 6 趟直线线头偏 0.5–2.1 cm：
+助跑起点就偏 1–3 cm，锁车头 1 m 后只剩 ~1.7 m。"""
 import math
 import os
 import sys
@@ -48,7 +49,7 @@ class RunupLaw(unittest.TestCase):
         before, e_before = self.bias_at(tr.paint_from_m - 1.2)
         after, _ = self.bias_at(tr.paint_from_m + .5)
         self.assertGreater(before, 1.5)                       # 3 cm：k_e 2.0 → 3.4°，限到 2°
-        self.assertLessEqual(after, 1.0 + 1e-6)               # 开喷以后照旧最多 1°
+        self.assertLessEqual(after, 1.0 + 1e-6)               # 开喷后线头段照旧最多 1°
         self.assertGreater(e_before, .02)                     # 助跑段推算已经靠到卫星的 3 cm
 
 

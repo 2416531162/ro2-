@@ -145,7 +145,8 @@ def lateral_heading_step(cfg, e, distance, integral, target, line_yaw, offset, d
 #      和推算开始 fast_m 内按 fast_observer_m 快对准，上线以后按 observer_m；
 #   3. 卫星横偏和推算差超过 jump_m 就当卫星跳了：不再用卫星，按 IMU 推算接着开、接着喷，不报错、不停；
 #      差回到 rejoin_m 以内并持续 rejoin_s 才重新用；一直对不上就这条线按 IMU 走完，下一条线重新对；
-#   4. 往回拉按推算横偏（deadband_m 以内不拉），车头最多偏 max_bias_deg，上线以后目标车头每秒最多改 rate_deg_s。
+#   4. 往回拉按推算横偏（deadband_m 以内不拉），车头最多偏 max_bias_deg，上线以后目标车头每秒最多改 rate_deg_s；
+#      开喷后 head_m 内按 head_k_e / head_max_bias_deg（见 paint_pull）。
 # 卫星位置不可信（推算中、降权、正在接回）时同 3，修正冻结。融合与地图显示不变，仍以卫星为准。
 # 参数按 10-02 实车校准的仿真挑（会话 scratchpad sim/：A/C/E 三种底盘、0.8/0.5 m/s、1.2 m 助跑、测向每趟偏 ±0.6°）：
 # 正常时真喷头 p95 与原 A/B 持平（0.57–0.68 vs 0.63–0.71 cm）、最差一趟 0.74–1.01 vs 1.09–1.27 cm、线头最差
@@ -161,10 +162,19 @@ class ImuFirstConfig:
     fast_m: float = 2.0              # 推算开始后这么远内算对准阶段（另：助跑还没到线头也算）
     max_heading_fix_deg: float = 3.0  # β（卫星轨迹看出来的参考航向误差）上限
     deadband_m: float = 0.002        # 喷头横偏（推算）在这以内不往回拉
-    k_e: float = 0.8                 # 横偏 → 车头偏置，1/m
-    max_bias_deg: float = 1.0        # 往回拉时车头最多偏这么多（原 A/B 3°）
+    # 画线时（线头之后）往回拉：横偏 → 车头偏置 k_e（1/m），车头最多偏 max_bias_deg。10-08 用户「慢慢修」：原来 0.8 / 1°，
+    # 10-06 23:47 那条 37.8 m 线 22–24 m 推算偏右 1 cm 多，车头目标 2 m 内转 +0.55°，3 m 横挪约 2.5 cm，地上看得见一个弯；
+    # 卫星那几米读大了约 1 cm，又冲到左边。改成 1.5–2 cm 的偏差 4–6 m 内平缓收回
+    k_e: float = 0.4
+    max_bias_deg: float = 0.3
     rate_deg_s: float = 1.0          # 上线以后目标车头每秒最多改这么多（原 A/B 3°/s）
     target_accel_deg_s2: float = 4.0  # RTK 拟合模式的目标角加速度；及时响应，同时避免拟合点更新时突变
+    # 线头段：这条直线开喷处（线头 / 弯道出口 / 暂停后继续处）后 head_m 内仍按原来的 head_k_e / head_max_bias_deg
+    # （线头精度不能变差，用户规矩），再 head_blend_m 内线性过渡到上面的 k_e / max_bias_deg；不在喷（转场段、停喷后的收尾）一直按原来的
+    head_k_e: float = 0.8
+    head_max_bias_deg: float = 1.0
+    head_m: float = 3.0
+    head_blend_m: float = 2.0
     jump_m: float = 0.02             # 卫星横偏和推算差超过它：卫星跳了，不用
     rejoin_m: float = 0.01           # 差回到这以内……
     rejoin_s: float = 1.0            # ……持续这么久才重新用卫星
@@ -311,13 +321,14 @@ class ImuFirstConfig:
                      'antenna_pick_pair_m', 'antenna_agree_m', 'antenna_margin_m', 'antenna_fresh_s',
                      'runup_rtk_tau_m', 'runup_k_e', 'runup_max_bias_deg', 'runup_rate_deg_s', 'runup_target_accel_deg_s2',
                      'fit_prior_rate_deg', 'fit_walk_r_deg', 'fit_max_rate_deg', 'fit_start_beta_rate_deg',
-                     'persist_m', 'persist_e_m', 'fit_anchor_sigma', 'target_accel_deg_s2'):
+                     'persist_m', 'persist_e_m', 'fit_anchor_sigma', 'target_accel_deg_s2',
+                     'head_k_e', 'head_max_bias_deg'):
             value = getattr(self, name)
             if not math.isfinite(value) or value <= 0:
                 raise ValueError(name + ' 必须是有限正数')
         for name in ('deadband_m', 'trust_from_m', 'fast_m', 'min_baseline_m', 'max_baseline_m', 'baseline_hold_s',
                      'fit_walk_c_m', 'fit_walk_b_deg', 'fit_min_baseline_m', 'fit_max_baseline_m', 'fit_start_m',
-                     'fit_start_points_m',
+                     'fit_start_points_m', 'head_m', 'head_blend_m',
                      'borrow_max_age_s', 'borrow_max_gap_deg'):
             value = getattr(self, name)
             if not math.isfinite(value) or value < 0:
@@ -898,13 +909,25 @@ class ImuAlignment:
                     align_c_deg=deg(None if self.obs is None else self.obs[2]))
 
 
-def imu_first_target(cfg, guide, target, line_yaw, dt, align_rate_deg_s, align_deg, aligned):
+def paint_pull(cfg, along_m):
+    """画线时往回拉的 (k_e, 车头最多偏几度)：开喷处后 along_m 米。head_m 内按 head_k_e / head_max_bias_deg，
+    再 head_blend_m 内线性过渡到 k_e / max_bias_deg（ImuFirstConfig）。"""
+    if cfg.head_blend_m > 0:
+        w = max(0.0, min(1.0, (along_m - cfg.head_m) / cfg.head_blend_m))
+    else:
+        w = 1.0 if along_m >= cfg.head_m else 0.0
+    return (1.0 - w) * cfg.head_k_e + w * cfg.k_e, (1.0 - w) * cfg.head_max_bias_deg + w * cfg.max_bias_deg
+
+
+def imu_first_target(cfg, guide, target, line_yaw, dt, align_rate_deg_s, align_deg, aligned, pull=None):
     """目标车头（IMU 系）：线方向 − 偏移 − β + 横偏往回拉（推算横偏 deadband_m 内不拉）。还没对准过、或在对准
-    阶段（guide.fast）按 align_rate_deg_s 转，上线以后每秒最多改 cfg.rate_deg_s。返回 (目标, 往回拉的偏置, 在对准, 对准过)。"""
+    阶段（guide.fast）按 align_rate_deg_s 转，上线以后每秒最多改 cfg.rate_deg_s。pull：(k_e, 车头最多偏几度)，
+    None 用 cfg.k_e / cfg.max_bias_deg（画线时见 paint_pull）。返回 (目标, 往回拉的偏置, 在对准, 对准过)。"""
+    k_e, max_bias_deg = (cfg.k_e, cfg.max_bias_deg) if pull is None else pull
     e = guide.e
     excess = max(0.0, abs(e) - cfg.deadband_m)
-    lim = cfg.max_bias_deg * DEG
-    bias = max(-lim, min(lim, -math.atan(cfg.k_e * math.copysign(excess, e))))
+    lim = max_bias_deg * DEG
+    bias = max(-lim, min(lim, -math.atan(k_e * math.copysign(excess, e))))
     desired = wrap(line_yaw - guide.offset - guide.beta + bias)
     rate = cfg.rate_deg_s if aligned and not guide.fast else align_rate_deg_s
     gap = wrap(desired - target)
