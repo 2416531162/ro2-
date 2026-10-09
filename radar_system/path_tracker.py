@@ -300,6 +300,15 @@ class PathConfig:
     arc_heading_tau_s: float = 5.0   # 换算跟融合航向的时间常数：原地转完测向还要几秒才回来，短时间按 IMU
     arc_pull_m: float = 1.0          # 横偏往卫星拉的距离常数
     arc_pull_rate_m: float = 0.02    # 每米最多拉这么多
+    # 整圆可靠双天线观测持续确认后，径向估计及时跟随；航向仍由 IMU 平滑维持。
+    arc_rtk_radial_enabled: bool = True
+    arc_rtk_pull_m: float = 0.25
+    arc_rtk_pull_rate_m: float = 0.08
+    arc_rtk_pair_max_m: float = 0.015
+    arc_rtk_settle_s: float = 0.30
+    arc_rtk_fresh_s: float = 0.25
+    arc_rtk_error_m: float = 0.015  # 差异达到此值时使用完整额外校正。
+    arc_rtk_noise_m: float = 0.005  # 毫米级差异沿用原平缓校正，避免放大正常定位噪声。
 
     accel_jerk_mps3: float = 0.0   # 正向提速的加速度变化上限；0 保留原控制。减速/保护独立优先。
     turn_decel_mps2: float = .25   # 正常弯前舒适减速；故障/停车约束独立优先。
@@ -313,7 +322,8 @@ class PathConfig:
             raise ValueError('圆弧固定速度必须为空或有效正速度')
         if not math.isfinite(self.run_out_decel_max_mps2) or not 0 < self.run_out_decel_max_mps2 <= 1.0:
             raise ValueError('run_out_decel_max_mps2 必须在 (0,1] 内')
-        for name in ('straight_imu_enabled', 'straight_target_feedforward', 'straight_direct_rate_damping'):
+        for name in ('straight_imu_enabled', 'straight_target_feedforward', 'straight_direct_rate_damping',
+                     'arc_rtk_radial_enabled'):
             if type(getattr(self, name)) is not bool:
                 raise ValueError(name + ' 必须是布尔值')
         for name in ('turn_decel_mps2', 'turn_jerk_mps3', 'straight_min_length_m', 'straight_blend_s',
@@ -321,7 +331,9 @@ class PathConfig:
                      'straight_target_rate_deg_s', 'straight_kp', 'straight_drift_tc', 'straight_target_rate_tau_s',
                      'straight_outer_rate_tau_s', 'straight_outer_tau_scale',
                      'runup_release_e_m', 'runup_release_heading_deg', 'arc_s_rate_m', 'arc_s_tau_m', 'arc_scale_tau_m',
-                     'arc_heading_tau_s', 'arc_pull_m', 'arc_pull_rate_m'):
+                     'arc_heading_tau_s', 'arc_pull_m', 'arc_pull_rate_m', 'arc_rtk_pull_m',
+                     'arc_rtk_pull_rate_m', 'arc_rtk_pair_max_m', 'arc_rtk_settle_s', 'arc_rtk_fresh_s',
+                     'arc_rtk_error_m'):
             if not math.isfinite(getattr(self, name)) or getattr(self, name) <= 0:
                 raise ValueError(name + ' 必须是有限正数')
         for name in ('straight_settle_m', 'straight_min_speed_mps', 'straight_outer_k_i', 'straight_ki', 'straight_kd', 'straight_outer_rate_gain',
@@ -329,6 +341,8 @@ class PathConfig:
                      'straight_outer_i_boost', 'approach_zone_m'):
             if not math.isfinite(getattr(self, name)) or getattr(self, name) < 0:
                 raise ValueError(name + ' 必须是有限非负数')
+        if not math.isfinite(self.arc_rtk_noise_m) or not 0 <= self.arc_rtk_noise_m < self.arc_rtk_error_m:
+            raise ValueError('arc_rtk_noise_m 必须非负且小于 arc_rtk_error_m')
         if self.straight_imu_first is not None and not isinstance(self.straight_imu_first, ImuFirstConfig):
             raise ValueError('straight_imu_first 必须为空或 ImuFirstConfig')
         if not math.isfinite(self.straight_nozzle_x_m):
@@ -627,11 +641,15 @@ class PathTracker:
         self._arc_scale = 1.0           # 车速读数 → 沿圆路程的比例（慢慢学）
         self._arc_off = None            # 融合航向 − IMU 偏航（锁住后按 arc_heading_tau_s 慢慢跟），rad
         self._arc_e = None              # 喷头横偏估计（IMU 推算 + 往卫星拉），m
+        self._arc_jump_e = None         # 跳点判定保留原慢修估计，不能被快速校正提前吸收掉。
         self._arc_rel = None
         self._arc_travel = 0.0
         self._arc_hist = deque()        # 最近 jump_window_m 内的 (路程, 卫星 − 推算)
         self._arc_hold = None           # 卫星突然跳开、先不拉：[已等的秒数, 跳开时的差]
         self._arc_jumps = 0
+        self._arc_rtk_since = self._arc_rtk_frame = None
+        self._arc_rtk_frames = 0
+        self._arc_rtk_weight = 0.0
         self._arc_guided = None         # IMU 为主时喷头横偏估计、车头相对圆切线：偏离中止用
         self._arc_status = {'active': False, 'weight': 0.0}
         if self._arc_guide is not None:
@@ -1413,10 +1431,55 @@ class PathTracker:
             **(align.status() if align is not None else {}))
         return output
 
+    def _arc_radial_rtk_weight(self, rtk_ok, dt):
+        """只给新鲜固定解且双天线距离持续一致的整圆径向观测加权；不改变航向、进度或跳点保护。"""
+        cfg, first = self.cfg, self.cfg.straight_imu_first
+        now, quality, secondary = self._imu_now, self._quality, self._secondary
+        paired = False
+        if (cfg.arc_rtk_radial_enabled and rtk_ok and self._arc_hold is None
+                and now is not None and quality is not None and secondary is not None
+                and self._quality_frame_t is not None):
+            sigma, sats, pair, fixed = quality
+            paired = (fixed is True and secondary[3] is True
+                and math.isfinite(sigma) and sigma <= first.fit_max_sigma_m
+                and sats is not None and sats >= first.fit_min_sats
+                and pair is not None and math.isfinite(pair) and 0. <= pair <= cfg.arc_rtk_pair_max_m
+                and 0. <= now-self._quality_frame_t <= cfg.arc_rtk_fresh_s
+                and 0. <= now-secondary[0] <= first.antenna_fresh_s)
+        if not paired:
+            self._arc_rtk_since = self._arc_rtk_frame = None
+            self._arc_rtk_frames = 0
+            self._arc_rtk_weight = 0.0
+            return 0.0
+        if self._quality_frame_t != self._arc_rtk_frame:
+            self._arc_rtk_frame = self._quality_frame_t
+            self._arc_rtk_frames += 1
+            if self._arc_rtk_since is None:
+                self._arc_rtk_since = now
+        if self._arc_rtk_frames >= 3 and now-self._arc_rtk_since >= cfg.arc_rtk_settle_s:
+            self._arc_rtk_weight = min(1., self._arc_rtk_weight+dt/cfg.straight_blend_s)
+        return self._arc_rtk_weight
+
+    def _correct_arc_radial(self, measured, distance, rtk_ok, dt):
+        """有界互补校正；不改变用于维持转向的 IMU 航向和圆上进度。"""
+        cfg = self.cfg
+        weight = self._arc_radial_rtk_weight(rtk_ok, dt)
+        weight *= min(1., max(0., (abs(measured-self._arc_e)-cfg.arc_rtk_noise_m)
+                             /(cfg.arc_rtk_error_m-cfg.arc_rtk_noise_m)))
+        pull_m = cfg.arc_pull_m + weight*(cfg.arc_rtk_pull_m-cfg.arc_pull_m)
+        pull_rate = cfg.arc_pull_rate_m + weight*(cfg.arc_rtk_pull_rate_m-cfg.arc_pull_rate_m)
+        correction = 0.0
+        if rtk_ok and self._arc_hold is None:
+            lim = pull_rate * distance
+            correction = max(-lim, min(lim, (measured-self._arc_e)*min(1.,distance/pull_m)))
+            self._arc_e += correction
+        return weight, correction
+
     def _arc_first(self, pose, dt):
         """画圆 IMU 为主（PathConfig.arc_imu_first）：返回原弯道控制律这一拍转向用的位姿（x, y, yaw），不在整圆上或还没
         学好换算时返回 None（按融合位姿开）。互补滤波：车头 = IMU 偏航 + 换算（换算按 arc_heading_tau_s 慢慢跟融合航向），
-        喷头横偏 = IMU 推算 + 往卫星拉（距离常数 arc_pull_m、每米最多 arc_pull_rate_m；突然跳开 > jump_m 先不拉，
+        喷头横偏 = IMU 推算 + 往卫星拉；新鲜可靠双天线持续一致时用 arc_rtk_pull_* 及时校正，
+        其余观测沿用 arc_pull_* 慢修；突然跳开 > jump_m 先不拉，
         回来或 jump_accept_s 后再拉），沿圆路程按走过的路推、慢慢靠向卫星。不估角度 β：圆一圈只有十几米，
         直线那套角度拟合在卫星小台阶上会学偏（05:41 那圈回放学出 −0.5°、推算和卫星差到 10 cm）。"""
         cfg, st, guide = self.cfg, self.st, self._arc_guide
@@ -1479,13 +1542,18 @@ class PathTracker:
         measured += lever
         if self._arc_e is None:
             self._arc_e, self._arc_rel, self._arc_travel = measured, rel, 0.0
+            self._arc_jump_e = measured
         else:
             prev = self._arc_rel
-            self._arc_e += (distance*math.sin(0.5*(rel+prev)) + fx*(math.sin(rel)-math.sin(prev))
-                            + ny*(math.cos(rel)-math.cos(prev)))
+            if self._arc_jump_e is None:
+                self._arc_jump_e = self._arc_e
+            predicted = (distance*math.sin(0.5*(rel+prev)) + fx*(math.sin(rel)-math.sin(prev))
+                         + ny*(math.cos(rel)-math.cos(prev)))
+            self._arc_e += predicted
+            self._arc_jump_e += predicted
             self._arc_rel = rel
             self._arc_travel += distance
-        r = measured - self._arc_e
+        r = measured - self._arc_jump_e
         hist = self._arc_hist
         if not rtk_ok:
             hist.clear()
@@ -1506,7 +1574,8 @@ class PathTracker:
                 self._arc_hold = None                 # 卫星回来和推算对上了，或等够了按卫星慢慢拉
         if rtk_ok and self._arc_hold is None:
             lim = cfg.arc_pull_rate_m * distance
-            self._arc_e += max(-lim, min(lim, r * distance / cfg.arc_pull_m))
+            self._arc_jump_e += max(-lim, min(lim, r*min(1.,distance/cfg.arc_pull_m)))
+        radial_weight, correction = self._correct_arc_radial(measured, distance, rtk_ok, dt)
         e_track = self._arc_e - lever
         yaw_v = wrap(pyaw + rel)
         cx = px - math.sin(pyaw)*e_track - cfg.track_x_m*math.cos(yaw_v)
@@ -1517,7 +1586,11 @@ class PathTracker:
         self._arc_status = dict(active=True, weight=w, baseline_ok=baseline_ok, rtk_ok=rtk_ok, arc_s=self._arc_s,
                                 rtk_s=s_rtk, e_est=self._arc_e, e_rtk=measured, heading_deg=math.degrees(rel),
                                 offset_deg=math.degrees(self._arc_off), holding=self._arc_hold is not None,
-                                jumps=self._arc_jumps, scale=self._arc_scale)
+                                jumps=self._arc_jumps, scale=self._arc_scale,
+                                radial_source=('rtk_paired' if radial_weight > 0 else
+                                               'rtk_slow' if rtk_ok and self._arc_hold is None else 'imu_hold'),
+                                radial_rtk_weight=radial_weight, radial_correction_m=correction,
+                                jump_e_est=self._arc_jump_e)
         return SimpleNamespace(x=pose.x + w*(cx-pose.x), y=pose.y + w*(cy-pose.y), yaw=wrap(pose.yaw + w*wrap(yaw_v-pose.yaw)))
 
     def straight_guide_estimate(self):
