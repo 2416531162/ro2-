@@ -60,7 +60,15 @@ SOLO_CIRCLE_EXIT_M = 1.00
 # 开头 0.7–1 m 喷头偏内 1–1.6 cm、航向差 1–2°，一圈回来多喷的 0.2 m 压在线上，交界处错开 1–1.8 cm。
 # 2026-10-07 1 m → 2 m（用户：接入改聪明，但「线头不能差，要么对给助跑」）：仿真（Gen5 拟合底盘，R 1.5 / 3 m 顺逆 × 7 种摆位 ×
 # 16 种子）起喷后 0.5 m 内最大偏差中位 原来 8.2 mm → 就近接入 + 沿圆 1.5 m 6.7、+ 2 m 5.0；入弧那下的偏差要 1–2 m 才收回
-CIRCLE_RUN_IN_M = 2.00
+# 2026-10-09 2 m → 2.5 m（用户：「圆上多走 0.5 m 再喷」）：实录 9 个圆进圆的摆动要 3–5 m 才收完，起喷点平均偏 1.1 cm
+CIRCLE_RUN_IN_M = 2.50
+# 进圆过渡曲线（2026-10-09 用户：「进圆加一段过渡曲线」）：直线助跑和圆之间接一段 CIRCLE_TRANSITION_M 长、曲率从 0
+# 均匀增到圆曲率的过渡（CIRCLE_TRANSITION_STEPS 段等长圆弧，每段取段中点的曲率），接上圆后再沿圆走 CIRCLE_RUN_IN_M
+# 才喷。原来直线在切点一步跳到圆曲率，两轮转速一下变 ±7 %，驱动器速度环（实录：约 1 Hz、阻尼比 0.3–0.4，阶跃冲过头
+# 20–30 %）先少转后多转；过渡 1 m（0.5 m/s 约 2 s）比速度环晃一下慢，不再激起摆动。路线和前馈一起变缓，和 10-04
+# 试过的「只平滑前馈」不同。圆本身、起喷点、多喷和收尾都不变；直线助跑整体往圆外挪约 r·(L/r)²/24（R 2 m 约 1.7 cm）
+CIRCLE_TRANSITION_M = 1.00
+CIRCLE_TRANSITION_STEPS = 10
 CORNER_CLEAR_M = 0.05        # 急弯先把整车开出拐角（车尾也过了拐角这么远）再倒车
 CORNER_EXTRA_M = tuple(0.05 * i for i in range(21))     # 急弯倒车前可以再多往前开这么远（候选，找最短）
 CORNER_BACK_M = (0.0, 0.1, 0.2, 0.3)                    # 倒车后可以停得离拐角再远这么多（候选）
@@ -1342,11 +1350,14 @@ def start_from_nearest(spec, car_pose, min_radius, *, body=None, nozzle_x=None):
         near = math.atan2(py - cy, px - cx) - sign * lag
         angles = [near] + [near + 2 * math.pi * i / 72 for i in range(1, 72)]
         if nozzle_x is not None:
-            # 差速车：后轴顺着切线直接开上圆（接圆前沿圆走的 CIRCLE_RUN_IN_M 从切点算）的两个起点也算候选
+            # 差速车：后轴顺着切线直接开上圆（接圆前沿圆走的 CIRCLE_RUN_IN_M 从切点算）的两个起点也算候选；
+            # 有进圆过渡时直线切的是外挪 p 的圆，过渡接上圆那一点比切点靠前 φ
             dc = math.hypot(x - cx, y - cy)
-            if dc > r + 1e-6:
+            p, phi = _transition_offset(r, sign)
+            if dc > r + p + 1e-6:
                 for s in (1.0, -1.0):
-                    angles.append(math.atan2(y - cy, x - cx) + s * math.acos(r / dc) + sign * CIRCLE_RUN_IN_M / spec.radius)
+                    angles.append(math.atan2(y - cy, x - cx) + s * math.acos((r + p) / dc)
+                                  + sign * (phi + CIRCLE_RUN_IN_M / spec.radius))
         for a in angles:
             a = wrap(a)
             sx, sy = cx + r * math.cos(a), cy + r * math.sin(a)
@@ -1405,13 +1416,49 @@ def _circle_run_out(spec, loop):
     return loop[:-1] + [(paint, k), (SOLO_CIRCLE_EXIT_M, 0.0)]
 
 
+def _circle_transition(k):
+    """进圆过渡（见 CIRCLE_TRANSITION_M）：[(长度, 曲率), …]，曲率从 0 均匀增到 k；CIRCLE_TRANSITION_M 为 0 时为空。"""
+    n = CIRCLE_TRANSITION_STEPS
+    if CIRCLE_TRANSITION_M <= 0 or n <= 0:
+        return []
+    step = CIRCLE_TRANSITION_M / n
+    return [(step, k * (i + 0.5) / n) for i in range(n)]
+
+
+def _transition_start(x, y, yaw, ramp):
+    """过渡终点（接上圆那一点）位姿 (x, y, yaw) 往回推过渡 ramp，返回过渡起点位姿。"""
+    for step, kk in reversed(ramp):
+        x, y, yaw = advance(x, y, yaw, -step, kk)
+    return x, y, yaw
+
+
+def _transition_offset(r, sign):
+    """后轴圆半径 r（sign 逆时针 +1、顺时针 −1）接进圆过渡时，直线助跑那条线：(离圆心多远 − r, 这条线上离圆心最近的
+    那一点比过渡接上圆那一点在圆上靠后多少弧度)。没有过渡为 (0, 0)。"""
+    ramp = _circle_transition(sign / r)
+    if not ramp:
+        return 0.0, 0.0
+    # 接上圆那一点放在圆心 (0, 0) 正下方往右开（逆时针）/ 往左开（顺时针）
+    jx, jy, jyaw = 0.0, -r, (0.0 if sign > 0 else math.pi)
+    sx, sy, syaw = _transition_start(jx, jy, jyaw, ramp)
+    # 圆心到直线的距离、垂足
+    ux, uy = math.cos(syaw), math.sin(syaw)
+    t = -(sx * ux + sy * uy)
+    fx, fy = sx + t * ux, sy + t * uy
+    return math.hypot(fx, fy) - r, abs(wrap(math.atan2(fy, fx) - math.atan2(jy, jx)))
+
+
 def _circle_run_in(spec, route):
     """差速车的圆：起点沿后轴圆往回挪 CIRCLE_RUN_IN_M（沿图纸上半径 R 的圆量，后轴圆半径 r 上是
-    CIRCLE_RUN_IN_M·r/R），这段圆弧并进第一段，算接入、不喷；起喷点还是原来的起点。返回 (新 route, 后轴多走的米数)。"""
+    CIRCLE_RUN_IN_M·r/R），这段圆弧并进第一段，算接入、不喷；再往前接进圆过渡（_circle_transition），也算接入、不喷；
+    起喷点还是原来的起点。返回 (新 route, 后轴多走的米数)。"""
     (d, (x, y, yaw), pieces), rest = route[0], route[1:]
     length, k = pieces[0]
     arc = CIRCLE_RUN_IN_M / (abs(k) * spec.radius)
-    return [(d, advance(x, y, yaw, -arc, k), [(arc + length, k)] + list(pieces[1:]))] + list(rest), arc
+    ramp = _circle_transition(k)
+    start = _transition_start(*advance(x, y, yaw, -arc, k), ramp)
+    return ([(d, start, ramp + [(arc + length, k)] + list(pieces[1:]))] + list(rest),
+            arc + sum(v for v, _ in ramp))
 
 
 def _entry_fn(first, car, nozzle_x):

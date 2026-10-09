@@ -148,7 +148,8 @@ class CircleEntry(unittest.TestCase):
         self.assertLess(max(pivots(m)), 60., m)
         r = rp.circle_axle_radius(1.5, NOZZLE, MIN_R, -1.)
         self.assertAlmostEqual(sections[-1].path.pieces[0].length,rp.RUN_UP_M)
-        self.assertLess(entry_m, rp.RUN_UP_M+1.0 + rp.CIRCLE_RUN_IN_M*r/1.5)
+        # 进圆过渡本身多走 CIRCLE_TRANSITION_M；直线和圆相接处往回挪约半个过渡，可能要多倒这一段
+        self.assertLess(entry_m, rp.RUN_UP_M+1.0 + 1.5*rp.CIRCLE_TRANSITION_M + rp.CIRCLE_RUN_IN_M*r/1.5)
 
     def test_far_outside_turns_once(self):
         for yaw in (math.pi/2, -math.pi/2):
@@ -162,7 +163,8 @@ class CircleEntry(unittest.TestCase):
         sections, m, entry_m = self.plan(car)
         self.assertLessEqual(len(pivots(m)), 1, m)
         self.assertLess(sum(pivots(m)), 90., m)
-        self.assertLessEqual(sum(v[1] for v in m if isinstance(v, tuple) and v[0] == '倒'), rp.RUN_UP_M + 1e-6, m)
+        # 进圆过渡让直线和圆相接处往回挪约半个过渡（CIRCLE_TRANSITION_M / 2），倒车最多多这么多
+        self.assertLessEqual(sum(v[1] for v in m if isinstance(v, tuple) and v[0] == '倒'), rp.RUN_UP_M + rp.CIRCLE_TRANSITION_M/2 + 1e-6, m)
 
     def test_start_still_paints_full_circle(self):
         # 换了起点仍是整圈：起喷后到停喷沿后轴圆走满一圈 + 多喷

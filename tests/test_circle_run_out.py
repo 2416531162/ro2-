@@ -105,13 +105,20 @@ class CirclePlan(unittest.TestCase):
                         k = sec.path.kappa(mark+.1)
                         arc = rp.CIRCLE_RUN_IN_M/(abs(k)*sp.radius)
                         # 起喷前的 1 m 已经在同一个圆上：曲率不变、喷头压在图纸圆上
-                        self.assertGreaterEqual(mark, arc+rp.RUN_UP_M-1e-9)
+                        self.assertGreaterEqual(mark, arc+rp.CIRCLE_TRANSITION_M+rp.RUN_UP_M-1e-9)
                         for s in (mark-arc+1e-6, mark-arc/2, mark-1e-6):
                             self.assertAlmostEqual(sec.path.kappa(s), k, places=12)
                             self.assertAlmostEqual(math.hypot(*nozzle(sec, s)), sp.radius, places=6)
                         self.assertAlmostEqual(swept(sec, mark-arc, mark, sp), rp.CIRCLE_RUN_IN_M, delta=.003)
+                        # 再往前是进圆过渡：曲率从 0 一直往圆曲率增，不突变
+                        lead = mark-arc
+                        ks = [sec.path.kappa(lead-rp.CIRCLE_TRANSITION_M+u) for u in [i/50*rp.CIRCLE_TRANSITION_M for i in range(1, 50)]]
+                        self.assertTrue(all(abs(b) >= abs(a)-1e-12 and a*k >= 0 for a, b in zip(ks, ks[1:])))
+                        self.assertLess(abs(ks[0]), abs(k)*.1+1e-9)
+                        self.assertGreater(abs(ks[-1]), abs(k)*.9-1e-9)
+                        self.assertLessEqual(max(abs(b-a) for a, b in zip([0.]+ks, ks+[k])), abs(k)/rp.CIRCLE_TRANSITION_STEPS+1e-9)
                         # 再往前是直线助跑
-                        self.assertAlmostEqual(sec.path.kappa(mark-arc-.05), 0., places=12)
+                        self.assertAlmostEqual(sec.path.kappa(lead-rp.CIRCLE_TRANSITION_M-.05), 0., places=12)
                         # 起喷点没挪：还是离车最近的那一点
                         run = rp.start_from_nearest(sp, car, MIN_R, nozzle_x=NOZZLE)
                         start, _ = rp.loop_pieces(run, MIN_R, NOZZLE)
