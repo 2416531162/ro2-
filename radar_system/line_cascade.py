@@ -302,12 +302,15 @@ class ImuFirstConfig:
     # 助跑段（线头之前，还没喷，10-08 用户）：线头偏 0.5–2.1 cm（助跑起点就偏 1–3 cm，锁车头 1 m 后只剩 ~1.7 m 往回拉，
     # 按 k_e 0.8 / 1° 每米只拉回 ~55%；推算还在「慢慢修」，16:29 线头车以为 0.8 cm、卫星 2.1 cm）。助跑段推算直接往卫星靠
     # （每走 runup_rtk_tau_m 靠拢 63%，卫星可用且没判跳才靠），往回拉按 runup_k_e / runup_max_bias_deg，目标车头最快
-    # runup_rate_deg_s、角加速度 runup_target_accel_deg_s2；横偏收小车头偏置跟着收，到线头车头摆正。开喷以后照旧
+    # runup_rate_deg_s、角加速度 runup_target_accel_deg_s2；横偏收小车头偏置跟着收，线头处短距离交接后恢复喷线策略。
     runup_rtk_tau_m: float = 0.3
     runup_k_e: float = 2.0
     runup_max_bias_deg: float = 2.0
     runup_rate_deg_s: float = 3.0
     runup_target_accel_deg_s2: float = 8.0
+    # 到线头不能同时撤掉位置对齐和纠偏力度；在最初半米连续交给喷线控制。
+    # 不改变路径、助跑长度或开关喷边界。
+    runup_blend_m: float = 0.5
     fit_quality_frames: int = 2
     fit_settle_s: float = 2.0
 
@@ -319,7 +322,7 @@ class ImuFirstConfig:
                      'fit_max_sigma_m', 'fit_max_pair_m', 'fit_settle_s', 'fit_pair_settle_s',
                      'fit_low_sats_max_sigma_m', 'fit_low_sats_max_pair_m',
                      'antenna_pick_pair_m', 'antenna_agree_m', 'antenna_margin_m', 'antenna_fresh_s',
-                     'runup_rtk_tau_m', 'runup_k_e', 'runup_max_bias_deg', 'runup_rate_deg_s', 'runup_target_accel_deg_s2',
+                     'runup_rtk_tau_m', 'runup_k_e', 'runup_max_bias_deg', 'runup_rate_deg_s', 'runup_target_accel_deg_s2', 'runup_blend_m',
                      'fit_prior_rate_deg', 'fit_walk_r_deg', 'fit_max_rate_deg', 'fit_start_beta_rate_deg',
                      'persist_m', 'persist_e_m', 'fit_anchor_sigma', 'target_accel_deg_s2',
                      'head_k_e', 'head_max_bias_deg'):
@@ -919,21 +922,31 @@ def paint_pull(cfg, along_m):
     return (1.0 - w) * cfg.head_k_e + w * cfg.k_e, (1.0 - w) * cfg.head_max_bias_deg + w * cfg.max_bias_deg
 
 
-def imu_first_target(cfg, guide, target, line_yaw, dt, align_rate_deg_s, align_deg, aligned, pull=None):
+def runup_weight(cfg, along_m):
+    """线头前保持助跑控制，线头后按距离连续退出；两端斜率为零。"""
+    u=max(0.,min(1.,along_m/cfg.runup_blend_m))
+    return 1.-u*u*(3.-2.*u)
+
+
+def imu_first_target(cfg, guide, target, line_yaw, dt, align_rate_deg_s, align_deg, aligned, pull=None, entry_weight=0.):
     """目标车头（IMU 系）：线方向 − 偏移 − β + 横偏往回拉（推算横偏 deadband_m 内不拉）。还没对准过、或在对准
     阶段（guide.fast）按 align_rate_deg_s 转，上线以后每秒最多改 cfg.rate_deg_s。pull：(k_e, 车头最多偏几度)，
-    None 用 cfg.k_e / cfg.max_bias_deg（画线时见 paint_pull）。返回 (目标, 往回拉的偏置, 在对准, 对准过)。"""
+    None 用 cfg.k_e / cfg.max_bias_deg（画线时见 paint_pull）。entry_weight 是助跑控制权重 0..1。
+    返回 (目标, 往回拉的偏置, 在对准, 对准过)。"""
     k_e, max_bias_deg = (cfg.k_e, cfg.max_bias_deg) if pull is None else pull
+    k_e += entry_weight*(cfg.runup_k_e-k_e)
+    max_bias_deg += entry_weight*(cfg.runup_max_bias_deg-max_bias_deg)
     e = guide.e
     excess = max(0.0, abs(e) - cfg.deadband_m)
     lim = max_bias_deg * DEG
     bias = max(-lim, min(lim, -math.atan(k_e * math.copysign(excess, e))))
     desired = wrap(line_yaw - guide.offset - guide.beta + bias)
     rate = cfg.rate_deg_s if aligned and not guide.fast else align_rate_deg_s
+    rate += entry_weight*(max(align_rate_deg_s,cfg.runup_rate_deg_s)-rate)
     gap = wrap(desired - target)
     if cfg.rtk_fit and dt > 0:
         # 到目标前先减速；目标本身突变时允许有界过渡，不瞬间翻转角速度。
-        accel = cfg.target_accel_deg_s2 * DEG
+        accel = (cfg.target_accel_deg_s2+entry_weight*(cfg.runup_target_accel_deg_s2-cfg.target_accel_deg_s2))*DEG
         braking = max(0.0, (math.sqrt((accel * dt) ** 2 + 8.0 * accel * abs(gap)) - accel * dt) / 2.0)
         want = math.copysign(min(rate * DEG, braking), gap) if gap else 0.0
         guide.target_rate += max(-accel * dt, min(accel * dt, want - guide.target_rate))

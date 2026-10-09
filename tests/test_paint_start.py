@@ -92,7 +92,7 @@ class Integration(unittest.TestCase):
         self.assertFalse(tr._check_paint_start(sample(tr,.06,2.6,e=.02),.02,.5))
         self.assertEqual(tr.st.state,'RUNNING')
         self.assertFalse(tr.paint_start_allowed())
-        m=NS(pose=sample(tr,.04,2.6),differential=True,nozzle=(0.,0.))
+        m=NS(pose=sample(tr,.04,2.6),differential=True,nozzle=(0.,0.),_route_local=lambda:None)
         status=paint_quality.status(m,{},True,Section(1,tr.path),tr)
         self.assertTrue(status['painting']);self.assertIsNone(status['paint_blocked'])
 

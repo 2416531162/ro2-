@@ -37,7 +37,7 @@ from heading_control import HeadingControl, HeadingControlConfig
 from heading_hold import HoldConfig
 from paint_start import PaintStartGuard
 from line_cascade import (CascadeConfig, ImuFirstConfig, ImuFirstGuide, imu_first_target, learn_heading_offset,
-                          lateral_heading_step, paint_pull)
+                          lateral_heading_step, paint_pull, runup_weight)
 
 
 def wrap(a):
@@ -618,7 +618,6 @@ class PathTracker:
         self._quality_bad_t = None      # 最近一次（连续 fit_quality_frames 帧）不合格的时刻
         self._pair_bad_n = 0            # 两天线距离误差连续超限的帧数（单独计，恢复等 fit_pair_settle_s）
         self._pair_bad_t = None
-        self._runup_law = None          # 助跑段往回拉用的 ImuFirstConfig（runup_* 换进去，第一次用时建）
         self._receiver_bad_n = 0        # 只看接收机（σ、卫星数、固定解，不看两天线）连续不合格的帧数：选天线时用
         self._receiver_bad_t = None
         self._secondary = None          # 副天线最近一帧 (测量时刻, x, y, 固定解, 车体系杠杆臂 (前, 左))
@@ -1340,6 +1339,9 @@ class PathTracker:
         这里只出转向，另把喷头横偏估计留给偏离中止、降速和喷线资格（卫星跳了时它们也按 IMU 推算）。"""
         cfg, st, guide = self.cfg, self.st, self._straight_guide
         first, align = guide.cfg, self._imu_alignment
+        # 同一段助跑与喷线在边界上共享控制状态；仅原本有助跑的直线做半米交接。
+        entry_weight=(runup_weight(first,st.s-self.paint_from_m)
+                      if self.paint_from_m>0. else 0.)
         baseline_ok = self._baseline_ok()
         if guide.token is None and align is not None:
             guide.token = align.begin_line()            # 新的一条线：上一条线拟合好的换算定下来，可带过来
@@ -1351,6 +1353,15 @@ class PathTracker:
             # 线头已进坏区时，沿用原有交接；不能继续等待不可信测向把横偏收进新门槛。
             self._runup_released = True
         eligible, runup_wait = self._straight_eligible(piece, speed)
+        # 已有可信跨线标定时，本段最少样本确认一致便可开始原有渐入。
+        # 仍保留 .8 s 控制交接；没有可信历史或本段尚未确认时照旧累计完整样本。
+        if (eligible and not guide.locked and baseline_ok and self.entry_stabilize_mps is not None
+                and st.s<self.paint_from_m and align is not None
+                and guide.offset_n>=first.offset_min_samples and self._runup_position_trusted(pose)):
+            predicted=align.predict(self._imu_now)
+            if (predicted is not None and predicted[1]<=math.radians(align.cfg.dual_sigma_deg)
+                    and abs(wrap(predicted[0]-guide.offset))<=math.radians(1.)):
+                guide.lock_without_baseline(align,self._imu_now,wrap(pose.yaw-imu_yaw))
         if self._launch_armed:
             self._launch_armed = False
             if eligible and not self._rolling_entry:
@@ -1407,9 +1418,9 @@ class PathTracker:
             # steering：IMU 已经在开（上一拍权重 > 0）；rtk_trim、rtk_fit 都关时这以后卫星不再修正
             guide.update(measured, rel, max(0.0, pose.speed)*dt, dt, (nx, ny), rtk_ok, fast=st.s < self.paint_from_m,
                          steering=self._straight_weight > 0.0)
-            if first.rtk_fit and st.s < self.paint_from_m and rtk_ok and guide.rtk_accepted:
-                # 助跑段还没喷：推算直接往卫星靠（ImuFirstConfig.runup_rtk_tau_m），到线头车的判断和卫星一致
-                guide.pull_to(measured, 1.0 - math.exp(-max(0.0, pose.speed)*dt / first.runup_rtk_tau_m))
+            if first.rtk_fit and entry_weight>0. and rtk_ok and guide.rtk_accepted:
+                # 助跑及线头交接仍只接纳原质量门和跳点门放行的位置；对齐权重平滑退到零。
+                guide.pull_to(measured, 1.0 - math.exp(-max(0.0, pose.speed)*dt*entry_weight / first.runup_rtk_tau_m))
             sigma = guide.fit_sigma()
             if (align is not None and first.rtk_fit and guide.rtk_accepted
                     and sigma is not None and sigma <= math.radians(first.carry_fit_sigma_deg)):
@@ -1459,17 +1470,11 @@ class PathTracker:
             sent = [(self._imu_now-(self._clock-t), w) for t, _, w in self._sent]
             self._straight_core.reset(now=self._imu_now, sent=sent, output=legacy_w)
         previous_target = self._straight_target
-        runup = st.s < self.paint_from_m
-        if runup and self._runup_law is None:
-            self._runup_law = replace(first, k_e=first.runup_k_e, max_bias_deg=first.runup_max_bias_deg,
-                                                  rate_deg_s=first.runup_rate_deg_s,
-                                                  target_accel_deg_s2=first.runup_target_accel_deg_s2)
-        # 助跑段（线头之前）按更积极的往回拉（ImuFirstConfig.runup_*）；开喷以后线头段照旧，之后慢慢修（paint_pull）
-        pull = None if runup else paint_pull(first, self._paint_along(piece))
+        # 纠偏增益、限幅、目标角速度/加速度与位置观察器一起连续交接，避免开喷那拍突然松手。
+        pull = paint_pull(first, self._paint_along(piece))
         self._straight_target, self._straight_bias, aligning, self._straight_aligned = imu_first_target(
-            self._runup_law if runup else first, guide, self._straight_target, piece.yaw, dt,
-            max(cfg.straight_target_rate_deg_s, first.runup_rate_deg_s) if runup else cfg.straight_target_rate_deg_s,
-            CascadeConfig.align_deg, self._straight_aligned, pull=pull)
+            first, guide, self._straight_target, piece.yaw, dt,cfg.straight_target_rate_deg_s,
+            CascadeConfig.align_deg, self._straight_aligned, pull=pull,entry_weight=entry_weight)
         self._straight_target_rate = wrap(self._straight_target-previous_target)/dt
         # β 相当于原 A/B 积分给的车头偏置（−β）：换成路径积分单位，交回原跟踪（进弯）时接着用
         self._straight_integral = -guide.beta
@@ -1491,7 +1496,9 @@ class PathTracker:
         self._straight_status = dict(active=True, weight=self._straight_weight, eligible=eligible,
             control_law='imu_first', launch_weight=self._launch_weight, target_deg=math.degrees(self._straight_target),
             bias_deg=math.degrees(self._straight_bias), error_deg=math.degrees(error),
-            pull_k_e=None if pull is None else pull[0], pull_max_bias_deg=None if pull is None else pull[1],
+            pull_k_e=pull[0]+entry_weight*(first.runup_k_e-pull[0]),
+            pull_max_bias_deg=pull[1]+entry_weight*(first.runup_max_bias_deg-pull[1]),
+            entry_blend_weight=round(entry_weight,4),
             target_rate_deg_s=math.degrees(self._straight_target_rate), aligning=aligning, baseline_ok=baseline_ok,
             outer_e=guide.e, outer_e_rtk=measured, inner_wz=inner_w, legacy_wz=legacy_w, final_wz=output,
             **guide.status(), **self._antenna_status(), **self._straight_core.status(),
