@@ -99,7 +99,7 @@ class CircleRadialRtk(unittest.TestCase):
         self.assertLess(abs(state['e_est']),.005)
         for i in range(251,351):
             state=feed(tr,i,offset=.04)
-            self.assertLessEqual(abs(state['radial_correction_m']),.08*.5*DT+1e-10)
+            self.assertLessEqual(abs(state['radial_correction_m']),.12*.5*DT+1e-10)
 
     def test_radial_weight_does_not_change_imu_heading_or_progress(self):
         a,b=self.warmed(False),self.warmed()
@@ -112,8 +112,8 @@ class CircleRadialRtk(unittest.TestCase):
     def test_millimetre_position_noise_keeps_the_original_smooth_response(self):
         old,new=self.warmed(False),self.warmed()
         for i in range(201,351):
-            before=feed(old,i,offset=.002*math.sin(i))
-            after=feed(new,i,offset=.002*math.sin(i))
+            before=feed(old,i,offset=.001*math.sin(i))
+            after=feed(new,i,offset=.001*math.sin(i))
             self.assertEqual(after['radial_rtk_weight'],0.)
             self.assertAlmostEqual(before['e_est'],after['e_est'],places=10)
 

@@ -797,6 +797,11 @@ class LineMission:
                 quality(*self._rtk_quality)
             secondary = getattr(tracker, 'set_secondary_fix', None)
             lever = self._antenna_lever()
+            primary = getattr(tracker, 'set_primary_fix', None)
+            if callable(primary) and self._antenna is not None and lever is not None:
+                t1,lat,lon,sol,_ = self._antenna
+                x1,y1 = self.fusion.to_local(lat,lon)
+                primary(t1,x1,y1,sol in RTK_FIXED_SOLS,lever)
             if callable(secondary) and self._fix2 is not None and lever is not None:
                 # 副天线杠杆臂 = 主天线（含倾斜补偿）+ 测向基线（车体系方向 baseline_yaw_body_deg，长度取标称）
                 t2, x2, y2, fixed2, length = self._fix2
