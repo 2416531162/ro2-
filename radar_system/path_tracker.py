@@ -294,9 +294,17 @@ class PathConfig:
     # 卫星。05:41 那圈：原地转完偏 4.6 cm 没收稳就起喷（偏内 2.3 cm），起喷时卫星往里跳 1.3 cm、2.4 m 后 0.4 s 内往外跳
     # 3.2 cm（陀螺稳、车走不出来），车跟着卫星走，交界错开 2.5–2.9 cm
     arc_imu_first: bool = False
-    # 半径较大的非整圆作业弧预走时学习，跨喷线分段连续保持；R1 角弧沿用原控制。
+    # 非整圆作业弧：预走时学习，跨喷线分段连续保持；径向校正与融合航向/进度分开。
     arc_partial_imu_first: bool = False
-    arc_partial_min_radius_m: float = 1.5
+    arc_partial_min_radius_m: float = 1.0
+    arc_partial_rtk_pull_m: float = 0.07
+    arc_partial_rtk_error_m: float = 0.004
+    arc_partial_rtk_noise_m: float = 0.001
+    arc_partial_tight_feedback_scale: float = 3.5
+    arc_partial_rtk_feedback_scale: float = 4.5
+    arc_partial_heading_scale: float = 2.5
+    arc_partial_response_delay_s: float = .15
+    arc_partial_response_tau_s: float = .10
     arc_s_rate_m: float = 0.05
     arc_s_tau_m: float = 0.4
     arc_scale_tau_m: float = 2.0
@@ -337,7 +345,10 @@ class PathConfig:
                      'runup_release_e_m', 'runup_release_heading_deg', 'arc_s_rate_m', 'arc_s_tau_m', 'arc_scale_tau_m',
                      'arc_heading_tau_s', 'arc_pull_m', 'arc_pull_rate_m', 'arc_rtk_pull_m',
                      'arc_rtk_pull_rate_m', 'arc_rtk_pair_max_m', 'arc_rtk_settle_s', 'arc_rtk_fresh_s',
-                     'arc_rtk_error_m', 'arc_rtk_feedback_scale', 'arc_partial_min_radius_m'):
+                     'arc_rtk_error_m', 'arc_rtk_feedback_scale', 'arc_partial_min_radius_m',
+                     'arc_partial_rtk_pull_m', 'arc_partial_rtk_error_m', 'arc_partial_rtk_feedback_scale',
+                     'arc_partial_tight_feedback_scale',
+                     'arc_partial_heading_scale', 'arc_partial_response_delay_s', 'arc_partial_response_tau_s'):
             if not math.isfinite(getattr(self, name)) or getattr(self, name) <= 0:
                 raise ValueError(name + ' 必须是有限正数')
         for name in ('straight_settle_m', 'straight_min_speed_mps', 'straight_outer_k_i', 'straight_ki', 'straight_kd', 'straight_outer_rate_gain',
@@ -347,6 +358,8 @@ class PathConfig:
                 raise ValueError(name + ' 必须是有限非负数')
         if not math.isfinite(self.arc_rtk_noise_m) or not 0 <= self.arc_rtk_noise_m < self.arc_rtk_error_m:
             raise ValueError('arc_rtk_noise_m 必须非负且小于 arc_rtk_error_m')
+        if not math.isfinite(self.arc_partial_rtk_noise_m) or not 0 <= self.arc_partial_rtk_noise_m < self.arc_partial_rtk_error_m:
+            raise ValueError('arc_partial_rtk_noise_m 必须非负且小于 arc_partial_rtk_error_m')
         if self.straight_imu_first is not None and not isinstance(self.straight_imu_first, ImuFirstConfig):
             raise ValueError('straight_imu_first 必须为空或 ImuFirstConfig')
         if not math.isfinite(self.straight_nozzle_x_m):
@@ -764,7 +777,7 @@ class PathTracker:
             pass
 
     def set_primary_fix(self, t, x, y, fixed, lever):
-        """主天线原始固定解与同一车体系杆臂；仅用于整圆双天线径向观测。"""
+        """主天线原始固定解与同一车体系杆臂；用于作业圆弧双天线径向观测。"""
         try:
             if (all(math.isfinite(v) for v in (t,x,y,*lever))
                     and (self._primary is None or t >= self._primary[0])):
@@ -1514,15 +1527,17 @@ class PathTracker:
             self._arc_rtk_weight = min(1., self._arc_rtk_weight+dt/cfg.straight_blend_s)
         return self._arc_rtk_weight
 
-    def _correct_arc_radial(self, measured, distance, rtk_ok, dt, raw=None):
+    def _correct_arc_radial(self, measured, distance, rtk_ok, dt, raw=None, *, partial=False):
         """有界互补校正；不改变用于维持转向的 IMU 航向和圆上进度。"""
         cfg = self.cfg
         weight = self._arc_radial_rtk_weight(rtk_ok and (self._primary is None or raw is not None), dt)
         observed=measured if raw is None else measured+weight*(raw-measured)
         self._arc_observed_e=observed
-        weight *= min(1., max(0., (abs(observed-self._arc_e)-cfg.arc_rtk_noise_m)
-                             /(cfg.arc_rtk_error_m-cfg.arc_rtk_noise_m)))
-        pull_m = cfg.arc_pull_m + weight*(cfg.arc_rtk_pull_m-cfg.arc_pull_m)
+        noise_m=cfg.arc_partial_rtk_noise_m if partial else cfg.arc_rtk_noise_m
+        error_m=cfg.arc_partial_rtk_error_m if partial else cfg.arc_rtk_error_m
+        fast_pull_m=cfg.arc_partial_rtk_pull_m if partial else cfg.arc_rtk_pull_m
+        weight *= min(1., max(0., (abs(observed-self._arc_e)-noise_m)/(error_m-noise_m)))
+        pull_m = cfg.arc_pull_m + weight*(fast_pull_m-cfg.arc_pull_m)
         pull_rate = cfg.arc_pull_rate_m + weight*(cfg.arc_rtk_pull_rate_m-cfg.arc_pull_rate_m)
         correction = 0.0
         if rtk_ok and self._arc_hold is None:
@@ -1533,7 +1548,8 @@ class PathTracker:
 
     def _arc_first(self, pose, dt):
         """画圆 IMU 为主（PathConfig.arc_imu_first）：返回原弯道控制律这一拍转向用的位姿（x, y, yaw），不在整圆/可用作业弧上或还没
-        学好换算时返回 None（按融合位姿开）。互补滤波：车头 = IMU 偏航 + 换算（换算按 arc_heading_tau_s 慢慢跟融合航向），
+        学好换算时返回 None（按融合位姿开）。非整圆只校正精确喷头半径，保持融合航向与喷头方位；
+        整圆互补滤波：车头 = IMU 偏航 + 换算（换算按 arc_heading_tau_s 慢慢跟融合航向），
         喷头横偏 = IMU 推算 + 往卫星拉；新鲜可靠双天线持续一致时用 arc_rtk_pull_* 及时校正，
         其余观测沿用 arc_pull_* 慢修；突然跳开 > jump_m 先不拉，
         回来或 jump_accept_s 后再拉），沿圆路程按走过的路推、慢慢靠向卫星。不估角度 β：圆一圈只有十几米，
@@ -1561,6 +1577,10 @@ class PathTracker:
         # 定位退化时连同沿圆进度、轮速比例及航向换算一起停止学习，不能只冻结径向修正。
         rtk_ok = lateral_integral_allowed(pose) and self._baseline_ok(fit=True) and self._rtk_quality_ok()
         heading_ok = baseline_ok and rtk_ok and self._arc_hold is None
+        # 径向恢复使用成对位置的持续确认；航向换算仍保留上面的长期质量门槛。
+        partial_pair_ok=partial is not None and self._partial_arc_pair_ok()
+        if partial is not None:
+            rtk_ok=lateral_integral_allowed(pose) and self._baseline_ok(fit=True) and partial_pair_ok
         difference = wrap(pose.yaw - imu_yaw)
         if not guide.locked:
             if heading_ok:
@@ -1573,6 +1593,8 @@ class PathTracker:
         elif heading_ok:
             self._arc_off = wrap(self._arc_off + wrap(difference - self._arc_off) * min(1.0, dt / cfg.arc_heading_tau_s))
         reference = wrap(imu_yaw + self._arc_off)
+        partial_raw = self._arc_raw_radial(piece) if partial is not None and cfg.arc_rtk_radial_enabled else None
+        if partial is not None:rtk_ok = rtk_ok and partial_raw is not None
         x, y = pose.x, pose.y
         if self._imu_lever is not None:
             # 同直线：融合用自己的航向从天线倒推后轴，这里按 IMU 参考航向重推
@@ -1616,8 +1638,11 @@ class PathTracker:
             self._arc_rel = rel
             self._arc_travel += distance
         r = measured - self._arc_jump_e
-        raw = self._arc_raw_radial(piece) if cfg.arc_rtk_radial_enabled else None
-        if rtk_ok and raw is not None:
+        raw = partial_raw if partial is not None else self._arc_raw_radial(piece) if cfg.arc_rtk_radial_enabled else None
+        # 共同跳点会让融合暂时冻结修偏，但原始位置跳点检测必须保留前一帧参考。
+        # 只检测，不在融合不可信时应用位置校正；整圆保持原来的策略。
+        raw_jump_ok=(partial_pair_ok and self._baseline_ok(fit=True)) if partial is not None else rtk_ok
+        if raw_jump_ok and raw is not None:
             stamp=(self._primary[0],self._secondary[0])
             prior=self._arc_raw_last
             if prior is None or stamp != prior[0]:
@@ -1657,16 +1682,29 @@ class PathTracker:
         if rtk_ok and self._arc_hold is None:
             lim = cfg.arc_pull_rate_m * distance
             self._arc_jump_e += max(-lim, min(lim, r*min(1.,distance/cfg.arc_pull_m)))
-        radial_weight, correction = self._correct_arc_radial(measured, distance, rtk_ok, dt, raw)
+        radial_weight, correction = self._correct_arc_radial(measured, distance, rtk_ok, dt, raw, partial=partial is not None)
         e_track = self._arc_e - lever
         yaw_v = wrap(pyaw + rel)
         cx = px - math.sin(pyaw)*e_track - cfg.track_x_m*math.cos(yaw_v)
         cy = py + math.cos(pyaw)*e_track - cfg.track_x_m*math.sin(yaw_v)
         self._arc_weight = min(1.0, self._arc_weight + dt / cfg.straight_blend_s)
         w = self._arc_weight
-        self._arc_guided = (self._arc_e, rel)
-        self._arc_status = dict(active=True, weight=w, baseline_ok=baseline_ok, rtk_ok=rtk_ok, arc_s=self._arc_s,
-                                rtk_s=s_rtk, e_est=self._arc_e, e_rtk=measured, heading_deg=math.degrees(rel),
+        control_rel=rel
+        if partial is not None:
+            # 短弧直接修正喷头的圆半径；保留融合航向及当前喷头方位，避免把沿弧推算偏差带进转向。
+            k=piece.kappa
+            ox,oy=piece.x-math.sin(piece.yaw)/k,piece.y+math.cos(piece.yaw)/k
+            qx=pose.x+nx*math.cos(pose.yaw)-ny*math.sin(pose.yaw)
+            qy=pose.y+nx*math.sin(pose.yaw)+ny*math.cos(pose.yaw)
+            dx,dy=qx-ox,qy-oy
+            radius=math.hypot(nx,1./k-ny)
+            ratio=(radius-math.copysign(1.,k)*self._arc_e)/max(1e-6,math.hypot(dx,dy))-1.
+            cx,cy=pose.x+ratio*dx,pose.y+ratio*dy
+            yaw_v=pose.yaw
+            control_rel=self.locate(pose.x,pose.y,pose.yaw,st.s)[2]
+        self._arc_guided = (self._arc_e, control_rel)
+        self._arc_status = dict(active=True, weight=w, partial_arc=partial is not None, baseline_ok=baseline_ok, rtk_ok=rtk_ok, arc_s=self._arc_s,
+                                rtk_s=s_rtk, e_est=self._arc_e, e_rtk=measured, heading_deg=math.degrees(control_rel),
                                 offset_deg=math.degrees(self._arc_off), holding=self._arc_hold is not None,
                                 jumps=self._arc_jumps, scale=self._arc_scale,
                                 radial_source=('rtk_paired' if radial_weight > 0 else
@@ -1688,6 +1726,7 @@ class PathTracker:
         """
         sent = self._sent
         retained = max(self.cfg.delay_s, self._straight_core.cfg.delay_s) if self.cfg.straight_imu_enabled else self.cfg.delay_s
+        if self.cfg.arc_partial_imu_first:retained=max(retained,self.cfg.arc_partial_response_delay_s)
         while len(sent) >= 2 and sent[1][0] <= self._clock - retained + 1e-9:
             sent.popleft()
         d = self.cfg.delay_s if delay is None else min(delay, retained)
@@ -1704,6 +1743,30 @@ class PathTracker:
                 continue
             x, y, yaw = Piece(x, y, yaw, 0.0, w / v * self.cfg.steer_gain, 0.0).pose(v * (end - a))
         return x, y, yaw
+
+    def _predict_partial_motion(self, source, pose):
+        """用 IMU 转速和轮速初始化待执行响应，再按指令队列预测；短弧专用。"""
+        x,y,h=source.x,source.y,source.yaw
+        speed,rate=pose.speed,pose.yaw_rate
+        sent=list(self._sent)
+        if not sent or self.cfg.delay_s<=0:return self.predict(x,y,h)
+        delay=self.cfg.arc_partial_response_delay_s
+        tau=self.cfg.arc_partial_response_tau_s
+        horizon=min(self.cfg.delay_s,delay+tau)
+        elapsed=0.;index=0
+        while elapsed<horizon-1e-9:
+            dt=min(.01,horizon-elapsed)
+            t=self._clock+elapsed+.5*dt-delay
+            while index+1<len(sent) and sent[index+1][0]<=t:index+=1
+            _,vc,wc=sent[index]
+            if t<sent[0][0]:vc=wc=0.
+            alpha=1.-math.exp(-dt/tau)
+            nv=speed+alpha*(vc-speed);nw=rate+alpha*(wc*self.cfg.steer_gain-rate)
+            v,w=.5*(speed+nv),.5*(rate+nw)
+            mid=h+.5*w*dt
+            x+=v*math.cos(mid)*dt;y+=v*math.sin(mid)*dt;h+=w*dt
+            speed,rate=nv,nw;elapsed+=dt
+        return x,y,h
 
     def nozzle_end(self, pose, forward, left, at=None):
         """前进直线段尾的实际喷头剩余距离、沿线速度；不使用执行延迟预估或冻结的 st.s。
@@ -1791,10 +1854,35 @@ class PathTracker:
         spans=self.paint_spans if self.paint_spans is not None else [(self.paint_from_m,self.paint_to_m)]
         return any(start<b-1e-8 and end>a+1e-8 for a,b in spans)
 
+    def _partial_arc_feedback_scale(self):
+        """按喷头圆半径平滑分配纠偏强度；紧弧保留响应延迟余量，大弧及时纠偏。"""
+        piece=self._arc_piece
+        if piece is None or piece.straight:return 1.
+        nx,ny=self._straight_nozzle
+        radius=math.hypot(nx,1./piece.kappa-ny)
+        u=max(0.,min(1.,(radius-1.5)/1.5))
+        weight=u*u*(3.-2.*u)
+        return self.cfg.arc_partial_tight_feedback_scale+weight*(
+            self.cfg.arc_partial_rtk_feedback_scale-self.cfg.arc_partial_tight_feedback_scale)
+
+    def _partial_arc_pair_ok(self):
+        """短弧径向观测的当前双固定解质量；确认时长由 _arc_radial_rtk_weight 统一处理。"""
+        cfg=self.cfg
+        if (self._imu_now is None or self._quality is None or self._quality_frame_t is None
+                or self._primary is None or self._secondary is None):
+            return False
+        sigma,sats,pair,fixed=self._quality
+        return (fixed is True and 0.<=self._imu_now-self._quality_frame_t<=cfg.arc_rtk_fresh_s
+            and all(fix[3] and 0.<=self._imu_now-fix[0]<=cfg.arc_rtk_fresh_s for fix in (self._primary,self._secondary))
+            and self._quality_good(sigma,sats,pair,fixed)
+            and pair is not None and 0.<=pair<=cfg.arc_rtk_pair_max_m)
+
     def _partial_work_arc_piece(self, piece):
         """短作业弧沿同圆预走/喷线/收尾共用观测状态；完整圆保持原来的接管时机。"""
         if (piece is None or not self._work_arc_piece(piece)
-                or self._primary is None or self._secondary is None):
+                or self._primary is None or self._secondary is None
+                or self._quality is None or self._quality_frame_t is None
+                or not self.cfg.arc_rtk_radial_enabled):
             return None
         nx,ny=self._straight_nozzle
         radius=math.hypot(nx,1./piece.kappa-ny)
@@ -1937,6 +2025,10 @@ class PathTracker:
         # 再按当前速度和角速度推 lead_s（弯道上角速度不为 0，推出去的是一段圆弧）
         src = pose if steer is None else steer
         x, y, yaw = self.predict(src.x, src.y, src.yaw)
+        if self._arc_status.get('partial_arc'):
+            nx,ny,nh=self._predict_partial_motion(src,pose)
+            blend=self._arc_weight
+            x+=blend*(nx-x);y+=blend*(ny-y);yaw=wrap(yaw+blend*wrap(nh-yaw))
         mid = yaw + 0.5 * pose.yaw_rate * cfg.lead_s
         x += pose.speed * cfg.lead_s * math.cos(mid)
         y += pose.speed * cfg.lead_s * math.sin(mid)
@@ -2003,10 +2095,14 @@ class PathTracker:
         k_ff = k_pre * math.cos(he) / max(0.5, 1.0 - k_pre * e)
         lateral_gain=self.k_e
         if self._arc_guided is not None and self._arc_status.get('e_rtk_raw') is not None:
-            lateral_gain*=1.+self._arc_rtk_weight*(cfg.arc_rtk_feedback_scale-1.)
+            scale=self._partial_arc_feedback_scale() if self._arc_status.get('partial_arc') else cfg.arc_rtk_feedback_scale
+            lateral_gain*=1.+self._arc_rtk_weight*(scale-1.)
         theta_ref = -math.atan(lateral_gain * e)
         theta_ref = max(-cfg.approach_max_rad, min(cfg.approach_max_rad, theta_ref))
         k_fb = -self.k_theta * (he - theta_ref) - cfg.ki_per_m2 * st.integral
+        if self._arc_status.get('partial_arc'):
+            # 同比例提高航向反馈与已学的积分补偿，保持原有零偏补偿，并随观测器平滑接入。
+            k_fb*=1.+self._arc_weight*(cfg.arc_partial_heading_scale-1.)
         # 先把反馈限在"前馈之外还剩的曲率"内再低通（与直线控制器一样先限幅后滤波，滤波器里不会积出超限的量）
         k_max = self.kappa_act_max
         k_ff = max(-k_max, min(k_max, k_ff))

@@ -23,17 +23,17 @@ def tracker(split=True,k=-.5,full=False):
     tr.paint_spans=[(tr.paint_from_m,tr.paint_to_m)]
     return tr
 
-def feed(tr,i,shift=0.,fixed=True):
+def feed(tr,i,shift=0.,fixed=True,yaw_error=0.,correction=(0.,0.)):
     now=i*DT;s=.5*now;x,y,h=tr.path.pose(s);k=tr.path.kappa(s)
     tr.st.s=s;tr.sync(now,(now,h+1.7,.5*k))
     tr.set_heading_baseline(now,.415)
-    tr.set_rtk_quality(now,.01,24,.005,fixed)
+    tr.set_rtk_quality(now,.01 if fixed else .04,24,.005,fixed)
     for lever,setter in (((.235,.197),tr.set_primary_fix),((.235,-.218),tr.set_secondary_fix)):
         ax,ay=lever
         setter(now,x-math.sin(h)*shift+ax*math.cos(h)-ay*math.sin(h),
                y+math.cos(h)*shift+ax*math.sin(h)+ay*math.cos(h),fixed,lever)
-    p=NS(x=x,y=y,yaw=h,speed=.5,yaw_rate=.5*k,usable_for_control=True,
-         quality='RTK_FIXED' if fixed else 'RTK_FLOAT',reasons=(),rtk_trusted=fixed,correction_xy=(0.,0.))
+    p=NS(x=x,y=y,yaw=h+yaw_error,speed=.5,yaw_rate=.5*k,usable_for_control=True,
+         quality='RTK_FIXED' if fixed else 'RTK_FLOAT',reasons=(),rtk_trusted=fixed,correction_xy=correction)
     out=tr._arc_first(p,DT)
     return out,dict(tr._arc_status)
 
@@ -72,14 +72,40 @@ class PartialArcObserver(unittest.TestCase):
             self.assertEqual(sa,sb)
             self.assertEqual(pa,pb)
 
-    def test_small_corner_keeps_its_existing_controller(self):
-        a,b=tracker(k=-.7001463154759235),tracker(k=-.7001463154759235)
-        b.cfg=replace(b.cfg,arc_partial_imu_first=False)
-        for i in range(1,int(a.path.length/.5/DT)):
-            pa,sa=feed(a,i);pb,sb=feed(b,i)
-            self.assertIsNone(pa)
-            self.assertEqual(sa,sb)
-            self.assertEqual(pa,pb)
+    def test_corner_observer_is_active_before_spraying(self):
+        tr=tracker(k=-.7001463154759235)
+        for i in range(1,350):result,state=feed(tr,i)
+        self.assertLess(tr.st.s,tr.paint_from_m)
+        self.assertIsNotNone(result)
+        self.assertTrue(state['partial_arc'])
+        self.assertEqual(state['weight'],1.)
+
+    def test_partial_correction_preserves_fused_heading_and_nozzle_azimuth(self):
+        for k in (-.7001463154759235,.5):
+            tr=tracker(k=k)
+            for i in range(1,420):out,state=feed(tr,i,shift=.006 if i>350 else 0.)
+            self.assertTrue(state['partial_arc'])
+            x,y,h=tr.path.pose(tr.st.s)
+            self.assertAlmostEqual(out.yaw,h,places=12)
+            p=tr.path.pieces[1];cx,cy=p.x-math.sin(p.yaw)/k,p.y+math.cos(p.yaw)/k
+            def q(px,py):return (px+.24*math.cos(h)+.4575*math.sin(h)-cx,py+.24*math.sin(h)-.4575*math.cos(h)-cy)
+            a,b=q(x,y),q(out.x,out.y)
+            self.assertAlmostEqual(math.atan2(a[1],a[0]),math.atan2(b[1],b[0]),places=12)
+            radius=math.hypot(.24,1./k+.4575)
+            self.assertAlmostEqual(math.hypot(*b),radius-math.copysign(1.,k)*state['e_est'],places=10)
+
+    def test_radial_recovery_precedes_heading_relearning_but_waits_for_confirmation(self):
+        tr=tracker()
+        for i in range(1,350):feed(tr,i)
+        for i in range(350,390):feed(tr,i,fixed=False)
+        offset=tr._arc_off
+        for i in range(390,400):
+            _,state=feed(tr,i,shift=.006,yaw_error=.01)
+            self.assertEqual(state['radial_rtk_weight'],0.)
+        for i in range(400,425):_,state=feed(tr,i,shift=.006,yaw_error=.01)
+        self.assertFalse(tr._rtk_quality_ok())
+        self.assertGreater(state['radial_rtk_weight'],0.)
+        self.assertEqual(tr._arc_off,offset)
 
     def test_missing_raw_antenna_positions_do_not_enable_the_short_arc_observer(self):
         tr=tracker()
@@ -99,6 +125,33 @@ class PartialArcObserver(unittest.TestCase):
             self.assertEqual(state['radial_correction_m'],0.)
         _,state=feed(tr,390)
         self.assertFalse(state['holding'])
+
+    def test_raw_jump_is_detected_while_fusion_correction_is_frozen(self):
+        tr=tracker()
+        for i in range(1,350):feed(tr,i)
+        for i in range(350,375):
+            _,state=feed(tr,i,shift=.04,correction=(.02,0.))
+            self.assertFalse(state['rtk_ok'])
+            self.assertTrue(state['holding'])
+            self.assertEqual(state['radial_correction_m'],0.)
+        for i in range(375,390):
+            _,state=feed(tr,i,shift=.04)
+            self.assertTrue(state['holding'])
+        _,state=feed(tr,390)
+        self.assertFalse(state['holding'])
+        self.assertLess(abs(state['e_est']),.003)
+
+    def test_partial_radius_correction_cannot_mask_a_bad_control_heading(self):
+        tr=tracker()
+        for i in range(1,400):feed(tr,i)
+        steer,state=feed(tr,400,yaw_error=math.radians(50))
+        x,y,h=tr.path.pose(tr.st.s)
+        p=NS(x=x,y=y,yaw=h+math.radians(50),speed=.5,yaw_rate=-.25,usable_for_control=True,
+             quality='RTK_FIXED',reasons=(),rtk_trusted=True,correction_xy=(0.,0.))
+        tr.st.state='RUNNING'
+        self.assertEqual(tr._control(p,DT,steer),(0.,0.,0.))
+        self.assertEqual(tr.st.state,'ABORTED')
+        self.assertEqual(tr.st.reason,'off_line')
 
     def test_float_positions_cannot_pull_the_short_arc_observer(self):
         a,b=tracker(),tracker()
