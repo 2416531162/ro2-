@@ -1,4 +1,4 @@
-"""圆上预走与直线助跑分开：已进圆后不得重新降到 0.3 m/s。"""
+"""圆前切线助跑 0.35 m/s；圆上预走按画圆速度运行，不能重新降到助跑速度。"""
 from pathlib import Path
 from types import SimpleNamespace as NS
 import math
@@ -22,7 +22,7 @@ def tracker(curvature):
     path=Route((0.,0.,0.),[(1.5,0.),(20.,curvature)])
     tr=PathTracker(path,differential_config(PathConfig(cruise_mps=.8)),GEO)
     tr.paint_from_m=1.5+2./(abs(curvature)*2.) if curvature else 4.
-    tr.runup_speed_mps=.3;tr.runup_distance_m=1.5
+    tr.runup_speed_mps=.35 if curvature else .3;tr.runup_distance_m=1.5
     tr.constant_straight_speed=True
     tr.start(pose(path,0.,0.))
     return tr
@@ -39,10 +39,10 @@ class CircleRunInSpeed(unittest.TestCase):
                     self.assertAlmostEqual(v,PAINT_ARC_SPEED_MPS,places=10)
 
     def test_straight_approach_is_slow_before_reaching_the_circle(self):
-        tr=tracker(-.40932478145);tr._v_prev=.3;tr._creep_from=0.
+        tr=tracker(-.40932478145);tr._v_prev=.35;tr._creep_from=0.
         tr.st.s=.4
-        v,_=tr.update(pose(tr.path,.4,v=.3),.02)
-        self.assertAlmostEqual(v,.3,places=10)
+        v,_=tr.update(pose(tr.path,.4,v=.35),.02)
+        self.assertAlmostEqual(v,.35,places=10)
 
     def test_plain_straight_runup_no_longer_waits_at_point_three(self):
         tr=tracker(0.);tr._v_prev=.3;tr._creep_from=0.;tr.st.s=2.8;tr._hint=2.8
@@ -61,7 +61,7 @@ class CircleRunInSpeed(unittest.TestCase):
     def test_distant_straight_approach_keeps_its_cruise_speed(self):
         path=Route((0.,0.,0.),[(10.,0.),(20.,-.40932478145)])
         tr=PathTracker(path,differential_config(PathConfig(cruise_mps=.8)),GEO)
-        tr.paint_from_m=12.44;tr.runup_speed_mps=.3;tr.runup_distance_m=1.5
+        tr.paint_from_m=12.44;tr.runup_speed_mps=.35;tr.runup_distance_m=1.5
         tr.constant_straight_speed=True;tr.start(pose(path,0.,0.))
         tr._v_prev=.8;tr._creep_from=0.;tr.st.s=1.;tr._hint=1.
         self.assertAlmostEqual(tr.update(pose(path,1.,v=.8),.02)[0],.8,places=10)

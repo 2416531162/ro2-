@@ -91,12 +91,13 @@ class SmoothRunup(unittest.TestCase):
                     self.assertTrue(tr.paint_start_allowed())
                     self.assertTrue(all(not r['started'] for r in before))
                     self.assertTrue(all(b['v']>=a['v']-1e-8 for a,b in zip(rows,rows[1:])))
-                    self.assertEqual(rows[0]['v'],.35)
-                    self.assertTrue(all(r['v']>=.35 for r in before))
-                    # 首指令给驱动的 0.35 起步目标；此后的指令变化由本层限加速度、限加加速度。
-                    self.assertLessEqual(max(r['a'] for r in rows[1:]),.200001)
-                    accel=[0.]+[r['a'] for r in rows[1:]]
-                    self.assertLessEqual(max(abs(b-a)/DT for a,b in zip(accel,accel[1:])),.500001)
+                    self.assertGreater(rows[0]['v'],0.)
+                    self.assertLess(rows[0]['v'],.005)
+                    # 新鲜 IMU 下静止起步连续升至 0.35，之后沿原缓慢提速；两阶段都不允许速度阶跃。
+                    self.assertLessEqual(max(r['a'] for r in rows),.500001)
+                    self.assertLessEqual(max(r['a'] for r in rows if r['v']>.351),.200001)
+                    accel=[0.]+[r['a'] for r in rows]
+                    self.assertLessEqual(max(abs(b-a)/DT for a,b in zip(accel,accel[1:])),2.000001)
                     # 不再沿前段连续卡在 0.3 m/s，然后把提速挤到线头前。
                     self.assertLess(sum(abs(r['v']-.3)<.005 for r in before)*DT,.10)
 

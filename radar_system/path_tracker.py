@@ -165,6 +165,13 @@ def figure8(radius, *, lead_in=2.0, lead_out=1.5, start=(0.0, 0.0, 0.0)):
 
 # ---- 控制器 ----
 
+# 静止直线起步：共同提速参考与相对 IMU 稳向；只在绝对方向尚未接管时使用。
+LAUNCH_ACCEL_MPS2 = .5
+LAUNCH_JERK_MPS3 = 2.0
+LAUNCH_HOLD_MAX_S = 3.0
+LAUNCH_HOLD_MAX_M = 1.0
+LAUNCH_HEADING_LIMIT_RAD = math.radians(2.0)
+
 @dataclass(frozen=True)
 class PathConfig:
     cruise_mps: float = 0.5
@@ -520,12 +527,14 @@ class PathTracker:
         self.runup_speed_mps = None
         self.runup_start_mps = 0.0
         self._launch_pending = False
+        self._launch_ramp = False
         self.approach_to_m = None       # 正式路线（喷线起点）在本段的路程处（可在段尾之后）；None 不管（见 approach_zone_m）
         self.approach_mps = None        # 离它 approach_zone_m 以内最多这么快（画线速度）
         self.runup_distance_m = 0.
         self.paint_start_guard = None
         self._paint_start_beta_history = deque(maxlen=2048)
         self.reverse_runup = False
+        self.reverse_straight = False  # 纯直线倒车在行进方向坐标内使用共享 IMU 内环。
         self._runup_released = False    # 这次起步的助跑已收稳、交给 A/B（见 PathConfig.runup_release_e_m）
         self.constant_straight_speed = False
         self.constant_paint_speed = False
@@ -588,6 +597,8 @@ class PathTracker:
 
     def _reset_straight(self):
         self._straight_weight = 0.0
+        self._launch_weight = 0.0
+        self._launch_armed = False
         # 两根天线对不上时选哪根（ImuFirstConfig.antenna_*）：offset 副 − 主横偏的固定差（对得上时学），n 学了几帧，
         # delta 最近一帧副天线比主天线（扣掉固定差）多偏多少，t 用过的副天线帧，choice 这拍用的 main / second / None
         # shift：这拍用副天线时，报给 app 的位置要挪多少（世界系 x, y，m），shift_t 是哪一拍算的
@@ -853,6 +864,7 @@ class PathTracker:
         self._entry_speed_active = (self.entry_stabilize_mps is not None
             and (self._hint < self.paint_from_m or self._v_prev < min(self.entry_stabilize_mps,self.cfg.cruise_mps)-1e-6))
         self._launch_pending = self.runup_start_mps > 0. and (self._hint < self.paint_from_m or self._entry_speed_active)
+        self._launch_ramp = False
         self._entry_hold_from=max(self.paint_from_m,self._hint)
         self._entry_ramp_released=False
         self._entry_speed_guard=PaintStartGuard()
@@ -867,6 +879,13 @@ class PathTracker:
         self._clock = 0.0
         self._sent.clear()
         self._reset_straight()
+        # 静止后的前进喷线/纯直线倒车起步先保持相对 IMU 方向；绝对方向仍按质量规则学习。
+        self._launch_armed = (self.geo.differential and self.cfg.straight_imu_enabled
+                              and self.cfg.straight_imu_first is not None
+                              and (self.reverse_straight or
+                                   self.entry_stabilize_mps is not None and self.runup_start_mps > 0.)
+                              and abs(pose.speed) < .05
+                              and self.path._piece(max(0.,min(self.path.length,self._hint))).straight)
         return True
 
     def pause(self, reason='operator'):
@@ -979,19 +998,29 @@ class PathTracker:
         if self.st.state == 'RUNNING' and not (self.speed_limit_mps is not None and self.speed_limit_mps <= 0.0):
             wz = self._straight_control(pose, dt, v, wz)
         else:
+            armed = self._launch_armed and self._launch_pending and self.st.state == 'RUNNING'
             self._reset_straight()
+            self._launch_armed = armed
             if self.speed_limit_mps is not None and self.speed_limit_mps <= 0.0:
                 v = self.st.v_cmd = 0.0
                 wz = 0.0
                 self._arc_tail_w = 0.0
+        if (self.geo.differential and self.st.state == 'RUNNING'
+                and (self.reverse_straight or self.runup_speed_mps is not None and self.st.s < self.paint_from_m)
+                and self.path._piece(max(0.,self.st.s)).straight):
+            # 直线倒车/圆前切线的低速纠正不能用额外锁向量把一轮反向；入弧后交回原转向包络。
+            # 2026-10-08 实录：v 仅 0.0006 m/s 时 wz=-0.0805，左右目标 27/-26 erpm。
+            bound=min(self.kappa_max*v, 2.*v/self.geo.track_m)
+            wz=max(-bound,min(bound,wz))
+            if 'final_wz' in self._straight_status:self._straight_status['final_wz']=wz
         if self.st.state == 'RUNNING':
             self._check_paint_start(pose,dt,v)
         self._sent.append((self._clock, v, wz))
-        if self._straight_weight > 0 and self._imu_now is not None:
+        if (self._straight_weight > 0 or self._launch_weight > 0) and self._imu_now is not None:
             self._straight_core.record_sent(self._imu_now, wz)
             # 内环按原始 IMU 样本时刻预估，保留新鲜度窗口内可能用到的历史。
             self._straight_core.sent_since(self._imu_now-max(self.cfg.delay_s, self._straight_core.cfg.delay_s + .2), self._imu_now)
-        if (self._straight_weight > 0 or abs(self._arc_tail_w) > 1e-9) and v > 1e-6:
+        if (self._straight_weight > 0 or self._launch_weight > 0 or abs(self._arc_tail_w) > 1e-9) and v > 1e-6:
             self.st.kappa = wz / v
         return v, wz
 
@@ -1035,7 +1064,7 @@ class PathTracker:
         return self.paint_start_guard is None or self.paint_start_guard.started
 
     def _straight_control(self, pose, dt, speed, legacy_w):
-        """前进直线复用 A/B 稳向与横偏控制；路线仍管理车速、停车及弯道交接。"""
+        """直线在行进方向坐标内复用稳向与横偏控制；路线仍管理车速、停车及弯道交接。"""
         cfg, st = self.cfg, self.st
         imu = self._fresh_straight_imu()
         if not cfg.straight_imu_enabled or not self.geo.differential or imu is None or 'imu_mismatch' in getattr(pose, 'reasons', ()):
@@ -1052,7 +1081,10 @@ class PathTracker:
             self._reset_straight()
             return legacy_w
         if piece is not self._straight_piece:
-            if not self._same_straight_run(piece,self._straight_piece):self._reset_straight()
+            if not self._same_straight_run(piece,self._straight_piece):
+                armed = self._launch_armed and self._straight_piece is None
+                self._reset_straight()
+                self._launch_armed = armed
             self._straight_piece = piece
         if self._straight_guide is not None:
             return self._straight_first(pose, dt, speed, legacy_w, piece, imu_yaw, gyro)
@@ -1234,6 +1266,15 @@ class PathTracker:
             # 线头已进坏区时，沿用原有交接；不能继续等待不可信测向把横偏收进新门槛。
             self._runup_released = True
         eligible, runup_wait = self._straight_eligible(piece, speed)
+        if self._launch_armed:
+            self._launch_armed = False
+            if eligible and not self._rolling_entry:
+                self._launch_weight = 1.0
+                self._launch_at = self._clock
+                # 起步时只取一次线路方向换算，限到 2°；之后的定位抖动不能拖着参考左右变。
+                heading = max(-LAUNCH_HEADING_LIMIT_RAD, min(LAUNCH_HEADING_LIMIT_RAD, st.heading_err))
+                self._straight_target = wrap(imu_yaw-heading)
+                self._straight_core.reset(now=self._imu_now)
         if eligible and not guide.locked and not baseline_ok:
             # 该接管了、开头基线就不对：用这段已攒的或借上一条线对好的角度先开（用户 10-06）
             guide.lock_without_baseline(align, self._imu_now, wrap(pose.yaw - imu_yaw))
@@ -1299,6 +1340,26 @@ class PathTracker:
         step = dt / cfg.straight_blend_s
         self._straight_weight = max(0.0, min(1.0, old_weight + (step if eligible else -step)))
         if self._straight_weight == 0.0:
+            if self._launch_weight > 0.0:
+                # 参考尚未就绪时不追逐定位横偏；用实际陀螺和已发指令压住启动扰动。
+                # 不能无限期锁住起步方向：超时/超过 1 m 后平滑退回原控制。
+                if (self._clock-self._launch_at > LAUNCH_HOLD_MAX_S
+                        or st.s-self._started_at >= LAUNCH_HOLD_MAX_M):
+                    self._launch_weight = max(0.0, self._launch_weight-step)
+                if self._launch_weight > 0.0:
+                    sample_t, sample_yaw, _ = self._imu
+                    error = wrap(sample_yaw-self._straight_target)
+                    inner_w = self._straight_core.step(self._imu_now, error, gyro, sample_t=sample_t,
+                                                       moving=False, dt=dt, record=False)
+                    output = legacy_w + self._launch_weight*(inner_w-legacy_w)
+                    output = max(-self.kappa_max*speed, min(self.kappa_max*speed, output))
+                    self._straight_status = dict(active=True, weight=0.0, eligible=False,
+                        control_law='imu_launch', launch_weight=self._launch_weight,
+                        target_deg=math.degrees(self._straight_target), error_deg=math.degrees(error),
+                        target_rate_deg_s=0.0, inner_wz=inner_w, legacy_wz=legacy_w, final_wz=output,
+                        runup_wait=runup_wait, baseline_ok=baseline_ok, **guide.status(),
+                        **self._straight_core.status())
+                    return output
             self._straight_target = None
             self._straight_guided = None
             self._straight_status = dict(active=False, weight=0.0, eligible=eligible, control_law='imu_first',
@@ -1306,7 +1367,7 @@ class PathTracker:
                                          **self._antenna_status(), **(align.status() if align is not None else {}))
             return legacy_w
 
-        if old_weight == 0.0:
+        if old_weight == 0.0 and self._launch_weight == 0.0:
             self._straight_target = imu_yaw
             guide.target_rate = 0.0
             self._straight_aligned = False
@@ -1337,11 +1398,13 @@ class PathTracker:
                   and pose.speed >= HoldConfig.moving_ratio*speed)
         inner_w = self._straight_core.step(self._imu_now, error, gyro, sample_t=sample_t,
                                           moving=moving, target_rate=target_rate, dt=dt, record=False)
-        output = legacy_w + self._straight_weight * (inner_w-legacy_w)
+        output = legacy_w + max(self._straight_weight,self._launch_weight) * (inner_w-legacy_w)
         output = max(-self.kappa_max*speed, min(self.kappa_max*speed, output))
+        if self._straight_weight >= 1.0:
+            self._launch_weight = 0.0
         self._straight_guided = (guide.e, rel + guide.beta)
         self._straight_status = dict(active=True, weight=self._straight_weight, eligible=eligible,
-            control_law='imu_first', target_deg=math.degrees(self._straight_target),
+            control_law='imu_first', launch_weight=self._launch_weight, target_deg=math.degrees(self._straight_target),
             bias_deg=math.degrees(self._straight_bias), error_deg=math.degrees(error),
             pull_k_e=None if pull is None else pull[0], pull_max_bias_deg=None if pull is None else pull[1],
             target_rate_deg_s=math.degrees(self._straight_target_rate), aligning=aligning, baseline_ok=baseline_ok,
@@ -1628,11 +1691,25 @@ class PathTracker:
         if dt<=0:return min(target,self._v_prev)
         if self._launch_pending and target>0.:
             self._launch_pending=False
-            if not self._rolling_entry and self._v_prev<self.runup_start_mps:
-                # 首个正常前进指令从 0.35 起，底盘驱动仍从静止爬坡；随后由本层缓慢提速。
-                # 仅起步一次生效，不能覆盖更低的保护限速、低速设定或连续行驶的段间交接。
+            self._launch_ramp = (self._launch_armed and not self._rolling_entry
+                                 and self.cfg.straight_imu_enabled and self._fresh_straight_imu() is not None)
+            if (not self._rolling_entry and self._v_prev<self.runup_start_mps
+                    and not self._launch_ramp):
+                # 没有新鲜 IMU 的既有起步流程；更低保护限速仍优先。
                 self._accel_prev=0.
                 return min(target,self.runup_start_mps)
+        if self._launch_ramp:
+            top=min(target,self.runup_start_mps)
+            gap=top-self._v_prev
+            if gap>1e-6:
+                # 先由共同速度参考连续升至起步档，避免 0→0.35 阶跃放大两轮响应差异。
+                # 不在低速抖动区久留；到起步档后接回原有缓慢提速。
+                jerk=LAUNCH_JERK_MPS3
+                taper=max(0.,math.sqrt((jerk*dt)**2+2*jerk*gap)-jerk*dt)
+                accel=min(LAUNCH_ACCEL_MPS2,self._accel_prev+jerk*dt,taper)
+                self._accel_prev=accel
+                return min(top,self._v_prev+accel*dt)
+            self._launch_ramp=False
         gap=target-self._v_prev
         if smooth_decel:
             jerk=self.cfg.turn_jerk_mps3
@@ -2011,6 +2088,8 @@ class SectionTracker:
         self.pivot_timeout_s = pivot_timeout_s
         self.trackers = []
         for i, sec in enumerate(self.sections):
+            reverse_straight = (sec.direction < 0 and self.geo.differential and config.straight_imu_enabled
+                                and all(p.straight for p in sec.path.pieces))
             # 「离终点太近不起步」只对整条路线的最后一段有意义；后面还有段的（如 0.3–0.9 m 的接入、倒车助跑段）
             # 照样起步，否则短接入段一起步就报「已经过了路线终点」（2026-10-01 实车）
             cfg = config if len(self.sections) == 1 else \
@@ -2035,9 +2114,15 @@ class SectionTracker:
                 # 原来按 2 cm 容差停、再靠多走的 5 cm 盖过终点，实车水泵停在定点后 6–11 cm
                 cfg = replace(cfg, stop_tol_m=min(cfg.stop_tol_m, pivot_stop_tol))
             if sec.direction < 0:
-                # 倒车实测只走出下发曲率的 0.90（前进 0.96），延迟相近
+                # 倒车按行进方向换算控制点；差速车传入增益为 1，阿克曼车沿用其倒车补偿。
                 cfg = replace(cfg, cruise_mps=min(cfg.cruise_mps, reverse_mps), track_x_m=-cfg.track_x_m,
-                              steer_gain=reverse_gain, straight_imu_enabled=False, arc_speed_mps=None)
+                              steer_gain=reverse_gain, straight_imu_enabled=reverse_straight,
+                              arc_imu_first=False, arc_speed_mps=None)
+                if reverse_straight:
+                    # 10-08 三趟倒车中段的周期响应约放大 3 倍、滞后约 0.2 s。
+                    # 共享内核但使用较缓的倒车参数，直接按实际角速度阻尼，覆盖响应失配。
+                    cfg=replace(cfg,straight_kp=1.2,straight_ki=.4,straight_kd=.15,
+                                straight_prediction_delay_s=.30,straight_direct_rate_damping=True)
                 if cfg.reverse_section_creep_m is not None:
                     cfg = replace(cfg, start_creep_m=cfg.reverse_section_creep_m)
             # 前进喷线直线与圆弧、连续转场共用柔和起步。
@@ -2047,6 +2132,8 @@ class SectionTracker:
                     or i>0 and self.sections[i-1].continuous_after):
                 cfg=replace(cfg,accel_mps2=min(cfg.accel_mps2,.25),accel_jerk_mps3=.5)
             tracker=PathTracker(sec.path, cfg, self.geo)
+            tracker.reverse_straight=reverse_straight
+            if reverse_straight:tracker.set_nozzle(cfg.track_x_m,0.)
             tracker._arc_work_role=getattr(sec,'field_role',None)!='transit'
             tracker.constant_straight_speed = constant_straight_speed and self.geo.differential
             mark=getattr(sec,'paint_from_m',0.)
@@ -2082,6 +2169,9 @@ class SectionTracker:
                     tracker.runup_start_mps=.35
                     tracker.entry_stabilize_mps=.5
                     tracker.cfg=replace(tracker.cfg,accel_mps2=min(tracker.cfg.accel_mps2,.20))
+                else:
+                    # 10-08 用户：圆前切线助跑由 0.3 提到 0.35 m/s，入圆仍平滑接到圆弧速度。
+                    tracker.runup_speed_mps=.35
                 from route_plan import RUN_UP_M
                 tracker.runup_distance_m=RUN_UP_M
                 if self.reverse_runup and 0 < i == self._first_paint and self.sections[i-1].direction < 0:
@@ -2223,9 +2313,18 @@ class SectionTracker:
                        pose.usable_for_control, _source=pose)
 
     def sync(self, now, imu, lever=None):
-        """原地转向/倒车仍由原控制器处理，前进子段才允许长直线内环。"""
-        for tracker in self.trackers:
-            tracker.sync(now, imu, lever)
+        """倒车按行进方向换算航向和杆臂；角速度方向不变。原地转向由外层控制。"""
+        for sec,tracker in zip(self.sections,self.trackers):
+            reverse=sec.direction<0
+            value=imu
+            if reverse and imu is not None:
+                try:
+                    t,yaw,rate=imu
+                    value=(t,wrap(yaw+math.pi),rate)
+                except (TypeError,ValueError):
+                    pass  # 由 PathTracker.sync 按原规则拒绝无效输入。
+            arm=None if lever is None else tuple(-v for v in lever) if reverse else lever
+            tracker.sync(now,value,arm)
 
     def set_heading_baseline(self, t, length_m):
         for tracker in self.trackers:
@@ -2236,19 +2335,22 @@ class SectionTracker:
             tracker.set_rtk_quality(t, sigma_m, sats, pair_m, fixed)
 
     def set_secondary_fix(self, t, x, y, fixed, lever):
-        for tracker in self.trackers:
-            tracker.set_secondary_fix(t, x, y, fixed, lever)
+        for sec,tracker in zip(self.sections,self.trackers):
+            arm=tuple(-v for v in lever) if sec.direction<0 and lever is not None else lever
+            tracker.set_secondary_fix(t, x, y, fixed, arm)
 
     def position_correction(self):
         return self.trackers[self.index].position_correction() if 0 <= self.index < len(self.trackers) else None
 
     def share_imu_alignment(self, alignment):
-        for tracker in self.trackers:
-            tracker.share_imu_alignment(alignment)
+        for sec,tracker in zip(self.sections,self.trackers):
+            # 短倒车独立学习参考，不把倒车暂态标定写回正式喷线的跨线参考。
+            tracker.share_imu_alignment(alignment if sec.direction>0 else None)
 
     def set_nozzle(self, forward, left=0.0):
         for tracker in self.trackers:
-            tracker.set_nozzle(forward, left)
+            if tracker.reverse_straight:tracker.set_nozzle(tracker.cfg.track_x_m,0.)
+            else:tracker.set_nozzle(forward,left)
 
     def check_start(self, pose, hint=None):
         i = self.index if self.st.state == 'PAUSED' else 0

@@ -193,11 +193,15 @@ class RouteABSteering(unittest.TestCase):
         out, _ = self._drive(tr, lambda x: .03, 1.45, t)
         self.assertTrue(all(w > 0. and not wait for _, w, wait in out))
 
-    def test_reverse_section_still_disables_forward_imu_steering(self):
+    def test_straight_reverse_section_uses_travel_frame_imu_steering(self):
         from path_tracker import Section, SectionTracker
         sections = [Section(-1, Route((0., 0., 0.), [(8., 0.)]))]
         st = SectionTracker(sections, differential_config(PathConfig()), GEO)
-        self.assertFalse(st.trackers[0].cfg.straight_imu_enabled)
+        self.assertTrue(st.trackers[0].cfg.straight_imu_enabled)
+        st.sync(1.,(1.,0.,.1),(.24,.2))
+        self.assertAlmostEqual(abs(st.trackers[0]._imu[1]),math.pi)
+        self.assertEqual(st.trackers[0]._imu[2],.1)
+        self.assertEqual(st.trackers[0]._imu_lever,(-.24,-.2))
 
 
 if __name__ == '__main__':
