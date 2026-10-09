@@ -236,6 +236,8 @@ class RouteOperations:
         self._paint_tail_key = None
         self._paint_tail_armed = self._paint_tail_closed = False
         self._paint_tail_closed_at = None
+        self._arc_start_key = None
+        self._arc_start_open = False
         # 开/关喷那一拍的实际喷头位置（只给 App 画喷涂线，不存盘、不影响行驶和开泵）；
         # run 每次车端进程启动换一个，App 据此认出车重启后序号重新从 1 数
         self._paint_marks = collections.deque(maxlen=PAINT_MARKS_KEEP)
@@ -517,11 +519,45 @@ class RouteOperations:
                 and not self._paint_tail_closed and t.trackers[t.index].st.state=='DONE'
                 and t.st.state in ('RUNNING','DONE') and t._pivot is None)
 
+    def _arc_nozzle_start(self, sec, tr, start, end, early):
+        """非整圆弧线头附近按喷头越过起点截面放行，None 表示沿用原规则。"""
+        if (not self.m.differential or sec.direction!=1 or early<=0.
+                or not paint_quality.continuous_arc(self.m,sec,tr)):
+            return None
+        piece=sec.path._piece(start+1e-9)
+        if piece.straight:return None
+        if end-early<=start+1e-9:return False
+        # 只替代线头前后15cm内的厘米级判定，不把远处转场经过同一截面当作到达。
+        if tr.st.s<start-.15:return False
+        if tr.st.s>start+.15:return True
+        pose=self.m.pose
+        if pose is None or not pose.usable_for_control:return False
+        f,l=paint_quality.nozzle(self.m,self.record)
+        if not all(type(v) in (int,float) and math.isfinite(v) for v in (f,l)):
+            return None
+        if not all(math.isfinite(v) for v in (pose.x,pose.y,pose.yaw)):return False
+        x,y,h=sec.car_pose(start)
+        qx,qy=rp.nozzle_at(x,y,h,f,l)
+        px,py=rp.nozzle_at(pose.x,pose.y,pose.yaw,f,l)
+        # 喷头轨迹的切向与车头方向不同，包含侧置/前伸及转弯曲率。
+        k=piece.kappa;c,s=math.cos(h),math.sin(h)
+        vx,vy=(1.-k*l)*c-k*f*s,(1.-k*l)*s+k*f*c
+        return (px-qx)*vx+(py-qy)*vy>=-1e-9*math.hypot(vx,vy)
+
     def update_paint_tail(self, now):
-        """每拍控制后更新一次；status/trace 只读取，避免发布频率改变截止时机。"""
+        """每拍控制后更新起喷/停喷锁存；status/trace 只读，避免发布频率改变边界时机。"""
         t=self.m.tracker
         if not isinstance(t,SectionTracker):return
         key=self._paint_key()
+        if key!=self._arc_start_key or self.m.phase!='RUNNING' or t.st.state!='RUNNING' or t.switching:
+            self._arc_start_key=key
+            self._arc_start_open=False
+        if self.record and self.m.phase=='RUNNING' and t.st.state=='RUNNING' and not t.switching:
+            sec=t.sections[t.index];child=t.trackers[t.index]
+            _,start,end=self._paint_window()
+            early=paint_quality.arc_end_early(sec,start,end)
+            if self._arc_nozzle_start(sec,child,start,end,early) is True:
+                self._arc_start_open=True
         if key!=self._paint_tail_key:
             self._paint_tail_key=key
             self._paint_tail_armed=self._paint_tail_closed=False
@@ -560,6 +596,10 @@ class RouteOperations:
         # 仅非整圆弧的起点容许纳米级数值舍入，避免白等一拍；终点规则不变。
         paint_start=start-1e-9 if early>0. else start
         leading=not paint_start<=tr.st.s<end-early
+        reached=self._arc_nozzle_start(sec,tr,start,end,early)
+        if reached is not None:
+            latched=self._arc_start_key==self._paint_key() and self._arc_start_open and tr.st.s>=start-.15
+            leading=not ((reached or latched) and end-early>start+1e-9 and tr.st.s<end-early)
         late_cutoff=tail is not None and sec.paint_to_m is not None
         if late_cutoff:leading=not start<=tr.st.s<end+.05
         coast=tail is not None and self._paint_tail_active()
@@ -629,6 +669,8 @@ class RouteOperations:
         except ValueError:
             pass  # A disk error must never prevent the requested stop.
         self.m.tracker.pause('operator')
+        self._arc_start_key=None
+        self._arc_start_open=False
         self.record.update(state='PAUSING', reason='operator')
         self.preview = None
         self.m.phase, self.m.message = 'PAUSING', '正在停车，任务进度已保留'
