@@ -49,6 +49,13 @@ def is_arc(sec):
 
 
 class ArcEndEarly(unittest.TestCase):
+    def test_arc_start_roundoff_does_not_skip_a_control_frame(self):
+        job,_=penalty_arc()
+        sec,at=painting_at(job,(3.,1.5,0.),is_arc)
+        self.assertFalse(at(sec.paint_from_m-.001))
+        self.assertTrue(at(math.nextafter(sec.paint_from_m,-math.inf)))
+        self.assertTrue(at(sec.paint_from_m))
+
     def test_penalty_arc_stops_5_cm_before_the_line(self):
         job, ends = penalty_arc()
         sec, at = painting_at(job, (3., 1.5, 0.), is_arc)

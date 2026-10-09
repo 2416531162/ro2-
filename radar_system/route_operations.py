@@ -556,7 +556,10 @@ class RouteOperations:
         tail=self._paint_tail_section()
         # 弧（不是整圆）提前 ARC_END_EARLY_M 停喷，直线段尾照下面的越线截止
         early=0. if tail is not None else paint_quality.arc_end_early(sec,start,end)
-        leading=not start<=tr.st.s<end-early
+        # 同圆预走/喷线分段的投影可能落在 start 的前一个浮点数。
+        # 仅非整圆弧的起点容许纳米级数值舍入，避免白等一拍；终点规则不变。
+        paint_start=start-1e-9 if early>0. else start
+        leading=not paint_start<=tr.st.s<end-early
         late_cutoff=tail is not None and sec.paint_to_m is not None
         if late_cutoff:leading=not start<=tr.st.s<end+.05
         coast=tail is not None and self._paint_tail_active()
