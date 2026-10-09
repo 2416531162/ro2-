@@ -306,6 +306,9 @@ class RtkNode(Node):
         tablet = self.tablet.status() if self.tablet is not None else None
         bt = self.bt.status() if self.bt is not None else None
         can = self.can.status() if self.can is not None else None
+        if self.source=='can' and can is not None:
+            # CAN 在拼包层先做 CRC；继续计入原有诊断总数，坏包不会因前置过滤而被隐藏。
+            st['crc_errors']+=can.get('crc_errors',0)
         st['source'] = self.source
         if self.source == 'tablet':
             st['port_open'] = bool(tablet and tablet['connected'])

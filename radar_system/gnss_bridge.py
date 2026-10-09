@@ -22,6 +22,7 @@ import socket
 import struct
 import threading
 import time
+from gnss_can_reassembly import CanGnssReassembler
 
 TABLET_PORT = 48622
 # 蓝牙那一路：RFCOMM 通道和服务 UUID（自定义的，平板按它找服务，不会连到别的蓝牙串口设备上）。
@@ -283,7 +284,7 @@ class BluetoothSerialServer:
 class CanSerialBridge:
     """平板经 CAN 转发串口：read / status / close 与 TabletSerialServer 一样，rtk_node 当另一路串口用。
 
-    只收 CAN_DATA_ID（内核过滤器），按帧序号数丢帧（丢了的那条日志校验不过、解析时丢掉，不会拼错）。
+    只收 CAN_DATA_ID（内核过滤器），重复分片不拼入；缺帧/乱序时丢弃半包，只交付通过校验的完整消息。
     CAN 是广播、没有连接：CAN_QUIET_S 内收到过数据帧算「连着」。收到数据时每 CAN_ACK_S 回一帧 CAN_ACK_ID，
     平板据此显示车端确认；平板没在发时车一帧也不发。can0 没起来、被拔掉时 2 s 后重开，原因写进 status()['error']。
     in_use：rtk_node 现在用不用这一路（回给平板显示）。sock_factory、clock 测试用。
@@ -297,8 +298,9 @@ class CanSerialBridge:
         self.sock = None
         self.error = None
         self.frames = self.gaps = self.bytes_in = self.acks = 0
+        self.malformed_frames = 0
+        self.reassembly = CanGnssReassembler(CAN_QUIET_S)
         self.last_rx = None
-        self._expect = None
         self._window = 0                # 上次回确认以来收到的帧
         self._ack_at = None
         self._reopen_at = 0.0
@@ -324,7 +326,7 @@ class CanSerialBridge:
         return self.last_rx is not None and now - self.last_rx <= CAN_QUIET_S
 
     def read(self, n=4096):
-        """最多等 timeout 秒；没有数据时返回 b''。一次把已经到了的帧都取出来（最多约 n 字节）。"""
+        """最多等 timeout 秒；只返回完整 GNSS 消息。坏帧/重复帧也计读取上限，避免持续坏流饿死读循环。"""
         if self.sock is None:
             if self.clock() >= self._reopen_at:
                 self._open()
@@ -333,13 +335,15 @@ class CanSerialBridge:
                 return b''
         out = bytearray()
         sock = self.sock
+        received = 0
         try:
             raw = sock.recv(16)
             sock.settimeout(0.0)
             try:
                 while True:
                     self._take(raw, out)
-                    if len(out) >= n:
+                    received += 1
+                    if len(out) >= n or received >= max(1,(n+6)//7):
                         break
                     raw = sock.recv(16)
             except (BlockingIOError, socket.timeout):
@@ -352,27 +356,26 @@ class CanSerialBridge:
             self.error = '%s: %s' % (type(exc).__name__, exc)
             self._close_sock()
             self._reopen_at = self.clock() + 2.0
-            return b''
+            return bytes(out)          # 已完成且验过的消息照常交付，只放弃未完成的半包。
         now = self.clock()
-        if out:
-            if not self.connected(now) and self.on_connect is not None:
-                self.on_connect()
-            self.last_rx = now
-            self.bytes_in += len(out)
         self._ack(now)
         return bytes(out)
 
     def _take(self, raw, out):
+        if len(raw)!=struct.calcsize(CAN_FRAME):
+            self.malformed_frames+=1
+            return
         can_id, dlc, data = struct.unpack(CAN_FRAME, raw)
         if can_id & (CAN_EFF_FLAG | CAN_RTR_FLAG | CAN_ERR_FLAG) or can_id & 0x7FF != CAN_DATA_ID or not 2 <= dlc <= 8:
             return
-        seq = data[0]
-        if self._expect is not None and seq != self._expect and self.connected():
-            self.gaps += (seq - self._expect) & 0xFF
-        self._expect = (seq + 1) & 0xFF
-        self.frames += 1
+        now=self.clock()
+        was_connected=self.connected(now)
+        if not was_connected:self._window,self._ack_at=0,None
+        out += self.reassembly.feed(data[0],data[1:dlc],now)
+        self.frames,self.gaps,self.bytes_in=self.reassembly.frames,self.reassembly.gaps,self.reassembly.bytes_in
         self._window += 1
-        out += data[1:dlc]
+        self.last_rx=now
+        if not was_connected and self.on_connect is not None:self.on_connect()
 
     def _ack(self, now):
         if not self.connected(now) or self.sock is None:
@@ -392,10 +395,13 @@ class CanSerialBridge:
 
     def status(self):
         return dict(channel=self.channel, open=self.sock is not None, connected=self.connected(), peer=None,
-                    frames=self.frames, gaps=self.gaps, bytes_in=self.bytes_in, acks=self.acks, error=self.error)
+                    **self.reassembly.status(),acks=self.acks,error=self.error,malformed_frames=self.malformed_frames)
 
     def _close_sock(self):
         sock, self.sock = self.sock, None
+        self.reassembly.reset()
+        self.last_rx=None
+        self._window,self._ack_at=0,None
         if sock is not None:
             try:
                 sock.close()
