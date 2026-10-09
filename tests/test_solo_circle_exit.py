@@ -1,4 +1,4 @@
-"""独立画圆沿切线离开 1 m，整场、补画及两点弧线保持原收尾规则。只使用软件底盘。"""
+"""独立圆停喷后沿圆走 0.3 m，再切线离开 1 m。只使用软件底盘。"""
 from dataclasses import replace
 import math
 from pathlib import Path
@@ -13,8 +13,8 @@ import circle_spray_repair
 from field_planner import Settings, plan as field_plan
 from live_cruise import label_sections
 from path_tracker import Path as Route, PathConfig, Section, SectionTracker, differential_config
-from route_operations import rework_sections
-from test_continuous_field_arcs import GEO, drive, sections as field_sections
+from route_operations import RouteOperations, rework_sections
+from test_continuous_field_arcs import GEO, drive, pose, sections as field_sections
 from test_circle_run_out import spec
 
 NOZZLE = (.24, -.4575)
@@ -55,14 +55,39 @@ class SoloCircleExit(unittest.TestCase):
                         self.assertGreater(len(painting), 100)
                         self.assertAlmostEqual(min(r['v'] for r in painting), max(r['v'] for r in painting))
                         last = planned[-1]
-                        self.assertAlmostEqual(last.path.length-last.paint_to_m, 1.)
+                        dry_tail = 1. + .3/(abs(last.path.pieces[-2].kappa)*radius)
+                        self.assertAlmostEqual(last.path.length-last.paint_to_m, dry_tail)
+                        self.assertEqual(tracker.trackers[-1].run_out_m, 0.)
                         # 参考路径精确为 1 m；带控制前视和 0.3 s 执行延迟的模型沿用既有 5 cm 停车验收范围。
-                        self.assertAlmostEqual(rows[-1]['s']-last.paint_to_m, 1., delta=.05)
+                        self.assertAlmostEqual(rows[-1]['s']-last.paint_to_m, dry_tail, delta=.05)
                         self.assertEqual(rows[-1]['v'], 0.)
                         end = max(i for i, row in enumerate(rows) if row['paint'])
                         self.assertTrue(any(r['v'] > .1 for r in rows[end+1:]))
                         self.assertFalse(any(r['paint'] for r in rows[end+1:]))
                         self.assertFalse(any(r['switching'] for r in rows))
+
+    def test_spray_stays_off_during_curved_coast_and_tangent_exit(self):
+        for clockwise in (True, False):
+            circle, planned = circle_plan(3., clockwise)
+            tracker = SectionTracker(planned, differential_config(PathConfig()), GEO,
+                                     constant_straight_speed=True, constant_paint_speed=True)
+            tracker.set_nozzle(*NOZZLE)
+            tracker.index = len(planned)-1
+            tracker.st.state = 'RUNNING'
+            sec, child = planned[-1], tracker.trackers[-1]
+            child.st.state = 'RUNNING'
+            mission = NS(route_path=None, tracker=tracker, route=None, differential=True,
+                         phase='RUNNING', nozzle=NOZZLE, _route_local=lambda: circle)
+            ops = RouteOperations(mission)
+            ops.record = dict(id='circle-coast', route_nozzle=dict(forward=.24, right=.4575))
+            exit_start = sec.path.pieces[-1].s0
+            for s, expected in ((sec.paint_to_m-.01, True), (sec.paint_to_m+.01, False),
+                                ((sec.paint_to_m+exit_start)/2, False), (exit_start+.1, False)):
+                child.st.s = s
+                child.st.kappa_ref = sec.path.kappa(s)
+                mission.pose = pose(*sec.car_pose(s), .5, .5*sec.path.kappa(s))
+                ops.update_paint_tail(s)
+                self.assertEqual(ops.paint_status()['painting'], expected, (clockwise, s))
 
     def test_field_circle_and_partial_circle_rework_keep_curved_half_metre_tail(self):
         cfg = Settings(.24, .4575, (.911, .604, .39), .557, turn='arc', turn_radius=1.)

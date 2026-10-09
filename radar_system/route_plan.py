@@ -20,7 +20,7 @@
 圆        从圆的最南点出发（逆时针时车头朝东、顺时针朝西），转 laps 圈回到这里停车。
           差速车（Gen5）按喷头画圆：喷头在后轴中点前 f、左 l，后轴中点走半径 √(R²−f²) ± l（逆时针 +）的同心圆，
           喷头正好在半径 R 上；最后多走 VERTEX_PASS_M 让喷头盖过起点。接入同连线路线（pivot_entry，原地转向）。
-          独立画圆时喷头画过起点（交点）再多喷 CIRCLE_OVERLAP_M 才停喷，停喷后沿后轴切线前进 SOLO_CIRCLE_EXIT_M
+          独立画圆时喷头画过起点（交点）再多喷 CIRCLE_OVERLAP_M 才停喷，沿圆继续 SOLO_CIRCLE_COAST_M，随后沿后轴切线前进 SOLO_CIRCLE_EXIT_M
           再停车（_circle_run_out）。直线助跑之后先沿圆走 CIRCLE_RUN_IN_M 不喷，转弯稳住了再起喷（_circle_run_in）。
 喷头位置  nozzle_x 是数时喷头在车中线上、后轴中点前这么多米（共享配置 drive.nozzle_x_m）；是 (前, 左) 二元组时喷头
           可以在侧面（app 的「对准点」，2026-10-02 用户：喷头在右天线右 25 cm），连线路线见 _side_cover。
@@ -48,12 +48,11 @@ VERTEX_PASS_M = 0.05         # 车身中心开过拐角 / 终点这么远才换�
 # END_PASS_M 保留旧接口；画圆和阿克曼车仍使用 VERTEX_PASS_M。
 END_PASS_M = 0.0
 LINE_RUN_OUT_M = 0.40
-# 差速车画圆（2026-10-06 用户：快画完时直接停在终点，交界处不对；不要在交点停喷，多喷 0.2 m）：
-# 喷头过了起点（交点）沿图纸上的圆再多喷 20 cm 才停喷，停喷后沿同一个圆再转 50 cm 缓停，刹车全在停喷之后。
-# 原来最后约 1 m 边刹车边画（0.5 → 0.06 m/s），交界处喷头往外偏 2.4 cm，喷头只盖过起点 4 cm。
-CIRCLE_OVERLAP_M = 0.20
+# 独立画圆（2026-10-09）：过起点多喷 10 cm，停喷后沿同一圆再走 30 cm，均按喷头沿图纸圆的弧长计。
+CIRCLE_OVERLAP_M = 0.10
+SOLO_CIRCLE_COAST_M = 0.30
 CIRCLE_RUN_OUT_M = 0.50
-# 仅独立画圆：停喷后沿当前车头方向离开圆，前进 1 m 再停车；整场圆和补画仍使用原缓停距离。
+# 仅独立画圆：完成停喷后的沿圆段，再沿当前车头方向离开圆，前进 1 m 再停车。
 SOLO_CIRCLE_EXIT_M = 1.00
 # 差速车画圆起喷（2026-10-06 用户：交界处两条线没重合，「车在圆上转了 1 m，再开始喷」）：直线助跑后先沿圆走
 # 1 m（喷头沿图纸上的圆量）不喷，再从原来的起点开始喷。原来直线助跑到起点才突然转弯，转向延迟约 0.3 s，
@@ -1409,11 +1408,11 @@ def start_from_nearest(spec, car_pose, min_radius, *, body=None, nozzle_x=None):
 
 def _circle_run_out(spec, loop):
     """差速车的圆（loop_pieces 的后轴圆）：整圈后喷头再多喷 CIRCLE_OVERLAP_M（沿图纸上半径 R 的圆量，
-    后轴圆半径 r 上是 CIRCLE_OVERLAP_M·r/R），停喷后沿后轴切线开出 SOLO_CIRCLE_EXIT_M 再停车。仅独立圆。"""
+    后轴圆半径 r 上乘 r/R），停喷后沿圆继续 SOLO_CIRCLE_COAST_M，再切线开出 SOLO_CIRCLE_EXIT_M。仅独立圆。"""
     k = loop[-1][1]
     r = 1.0 / abs(k)
-    paint = 2.0 * math.pi * r * spec.laps + CIRCLE_OVERLAP_M * r / spec.radius
-    return loop[:-1] + [(paint, k), (SOLO_CIRCLE_EXIT_M, 0.0)]
+    arc = 2.0 * math.pi * r * spec.laps + (CIRCLE_OVERLAP_M + SOLO_CIRCLE_COAST_M) * r / spec.radius
+    return loop[:-1] + [(arc, k), (SOLO_CIRCLE_EXIT_M, 0.0)]
 
 
 def _circle_transition(k):
@@ -1479,9 +1478,12 @@ def _circle_route(run, car, min_radius, nozzle_x):
     return route, entry_fn, run_in
 
 
-def _circle_paint_end(sections):
-    """独立圆保留整圈与重叠喷涂，最后 1 m 切线离开段不喷，停车减速在这段内完成。"""
-    sections[-1].paint_to_m = sections[-1].path.length - SOLO_CIRCLE_EXIT_M
+def _circle_paint_end(sections, spec):
+    """整圈加 10 cm 停喷；后续 30 cm 喷头圆弧与 1 m 后轴切线均不喷。"""
+    section = sections[-1]
+    curve = section.path.pieces[-2]
+    coast = SOLO_CIRCLE_COAST_M / (abs(curve.kappa) * spec.radius)
+    section.paint_to_m = section.path.length - SOLO_CIRCLE_EXIT_M - coast
     return sections
 
 
@@ -1533,7 +1535,7 @@ def plan_current(spec, car_pose, min_radius, *, body=None, max_entry_m=MAX_ENTRY
     if entry_m > max_entry_m:
         raise ValueError('车离路线太远（接入路线 %.0f m，最多 %.0f m），请先把车开近些' % (entry_m, max_entry_m))
     sections = _planned_sections(entry, route, 'route_'+run.kind+'_')
-    return (_circle_paint_end(sections) if run.kind == 'circle' else sections), entry_m + run_in
+    return (_circle_paint_end(sections, run) if run.kind == 'circle' else sections), entry_m + run_in
 
 
 def plan(spec, car_pose, min_radius, *, body=None, max_entry_m=MAX_ENTRY_M, nozzle_x=None, info=None):
@@ -1570,7 +1572,7 @@ def plan(spec, car_pose, min_radius, *, body=None, max_entry_m=MAX_ENTRY_M, nozz
         if entry_m > max_entry_m:
             raise ValueError('车离路线起点太远（接入路线 %.0f m，最多 %.0f m），请先把车开近些' % (entry_m, max_entry_m))
         return _circle_paint_end([Section(d, Path(s, pieces, name='route_circle_%d' % i))
-                                  for i, (d, s, pieces) in enumerate(entry)]), entry_m + run_in
+                                  for i, (d, s, pieces) in enumerate(entry)], spec), entry_m + run_in
     start, loop = loop_pieces(spec, min_radius)
     entry = dubins(car_pose, start, spec.turn_radius)
     entry_m = sum(length for length, _ in entry)
