@@ -294,13 +294,16 @@ class PathConfig:
     # 卫星。05:41 那圈：原地转完偏 4.6 cm 没收稳就起喷（偏内 2.3 cm），起喷时卫星往里跳 1.3 cm、2.4 m 后 0.4 s 内往外跳
     # 3.2 cm（陀螺稳、车走不出来），车跟着卫星走，交界错开 2.5–2.9 cm
     arc_imu_first: bool = False
+    # 半径较大的非整圆作业弧预走时学习，跨喷线分段连续保持；R1 角弧沿用原控制。
+    arc_partial_imu_first: bool = False
+    arc_partial_min_radius_m: float = 1.5
     arc_s_rate_m: float = 0.05
     arc_s_tau_m: float = 0.4
     arc_scale_tau_m: float = 2.0
     arc_heading_tau_s: float = 5.0   # 换算跟融合航向的时间常数：原地转完测向还要几秒才回来，短时间按 IMU
     arc_pull_m: float = 1.0          # 横偏往卫星拉的距离常数
     arc_pull_rate_m: float = 0.02    # 每米最多拉这么多
-    # 整圆可靠双天线观测持续确认后，径向估计及时跟随；航向仍由 IMU 平滑维持。
+    # 作业圆弧可靠双天线观测持续确认后，径向估计及时跟随；航向仍由 IMU 平滑维持。
     arc_rtk_radial_enabled: bool = True
     arc_rtk_pull_m: float = 0.10
     arc_rtk_pull_rate_m: float = 0.12
@@ -324,7 +327,7 @@ class PathConfig:
         if not math.isfinite(self.run_out_decel_max_mps2) or not 0 < self.run_out_decel_max_mps2 <= 1.0:
             raise ValueError('run_out_decel_max_mps2 必须在 (0,1] 内')
         for name in ('straight_imu_enabled', 'straight_target_feedforward', 'straight_direct_rate_damping',
-                     'arc_rtk_radial_enabled'):
+                     'arc_rtk_radial_enabled', 'arc_partial_imu_first'):
             if type(getattr(self, name)) is not bool:
                 raise ValueError(name + ' 必须是布尔值')
         for name in ('turn_decel_mps2', 'turn_jerk_mps3', 'straight_min_length_m', 'straight_blend_s',
@@ -334,7 +337,7 @@ class PathConfig:
                      'runup_release_e_m', 'runup_release_heading_deg', 'arc_s_rate_m', 'arc_s_tau_m', 'arc_scale_tau_m',
                      'arc_heading_tau_s', 'arc_pull_m', 'arc_pull_rate_m', 'arc_rtk_pull_m',
                      'arc_rtk_pull_rate_m', 'arc_rtk_pair_max_m', 'arc_rtk_settle_s', 'arc_rtk_fresh_s',
-                     'arc_rtk_error_m', 'arc_rtk_feedback_scale'):
+                     'arc_rtk_error_m', 'arc_rtk_feedback_scale', 'arc_partial_min_radius_m'):
             if not math.isfinite(getattr(self, name)) or getattr(self, name) <= 0:
                 raise ValueError(name + ' 必须是有限正数')
         for name in ('straight_settle_m', 'straight_min_speed_mps', 'straight_outer_k_i', 'straight_ki', 'straight_kd', 'straight_outer_rate_gain',
@@ -448,7 +451,7 @@ def differential_config(config=PathConfig()):
                    straight_end_reserve_m=0.05,
                    # 2026-10-06 用户：直线 IMU 为主、卫星辅助，卫星和 IMU 推算对不上就听 IMU（line_cascade.ImuFirstConfig）；
                    # 当晚又定：直接靠 IMU 画线（rtk_trim=False），卫星好的时候只拟合角度和起点横偏、不逐拍拉（rtk_fit）
-                   straight_imu_first=ImuFirstConfig(rtk_trim=False, rtk_fit=True), arc_imu_first=True)
+                   straight_imu_first=ImuFirstConfig(rtk_trim=False, rtk_fit=True), arc_imu_first=True, arc_partial_imu_first=True)
 
 
 DIFF_REVERSE_MPS = 0.5      # 差速车倒车段限速（SectionTracker reverse_mps；阿克曼车 0.3）
@@ -1483,7 +1486,7 @@ class PathTracker:
         return output
 
     def _arc_radial_rtk_weight(self, rtk_ok, dt):
-        """只给新鲜固定解且双天线距离持续一致的整圆径向观测加权；不改变航向、进度或跳点保护。"""
+        """只给新鲜固定解且双天线距离持续一致的作业圆弧径向观测加权；不改变航向、进度或跳点保护。"""
         cfg, first = self.cfg, self.cfg.straight_imu_first
         now, quality, secondary = self._imu_now, self._quality, self._secondary
         paired = False
@@ -1529,7 +1532,7 @@ class PathTracker:
         return weight, correction
 
     def _arc_first(self, pose, dt):
-        """画圆 IMU 为主（PathConfig.arc_imu_first）：返回原弯道控制律这一拍转向用的位姿（x, y, yaw），不在整圆上或还没
+        """画圆 IMU 为主（PathConfig.arc_imu_first）：返回原弯道控制律这一拍转向用的位姿（x, y, yaw），不在整圆/可用作业弧上或还没
         学好换算时返回 None（按融合位姿开）。互补滤波：车头 = IMU 偏航 + 换算（换算按 arc_heading_tau_s 慢慢跟融合航向），
         喷头横偏 = IMU 推算 + 往卫星拉；新鲜可靠双天线持续一致时用 arc_rtk_pull_* 及时校正，
         其余观测沿用 arc_pull_* 慢修；突然跳开 > jump_m 先不拉，
@@ -1540,7 +1543,10 @@ class PathTracker:
             return None
         imu = self._fresh_straight_imu()
         piece = next((p for p in self.path.pieces if p.s0 <= st.s < p.s0 + p.length), None)
-        if (imu is None or piece is None or piece.straight or piece.length * abs(piece.kappa) < 2 * math.pi - 1e-3
+        partial = self._partial_work_arc_piece(piece) if cfg.arc_partial_imu_first else None
+        if partial is not None:
+            piece = partial
+        if (imu is None or piece is None or piece.straight or (partial is None and piece.length * abs(piece.kappa) < 2 * math.pi - 1e-3)
                 or 'imu_mismatch' in getattr(pose, 'reasons', ())):
             if self._arc_piece is not None:
                 self._reset_arc()
@@ -1784,6 +1790,22 @@ class PathTracker:
         start,end=pieces[lo].s0,pieces[hi].s0+pieces[hi].length
         spans=self.paint_spans if self.paint_spans is not None else [(self.paint_from_m,self.paint_to_m)]
         return any(start<b-1e-8 and end>a+1e-8 for a,b in spans)
+
+    def _partial_work_arc_piece(self, piece):
+        """短作业弧沿同圆预走/喷线/收尾共用观测状态；完整圆保持原来的接管时机。"""
+        if (piece is None or not self._work_arc_piece(piece)
+                or self._primary is None or self._secondary is None):
+            return None
+        nx,ny=self._straight_nozzle
+        radius=math.hypot(nx,1./piece.kappa-ny)
+        if radius<self.cfg.arc_partial_min_radius_m-1e-9:return None
+        pieces=self.path.pieces;i=pieces.index(piece);lo=hi=i
+        while lo>0 and abs(pieces[lo-1].kappa-piece.kappa)<1e-9:lo-=1
+        while hi+1<len(pieces) and abs(pieces[hi+1].kappa-piece.kappa)<1e-9:hi+=1
+        start,end=pieces[lo].s0,pieces[hi].s0+pieces[hi].length
+        spans=self.paint_spans if self.paint_spans is not None else [(self.paint_from_m,self.paint_to_m)]
+        painted=sum(max(0.,min(b,end)-max(a,start)) for a,b in spans)
+        return pieces[lo] if 1e-6<painted*abs(piece.kappa)<2*math.pi-1e-3 else None
 
     def _curve_target_at(self, s):
         # 连续路径预瞄必须保留下一段的作业/转场身份，不能只看复制后的曲率。

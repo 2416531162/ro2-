@@ -82,7 +82,7 @@ class ArcImuFirst(unittest.TestCase):
         self.assertLess(worst[True], .01)
         self.assertGreater(worst[False], .015)
 
-    def test_lines_and_partial_arcs_do_not_use_it(self):
+    def test_imu_observer_is_enabled_by_the_differential_profile(self):
         cfg = differential_config(PathConfig())
         self.assertTrue(cfg.arc_imu_first)
         self.assertFalse(PathConfig().arc_imu_first)
