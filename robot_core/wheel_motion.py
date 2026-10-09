@@ -14,9 +14,14 @@ HALL_STEPS_PER_ELECTRICAL_TURN = 6
 
 
 class WheelMotionAligner:
-    def __init__(self, wheels, max_age_s=.2, max_gap_s=.2, time_uncertainty_s=.01, accumulate_s=.1, feedback_delay_s=0.):
+    def __init__(self, wheels, max_age_s=.2, max_gap_s=.2, time_uncertainty_s=.01, accumulate_s=.1, feedback_delay_s=0., reset_gap_s=1.):
         self.wheels = wheels
         self.max_age, self.max_gap, self.time_padding = max_age_s, max_gap_s, time_uncertainty_s
+        # 2026-10-09：累计角度反馈间隔超过 1 s 才重建。与插值区间和当前反馈新鲜度分开，
+        # 避免放宽重建阈值后生成 WheelInput 不接受的长区间，或把迟到数据当作当前测量。
+        if not self._finite(reset_gap_s) or reset_gap_s <= 0:
+            raise ValueError('轮程重建间隔必须是有限正数')
+        self.reset_gap = reset_gap_s
         # accumulate_s 保留旧调用兼容；新霍尔区间不再等回读转速一致后才发送。
         self.step = (wheels.centideg_to_m(36000.0 / (HALL_STEPS_PER_ELECTRICAL_TURN * wheels.pole_pairs))
                      if wheels.configured else 0.0)
@@ -83,7 +88,7 @@ class WheelMotionAligner:
                     quality='pending', reason='waiting_for_pair', resets=self.resets)
         if not self._finite(now) or not wl.configured:
             return dict(base, quality='invalid', reason='unconfigured')
-        reset = False
+        reset = gap = False
         for motor, sign in ((1, wl.left_sign), (2, wl.right_sign)):
             state = states[motor]
             t, value = state.t_speed, state.speed_erpm
@@ -107,7 +112,7 @@ class WheelMotionAligner:
                 delta = (int(raw)-previous[1]+2**31) % 2**32 - 2**31
                 distance = sign*wl.centideg_to_m(delta)
                 # 霍尔刚跨格时，两次很近的回复也可能相差一整格，不能按连续角度误判计数器重置。
-                if dt > self.max_gap or abs(distance) > 1.5*wl.max_wheel_mps*dt + self.step + .003:
+                if dt > self.reset_gap+1e-9 or abs(distance) > 1.5*wl.max_wheel_mps*dt + self.step + .003:
                     rows.clear()
                     self.hall[motor].reset()
                     rows.append((t, 0.0))
@@ -115,6 +120,7 @@ class WheelMotionAligner:
                     reset = True
                 else:
                     rows.append((t, rows[-1][1]+distance))
+                    gap = gap or dt > self.max_gap
             self.hall[motor].add(t, rows[-1][1])
             self.raw_position[motor] = (t, int(raw))
         if reset:
@@ -155,7 +161,9 @@ class WheelMotionAligner:
         # 跨格事件使用各轮本次已经收到的最新回复。若以较早的共同时间裁掉另一轮刚来的事件，
         # 会漏判起步，并把连续转动误当作太久没跨格而衰减；时刻差完整计入时间余量。
         hall = [self.hall[m].at(positions_t[m-1],use_window=False) for m in (1,2)] if positions_ok else [None,None]
-        hall_ok = all(h is not None and h[0] is not None for h in hall) and not reset
+        # 长间隔可保留累计角度，但恢复这一拍不把长跨格周期当即时霍尔速度。
+        # 先用新鲜转速回读，后续短区间再恢复轮程；不放宽融合端的不确定度校验。
+        hall_ok = all(h is not None and h[0] is not None for h in hall) and not (reset or gap)
         diagnostics = []
         if hall_ok:
             estimated = [h[0] for h in hall]
@@ -208,6 +216,6 @@ class WheelMotionAligner:
             self.anchor = None
             frame['reason'] = 'encoder_unavailable'
         if not hall_ok and positions_ok:
-            frame['reason'] = 'hall_speed_initializing' if not reset else 'encoder_reset'
+            frame['reason'] = ('encoder_reset' if reset else 'encoder_gap' if gap else 'hall_speed_initializing')
         self.last_t = common
         return frame
