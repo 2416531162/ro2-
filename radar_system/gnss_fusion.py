@@ -365,6 +365,15 @@ MISMATCH_S = 0.2
 # 1.0 s 与 rtk_node 报「测向有效」、line_mission 认副天线固定的时限相同（10 Hz 输出、CAN 偶尔丢帧也不闪）
 TRUSTED_FRESH_S = 1.0
 TRUSTED_BASELINE_M = (0.30, 0.50)
+# 控制输出航向直接对齐（continuous_output）。2026-10-10 用户：「大偏差立即对齐，双天线可信（两个天线都固定、
+# 基线 0.35–0.45 m）时，如果车停着、不在喷，或者差值超过 2°，控制用的车头角直接对齐双天线，不再每秒挪 1°」。
+# 10-10 实录：开始作业时控制输出的航向比融合差 58°（融合早已跟上双天线），按 output_heading_rate_deg_s 每秒追 1°
+# 追了一分多钟：第一趟原地转错方向、偏离中止，第二趟线头偏 23 cm。
+# 卫星可信（见上）且最近一帧测向基线在 OUTPUT_SNAP_BASELINE_M 内时：车停着、不在喷（任务层 set_painting），或输出与
+# 融合航向差超过 OUTPUT_SNAP_DEG，输出航向直接等于融合航向（以双天线为准，不带单帧测向的噪声）；
+# 只有在喷且差不到 OUTPUT_SNAP_DEG 时仍按 output_heading_rate_deg_s 平滑（线上不出折角）
+OUTPUT_SNAP_BASELINE_M = (0.35, 0.45)
+OUTPUT_SNAP_DEG = 2.0
 # 可信时 pose() 最多往后外推这么久（轮速、IMU 都断了时滤波器只靠 10 Hz 的卫星往前走，加上转发延迟常超过 0.2 s）
 TRUSTED_EXTRAPOLATION_S = 0.5
 # 旧阿克曼兼容恢复；Gen5 用下方多源质量确认后平滑接回，不直接重定航向。
@@ -624,6 +633,8 @@ class _State:
         # 卫星可信（见 TRUSTED_FRESH_S）：最近处理的那帧卫星（固定解或测向）是否可信、最近一帧可信的时刻
         self.trusted = False
         self.trusted_t = -math.inf
+        # 最近一帧有效测向基线在 OUTPUT_SNAP_BASELINE_M 内时是它的时刻，否则 -inf（控制输出航向直接对齐用）
+        self.snap_heading_t = -math.inf
         # 卫星可信、IMU 断着时航向直接取测向；sat_rate 是相邻两帧测向算的转速（rad/s），两帧之间按它推
         self.sat_yaw = 0.0
         self.sat_yaw_t = self.sat_rate_t = -math.inf
@@ -653,6 +664,11 @@ class GnssFusion:
         # 到达顺序上最近一帧主天线 (t, 解)、副天线 (t, 解)、测向 (t, 解, 基线 m)：判卫星可信用（见 TRUSTED_FRESH_S），
         # 结果跟样本一起存下，历史重放时不变
         self._seen_fix = self._seen_fix2 = self._seen_heading = None
+        # 任务层每拍告诉融合现在是否在喷（set_painting）：不在喷时控制输出航向直接对齐（见 OUTPUT_SNAP_BASELINE_M）
+        self.painting = False
+
+    def set_painting(self, painting):
+        self.painting = bool(painting)
 
     def switch_config(self, config: FusionConfig):
         """换一套配置（单天线 / 双天线：天线杠杆臂差 0.41 m）：滤波状态、历史、标定统计全部重来，本地坐标原点和
@@ -851,6 +867,7 @@ class GnssFusion:
                 self._imu(s)
             elif k == 2:
                 self._heading(s, pos)
+                self._snap_output()
             elif k == 3:
                 self._fix(s, pos)
             else:
@@ -917,9 +934,7 @@ class GnssFusion:
         imu_ok = not s.imu_mismatch
         dg = min(dt, max(0., s.imu_valid_t + cfg.sensor_timeout_s - s.t)) if imu_ok else 0.
         w = s.gyro - s.bias
-        stationary = (s.stationary_since is not None
-                      and s.t-s.stationary_since >= cfg.stationary_time_s
-                      and s.t-s.wheel_t <= cfg.sensor_timeout_s)
+        stationary = self._stationary()
         if not imu_ok:
             pass
         elif cfg.yaw_input == 'angle':
@@ -1004,8 +1019,9 @@ class GnssFusion:
             # 输出航向按 1°/s 平滑跟融合航向（IMU 接上、卫星回来都不甩头）；只有卫星可信而 IMU 断着时不限速，
             # 这时没有 IMU 推转动，输出要直接跟测向
             trusted = self._trusted()
-            limit = math.inf if trusted and dg < dt else math.radians(cfg.output_heading_rate_deg_s) * dt
-            s.output_yaw = _wrap(s.output_yaw + max(-limit, min(limit, delta * -math.expm1(-dt / cfg.output_heading_tau_s))))
+            if not self._snap_output(stationary):
+                limit = math.inf if trusted and dg < dt else math.radians(cfg.output_heading_rate_deg_s) * dt
+                s.output_yaw = _wrap(s.output_yaw + max(-limit, min(limit, delta * -math.expm1(-dt / cfg.output_heading_tau_s))))
             ox, oy = s.x - s.output_x, s.y - s.output_y
             fraction = -math.expm1(-dt / cfg.output_position_tau_s)
             cs_out, sn_out = math.cos(s.yaw), math.sin(s.yaw)
@@ -1027,6 +1043,28 @@ class GnssFusion:
                 s.output_x, s.output_y, s.output_yaw = s.x, s.y, s.yaw
                 s.output_rejoining = False
         s.t = t
+
+    def _stationary(self):
+        s, cfg = self._s, self.config
+        return (s.stationary_since is not None
+                and s.t-s.stationary_since >= cfg.stationary_time_s
+                and s.t-s.wheel_t <= cfg.sensor_timeout_s)
+
+    def _snap_output(self, stationary=None):
+        """控制输出航向能直接对齐就对齐（见 OUTPUT_SNAP_BASELINE_M），返回是否对齐了。推算每一步和每帧测向修正后都调，
+        测向刚把融合航向拉回来那一刻输出也跟上，不留到下一步推算。"""
+        s = self._s
+        if not (self.config.continuous_output and s.output_ready and s.t is not None):
+            return False
+        if not (self._trusted() and s.t - s.snap_heading_t <= TRUSTED_FRESH_S + 1e-9):
+            return False
+        if stationary is None:
+            stationary = self._stationary()
+        if not (stationary or not self.painting or abs(_wrap(s.yaw - s.output_yaw)) > math.radians(OUTPUT_SNAP_DEG)):
+            return False
+        # 双天线可信且车停着 / 不在喷 / 差超过 OUTPUT_SNAP_DEG：直接对齐
+        s.output_yaw = s.yaw
+        return True
 
     def _initialize_output(self):
         s = self._s
@@ -1325,6 +1363,8 @@ class GnssFusion:
                  and sample.sigma_heading_deg >= 0)
         trusted = valid and bool(trusted)
         self._mark_trust(sample.t, trusted)
+        s.snap_heading_t = (sample.t if valid and OUTPUT_SNAP_BASELINE_M[0] <= sample.length_m <= OUTPUT_SNAP_BASELINE_M[1]
+                            else -math.inf)
         if not valid:
             s.heading_ok = False
             return

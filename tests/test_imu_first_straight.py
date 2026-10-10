@@ -485,9 +485,19 @@ class CarryAcrossLines(unittest.TestCase):
         self.assertGreater(g.start['weight'], .9)
         g = ImuFirstGuide(FIT)
         g.offset, g.offset_n, g.locked, g.source = .8 * DEG, 50, True, 'learned'
-        g.blend_start((-1.2 * DEG, .1 * DEG), cfg)           # 差 2°：IMU 重启或测向坏，不混
+        g.blend_start((-3.2 * DEG, .1 * DEG), cfg)           # 差 4°（超过 max_gap_deg 3°）：IMU 重启或测向坏，不混
         self.assertAlmostEqual(math.degrees(g.offset), .8, places=9)
         self.assertEqual(g.start['weight'], 0.)
+
+    def test_blend_keeps_carried_when_dual_is_off_by_one_and_a_half_degrees(self):
+        # 10-10 16:16:42 实录：双天线学满 50 个 −20.654°，上一条带来 −19.090°（σ 约 0.135°），差 1.56°；卫星轨迹反推
+        # 真值 −19.31°。原来门槛 1.5° 只用双天线（差 1.34°），线头偏 2 cm、整段 12 m 才收回又反向过头
+        cfg = AlignmentConfig()
+        g = ImuFirstGuide(FIT)
+        g.offset, g.offset_n, g.locked, g.source = -20.654 * DEG, 50, True, 'learned'
+        g.blend_start((-19.090 * DEG, .135 * DEG), cfg)
+        self.assertGreater(g.start['weight'], .8)
+        self.assertLess(abs(math.degrees(g.offset) + 19.31), .15)
 
     def test_drift_rate_learned_on_one_line_carries_into_a_bad_start_on_the_next(self):
         # IMU 漂 −0.4°/min：第一条线卫星好、学出漂移速度；第二条线开头 15 s 卫星质量差，按带过来的漂移速度推

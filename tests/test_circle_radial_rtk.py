@@ -15,8 +15,11 @@ DT = .02
 GEO = ChassisGeometry(drive='differential', track_m=.675, diff_min_radius_m=.5)
 
 
-def tracker(enabled=True):
+def tracker(enabled=True, good_sky=True):
     cfg = replace(differential_config(PathConfig(cruise_mps=.5)), arc_rtk_radial_enabled=enabled)
+    if not good_sky:
+        # 单独看双天线快修：关掉卫星好时的快慢修（arc_good_pull_*，它自己就把差收到噪声以内，快修用不上）
+        cfg = replace(cfg, arc_good_pair_max_m=1e-9)
     tr = PathTracker(circle(2.4, left=False, lead_in=2., lead_out=1.), cfg, GEO)
     tr.set_nozzle(.24, -.4575)
     x,y,h = tr.path.pose(0.)
@@ -46,14 +49,14 @@ def feed(tr, i, *, offset=0., pair=.005, sigma=.01, fixed=True, secondary_fixed=
 
 
 class CircleRadialRtk(unittest.TestCase):
-    def warmed(self, enabled=True):
-        tr=tracker(enabled)
+    def warmed(self, enabled=True, good_sky=True):
+        tr=tracker(enabled, good_sky)
         for i in range(1,201): feed(tr,i)
         self.assertTrue(tr._arc_status['active'])
         return tr
 
     def test_consistent_position_sees_lateral_drift_that_imu_cannot_observe(self):
-        old,new=self.warmed(False),self.warmed()
+        old,new=self.warmed(False,False),self.warmed(True,False)
         # 侧向滑移持续两秒，车头角不变：可靠双天线都看到偏移。
         for i in range(201,351):
             offset=.05*min(1.,(i-200)/100)

@@ -234,6 +234,8 @@ class RouteOperations:
         # 仅运行时保存：每个执行分段独立锁存关泵，定位回摆不能在该段尾重新开喷。
         self._gap_previous = None
         self._paint_tail_key = None
+        # 已经过了起喷门槛的喷线区间（_paint_key）；换区间、继续作业换了跟踪器都要重新过（见 PAINT_START_MAX_OFFSET_M）
+        self._paint_started_key = None
         self._paint_tail_armed = self._paint_tail_closed = False
         self._paint_tail_closed_at = None
         self._arc_start_key = None
@@ -330,6 +332,29 @@ class RouteOperations:
             self.record, self.parent, self.preview, self.execution = old
             raise
         self.runtime_base = self.runtime_entry = 0.0
+
+    def restart_entry(self, sections, entry_m):
+        """还没开喷就偏离接入路线（LineMission._reentry_tick）：同一任务（id、开始时间、速度、水泵不变）换成从当前位置
+        重新规划的接入 + 整条路线，进度从 0 算。返回这是第几次重新接入。"""
+        r = self.record
+        if not r or r.get('state') != 'RUNNING':
+            raise ValueError('没有进行中的任务')
+        old = self.record, self.execution
+        fresh = self.new_record(sections, kind=r['kind'], label=r['label'])
+        for key in ('id', 'started_at', 'cruise', 'route_nozzle'):
+            if key in r:
+                fresh[key] = r[key]
+        fresh['reentries'] = r.get('reentries', 0) + 1
+        self.record = fresh
+        self.execution = dict(sections=samples(sections), entry_m=entry_m)
+        try:
+            self.save()
+        except ValueError:
+            self.record, self.execution = old
+            raise
+        self.runtime_base = self.runtime_entry = 0.0
+        self._gap_previous = None
+        return fresh['reentries']
 
     def save(self):
         if not self.path:
@@ -628,6 +653,16 @@ class RouteOperations:
         cursor=self.runtime_base+max(0.,t.st.s-self.runtime_entry)
         if current['painting'] and not paint_quality.continuous_arc(self.m,sec,tr) and not circle_spray_repair.allowed(r,cursor):
             current.update(painting=False,paint_blocked='repair_skip_covered')
+        if current['painting']:
+            # 起喷门槛：这个喷线区间还没开过喷，喷头离线不到 PAINT_START_MAX_OFFSET_M 才开（开过就不再拦）
+            key=self._paint_key()
+            if getattr(self,'_paint_started_key',None)!=key:
+                deviation=current.get('nozzle_deviation_m')
+                if (type(deviation) not in (int,float) or not math.isfinite(deviation)
+                        or deviation>=paint_quality.PAINT_START_MAX_OFFSET_M):
+                    current.update(painting=False,paint_blocked='paint_start_off_line')
+                else:
+                    self._paint_started_key=key
         return current
 
     def mark_paint(self, painting):

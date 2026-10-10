@@ -94,6 +94,23 @@ PDOP_NOTICE_PREFIXES = ('单天线 PDOP', PDOP_TEXT_MISSING)
 # 跟踪器因定位暂停（上面几种以外的原因，如定位抖一下）时不能还显示「行驶中」（2026-10-01 实车：暂停 24 s 屏幕
 # 一直是「行驶中」）；恢复后起步检查不过、自动继续不了时说清楚原因（原因代码由 app 翻译）
 TRACKER_PAUSED_NOTICE = '定位暂时不能用，已原地停车，恢复后自动继续'
+# 2026-10-10 用户：「偏离路线太远，不应该有这个提示，应该自己跑到离自己最近的一边开始」。还没开喷（接入、助跑）时
+# 跟踪器判偏离（off_line）不结束作业：渐停、停稳，等控制用的定位追上融合，再按「开始作业」同一套就近接入从当前位置
+# 重新规划整条路线（同一任务、同一 id）。已经开喷后的偏离、场地作业、补画仍按原来中止。
+# 10-10 实录 16:05:00：开始作业时给控制的航向比融合差 58°（连续输出每秒只追 1°），原地转向转错方向，开出 0.4 m
+# 就偏 40 cm；不等航向追上就重新规划会照样转错，所以先等它对齐（REENTRY_ALIGN_*），最多等 REENTRY_WAIT_S
+REENTRY_MAX = 3                 # 同一任务最多重新接入几次，再偏就中止
+REENTRY_ALIGN_DEG = 1.0         # 控制输出与融合的航向差在这以内才重新规划
+REENTRY_ALIGN_M = 0.02          # 位置差
+REENTRY_STILL_S = 0.5           # 车速、转速都低于下面两个值持续这么久算停稳
+REENTRY_STILL_MPS = 0.03
+REENTRY_STILL_DEG_S = 2.0
+REENTRY_WAIT_S = 120.0
+REENTRY_WAIT_NOTICE = '偏离接入路线，已停车，等定位对齐后从最近处重新接入'
+REENTRY_NOTICE = '已从当前位置重新接入（接入 %.1f m，第 %d 次）'
+# 起喷门槛没过（paint_quality.PAINT_START_MAX_OFFSET_M）：车照走、先不喷
+PAINT_START_OFF_PREFIX = '喷头离线'
+PAINT_START_OFF_NOTICE = PAINT_START_OFF_PREFIX + ' %.1f cm，起喷要在 5 cm 内，先不喷'
 RESUME_FAILED_NOTICE = '定位已恢复，但不能自动接着走：%s；请停止后重新开始'
 # 定位降级（没有有效测向、传感器接管）时限速。2026-10-05 起「起步前卫星确认」「定位与卫星差太多停车」
 # 「推算误差预算停车」都已删掉（用户：「原来的检查必须删除，这种检查是不合理的」）；2026-10-06 晚起没有固定解
@@ -196,7 +213,8 @@ class LineMission:
         self._fix2_t = None             # 副天线最近一次固定解的时刻
         self._usable_since = None       # 暂停中定位从什么时候起一直可用（自动继续用）
         self._resume_failed = None      # 自动继续时起步检查没过的原因代码（报给操作员）
-        self._innovation = None         # 最近一次固定解与融合推算之差 (t, 沿车头, 向左) 米
+        self._reentry = None            # 接入时偏离、等着就近重新接入：{'since', 'still_since'}（见 REENTRY_MAX）
+        self._innovation = None        # 最近一次固定解与融合推算之差 (t, 沿车头, 向左) 米
         self._jumps = deque(maxlen=JUMP_EVENTS_MAX)     # 定位跳动记录，本次开机以来（只留最近 50 次）
         self._jump_count = 0            # 本次开机以来定位跳动总次数（作业记录按首末相减，不能用上面那个的长度）
         self._jump = None               # 正在进行的那次跳动
@@ -890,19 +908,10 @@ class LineMission:
             route_nozzle = dict(forward=self.nozzle[0], right=-self.nozzle[1])
         else:
             route_nozzle = None
-        planner_nozzle = (route_nozzle['forward'], -route_nozzle['right']) if route_nozzle else None
+        planner = route_plan.plan_current if cmd.get('cmd') == 'route_start_current' else route_plan.plan
         try:
             spec = self._route_local()
-            k = self.line_cfg.track_x_m     # 与直线相同：控制点（默认后轴中心）压在路线上
-            car = (pose.x + k * math.cos(pose.yaw), pose.y + k * math.sin(pose.yaw), pose.yaw)
-            planner = route_plan.plan_current if cmd.get('cmd') == 'route_start_current' else route_plan.plan
-            info = {}
-            sections, entry_m = planner(spec, car, self.min_route_radius, body=self.body, nozzle_x=planner_nozzle,
-                                        info=info)
-            from live_cruise import label_sections
-            label_sections(sections,entry_m,spec.cruise)
-            cfg = dataclasses.replace(self.path_cfg, cruise_mps=spec.cruise, track_x_m=k)
-            tracker = SectionTracker(sections, cfg, self.geo, **self.section_options(route=True))
+            sections, entry_m, tracker, info = self._plan_route(spec, pose, planner, route_nozzle, spec.cruise)
         except ValueError as exc:
             return False, str(exc)
         ok, why = tracker.check_start(pose)
@@ -914,6 +923,7 @@ class LineMission:
             return False, str(exc)
         self.tracker, self.task, self.cruise = tracker, 'route', spec.cruise
         self.phase, self.select_since = 'SELECTING', now
+        self._reentry = None
         turns = '，换向 %d 次' % tracker.cusps if tracker.cusps else ''
         if self.differential:
             # 倒车几段（每段前后各换向一次，tracker.reversals 是换向次数）
@@ -923,6 +933,88 @@ class LineMission:
                     ('，倒车 %d 次' % reverses if reverses else '')
         self.message = '申请控制权（接入 %.1f m，全程 %.1f m%s）' % (entry_m, tracker.length, turns)
         return True, self.message
+
+    def _plan_route(self, spec, pose, planner, route_nozzle, cruise):
+        """从当前位姿规划接入 + 整条路线，建好跟踪器：(sections, entry_m, tracker, info)。规划不了抛 ValueError。
+        开始作业和接入时偏离后的重新接入共用。"""
+        planner_nozzle = (route_nozzle['forward'], -route_nozzle['right']) if route_nozzle else None
+        k = self.line_cfg.track_x_m     # 与直线相同：控制点（默认后轴中心）压在路线上
+        car = (pose.x + k * math.cos(pose.yaw), pose.y + k * math.sin(pose.yaw), pose.yaw)
+        info = {}
+        sections, entry_m = planner(spec, car, self.min_route_radius, body=self.body, nozzle_x=planner_nozzle,
+                                    info=info)
+        from live_cruise import label_sections
+        label_sections(sections,entry_m,cruise)
+        cfg = dataclasses.replace(self.path_cfg, cruise_mps=cruise, track_x_m=k)
+        tracker = SectionTracker(sections, cfg, self.geo, **self.section_options(route=True))
+        return sections, entry_m, tracker, info
+
+    def _reentry_allowed(self):
+        """接入时偏离能不能就近重新接入：普通路线任务（不是场地、补画）、还没开喷、没超过 REENTRY_MAX 次。"""
+        ops = self.operations
+        r = ops.record
+        if (self.task != 'route' or self.route is None or not isinstance(self.tracker, SectionTracker)
+                or not r or r.get('kind') != 'route' or r.get('field_plan') or r.get('state') != 'RUNNING'
+                or r.get('reentries', 0) >= REENTRY_MAX):
+            return False
+        try:
+            from route_operations import painting_start
+            paint_at = painting_start(ops.decode(r))
+        except (ValueError, TypeError, KeyError):
+            return False
+        # 与「未开始画圆」相同的判据：进度还没过第一次真正划线的位置（接入、助跑不算）
+        return paint_at is not None and r['cursor_m'] <= paint_at + 1e-5
+
+    def _reentry_tick(self, now, pose):
+        """跟踪器判偏离（off_line）后每拍调用：能就近重新接入返回 True（车渐停 / 等待中 / 已重新规划），
+        不能（不允许、等超时、重新规划失败）返回 False，由调用方按原来中止。"""
+        if self._reentry is None:
+            if not self._reentry_allowed():
+                return False
+            self._reentry = dict(since=now, still_since=None)
+        self.message = REENTRY_WAIT_NOTICE
+        if now - self._reentry['since'] > REENTRY_WAIT_S:
+            self._reentry = None
+            return False
+        still = (pose is not None and abs(getattr(pose, 'speed', math.inf)) < REENTRY_STILL_MPS
+                 and abs(getattr(pose, 'yaw_rate', math.inf)) < math.radians(REENTRY_STILL_DEG_S))
+        if not still:
+            self._reentry['still_since'] = None
+            return True
+        if self._reentry['still_since'] is None:
+            self._reentry['still_since'] = now
+        if now - self._reentry['still_since'] < REENTRY_STILL_S - 1e-9:
+            return True
+        if pose_problem(pose) or not getattr(pose, 'rtk_trusted', False):
+            return True
+        # 给控制的位姿还没追上融合（连续输出平滑对齐中）：按它规划会转错方向，等
+        if (abs(getattr(pose, 'correction_yaw', 0.0)) > math.radians(REENTRY_ALIGN_DEG)
+                or math.hypot(*getattr(pose, 'correction_xy', (0.0, 0.0))) > REENTRY_ALIGN_M):
+            return True
+        r = self.operations.record
+        cruise = r.get('cruise') or self.cruise
+        try:
+            spec = self._route_local()
+            sections, entry_m, tracker, _ = self._plan_route(spec, pose, route_plan.plan_current,
+                                                             r.get('route_nozzle'), cruise)
+        except ValueError:
+            self._reentry = None
+            return False
+        ok, _ = tracker.check_start(pose)
+        if not ok:
+            self._reentry = None
+            return False
+        try:
+            count = self.operations.restart_entry(sections, entry_m)
+        except ValueError:
+            self._reentry = None
+            return False
+        self._close_log()
+        self._reentry = None
+        self.tracker = tracker
+        self.phase, self.select_since = 'SELECTING', now
+        self.message = REENTRY_NOTICE % (entry_m, count)
+        return True
 
     def _store_route(self, spec):
         self.route, self._route_cache = spec, None
@@ -1018,10 +1110,22 @@ class LineMission:
         # 开/关喷标记：这一拍之后状态不再变，与节点随后发的 /line/trace paint（水泵按它开关）同值。
         # 只给 App 显示，同 /line/trace 一样出错只丢这一次，不影响开车
         try:
-            self.operations.mark_paint(self.task == 'route' and self.phase == 'RUNNING'
-                                       and self.operations.paint_status()['painting'])
+            paint = self.operations.paint_status() if self.task == 'route' and self.phase == 'RUNNING' else None
+            painting = bool(paint and paint['painting'])
         except Exception:
-            pass
+            paint = painting = None
+        if paint and paint.get('paint_blocked') == 'paint_start_off_line' and paint.get('nozzle_deviation_m') is not None:
+            # 起喷门槛没过：如实告诉操作员为什么没喷（过了以后 _tick 改回「行驶中」）
+            self.message = PAINT_START_OFF_NOTICE % (paint['nozzle_deviation_m'] * 100)
+        if painting is not None:
+            try:
+                self.operations.mark_paint(painting)
+            except Exception:
+                pass
+            # 融合按它决定控制输出航向能不能直接对齐双天线（gnss_fusion.OUTPUT_SNAP_BASELINE_M）；出错这拍不改
+            setter = getattr(self.fusion, 'set_painting', None)
+            if callable(setter):
+                setter(painting)
         return vx, wz, select
 
     def _tick(self, now, motion_mode):
@@ -1121,8 +1225,8 @@ class LineMission:
             self.message = text
         elif self.message in (RTK_NOTICE_LOST_HOLD, RTK_NOTICE_LOST_PAINT, RTK_NOTICE_LOST, TRACKER_PAUSED_NOTICE) \
                 or self.message.startswith(RESUME_FAILED_NOTICE.split('%s')[0]) \
-                or self.message.startswith(('定位已稳定', '定位降级', '固定解更新稍慢', '轮速反馈中断', 'IMU 中断')
-                                           + PDOP_NOTICE_PREFIXES):
+                or self.message.startswith(('定位已稳定', '定位降级', '固定解更新稍慢', '轮速反馈中断', 'IMU 中断',
+                                            PAINT_START_OFF_PREFIX) + PDOP_NOTICE_PREFIXES):
             self.message = '行驶中'
         self._write_log(now, pose, vx)
         try:
@@ -1144,6 +1248,9 @@ class LineMission:
             return 0.0, 0.0, None
         if st == 'ABORTED':
             why = self.tracker.st.reason
+            if why == 'off_line' and self._reentry_tick(now, pose):
+                # 还没开喷就偏离：不结束任务，渐停后就近重新接入（REENTRY_MAX）
+                return vx, wz, None
             self._finish('中止：%s' % REASON_TEXT.get(why, why))
             return 0.0, 0.0, None
         return vx, wz, None
@@ -1207,6 +1314,7 @@ class LineMission:
             pass
         self.phase, self.message = 'IDLE', message
         self.release_pending = True
+        self._reentry = None
         self._close_log()
         try:
             self.operations.finish(state or ('DONE' if self.tracker.st.state == 'DONE' else 'INTERRUPTED'), message)

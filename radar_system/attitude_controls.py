@@ -7,6 +7,13 @@ import tempfile
 
 # 单天线接收机自己按杆长做倾斜补偿（line_node.single_antenna_config），车端坡度补偿不能再开，免得补两次
 SINGLE_TILT_BLOCKED = '单天线接收机自己做坡度补偿（接收机上设杆长），车端不再补'
+# HDA536T 水平零点（2026-10-11 用户：「先把横滚约 −0.57°、俯仰约 −0.55° 补偿进去，等我再一次手动清零再自动清除」）。
+# 车上 imu_zero.json 是 10-06 以前在不平处清的零（横滚 −0.25°、俯仰 +0.41°）。10-06–10-10 五天 24 次大角度原地转前后
+# 静止读数取平均（坡度正反抵消）、同一条路来回反向的直线、整圆三种算法都反推出水平时 IMU 读数约为横滚 −0.57°、俯仰 −0.55°
+# （差 0.3° / 0.9°，天线高 0.53 m → 左右 0.3 cm、前后 0.9 cm），五天里读数稳定，不是传感器漂移。
+# 文件还是旧零点时用反推值；用户再清零后文件写的是新值，照用（同 line_node 天线手量值换实测值）。不改车上文件，回滚即恢复
+HDA536T_ZERO_OLD_DEG = (-0.25, 0.41)
+HDA536T_ZERO_MEASURED_DEG = (-0.57, -0.55)
 
 
 class AttitudeControls:
@@ -176,6 +183,9 @@ class AttitudeControls:
         try:
             with open(self.zero_path, encoding='utf-8') as fh:
                 roll, pitch = self._zero_values(json.load(fh))
+            if (self.zero_path == self.default_zero_path
+                    and all(abs(v - old) < .005 for v, old in zip((roll, pitch), HDA536T_ZERO_OLD_DEG))):
+                roll, pitch = HDA536T_ZERO_MEASURED_DEG
             self.mission.fusion.zero_tilt(math.radians(roll), math.radians(pitch))
         except (ValueError, TypeError, OSError) as exc:
             self.zero_save_error = '已保存的 IMU 零点无法读取，请重新清零：' + str(exc)

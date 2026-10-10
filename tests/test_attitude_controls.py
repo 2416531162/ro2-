@@ -104,6 +104,33 @@ class Controls(unittest.TestCase):
         self.assertTrue(self.command('imu_zero','repair')[0]);self.assertIsNone(self.c.zero_save_error)
         self.assertEqual(json.loads(Path(self.c.zero_path).read_text())['roll_deg'],2.)
 
+    def test_old_uneven_zero_uses_measured_level_until_the_user_zeroes_again(self):
+        # 2026-10-11 用户：车上旧零点（−0.25°、+0.41°，不平处清的）先按数据反推的 −0.57°、−0.55° 补，再手动清零就自动不用
+        def restart():
+            f=gf.GnssFusion(self.f.config);c=AttitudeControls(SimpleNamespace(fusion=f),str(self.path))
+            return f,c
+        zero=Path(self.c.zero_path)
+        zero.write_text(json.dumps(dict(version=1,roll_deg=-0.2500064008288567,pitch_deg=0.40999609702888323)))   # 车上实际保存的值
+        f,c=restart()
+        st=f.tilt_status();self.assertTrue(st['zeroed'])
+        self.assertAlmostEqual(st['zero_roll_deg'],-.57);self.assertAlmostEqual(st['zero_pitch_deg'],-.55)
+        self.assertIsNone(c.zero_save_error)
+        self.assertEqual(json.loads(zero.read_text())['roll_deg'],-0.2500064008288567)   # 不改车上文件
+        # 用户手动清零：写新值、当场用新值，重启后也照新值（不再换）
+        self.c=AttitudeControls(self.m,str(self.path))
+        self.c.observe_wheel(1.,0.,0.,True);self.c.status(1.,self.motion,(1.,2.,-1.,40.))
+        self.c.observe_wheel(1.4,0.,0.,True)
+        self.assertTrue(self.command('imu_zero','user')[0])
+        self.assertAlmostEqual(self.f.tilt_status()['zero_roll_deg'],2.)
+        f,c=restart();self.assertAlmostEqual(f.tilt_status()['zero_roll_deg'],2.);self.assertAlmostEqual(f.tilt_status()['zero_pitch_deg'],-1.)
+        # 别的零点照用；另一路 IMU 的零点文件不换
+        zero.write_text(json.dumps(dict(version=1,roll_deg=-.30,pitch_deg=.41)))
+        f,c=restart();self.assertAlmostEqual(f.tilt_status()['zero_roll_deg'],-.30);self.assertAlmostEqual(f.tilt_status()['zero_pitch_deg'],.41)
+        other=Path(self.tmp.name)/'imu_zero-imu762.json'
+        other.write_text(json.dumps(dict(version=1,roll_deg=-.25,pitch_deg=.41)))
+        f,c=restart();c.select_imu_source('imu762')
+        self.assertAlmostEqual(f.tilt_status()['zero_roll_deg'],-.25);self.assertAlmostEqual(f.tilt_status()['zero_pitch_deg'],.41)
+
     def test_reference_barrier_discards_old_observations(self):
         self.assertTrue(self.command('imu_zero')[0]);before=self.f._s.t
         self.f.add_imu(gf.ImuSample(1.2,0.,.7,.4,.3))

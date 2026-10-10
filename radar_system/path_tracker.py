@@ -239,6 +239,22 @@ class PathConfig:
     start_hold_m: float = 0.0
     start_hold_rate: float = 2.0
     start_hold_max: float = 0.3
+    # 起步先稳再纠偏（差速车，2026-10-10 用户：「起步先稳再纠偏」）：每段从停着起步、还没到喷线区时，原控制先不拉
+    # 横偏、不积分，只保持车头；路线曲率前馈之外的转向限在 ±launch_settle_max_deg_s，车速目标不超过 launch_settle_mps；
+    # 走满 launch_settle_min_m 且车身转速连续 launch_settle_calm_s 跟下发转速差在 launch_settle_rate_deg_s 内（两轮同步了），或走满
+    # launch_settle_max_m，再在 launch_settle_blend_s 内把限幅放开（横偏纠正、加速照原控制）。
+    # 10-10 实录 21 次起步：下发转速峰中位 5°/s，车身实际 13°/s（两轮先后动最多差 0.3 s、各冲过头约 11%），
+    # 起步时一边纠横偏一边轮子不同步，摆动峰峰中位 4.7°、最大 7.4°。
+    # 按实测拟合的轮子模型（速度环约 1 Hz 欠阻尼、起步随机晚 0–0.4 s）对比（助跑同长）：限 2°/s、交回 1 s 时
+    # 起步 3 s 摆动中位少约 25%、最大少 30–40%，线头 2 m 内最大偏差变化在 ±0.15 cm 内；限 1°/s 摆得更小，但起步
+    # 车头已偏 5° 时线头差到 3 cm（修车头太慢），不用。0 为不用
+    launch_settle_max_m: float = 0.0
+    launch_settle_min_m: float = 0.3
+    launch_settle_rate_deg_s: float = 2.0
+    launch_settle_calm_s: float = 0.3
+    launch_settle_max_deg_s: float = 2.0
+    launch_settle_mps: float = 0.35
+    launch_settle_blend_s: float = 1.0
     # Gen5前进长直线：快速IMU航向内环、慢喷头横偏外环；基础配置关闭以兼容旧车与纯几何调用方。
     straight_imu_enabled: bool = False
     straight_min_length_m: float = 6.0
@@ -321,6 +337,16 @@ class PathConfig:
     arc_rtk_error_m: float = 0.010  # 差异达到此值时使用完整额外校正。
     arc_rtk_noise_m: float = 0.002  # 毫米级差异沿用原平缓校正，避免放大正常定位噪声。
     arc_rtk_feedback_scale: float = 1.5  # 可靠原始双天线径向观测下的横向修正比例；不改变航向阻尼。
+    # 整圆卫星好时的慢修（2026-10-11 用户「修复a」）。10-10 R2 实车圆：换算跟着测向绕圈晃约 0.6°、推算每米漂约 1 cm，按
+    # arc_pull_m 1 m 才拉回一半，估计稳定落后卫星 1–2 cm（上面的快修那圈权重平均 0.09：单帧对不上就清零，攒不满）。
+    # 固定解、卫星 ≥ fit_full_sats、σ ≤ fit_max_sigma_m、两天线距离误差 ≤ arc_good_pair_max_m、离上次跳点
+    # ≥ arc_good_after_jump_m 时，慢修改按 arc_good_pull_*；那圈回放估计与卫星之差 95% 1.8 → 1.2 cm（加姿态零点 0.9），抖动不变。
+    # 多路径多半只偏一根天线，两天线一比就退回原慢修（回放主天线慢漂 3 cm：一直快 2.7、只在好时快 1.7、原来 1.8 cm）。
+    # 只用于整圆；作业圆弧另有一套
+    arc_good_pull_m: float = 0.3
+    arc_good_pull_rate_m: float = 0.05
+    arc_good_pair_max_m: float = 0.02
+    arc_good_after_jump_m: float = 1.0
 
     accel_jerk_mps3: float = 0.0   # 正向提速的加速度变化上限；0 保留原控制。减速/保护独立优先。
     turn_decel_mps2: float = .25   # 正常弯前舒适减速；故障/停车约束独立优先。
@@ -345,7 +371,8 @@ class PathConfig:
                      'runup_release_e_m', 'runup_release_heading_deg', 'arc_s_rate_m', 'arc_s_tau_m', 'arc_scale_tau_m',
                      'arc_heading_tau_s', 'arc_pull_m', 'arc_pull_rate_m', 'arc_rtk_pull_m',
                      'arc_rtk_pull_rate_m', 'arc_rtk_pair_max_m', 'arc_rtk_settle_s', 'arc_rtk_fresh_s',
-                     'arc_rtk_error_m', 'arc_rtk_feedback_scale', 'arc_partial_min_radius_m',
+                     'arc_rtk_error_m', 'arc_rtk_feedback_scale', 'arc_good_pull_m', 'arc_good_pull_rate_m',
+                     'arc_good_pair_max_m', 'arc_good_after_jump_m', 'arc_partial_min_radius_m',
                      'arc_partial_rtk_pull_m', 'arc_partial_rtk_error_m', 'arc_partial_rtk_feedback_scale',
                      'arc_partial_tight_feedback_scale',
                      'arc_partial_heading_scale', 'arc_partial_response_delay_s', 'arc_partial_response_tau_s'):
@@ -441,7 +468,7 @@ def differential_config(config=PathConfig()):
     # 积分 0.4、外环低通 1.0 s：真喷头 p95 0.8 m/s 0.76–0.80 → 0.42–0.48 cm（原控制 0.44–0.58），车身小摆与现双环相同
     # （最差模型 +6%）；测向偏 2° 时 4.2 → 1.2 cm。外环低通再短、比例再大，小摆就回来了
     ab = CascadeConfig()
-    return replace(config, delay_s=0.30, steer_gain=1.0, ki_per_m2=2.0, lat_accel_mps2=0.20, arc_speed_mps=PAINT_ARC_SPEED_MPS, start_creep_mps=0.1, start_hold_m=0.6,
+    return replace(config, delay_s=0.30, steer_gain=1.0, ki_per_m2=2.0, lat_accel_mps2=0.20, arc_speed_mps=PAINT_ARC_SPEED_MPS, start_creep_mps=0.1, start_hold_m=0.6, launch_settle_max_m=1.0,
                    reverse_creep_m=0.5, reverse_creep_mps=0.15, reverse_section_creep_m=0.15, stop_delay_s=None,
                    ff_shape_ratio=0.27, ff_shape_gap_s=0.48, ff_shape_kappa_max=1.2,
                    # 2026-10-06：已验证常速顺时针完整圆的入圆收益；低速与其他圆/圆弧沿用原前馈。
@@ -582,6 +609,7 @@ class PathTracker:
         self._paint_speed_key = None
         self._paint_speed_latched = None
         self.integral_start_m = None    # 长直线助跑只纠偏，真正上线后才学习横偏积分；None 保留原行为
+        self.integral_curve_from_m = None   # 喷线圆弧段：这之前的直线部分（进弧助跑）只纠偏、不学积分；None 保留原行为
         self.arc_tail_heading_from_m = None   # 仅部分喷线圆弧启用；整圆和转场不启用
         self._arc_tail_w = 0.0
         # 控制律按车实际走出的曲率算，最多能走出 steer_gain·kappa_max（下发的仍不超过 kappa_max）
@@ -592,6 +620,7 @@ class PathTracker:
         self._hint = None
         self._v_prev = 0.0
         self._creep_from = None
+        self._settle = None             # 起步先稳再纠偏（launch_settle_*）：{'calm', 'done', 'blend'}，每次起步重来
         self._kfb = 0.0
         self._sum2 = self._n = self._max = 0.0
         self._clock = 0.0
@@ -668,6 +697,8 @@ class PathTracker:
         self._arc_travel = 0.0
         self._arc_hist = deque()        # 最近 jump_window_m 内的 (路程, 卫星 − 推算)
         self._arc_hold = None           # 卫星突然跳开、先不拉：[已等的秒数, 跳开时的差]
+        self._arc_hold_end = None       # 上次跳点放开时的沿圆路程（arc_good_after_jump_m 内不算卫星好），m
+        self._arc_good = False          # 这一拍整圆卫星好、慢修按 arc_good_pull_*
         self._arc_jumps = 0
         self._arc_rtk_since = self._arc_rtk_frame = None
         self._arc_rtk_frames = 0
@@ -943,6 +974,7 @@ class PathTracker:
         if not (preserve_startup and resume):
             # 原地短暂停后自动恢复保持已完成的起步段；操作员重新接入/新任务仍重新稳定起步。
             self._creep_from = None
+            self._settle = None
         self._runup_released = False
         self._v_prev = max(0.0, pose.speed)
         self._entry_speed_active = (self.entry_stabilize_mps is not None
@@ -1077,6 +1109,7 @@ class PathTracker:
             steer = self._arc_first(pose, dt)
         elif self._arc_piece is not None:
             self._reset_arc()
+        self._settle_step(pose, dt)
         v, kappa, w_hold = self._control(pose, dt, steer)
         wz = v * kappa + w_hold
         if self.st.state == 'RUNNING' and not (self.speed_limit_mps is not None and self.speed_limit_mps <= 0.0):
@@ -1098,6 +1131,8 @@ class PathTracker:
             wz=max(-bound,min(bound,wz))
             if 'final_wz' in self._straight_status:self._straight_status['final_wz']=wz
         if self.st.state == 'RUNNING':
+            v, wz = self._launch_settle(dt, v, wz)
+        if self.st.state == 'RUNNING':
             self._check_paint_start(pose,dt,v)
         self._sent.append((self._clock, v, wz))
         if (self._straight_weight > 0 or self._launch_weight > 0) and self._imu_now is not None:
@@ -1107,6 +1142,60 @@ class PathTracker:
         if (self._straight_weight > 0 or self._launch_weight > 0 or abs(self._arc_tail_w) > 1e-9) and v > 1e-6:
             self.st.kappa = wz / v
         return v, wz
+
+    def _settling(self):
+        """这一拍还在起步稳定段（launch_settle_*，稳住之前）：原控制不拉横偏、不积分。"""
+        return self._settle is not None and not self._settle['done']
+
+    def _settle_step(self, pose, dt):
+        """每拍控制前更新起步稳定状态（用上一拍的路程）。只管真正从停着起步、还没到喷线区；连续走过段与段的交接
+        （场地连续弧、圆弧掉头）不算起步。"""
+        cfg, st = self.cfg, self.st
+        if cfg.launch_settle_max_m <= 0 or not self.geo.differential or st.state != 'RUNNING':
+            return
+        if self._settle is None:
+            moving = abs(pose.speed) >= 0.05 or self._v_prev >= 0.05
+            self._settle = dict(calm=0.0, done=moving, blend=cfg.launch_settle_blend_s if moving else 0.0, started_m=0.0)
+        S = self._settle
+        if S['done'] or self._creep_from is None:
+            return
+        started = S['started_m'] = st.s - self._creep_from
+        # 两轮同步了 = 车身转速跟上正在执行的下发转速（不是转速本身小）：限幅顶满、车稳稳地按 2°/s 修车头也算稳住。
+        # 原来按「转速 < launch_settle_rate_deg_s」判，和限幅一样大，起步车头差 4–5°（< 原地转门槛 5°）时一直顶满、永远
+        # 不算稳，稳定段拖满 1 m 不纠横偏（2026-10-11 仿真 R3 圆：喷头被带开 7 cm，开喷后最大 3 cm）
+        calm = (abs(pose.speed) > 0.02
+                and abs(getattr(pose, 'yaw_rate', math.inf) - self.cfg.steer_gain * self._executing_wz())
+                < math.radians(cfg.launch_settle_rate_deg_s))
+        S['calm'] = S['calm'] + dt if calm else 0.0
+        if (started >= cfg.launch_settle_max_m or self._active_paint_window(st.s) is not None
+                or started >= cfg.launch_settle_min_m and S['calm'] >= cfg.launch_settle_calm_s - 1e-9):
+            S['done'] = True
+
+    def _executing_wz(self):
+        """此刻车上正在执行的下发角速度（delay_s 之前下发、还在生效的那条）；还没有就当 0（刚从停着起步）。"""
+        due, w = self._clock - self.cfg.delay_s, 0.0
+        for t, _, wz in self._sent:
+            if t > due + 1e-9:
+                break
+            w = wz
+        return w
+
+    def _launch_settle(self, dt, v, wz):
+        """起步稳定段的转向限制，返回实际下发的 (v, wz)（车速目标在 _control 里已限到 launch_settle_mps）：路线曲率
+        前馈之外的转向（这时原控制已不拉横偏，只剩保持车头）限在 ±launch_settle_max_deg_s，起步极慢时也不让一边轮子反转；
+        稳住后 launch_settle_blend_s 内把限幅渐渐放开。"""
+        cfg, st, S = self.cfg, self.st, self._settle
+        if S is None or S['done'] and S['blend'] >= cfg.launch_settle_blend_s - 1e-9:
+            return v, wz
+        ff = v * st.kappa_ref
+        lim = math.radians(cfg.launch_settle_max_deg_s)
+        bound = 2. * abs(v) / self.geo.track_m
+        limited = max(-bound, min(bound, ff + max(-lim, min(lim, wz - ff))))
+        if not S['done']:
+            return v, limited
+        S['blend'] += dt
+        a = min(1.0, S['blend'] / cfg.launch_settle_blend_s)
+        return v, limited + a * (wz - limited)
 
     def _check_paint_start(self,pose,dt,speed):
         """起步检查只控制喷涂许可，不触发车辆停车；未收稳沿原路径继续纠偏。"""
@@ -1544,14 +1633,30 @@ class PathTracker:
         error_m=cfg.arc_partial_rtk_error_m if partial else cfg.arc_rtk_error_m
         fast_pull_m=cfg.arc_partial_rtk_pull_m if partial else cfg.arc_rtk_pull_m
         weight *= min(1., max(0., (abs(observed-self._arc_e)-noise_m)/(error_m-noise_m)))
-        pull_m = cfg.arc_pull_m + weight*(fast_pull_m-cfg.arc_pull_m)
-        pull_rate = cfg.arc_pull_rate_m + weight*(cfg.arc_rtk_pull_rate_m-cfg.arc_pull_rate_m)
+        self._arc_good = not partial and self._arc_good_sky()
+        slow_m, slow_rate = ((cfg.arc_good_pull_m, cfg.arc_good_pull_rate_m) if self._arc_good
+                             else (cfg.arc_pull_m, cfg.arc_pull_rate_m))
+        pull_m = slow_m + weight*(fast_pull_m-slow_m)
+        pull_rate = slow_rate + weight*(cfg.arc_rtk_pull_rate_m-slow_rate)
         correction = 0.0
         if rtk_ok and self._arc_hold is None:
             lim = pull_rate * distance
             correction = max(-lim, min(lim, (observed-self._arc_e)*min(1.,distance/pull_m)))
             self._arc_e += correction
         return weight, correction
+
+    def _arc_good_sky(self):
+        """整圆这一拍卫星好（见 PathConfig.arc_good_pull_m）：最新一帧固定解、卫星数够、σ 小、两天线距离误差小，且离上次跳点放开已走
+        够 arc_good_after_jump_m。逐拍判断、不攒权重：差一帧只是这一拍按原慢修。"""
+        cfg, first, q = self.cfg, self.cfg.straight_imu_first, self._quality
+        if q is None or self._imu_now is None or self._quality_frame_t is None:
+            return False
+        sigma, sats, pair, fixed = q
+        return (fixed is True and sats is not None and sats >= first.fit_full_sats
+                and math.isfinite(sigma) and sigma <= first.fit_max_sigma_m
+                and pair is not None and math.isfinite(pair) and 0. <= pair <= cfg.arc_good_pair_max_m
+                and 0. <= self._imu_now-self._quality_frame_t <= cfg.arc_rtk_fresh_s
+                and (self._arc_hold_end is None or self._arc_travel-self._arc_hold_end >= cfg.arc_good_after_jump_m))
 
     def _arc_first(self, pose, dt):
         """画圆 IMU 为主（PathConfig.arc_imu_first）：返回原弯道控制律这一拍转向用的位姿（x, y, yaw），不在整圆/可用作业弧上或还没
@@ -1684,6 +1789,7 @@ class PathTracker:
             self._arc_hold[0] = self._arc_hold[0]+dt if not self._arc_raw_hold or raw is not None else 0.
             if abs(residual) <= first.rejoin_m or self._arc_hold[0] >= first.jump_accept_s:
                 self._arc_hold = None                 # 卫星回来和推算对上了，或等够了按卫星慢慢拉
+                self._arc_hold_end = self._arc_travel
                 self._arc_raw_hold = False
                 self._arc_raw_expected = None
         if rtk_ok and self._arc_hold is None:
@@ -1716,7 +1822,7 @@ class PathTracker:
                                 jumps=self._arc_jumps, scale=self._arc_scale,
                                 radial_source=('rtk_paired' if radial_weight > 0 else
                                                'rtk_slow' if rtk_ok and self._arc_hold is None else 'imu_hold'),
-                                radial_rtk_weight=radial_weight, radial_correction_m=correction,
+                                radial_rtk_weight=radial_weight, radial_correction_m=correction, good_sky=self._arc_good,
                                 jump_e_est=self._arc_jump_e, e_rtk_raw=raw, e_observed=self._arc_observed_e)
         return SimpleNamespace(x=pose.x + w*(cx-pose.x), y=pose.y + w*(cy-pose.y), yaw=wrap(pose.yaw + w*wrap(yaw_v-pose.yaw)))
 
@@ -2060,7 +2166,9 @@ class PathTracker:
             self._paint_speed_key=self._paint_speed_latched=None
         constant_tracking = constant_straight or constant_arc or paint_window is not None
         st.integral_frozen = st.integral_frozen or (
-            self.integral_start_m is not None and s_now < self.integral_start_m)
+            self.integral_start_m is not None and s_now < self.integral_start_m) or (
+            self.integral_curve_from_m is not None and s_now < self.integral_curve_from_m
+            and self.path._piece(s_now).straight)
 
         guided = self._straight_guided     # 直线 IMU 为主：上一拍的喷头横偏估计、车头（卫星跳了也按 IMU 推算）
         if guided is None:
@@ -2093,7 +2201,8 @@ class PathTracker:
             self._creep_from = s_now
         started = s_now - self._creep_from          # 这次起步后走了多远
         # 起步锁车头这段不积分：起步甩头是一下子的，积进去会在后面几米反向拖着偏
-        if self._straight_weight == 0.0 and not st.integral_frozen and abs(e) < cfg.slow_offset_m and started >= cfg.start_hold_m:
+        if (self._straight_weight == 0.0 and not st.integral_frozen and abs(e) < cfg.slow_offset_m and started >= cfg.start_hold_m
+                and not self._settling()):
             lim = cfg.integral_limit / cfg.ki_per_m2
             st.integral = max(-lim, min(lim, st.integral + e * ds))
 
@@ -2104,7 +2213,8 @@ class PathTracker:
         if self._arc_guided is not None and self._arc_status.get('e_rtk_raw') is not None:
             scale=self._partial_arc_feedback_scale() if self._arc_status.get('partial_arc') else cfg.arc_rtk_feedback_scale
             lateral_gain*=1.+self._arc_rtk_weight*(scale-1.)
-        theta_ref = -math.atan(lateral_gain * e)
+        # 起步稳定段（launch_settle_*）先不拉横偏，只保持车头
+        theta_ref = 0.0 if self._settling() else -math.atan(lateral_gain * e)
         theta_ref = max(-cfg.approach_max_rad, min(cfg.approach_max_rad, theta_ref))
         k_fb = -self.k_theta * (he - theta_ref) - cfg.ki_per_m2 * st.integral
         if self._arc_status.get('partial_arc'):
@@ -2184,6 +2294,9 @@ class PathTracker:
             v = min(v, max(cfg.min_mps, math.sqrt(2.0 * cfg.decel_mps2 * max(0.0, remaining - cfg.stop_tol_m))))
         if not constant_tracking and cfg.start_creep_mps > 0 and started < cfg.start_creep_m:
             v = min(v, cfg.start_creep_mps)
+        if self._settling():
+            # 起步稳定段（launch_settle_*）：稳住之前车速目标不超过 launch_settle_mps，由下面的加速斜坡平顺收住
+            v = min(v, cfg.launch_settle_mps)
         if self.constant_paint_speed:
             if paint_window is not None:
                 # 覆盖正常的偏差、曲率预瞄、段尾、慢行限速；硬停车/保护约束仍在下面优先执行。
@@ -2271,7 +2384,7 @@ class PathTracker:
                     s=st.s, length=st.length, kappa_ref=st.kappa_ref, v_cmd=st.v_cmd, kappa=st.kappa,
                     integral=st.integral, trim_kappa=-self.cfg.ki_per_m2 * st.integral, stats=dict(st.stats),
                     integral_frozen=st.integral_frozen, straight_hold=dict(self._straight_status),
-                    arc_hold=dict(self._arc_status))
+                    arc_hold=dict(self._arc_status), launch_settle=dict(self._settle) if self._settle else None)
 
 
 # ---- 前进 / 倒车交替的分段路径 ----
@@ -2495,6 +2608,12 @@ class SectionTracker:
                 if not math.isfinite(mark) or not 0 <= mark <= sec.path.length:
                     raise ValueError('长直线划线起点无效')
                 tracker.integral_start_m = mark
+            elif self._paint_curve(sec, tracker):
+                # 2026-10-11 用户「补上」：进弧助跑的直线部分只纠偏、不学积分（起步车头差 4–5° 带开的暂时偏差积进去，进圆后反向
+                # 冲过头，仿真 R2 圆线头 2.3 cm）；进到圆上照常学，补底盘小半径转不够（10-08 实测 R1 弧只转出指令的 79%）
+                mark = getattr(sec, 'paint_from_m', 0.0)
+                if math.isfinite(mark) and 0 < mark <= sec.path.length:
+                    tracker.integral_curve_from_m = mark
             self.trackers.append(tracker)
         self._set_continuations()
         self._set_approach()
@@ -2778,6 +2897,12 @@ class SectionTracker:
         seed = self._integral
         if i > 0 and self._spray_straight(sec, tr):
             seed = self._paint_integral if self._paint_integral is not None else 0.0
+        elif i > 0 and self._paint_curve(sec, tr):
+            # 喷线圆弧段（整圆、角球弧、罚球弧，2026-10-11 用户「先做 1」）停车后重新起步也不接上一段的积分：上一段多是半径
+            # 0.5 m 上下的转场急弯，积分是那里的转向补偿；带进来在进弧前的直线助跑上就是一个固定的拐弯偏置，比例纠偏顶住它，
+            # 喷头被推开 2–3 cm，开喷时还偏 2.2 cm（仿真整场最差的角球弧线头 2.4 cm 即此）。从 0 开始，进弧助跑里照常重新积分。
+            # 仿真整场 3 场：角球弧 12 个线头中位 1.06 → 0.78、最差 2.41 → 1.30 cm；罚球弧、中圈、直线、8 字不变
+            seed = 0.0
         if not tr.start(self._view(sec, pose), integral=sec.direction * seed):
             st.state, st.reason = 'ABORTED', 'cusp_' + tr.st.reason
             return 0.0, 0.0
@@ -2831,6 +2956,12 @@ class SectionTracker:
                 and getattr(sec, 'field_role', None) == 'paint'
                 and sec.path.length >= tracker.cfg.straight_min_length_m
                 and all(piece.straight for piece in sec.path.pieces))
+
+    def _paint_curve(self, sec, tracker):
+        """差速车前进的喷线段里带弯（整圆、作业圆弧连同它们的助跑）：停车后重新起步时积分从 0 开始，不接转场的。"""
+        return (self.geo.differential and tracker.cfg.straight_imu_enabled and sec.direction > 0
+                and getattr(sec, 'field_role', None) == 'paint'
+                and not all(piece.straight for piece in sec.path.pieces))
 
     def _misaligned(self, i, pose):
         """车头与第 i 段起点方向差 pivot_min 以上，要原地转；以内直接开，由跟踪纠正。"""
