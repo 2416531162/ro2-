@@ -33,6 +33,16 @@ def pivots(m):
     return [abs(v) for v in m if not isinstance(v, tuple)]
 
 
+def approach(m):
+    """去掉助跑起点前「转正后直线倒回 RUNUP_BACK_M」那一下（2026-10-11 起步扭头，见 route_plan.RUNUP_BACK_M），
+    只看怎么开到转正点：倒车接入的距离限制、往前开还是倒过去，都按原来的规则。"""
+    k = [i for i, v in enumerate(m) if isinstance(v, tuple)]
+    if (len(k) >= 2 and m[k[-2]][0] == '倒' and abs(m[k[-2]][1] - rp.RUNUP_BACK_M) < 1e-6
+            and m[k[-1]][0] == '前' and k[-1] == k[-2] + 1):
+        return m[:k[-2]] + m[k[-1]:]
+    return m
+
+
 def line_car(q, side=0., yaw=0.):
     """喷头在 (q, side)、车头 yaw 时的后轴位姿。"""
     return rp.axle_for((q, side), yaw, *NOZZLE) + (yaw,)
@@ -69,12 +79,12 @@ class LineEntry(unittest.TestCase):
         # 倒车超过 REVERSE_ENTRY_MAX_M 不倒：照旧掉头往前开（车在线外侧，起点在背后 5 m）
         car = line_car(4., 1.5, 0.)
         m, _ = self.plan(car)
-        self.assertNotIn('倒', [v[0] for v in m if isinstance(v, tuple)], m)
+        self.assertNotIn('倒', [v[0] for v in approach(m) if isinstance(v, tuple)], m)
 
     def test_longer_runup_preserves_the_existing_reverse_distance_limit(self):
         m, _ = self.plan(line_car(.8))
         self.assertGreater(rp.RUN_UP_M+.8,rp.REVERSE_ENTRY_MAX_M)
-        self.assertNotIn('倒',[v[0] for v in m if isinstance(v,tuple)])
+        self.assertNotIn('倒',[v[0] for v in approach(m) if isinstance(v,tuple)],m)
 
     def test_on_extension_turns_once_and_drives_in(self):
         # 车已在线的延长线上、助跑起点后方，车头朝外：原地转正一次直接开进来，中间不在助跑起点停
@@ -90,7 +100,8 @@ class LineEntry(unittest.TestCase):
         car = (0., 0., 0.)
         spec = rp.RouteSpec(kind='path', points=((-1.0, 0.), (-6., 0.)), closed=False)
         sections, _ = rp.plan_current(spec, car, MIN_R, nozzle_x=NOZZLE)
-        self.assertTrue(all(s.direction > 0 for s in sections))
+        m = approach(moves(sections, car))
+        self.assertNotIn('倒', [v[0] for v in m if isinstance(v, tuple)], m)
 
 
 class ReverseRunup(unittest.TestCase):
@@ -118,7 +129,7 @@ class ReverseRunup(unittest.TestCase):
         self.assertAlmostEqual(tr.trackers[1].cfg.start_hold_m, REVERSE_HOLD_M)
         plain, _ = self.tracker(line_car(-.8), reverse_runup=False)        # 场地作业等：照旧
         self.assertAlmostEqual(plain.trackers[1].cfg.start_hold_m, .6)
-        fwd, secs = self.tracker(line_car(-3.))                            # 不倒车的接入：照旧
+        fwd, secs = self.tracker(line_car(-rp.RUN_UP_M-.5))                # 不倒车的接入：照旧
         self.assertTrue(all(s.direction > 0 for s in secs))
         self.assertAlmostEqual(fwd.trackers[0].cfg.start_hold_m, .6)
 

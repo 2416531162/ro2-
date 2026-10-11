@@ -88,8 +88,9 @@ class LaunchSettle(unittest.TestCase):
         cls.old = [run(*c, settle=False) for c in CASES]
         cls.new = [run(*c, settle=True) for c in CASES]
 
-    def test_run_up_is_two_point_eight_metres(self):
-        self.assertEqual(rp.RUN_UP_M, 2.8)
+    def test_run_up_is_three_point_five_metres(self):
+        # 2026-10-11 用户：助跑暂时 2.8 → 3.5 m
+        self.assertEqual(rp.RUN_UP_M, 3.5)
 
     def test_start_swing_is_smaller(self):
         median = lambda rs: sorted(r['swing'] for r in rs)[len(rs) // 2]

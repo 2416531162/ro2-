@@ -161,7 +161,8 @@ class CircleDrive(unittest.TestCase):
         start, loop = rp.loop_pieces(sp, MIN_R, NOZZLE)
         # 车停在沿圆助跑起点的切线后方：直线开过去、不原地转，只有一段
         (_, (x0, y0, h0), _), = rp._circle_run_in(sp, [(1, start, loop)])[0]
-        car = (x0-3.*math.cos(h0), y0-3.*math.sin(h0), h0)
+        back = rp.RUN_UP_M + .2
+        car = (x0-back*math.cos(h0), y0-back*math.sin(h0), h0)
         sections, entry_m = rp.plan(sp, car, MIN_R, nozzle_x=NOZZLE)
         label_sections(sections, entry_m, sp.cruise)
         self.assertEqual(len(sections), 1)

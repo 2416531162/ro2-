@@ -111,6 +111,13 @@ REENTRY_NOTICE = '已从当前位置重新接入（接入 %.1f m，第 %d 次）
 # 起喷门槛没过（paint_quality.PAINT_START_MAX_OFFSET_M）：车照走、先不喷
 PAINT_START_OFF_PREFIX = '喷头离线'
 PAINT_START_OFF_NOTICE = PAINT_START_OFF_PREFIX + ' %.1f cm，起喷要在 5 cm 内，先不喷'
+# 2026-10-11 用户：作业第一个线头就没过起喷门槛时不跳过线头往前喷（18:34 实录晚开 0.72 m），渐停后退回去重新助跑：
+# 与接入时偏离同一套（_reentry_tick，同一任务、就近接入，次数一起算 REENTRY_MAX）。后面的线头（拐角后）已经喷过，
+# 重新接入要从头跑，照旧车照走、先不喷；超过 REENTRY_MAX 次也照旧
+REDO_RUNUP_PAST_M = 0.30        # 进度过了第一个线头不到这么远（门槛第一次挡住时就在线头上）才退回去
+REDO_RUNUP_WAIT_NOTICE = '到线头时喷头离线 %.1f cm（要在 5 cm 内），已停车，退回去重新助跑'
+REDO_RUNUP_NOTICE = '已退回去重新助跑（接入 %.1f m，第 %d 次）'
+REENTRY_REASONS = ('off_line', 'paint_start_off_line')
 RESUME_FAILED_NOTICE = '定位已恢复，但不能自动接着走：%s；请停止后重新开始'
 # 定位降级（没有有效测向、传感器接管）时限速。2026-10-05 起「起步前卫星确认」「定位与卫星差太多停车」
 # 「推算误差预算停车」都已删掉（用户：「原来的检查必须删除，这种检查是不合理的」）；2026-10-06 晚起没有固定解
@@ -949,8 +956,9 @@ class LineMission:
         tracker = SectionTracker(sections, cfg, self.geo, **self.section_options(route=True))
         return sections, entry_m, tracker, info
 
-    def _reentry_allowed(self):
-        """接入时偏离能不能就近重新接入：普通路线任务（不是场地、补画）、还没开喷、没超过 REENTRY_MAX 次。"""
+    def _reentry_allowed(self, past_m=0.0):
+        """接入时偏离能不能就近重新接入：普通路线任务（不是场地、补画）、还没开喷、没超过 REENTRY_MAX 次。
+        past_m：进度可以过第一个线头这么远（起喷门槛挡住第一个线头时，见 REDO_RUNUP_PAST_M）。"""
         ops = self.operations
         r = ops.record
         if (self.task != 'route' or self.route is None or not isinstance(self.tracker, SectionTracker)
@@ -963,7 +971,7 @@ class LineMission:
         except (ValueError, TypeError, KeyError):
             return False
         # 与「未开始画圆」相同的判据：进度还没过第一次真正划线的位置（接入、助跑不算）
-        return paint_at is not None and r['cursor_m'] <= paint_at + 1e-5
+        return paint_at is not None and r['cursor_m'] <= paint_at + past_m + 1e-5
 
     def _reentry_tick(self, now, pose):
         """跟踪器判偏离（off_line）后每拍调用：能就近重新接入返回 True（车渐停 / 等待中 / 已重新规划），
@@ -972,7 +980,8 @@ class LineMission:
             if not self._reentry_allowed():
                 return False
             self._reentry = dict(since=now, still_since=None)
-        self.message = REENTRY_WAIT_NOTICE
+        redo = self._reentry.get('deviation_m')
+        self.message = REENTRY_WAIT_NOTICE if redo is None else REDO_RUNUP_WAIT_NOTICE % (redo * 100)
         if now - self._reentry['since'] > REENTRY_WAIT_S:
             self._reentry = None
             return False
@@ -1013,7 +1022,19 @@ class LineMission:
         self._reentry = None
         self.tracker = tracker
         self.phase, self.select_since = 'SELECTING', now
-        self.message = REENTRY_NOTICE % (entry_m, count)
+        self.message = (REENTRY_NOTICE if redo is None else REDO_RUNUP_NOTICE) % (entry_m, count)
+        return True
+
+    def _redo_runup(self, now, paint):
+        """起喷门槛挡住了作业的第一个线头（喷头离线 5 cm 以上）：能退回去重新助跑就让跟踪器停下（渐停），之后每拍走
+        _reentry_tick，返回 True；不能（场地、补画、已经喷过、超过次数）返回 False，照旧车照走、先不喷。"""
+        if (self._reentry is not None or self.tracker.st.state != 'RUNNING'
+                or not self._reentry_allowed(past_m=REDO_RUNUP_PAST_M)):
+            return False
+        deviation = paint['nozzle_deviation_m']
+        self.tracker.stop('paint_start_off_line')
+        self._reentry = dict(since=now, still_since=None, deviation_m=deviation)
+        self.message = REDO_RUNUP_WAIT_NOTICE % (deviation * 100)
         return True
 
     def _store_route(self, spec):
@@ -1115,8 +1136,9 @@ class LineMission:
         except Exception:
             paint = painting = None
         if paint and paint.get('paint_blocked') == 'paint_start_off_line' and paint.get('nozzle_deviation_m') is not None:
-            # 起喷门槛没过：如实告诉操作员为什么没喷（过了以后 _tick 改回「行驶中」）
-            self.message = PAINT_START_OFF_NOTICE % (paint['nozzle_deviation_m'] * 100)
+            # 起喷门槛没过：第一个线头退回去重新助跑；否则如实告诉操作员为什么没喷（过了以后 _tick 改回「行驶中」）
+            if not self._redo_runup(now, paint):
+                self.message = PAINT_START_OFF_NOTICE % (paint['nozzle_deviation_m'] * 100)
         if painting is not None:
             try:
                 self.operations.mark_paint(painting)
@@ -1248,8 +1270,8 @@ class LineMission:
             return 0.0, 0.0, None
         if st == 'ABORTED':
             why = self.tracker.st.reason
-            if why == 'off_line' and self._reentry_tick(now, pose):
-                # 还没开喷就偏离：不结束任务，渐停后就近重新接入（REENTRY_MAX）
+            if why in REENTRY_REASONS and self._reentry_tick(now, pose):
+                # 还没开喷就偏离、第一个线头没过起喷门槛：不结束任务，渐停后就近重新接入（REENTRY_MAX）
                 return vx, wz, None
             self._finish('中止：%s' % REASON_TEXT.get(why, why))
             return 0.0, 0.0, None

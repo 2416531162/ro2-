@@ -1,5 +1,5 @@
 """起喷门槛（2026-10-10 用户：「如果起喷是差 5cm 以上，必须停喷」）：每个喷线区间第一次开喷时喷头离线不到 5 cm
-才开，没到先不喷、车照走；开喷后中途偏差照旧只报警不停喷。
+才开，没到先不喷、车照走；开喷后中途偏差照旧只报警不停喷。2026-10-11 起作业的第一个线头没过门槛时退回去重新助跑。
 
 复现 10-10 实录 16:05:30：开始作业时给控制的航向错 27°（每秒只追 1°），接入开偏，原来到线头偏 23 cm 照样开喷。"""
 from pathlib import Path
@@ -40,9 +40,25 @@ class PaintStartGate(unittest.TestCase):
     def test_threshold_is_five_centimetres(self):
         self.assertEqual(pq.PAINT_START_MAX_OFFSET_M, .05)
 
-    def test_wrong_heading_start_does_not_paint_until_within_5cm(self):
+    def test_wrong_heading_start_backs_up_and_paints_from_the_head(self):
+        # 2026-10-11 用户：第一个线头没过门槛不跳过线头往前喷，退回去重新助跑（见 test_launch_twist）
         car = Car(-3., 1.7, math.radians(100.), err_deg=27.)
         m = mission(car, self.folder.name)
+        rows = run(m, car, 300.)
+        first = next(i for i, r in enumerate(rows) if r['on'])
+        self.assertTrue(any(r['message'].startswith('到线头时喷头离线') for r in rows[:first]))
+        self.assertLess(rows[first]['est'], .05)
+        self.assertEqual(m.message, '路线完成')
+        self.assertEqual(m.operations.record['reentries'], 1)
+        on = [i for i in m.operations._paint_marks if i['on']]
+        self.assertEqual(len(on), 1)
+        self.assertLess(abs(on[0]['x']), .05)          # 从线头开喷，没有拦掉的一截
+
+    def test_wrong_heading_start_does_not_paint_until_within_5cm(self):
+        # 退回去的次数用完（REENTRY_MAX）：照旧车照走、先不喷，到 5 cm 内才开
+        car = Car(-3., 1.7, math.radians(100.), err_deg=27.)
+        m = mission(car, self.folder.name)
+        m.operations.record['reentries'] = lm.REENTRY_MAX
         rows = run(m, car, 200.)
         first = next(i for i, r in enumerate(rows) if r['on'])
         # 开喷前被门槛拦过，开喷那一拍车自己算的喷头离线在 5 cm 内

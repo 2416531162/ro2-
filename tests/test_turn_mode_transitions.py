@@ -12,7 +12,7 @@ from test_continuous_field_arcs import GEO,pose,DT
 def route(closed=False):
  points=((0.,0.),(8.,0.),(8.,5.),(0.,5.)) if closed else ((0.,0.),(8.,0.),(8.,6.))
  spec=rp.RouteSpec(kind='path',points=points,closed=closed,cruise=.8,turn='arc',turn_radius=1.)
- car=rp.axle_for((-3.,0.),0.,.24,-.4575)+(0.,)
+ car=rp.axle_for((-rp.RUN_UP_M-.2,0.),0.,.24,-.4575)+(0.,)   # 喷头在助跑起点后方的线上：直线开过去
  secs,entry=rp.plan_current(spec,car,.556,nozzle_x=(.24,-.4575));label_sections(secs,entry,.8)
  tr=SectionTracker(secs,replace(differential_config(PathConfig(cruise_mps=.8)),straight_imu_enabled=False),GEO,
                    constant_straight_speed=True,constant_paint_speed=True)

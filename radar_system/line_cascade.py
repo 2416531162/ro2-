@@ -59,6 +59,7 @@ REASON_TEXT = {
     'not_stopped_at_cusp': '换向前车没停稳',
     'off_line': '偏离路线太远',
     'paint_start_unready': '起步尚未收稳，已停止起喷；请继续作业预览重新接入原线头',
+    'paint_start_off_line': '到线头时喷头离线超过 5 cm',
 }
 
 

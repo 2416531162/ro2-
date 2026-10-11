@@ -660,7 +660,18 @@ PIVOT_TOL_RAD = math.radians(1.0)   # 前后两段车头方向差这么多以上
 PIVOT_REVERSE_MIN_M = 1.20  # 旧后轴距离，兼容历史配置；新助跑按喷头到线头计。
 # 2026-10-10 用户：助跑 2.5 → 2.8（先说加 0.5 m，后定 2.8 m）。10-10 实录 10 条直线起步摆动要走 1.3–2 m 才收住，
 # 7 条到线头还在纠，开喷时车头差 0.6–2.4°；起步头 1 m 先稳再纠偏见 path_tracker launch_settle_*
-RUN_UP_M = 2.80
+# 2026-10-11 用户：暂时 2.8 → 3.5（18:34 实录起步车头扭 5.6°，到线头喷头还偏 6 cm，被起喷门槛挡掉 0.72 m）
+RUN_UP_M = 3.50
+# 起步扭头（2026-10-11 实录 3 天 37 次直线起步）：起步前最后一下是原地转（一边轮子往前、一边往后），起步时要换向的那个
+# 轮子比另一个晚动 0.1–0.5 s（编码器不动，驱动器的事，暂时不能换），车头往它那边扭：只左轮换向 18 次中位 +4.7°、
+# 只右轮换向 12 次 −3.7°；两轮一起换向（直线倒车后）3 次、都不换向 4 次都在 2° 以内。所以要在助跑起点 G 原地转正时，
+# 改在 G 前方 RUNUP_BACK_M 处转正，再沿线直线倒回 G：起步时两个轮子一起从倒车换成前进。
+# 到 G 本来就只差 RUNUP_BACK_TURN_RAD 以内（跟踪器 5° 以内不原地转，最后一下就是直线倒车或直线前进）时照旧。
+# 现在关着（RUNUP_BACK_M = 0，规划与原来相同）：转正后开始倒车那一下也是单轮换向，实录倒车起步扭头中位 1.9°（前进 4.7°），
+# 倒 1 m 能纠回去；仿真（换向晚动 0.3–0.6 s）看不出好处、每条线多约 5 s。2026-10-11 用户：这次先不带，实车看起步还扭再开
+# （开的话 App PivotRoute.viaRunup 要照改，路线样例重新导出）
+RUNUP_BACK_M = 0.0
+RUNUP_BACK_TURN_RAD = math.radians(3.0)
 # 喷头在后轴前时后轴被喷头拖着走（见 _pulled_cover）：每片喷头走不超过 nozzle_x × PULL_STEP，片内按等曲率接
 # （片端车头方向准确，片内误差约 (PULL_STEP·d)²·φ/(12d)，d 0.30 m、拐 28° 约 0.8 mm）；车头与边的夹角
 # 收敛到 PULL_SETTLE_RAD 后用一段圆弧把后轴正好收回到边上（收回时喷头最多偏 PULL_SETTLE_RAD·d/4，约 0.3 mm）
@@ -1022,25 +1033,36 @@ def _pivot_route_sections(spec, radius, nozzle_x):
 def _via_runup(first, car, direction):
     """车开到助跑起点 G（第一段起点沿反方向退 RUN_UP_M）：direction 1 车头对着 G 开过去，-1 车尾对着 G 倒过去；
     到 G 后原地转到第一段方向，往前助跑 RUN_UP_M 接第一段（倒车后的助跑起步锁车头更长，见 path_tracker.REVERSE_HOLD_M）。
-    车离 G 不到 ON_LINE_M 就不开这段，由跟踪器当横偏纠正（路线本身不跟着车偏）。返回 (分段, 接入路程米)。"""
+    到 G 要原地转（差 RUNUP_BACK_TURN_RAD 以上）时改成开到 G 前方 RUNUP_BACK_M 处转正、再直线倒回 G 起步，
+    起步时两轮一起换向、不单边扭头（见 RUNUP_BACK_M）。
+    车离 G（或转正点）不到 ON_LINE_M 就不开这段，由跟踪器当横偏纠正（路线本身不跟着车偏）。返回 (分段, 接入路程米)。"""
     _, (x0, y0, h0), pieces = first
     x, y, yaw = car
     run = RUN_UP_M
     gx, gy = _offset((x0, y0), h0, -run)
-    dist = math.hypot(gx - x, gy - y)
+    back = 0.0
+    if math.hypot(gx - x, gy - y) >= ON_LINE_M:
+        at_g = wrap(math.atan2(gy - y, gx - x) + (0.0 if direction > 0 else math.pi))
+    else:
+        at_g = yaw
+    if abs(wrap(h0 - at_g)) > RUNUP_BACK_TURN_RAD:
+        back = RUNUP_BACK_M
+    px, py = _offset((gx, gy), h0, back)
+    dist = math.hypot(px - x, py - y)
     out = _PivotSections((x, y, yaw))
     moved = 0.0
     if dist >= ON_LINE_M:
-        to_g = math.atan2(gy - y, gx - x)
-        out.pivot(wrap(to_g + (0.0 if direction > 0 else math.pi) - yaw))
+        to_p = math.atan2(py - y, px - x)
+        out.pivot(wrap(to_p + (0.0 if direction > 0 else math.pi) - yaw))
         out.add(direction, dist, 0.0)
         moved = dist
-    out.pose = (gx, gy, out.pose[2])
+    out.pose = (px, py, out.pose[2])
     out.pivot(wrap(h0 - out.pose[2]))
+    out.add(-1, back, 0.0)
     out.add(1, run, 0.0)
     for length, k in pieces:
         out.add(1, length, k)
-    return out.out, moved + run
+    return out.out, moved + back + run
 
 
 def entry_seconds(sections, car_yaw):

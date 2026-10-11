@@ -24,7 +24,9 @@ def circle_plan(radius, clockwise, laps=1, cruise=.8):
     circle = replace(spec(radius, clockwise, laps), cruise=cruise)
     start, loop = rp.loop_pieces(circle, .556, NOZZLE)
     (_, (x, y, yaw), _), = rp._circle_run_in(circle, [(1, start, loop)])[0]
-    car = (x-3*math.cos(yaw), y-3*math.sin(yaw), yaw)
+    # 车停在助跑起点后方的切线上（直线开过去、不原地转）
+    back = rp.RUN_UP_M + .2
+    car = (x-back*math.cos(yaw), y-back*math.sin(yaw), yaw)
     planned, entry = rp.plan(circle, car, .556, nozzle_x=NOZZLE)
     label_sections(planned, entry, cruise)
     return circle, planned
