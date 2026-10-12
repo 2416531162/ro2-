@@ -213,6 +213,7 @@ class LineMission:
         self._route_cache = None
         self._antenna = None            # 最近一次天线定位 (t, lat, lon, sol, sigma)
         self._imu = None                # 最近一帧 IMU (t, 偏航 rad, 陀螺 z rad/s)，差速车定点画线的内环用
+        self._attitude = None           # 最近一帧 IMU 姿态 (t, 横滚, 俯仰) rad，直线侧滑补偿用
         self._heading_baseline = None   # 最近一帧双天线测向 (测量时刻, 基线长 m)：直线 IMU 为主时基线不对就不用卫星修正
         self._rtk_quality = None        # 最近一帧主天线定位 (测量时刻, σ m, 卫星数, 两天线距离误差 m, 固定解)：直线卫星纠偏只在合格时用
         self._fix2 = None               # 最近一帧副天线 (测量时刻, 本地 x, y, 固定解, 两天线标称距离 m)：两根对不上时直线选天线用
@@ -379,6 +380,8 @@ class LineMission:
         extra = {} if yaw is None else {'yaw': yaw}
         if roll is not None and pitch is not None:
             extra.update(roll=roll, pitch=pitch)
+            if math.isfinite(t) and math.isfinite(roll) and math.isfinite(pitch):
+                self._attitude = (t, roll, pitch)      # 直线侧滑补偿用（_sync_imu 交给跟踪器）
         self.fusion.add_imu(self.samples.ImuSample(t=t, gyro_z=gyro_z, **extra))
         if yaw is not None and math.isfinite(yaw) and math.isfinite(gyro_z):
             self._imu = (t, yaw, gyro_z)
@@ -820,6 +823,17 @@ class LineMission:
             quality = getattr(tracker, 'set_rtk_quality', None)
             if callable(quality) and self._rtk_quality is not None:
                 quality(*self._rtk_quality)
+            attitude = getattr(tracker, 'set_attitude', None)
+            a = getattr(self, '_attitude', None)
+            if callable(attitude) and a is not None:
+                # 扣掉水平零点（平地 ≈ 0）：侧坡侧滑 ≈ k × 横滚（ImuFirstConfig.crab_*）
+                tilt = getattr(self.fusion, 'tilt_angles', None)
+                try:
+                    roll = tilt(a[1], a[2])[0] if callable(tilt) else a[1]
+                except (TypeError, ValueError):
+                    roll = None
+                if roll is not None:
+                    attitude(a[0], roll)
             secondary = getattr(tracker, 'set_secondary_fix', None)
             lever = self._antenna_lever()
             primary = getattr(tracker, 'set_primary_fix', None)

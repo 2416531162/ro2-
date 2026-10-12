@@ -1,5 +1,5 @@
-"""起步先稳再纠偏（2026-10-10 用户）+ 助跑 2.8 m：按 10-10 实测拟合的轮子模型（速度环约 1 Hz 欠阻尼、起步随机
-晚动）对比不用稳定段，起步摆动要小、线头不能差；连续交接（不是从停着起步）不受影响。"""
+"""同一 3.5 m 助跑：轮子起动滞后/欠阻尼下，有界自适应纠偏和位置/航向收稳交接。
+与完全不用起步稳定策略对比，保留摆动、线头精度与不反转单轮的检查。"""
 from collections import deque
 from dataclasses import replace
 from pathlib import Path
@@ -107,18 +107,18 @@ class LaunchSettle(unittest.TestCase):
         for res in self.new:
             settling = [r for r in res['rows'] if r['settle']]
             self.assertTrue(settling)
-            for r in settling:
-                self.assertLessEqual(r['vc'], .35 + 1e-9)
-                self.assertLessEqual(abs(r['wc']), math.radians(2.) + 1e-9)
+            prev=0.
+            for r in res['rows']:
+                if r['settle']:
+                    # 交接中失去收稳条件时允许按既有减速度退回，不能继续提速。
+                    self.assertLessEqual(r['vc'], max(.35,prev) + 1e-9)
+                    self.assertLessEqual(abs(r['wc']), math.radians(4.) + 1e-9)
                 self.assertLessEqual(abs(r['wc']), 2 * abs(r['vc']) / TRACK + 1e-9)
-            # 最多 1 m 就交回，交回时离线头至少还有 1.8 m
-            last = settling[-1]
-            self.assertLessEqual(last['s'] - settling[0]['s'], 1. + .05)
-            self.assertGreaterEqual(rp.RUN_UP_M - last['s'], 1.8 - .05)
+                prev=r['vc']
+            self.assertLess(settling[-1]['s'],rp.RUN_UP_M+.05)
 
-    def test_steady_capped_heading_fix_counts_as_settled(self):
-        # 2026-10-11：起步车头差 4.5°（不到原地转门槛 5°），稳定段修车头顶着限幅、车稳稳地按限幅转，两轮已经同步，要算稳住；
-        # 原来按「转速本身 < 2°/s」判，和限幅一样大，一直不算稳、拖满 1 m 不纠横偏（仿真 R3 圆喷头被带开 7 cm）
+    def test_wheel_response_alone_cannot_release_a_misaligned_start(self):
+        # 两轮即使跟得上指令，也须位置与方向收稳才提速；不能把“稳稳地往偏处走”当作完成起步。
         class Steady:
             """跟得上指令的轮子，右轮带 ±1.8 mm/s 交替的小抖动（车身转速约 ±0.15°/s，实车总有）"""
             made = 0
@@ -133,8 +133,11 @@ class LaunchSettle(unittest.TestCase):
             for e0 in (-.02, .02):
                 for h0 in (-8., -4.5, 4.5, 8.):
                     rows = run(0, e0, h0, settle=True)['rows']
-                    settling = [r for r in rows if r['settle']]
-                    self.assertLess(settling[-1]['s'] - settling[0]['s'], .5)
+                    first=next(i for i,r in enumerate(rows) if r['settle'])
+                    released=next(r for r in rows[first+1:] if not r['settle'])
+                    if released['s']<rp.RUN_UP_M:
+                        self.assertLess(abs(released['h']),1.8)
+                        self.assertLess(abs(released['noz']),2.2)
 
     def test_moving_handover_is_not_a_start(self):
         sec = Section(1, Route((0., 0., 0.), [(10., 0.)]))

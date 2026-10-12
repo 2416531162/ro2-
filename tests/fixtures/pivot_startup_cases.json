@@ -1,0 +1,70 @@
+{
+  "8a100103": {
+    "target_deg": 151.02967351405258,
+    "recorded_reason": "pivot_timeout",
+    "first_recovery_s": 4.479693412780762,
+    "command_pulses": [
+      {
+        "start_s": 0.4243152141571045,
+        "end_s": 4.100482702255249,
+        "duration_s": 3.6761674880981445,
+        "peak_rad_s": 0.8,
+        "peak_heading_after_deg": 147.01581361041306,
+        "settled_heading_after_deg": 143.93272771481412,
+        "rollback_deg": 3.0830858955989413
+      },
+      {
+        "start_s": 5.419641017913818,
+        "end_s": 5.901688814163208,
+        "duration_s": 0.48204779624938965,
+        "peak_rad_s": 0.1812,
+        "peak_heading_after_deg": 148.06891003786353,
+        "settled_heading_after_deg": 144.37447817485997,
+        "rollback_deg": 3.694431863003558
+      },
+      {
+        "start_s": 7.3482825756073,
+        "end_s": 7.7002012729644775,
+        "duration_s": 0.35191869735717773,
+        "peak_rad_s": 0.157,
+        "peak_heading_after_deg": 150.36818966972353,
+        "settled_heading_after_deg": 145.26485458849328,
+        "rollback_deg": 5.103335081230256
+      }
+    ]
+  },
+  "3fe42370": {
+    "target_deg": 145.1336451388616,
+    "recorded_reason": "pivot_timeout",
+    "first_recovery_s": 4.4939258098602295,
+    "command_pulses": [
+      {
+        "start_s": 0.39522266387939453,
+        "end_s": 4.115004777908325,
+        "duration_s": 3.7197821140289307,
+        "peak_rad_s": 0.8,
+        "peak_heading_after_deg": 142.21786503398755,
+        "settled_heading_after_deg": 136.78794400953274,
+        "rollback_deg": 5.4299210244548135
+      },
+      {
+        "start_s": 6.772941827774048,
+        "end_s": 7.19372296333313,
+        "duration_s": 0.42078113555908203,
+        "peak_rad_s": 0.1925,
+        "peak_heading_after_deg": 141.99784924065733,
+        "settled_heading_after_deg": 136.59428427477852,
+        "rollback_deg": 5.4035649658788145
+      },
+      {
+        "start_s": 8.654397010803223,
+        "end_s": 9.014083862304688,
+        "duration_s": 0.35968685150146484,
+        "peak_rad_s": 0.1791,
+        "peak_heading_after_deg": 142.38688758355116,
+        "settled_heading_after_deg": 136.77934964260578,
+        "rollback_deg": 5.607537940945377
+      }
+    ]
+  }
+}

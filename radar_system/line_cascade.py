@@ -265,6 +265,14 @@ class ImuFirstConfig:
     # 角度仍由连续沿程观测学习，推算上按 fit_rate_m / 角度限速拉回。
     persist_m: float = 1.0
     persist_e_m: float = 0.01
+    # 2a018383：角度拟合很稳，位置却落后可信卫星 1.6 cm；只放开一次位置协方差仍会再次落后。
+    # 喷线后，可信观测连续同侧超过 1 cm 达 1 m，单独启用横偏跟随：IMU + 已学角度预测，卫星按
+    # 距离平滑校正位置。角度/侧滑继续由原拟合学习，不把位置差当成转角；修正仍限 fit_rate_m。
+    # 回到线附近后放慢位置跟随，避免追逐毫米级卫星往复噪声；卫星不可信时只预测，不撤销已确认的位置。
+    position_follow_min_e_m: float = 0.01
+    position_follow_confirm_m: float = 1.0
+    position_follow_tau_m: float = 0.35
+    position_follow_near_tau_m: float = 1.5
     fit_min_baseline_m: float = 0.30
     fit_max_baseline_m: float = 0.50
     # 跳点只挡短暂的：跳开后 jump_accept_s 内没回来、但新位置自己稳定（扣掉直线趋势后散布 ≤ rejoin_m），就认卫星，照常慢慢纠
@@ -314,6 +322,25 @@ class ImuFirstConfig:
     runup_blend_m: float = 0.5
     fit_quality_frames: int = 2
     fit_settle_s: float = 2.0
+    # 侧坡侧滑（2026-10-11 用户「加 2、3」）：车在侧坡上往坡下溜，轨迹方向 − 车头 ≈ crab × 横滚（10-11 下午 2° 侧坡 12 条
+    # 线全部按方向翻号，西→东 +0.10..+0.57°、东→西 −0.14..−0.60°，拟合 −0.16）；IMU 管车头、看不到。原来全靠拟合的角度 b
+    # 慢慢学（还把上一条线反方向的侧滑带到下一条线开头）。现在拟合多一个量 k（侧滑 / 横滚），卫星轨迹和 IMU 推算的差由 b 和
+    # k × ∫横滚 一起解释（卫星实时量侧滑），目标车头再减 k × 此刻横滚（坡一变就补）；k 带到下一条线。
+    # 横滚用扣掉水平零点的（平地 ≈ 0），低通 crab_roll_tau_s（颠簸不进转向），超过 crab_max_roll_deg 或断了不补
+    crab_enabled: bool = True
+    crab_prior: float = -0.16
+    crab_prior_sigma: float = 0.10
+    crab_walk: float = 0.002           # k 每米随机游走，/√m
+    crab_max: float = 0.4
+    crab_roll_tau_s: float = 1.0
+    crab_max_roll_deg: float = 8.0
+    crab_roll_fresh_s: float = 0.3
+    # 画线时往回拉加强（2026-10-11 用户）：卫星可信时喷头横偏同一边持续超过 boost_e_m 走满 boost_persist_m，车头最多偏
+    # max_bias_deg 放到 boost_max_bias_deg；回到 boost_release_e_m 以内或卫星不可信恢复
+    boost_e_m: float = 0.01
+    boost_release_e_m: float = 0.005
+    boost_persist_m: float = 1.0
+    boost_max_bias_deg: float = 0.6
 
     def __post_init__(self):
         for name in ('observer_m', 'fast_observer_m', 'max_heading_fix_deg', 'k_e', 'max_bias_deg', 'rate_deg_s', 'jump_m',
@@ -325,11 +352,22 @@ class ImuFirstConfig:
                      'antenna_pick_pair_m', 'antenna_agree_m', 'antenna_margin_m', 'antenna_fresh_s',
                      'runup_rtk_tau_m', 'runup_k_e', 'runup_max_bias_deg', 'runup_rate_deg_s', 'runup_target_accel_deg_s2', 'runup_blend_m',
                      'fit_prior_rate_deg', 'fit_walk_r_deg', 'fit_max_rate_deg', 'fit_start_beta_rate_deg',
-                     'persist_m', 'persist_e_m', 'fit_anchor_sigma', 'target_accel_deg_s2',
-                     'head_k_e', 'head_max_bias_deg'):
+                     'persist_m', 'persist_e_m', 'position_follow_min_e_m', 'position_follow_confirm_m',
+                     'position_follow_tau_m', 'position_follow_near_tau_m', 'fit_anchor_sigma', 'target_accel_deg_s2',
+                     'head_k_e', 'head_max_bias_deg', 'crab_prior_sigma', 'crab_max', 'crab_roll_tau_s',
+                     'crab_max_roll_deg', 'crab_roll_fresh_s', 'boost_e_m', 'boost_release_e_m', 'boost_persist_m',
+                     'boost_max_bias_deg'):
             value = getattr(self, name)
             if not math.isfinite(value) or value <= 0:
                 raise ValueError(name + ' 必须是有限正数')
+        if not math.isfinite(self.crab_prior) or abs(self.crab_prior) > self.crab_max:
+            raise ValueError('crab_prior 必须在 ±crab_max 内')
+        if not math.isfinite(self.crab_walk) or self.crab_walk < 0:
+            raise ValueError('crab_walk 必须是有限非负数')
+        if type(self.crab_enabled) is not bool:
+            raise ValueError('crab_enabled 必须是 True 或 False')
+        if self.boost_release_e_m > self.boost_e_m:
+            raise ValueError('boost_release_e_m 不能大于 boost_e_m')
         for name in ('deadband_m', 'trust_from_m', 'fast_m', 'min_baseline_m', 'max_baseline_m', 'baseline_hold_s',
                      'fit_walk_c_m', 'fit_walk_b_deg', 'fit_min_baseline_m', 'fit_max_baseline_m', 'fit_start_m',
                      'fit_start_points_m', 'head_m', 'head_blend_m',
@@ -390,7 +428,16 @@ class ImuFirstGuide:
         self.persists = 0            # 认过几次真偏
         self.rtk_accepted = False    # 当前观测实际通过质量及跳点门，供跨线标定使用
         self.target_rate = 0.0       # 平滑目标的连续角速度，rad/s
-        self._fit = None             # rtk_fit：(起点横偏, IMU 推算横移, [a, b], P, 当前这一格 [Σ路程, Σ残差, 个数, 起点])
+        self._fit = None             # rtk_fit：(起点横偏, IMU 推算横移, [c, b, r, k], P, 当前这一格 [Σ路程, Σ残差, 个数, 起点, Σ∫横滚])
+        self.crab = 0.0              # 此刻补的侧滑角（k × 横滚），rad；目标车头再减它（见 ImuFirstConfig.crab_*）
+        self.roll = None             # 此刻用的横滚（低通、扣掉水平零点），rad；没有为空
+        self.fit_e = None            # 慢速角度拟合给出的位置，和实际控制横偏分开记录
+        self._position_e = None      # 持续可信横偏确认后的独立位置估计
+        self._position_rel = None
+        self._position_heading = 0.0
+        self._position_sign = 0
+        self._position_confirmed_m = 0.0
+        self._position_correction = 0.0
 
     @property
     def travel(self):
@@ -433,7 +480,7 @@ class ImuFirstGuide:
         self.offset, self.beta, self.locked, self.source = value, 0.0, True, 'borrowed'
         return True
 
-    def blend_start(self, predicted, align_cfg, rate=None):
+    def blend_start(self, predicted, align_cfg, rate=None, crab=None):
         """偏移刚锁住时调用：predicted = ImuAlignment.predict(此刻)，(c, σ) rad 或 None。learned / partial 时和双天线学的
         按误差加权（双天线误差 = dual_sigma_deg × √(lock_samples / 样本数)）；两者差 > max_gap_deg 只用双天线。"""
         cfg = self.cfg
@@ -457,6 +504,8 @@ class ImuFirstGuide:
         self._prior_scale = self.start['sigma'] / full
         if rate is not None and all(math.isfinite(v) for v in rate):
             self.start['rate'] = rate
+        if crab is not None and all(math.isfinite(v) for v in crab):
+            self.start['crab'] = crab
 
     def fit_rate(self):
         """rtk_fit：拟合出的漂移速度 (rad/m, 误差 rad/m)，还没开始拟合为 None。"""
@@ -466,15 +515,16 @@ class ImuFirstGuide:
         """rtk_fit：拟合出的角度差的误差（rad），还没开始拟合为 None。"""
         return None if self._fit is None else math.sqrt(max(0.0, self._fit['P'][1][1]))
 
-    def update(self, measured, rel, distance, dt, nozzle, rtk_ok, fast=False, steering=False):
+    def update(self, measured, rel, distance, dt, nozzle, rtk_ok, fast=False, steering=False, roll=None):
         """锁住偏移以后每拍一次。measured：卫星（融合位置，天线杠杆臂按 rel + β 改算）量的喷头横偏，m；
         rel：IMU 参考航向 − 线方向，rad；distance：这一拍往前走的路，m；nozzle：喷头（车体前, 左），m；
         rtk_ok：这一拍卫星位置可以用来修正；fast：对准阶段（调用方另判，推算开始 fast_m 内也算）；
-        steering：IMU 内环已经在开（rtk_trim、rtk_fit 都关时，这以后卫星不再修正）。返回喷头横偏估计。"""
+        steering：IMU 内环已经在开（rtk_trim、rtk_fit 都关时，这以后卫星不再修正）；roll：此刻横滚（低通、扣零点，rad），
+        没有为空（不补侧滑）。返回喷头横偏估计。"""
         cfg = self.cfg
         self.fast = fast or self._travel < cfg.fast_m
         if cfg.rtk_fit:
-            return self._fit_update(measured, rel, distance, dt, nozzle, rtk_ok)
+            return self._fit_update(measured, rel, distance, dt, nozzle, rtk_ok, roll)
         if not cfg.rtk_trim and steering:
             rtk_ok = False
         if self.e is None:
@@ -578,10 +628,16 @@ class ImuFirstGuide:
         self._fit['c'] += d
         self._fit['x'][0] += d
         self.e += d
+        if self._position_e is not None:
+            self._position_e += d
+        if self.fit_e is not None:
+            self.fit_e += d
 
     def source_changed(self):
         """卫星横偏换了来源（主 / 副天线）：跳点参照从这一拍重新攒，两根天线之间的差不算跳。"""
         self._fit_hist.clear()
+        self._position_sign = 0
+        self._position_confirmed_m = 0.0
 
     def _settled(self):
         """跳开以后最近 jump_accept_s 的卫星点自己稳定：扣掉直线趋势后散布 ≤ rejoin_m。"""
@@ -595,10 +651,15 @@ class ImuFirstGuide:
         k = sum((p[0] - mu) * (p[1] - mz) for p in pts) / suu if suu > 0 else 0.0
         return max(abs(p[1] - mz - k * (p[0] - mu)) for p in pts) <= self.cfg.rejoin_m
 
-    def _fit_update(self, measured, rel, distance, dt, nozzle, rtk_ok):
+    def _fit_update(self, measured, rel, distance, dt, nozzle, rtk_ok, roll=None):
         """rtk_fit（见 ImuFirstConfig）：喷头横偏 = IMU 推算 + 修正 c；卫星可用时每 fit_bin_m 平均成一个点，卡尔曼跟踪
-        [c, 角度 b]（c 随路程按 b 增长，两者都按距离随机游走）；用到推算和目标车头上的 c、b 再按距离限速。"""
+        [c, 角度 b, 角度变化 r, 侧滑 k]（c 随路程按 b + k × 横滚 增长，都按距离随机游走）；用到推算和目标车头上的 c、b
+        再按距离限速，侧滑按 k × 此刻横滚直接补（crab）。"""
         cfg = self.cfg
+        use_roll = (cfg.crab_enabled and roll is not None and math.isfinite(roll)
+                    and abs(roll) <= cfg.crab_max_roll_deg * DEG)
+        phi = roll if use_roll else 0.0
+        self.roll = roll if use_roll else None
         if self.e is None:
             self.rtk_accepted = rtk_ok
             prior = max(cfg.fit_prior_min_deg, min(cfg.fit_prior_max_deg, cfg.fit_prior_deg * self._prior_scale))
@@ -607,9 +668,17 @@ class ImuFirstGuide:
             carried = (self.start or {}).get('rate')
             if carried is not None:                  # 上一条线学到的漂移速度（线头就是卫星差的地方也能按它推）
                 r0, sr = carried[0], min(sr, carried[1])
-            self._fit = dict(e0=measured, imu=0.0, x=[0.0, 0.0, r0], P=[[sc * sc, 0.0, 0.0], [0.0, sb * sb, 0.0], [0.0, 0.0, sr * sr]],
-                             u=0.0, cell=[0.0, 0.0, 0, 0.0], c=0.0, b=0.0, anchor=not rtk_ok)
+            k0, sk = (cfg.crab_prior, cfg.crab_prior_sigma) if cfg.crab_enabled else (0.0, 0.0)
+            crab = (self.start or {}).get('crab')
+            if cfg.crab_enabled and crab is not None:  # 上一条线学到的侧滑（同一块场地基本不变）
+                k0, sk = crab[0], min(sk, crab[1])
+            self._fit = dict(e0=measured, imu=0.0, x=[0.0, 0.0, r0, k0],
+                             P=[[sc * sc, 0.0, 0.0, 0.0], [0.0, sb * sb, 0.0, 0.0], [0.0, 0.0, sr * sr, 0.0],
+                                [0.0, 0.0, 0.0, sk * sk]],
+                             u=0.0, Phi=0.0, phi_total=0.0, cell=[0.0, 0.0, 0, 0.0, 0.0], c=0.0, b=0.0, anchor=not rtk_ok)
             self.e, self._rel, self._travel, self.innovation = measured, rel, 0.0, 0.0
+            self.fit_e = measured
+            self.crab = k0 * phi
             return self.e
         nx, ny = nozzle
         h, hp = rel, self._rel
@@ -617,6 +686,7 @@ class ImuFirstGuide:
         f['imu'] += distance * math.sin(0.5 * (h + hp)) + nx * (math.sin(h) - math.sin(hp)) + ny * (math.cos(h) - math.cos(hp))
         self._rel = rel
         self._travel += abs(distance)
+        f['phi_total'] += phi * abs(distance)
         u, base = self._travel, f['e0'] + f['imu']
         x, cell = f['x'], f['cell']
         c_now, b_now = self._fit_now(u)
@@ -628,67 +698,116 @@ class ImuFirstGuide:
             cell[0] += u
             cell[1] += measured - base
             cell[2] += 1
+            cell[4] += f['phi_total']
             if u - cell[3] >= cfg.fit_bin_m:
-                hu, z = cell[0] / cell[2], cell[1] / cell[2]
-                if f['anchor'] and self._fit_start_wrong(hu, z):
-                    self._fit_anchor(hu, z)
+                hu, z, ph = cell[0] / cell[2], cell[1] / cell[2], cell[4] / cell[2]
+                if f['anchor'] and self._fit_start_wrong(hu, z, ph):
+                    self._fit_anchor(hu, z, ph)
                 else:
                     f['anchor'] = False
-                    self._persist_check(hu, z)
-                    self._fit_step(hu, z)
-                cell[:] = [0.0, 0.0, 0, 0.0]
+                    self._persist_check(hu, z, ph)
+                    self._fit_step(hu, z, ph)
+                cell[:] = [0.0, 0.0, 0, 0.0, 0.0]
                 self.fit_points += 1
                 c_now, b_now = self._fit_now(u)
         else:
-            cell[:] = [0.0, 0.0, 0, 0.0]
+            cell[:] = [0.0, 0.0, 0, 0.0, 0.0]
             self._persist = None     # 没有可信观测的里程不能算成“持续偏差”
         lim = math.sin(cfg.max_heading_fix_deg * DEG)
         x[1] = max(-lim, min(lim, x[1]))
         b_now = max(-lim, min(lim, b_now))
         step = abs(distance)
-        # 用到车头上的角度带来的横移照常补（IMU 推算不含 β）；只有额外的纠正按 fit_rate_m 限速
-        f['c'] += f['b'] * step
+        km = cfg.crab_max
+        self.crab = max(-km, min(km, x[3])) * phi
+        # 用到车头上的角度（β 和补的侧滑）带来的横移照常补（IMU 推算不含）；只有额外的纠正按 fit_rate_m 限速
+        f['c'] += (f['b'] + self.crab) * step
         f['c'] += max(-cfg.fit_rate_m * step, min(cfg.fit_rate_m * step, c_now - f['c']))
         start = u < cfg.fit_start_m and self.fit_points * cfg.fit_bin_m >= cfg.fit_start_points_m - 1e-9
         db = (cfg.fit_start_beta_rate_deg if start else cfg.fit_beta_rate_deg) * DEG * step
         f['b'] += max(-db, min(db, b_now - f['b']))
         self.beta = math.asin(max(-lim, min(lim, f['b'])))
-        self.e = base + f['c']
+        self.fit_e = base + f['c']
+        self.e = self._follow_position(measured, rel, distance, nozzle)
         return self.e
 
-    def _fit_start_wrong(self, hu, z):
-        """拟合起点那拍不可信时，第一个可信点（路程 hu、值 z）和预测差多少个标准差，超过 fit_anchor_sigma 为 True。"""
+    def _follow_position(self, measured, rel, distance, nozzle):
+        """可信的持续同侧偏差单独跟随位置；航向参数保留原来的慢拟合和跳点判断。
+
+        确认必须连续且有实际轮程，助跑不累计；丢定位后保留已确认的位置，只按惯性预测。
+        β/侧滑是模型修正，不是车头真的转动，不能进入喷头转动杠杆项。
+        """
+        cfg, step = self.cfg, abs(distance)
+        sign = 1 if measured > 0.0 else -1
+        qualified = self.rtk_accepted and not self.fast and abs(measured) > cfg.position_follow_min_e_m
+        if qualified:
+            if sign != self._position_sign:
+                self._position_confirmed_m = 0.0
+            self._position_sign = sign
+            self._position_confirmed_m += step
+        else:
+            self._position_sign = 0
+            self._position_confirmed_m = 0.0
+        self._position_correction = 0.0
+        heading = self.beta + self.crab
+        if self._position_e is None:
+            if self._position_confirmed_m >= cfg.position_follow_confirm_m:
+                self._position_e = self.fit_e
+                self._position_rel = rel
+                self._position_heading = heading
+            return self.fit_e
+        previous = self._position_rel
+        # 两拍间实际转动用 IMU 相对角；参考角修正只参与平移方向。
+        nx, ny = nozzle
+        h = 0.5 * (rel + previous + heading + self._position_heading)
+        self._position_e += (distance * math.sin(h)
+                             + nx * (math.sin(rel + self.beta) - math.sin(previous + self.beta))
+                             + ny * (math.cos(rel + self.beta) - math.cos(previous + self.beta)))
+        self._position_rel, self._position_heading = rel, heading
+        if self.rtk_accepted:
+            tau = cfg.position_follow_tau_m if qualified else cfg.position_follow_near_tau_m
+            correction = (1.0 - math.exp(-step / tau)) * (measured - self._position_e)
+            limit = cfg.fit_rate_m * step
+            self._position_correction = max(-limit, min(limit, correction))
+            self._position_e += self._position_correction
+        return self._position_e
+
+    def _fit_start_wrong(self, hu, z, ph=None):
+        """拟合起点那拍不可信时，第一个可信点（路程 hu、值 z、∫横滚 ph）和预测差多少个标准差，超过 fit_anchor_sigma 为 True。"""
         cfg, f = self.cfg, self._fit
         x, P = f['x'], f['P']
         d = max(0.0, hu - f['u'])
-        F0 = (1.0, d, d * d / 2)
-        var = sum(F0[i] * P[i][j] * F0[j] for i in range(3) for j in range(3))
+        F0 = (1.0, d, d * d / 2, (f['Phi'] if ph is None else ph) - f['Phi'])
+        var = sum(F0[i] * P[i][j] * F0[j] for i in range(4) for j in range(4))
         var += cfg.fit_walk_c_m ** 2 * d + cfg.fit_noise_m ** 2
-        r = z - sum(F0[i] * x[i] for i in range(3))
+        r = z - sum(F0[i] * x[i] for i in range(4))
         return r * r > cfg.fit_anchor_sigma ** 2 * var
 
-    def _fit_anchor(self, hu, z):
+    def _fit_anchor(self, hu, z, ph=None):
         """rtk_fit：拟合起点那拍卫星不可信，这是第一个可信点：修正量就取这一点、按 fit_prior_m 信（同正常起点）；
-        角度、漂移速度的估计和不确定度照旧推到这一点，不拿起点的错去改角度。"""
+        角度、漂移速度、侧滑的估计和不确定度照旧推到这一点，不拿起点的错去改角度。"""
         cfg, f = self.cfg, self._fit
         x, P = f['x'], f['P']
         d = max(0.0, hu - f['u'])
         wb, wr = (cfg.fit_walk_b_deg * DEG) ** 2 * d, (cfg.fit_walk_r_deg * DEG) ** 2 * d
+        wk = (cfg.crab_walk ** 2 * d) if cfg.crab_enabled else 0.0
         pbb = P[1][1] + 2.0 * d * P[1][2] + d * d * P[2][2] + wb
         pbr = P[1][2] + d * P[2][2]
         prr = P[2][2] + wr
-        x[:] = [z, x[1] + x[2] * d, x[2]]
-        f['P'] = [[cfg.fit_prior_m ** 2, 0.0, 0.0], [0.0, pbb, pbr], [0.0, pbr, prr]]
+        pkk = P[3][3] + wk
+        x[:] = [z, x[1] + x[2] * d, x[2], x[3]]
+        f['P'] = [[cfg.fit_prior_m ** 2, 0.0, 0.0, 0.0], [0.0, pbb, pbr, 0.0], [0.0, pbr, prr, 0.0], [0.0, 0.0, 0.0, pkk]]
         f['u'], f['anchor'] = hu, False
+        if ph is not None:
+            f['Phi'] = ph
 
-    def _persist_check(self, hu, z):
+    def _persist_check(self, hu, z, ph=None):
         """rtk_fit：这一点（路程 hu，卫星横偏 − IMU 推算 z）和拟合差多少。最近 persist_m 的点都在同一边差超过
         persist_e_m 的一半、平均超过 persist_e_m，放开位置修正量（差²）的不确定度。
         横向位置台阶不证明航向有误，不同时放大角度不确定度；角度由后续连续观测的斜率学习。
         这一点起拟合跟上（见 ImuFirstConfig.persist_m）。10-07 回放：残差在 1.0–1.5 cm 之间晃，逐点都要超 1 cm 会被
         0.99 断开，所以按平均。"""
         cfg = self.cfg
-        r = z - self._fit_now(hu)[0]
+        r = z - self._fit_now(hu, ph)[0]
         p = self._persist
         if abs(r) <= 0.5 * cfg.persist_e_m or p and (r > 0) != (p[-1][1] > 0):
             p = self._persist = None
@@ -706,30 +825,43 @@ class ImuFirstGuide:
             self.persists += 1
             self._persist = None
 
-    def _fit_now(self, u):
-        """卡尔曼状态（上一点）推到路程 u：(修正量 c, 角度 b)，含角度变化速度 r。"""
-        x, d = self._fit['x'], u - self._fit['u']
-        return x[0] + x[1] * d + x[2] * d * d / 2, x[1] + x[2] * d
+    def _fit_now(self, u, ph=None):
+        """卡尔曼状态（上一点）推到路程 u（这时 ∫横滚 ph，空 = 现在的）：(修正量 c, 角度 b)，含角度变化速度 r、侧滑 k。"""
+        f = self._fit
+        x, d = f['x'], u - f['u']
+        dphi = (f['phi_total'] if ph is None else ph) - f['Phi']
+        return x[0] + x[1] * d + x[2] * d * d / 2 + x[3] * dphi, x[1] + x[2] * d
 
-    def _fit_step(self, hu, z):
-        """卡尔曼：状态 [c, b, r] 从上一点预测到路程 hu（c += b·Δ + r·Δ²/2，b += r·Δ，三者按距离随机游走），
+    def _fit_step(self, hu, z, ph=None):
+        """卡尔曼：状态 [c, b, r, k] 从上一点预测到路程 hu（c += b·Δ + r·Δ²/2 + k·Δ∫横滚，b += r·Δ，都按距离随机游走），
         再用这一点 z（卫星横偏 − IMU 推算）更新。"""
         cfg, f = self.cfg, self._fit
         x, P = f['x'], f['P']
         d = max(0.0, hu - f['u'])
-        F = [[1.0, d, d * d / 2], [0.0, 1.0, d], [0.0, 0.0, 1.0]]
-        q = [cfg.fit_walk_c_m ** 2 * d, (cfg.fit_walk_b_deg * DEG) ** 2 * d, (cfg.fit_walk_r_deg * DEG) ** 2 * d]
-        x[:] = [sum(F[i][k] * x[k] for k in range(3)) for i in range(3)]
-        FP = [[sum(F[i][k] * P[k][j] for k in range(3)) for j in range(3)] for i in range(3)]
-        P = [[sum(FP[i][k] * F[j][k] for k in range(3)) + (q[i] if i == j else 0.0) for j in range(3)] for i in range(3)]
+        dphi = (f['Phi'] if ph is None else ph) - f['Phi']
+        F = [[1.0, d, d * d / 2, dphi], [0.0, 1.0, d, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]]
+        q = [cfg.fit_walk_c_m ** 2 * d, (cfg.fit_walk_b_deg * DEG) ** 2 * d, (cfg.fit_walk_r_deg * DEG) ** 2 * d,
+             cfg.crab_walk ** 2 * d if cfg.crab_enabled else 0.0]
+        n = 4
+        x[:] = [sum(F[i][k] * x[k] for k in range(n)) for i in range(n)]
+        FP = [[sum(F[i][k] * P[k][j] for k in range(n)) for j in range(n)] for i in range(n)]
+        P = [[sum(FP[i][k] * F[j][k] for k in range(n)) + (q[i] if i == j else 0.0) for j in range(n)] for i in range(n)]
         s = P[0][0] + cfg.fit_noise_m ** 2
-        k = [P[i][0] / s for i in range(3)]
+        k = [P[i][0] / s for i in range(n)]
         r = z - x[0]
-        x[:] = [x[i] + k[i] * r for i in range(3)]
+        x[:] = [x[i] + k[i] * r for i in range(n)]
         rl = cfg.fit_max_rate_deg * DEG
         x[2] = max(-rl, min(rl, x[2]))
-        f['P'] = [[P[i][j] - k[i] * P[0][j] for j in range(3)] for i in range(3)]
+        x[3] = max(-cfg.crab_max, min(cfg.crab_max, x[3]))
+        f['P'] = [[P[i][j] - k[i] * P[0][j] for j in range(n)] for i in range(n)]
         f['u'] = hu
+        f['Phi'] = f['Phi'] if ph is None else ph
+
+    def fit_crab(self):
+        """rtk_fit：拟合出的侧滑 k（侧滑 / 横滚）和误差；没开或还没拟合为 None。"""
+        if self._fit is None or not self.cfg.crab_enabled:
+            return None
+        return self._fit['x'][3], math.sqrt(max(0.0, self._fit['P'][3][3]))
 
     def status(self):
         deg = lambda a: None if a is None else round(math.degrees(a), 3)  # noqa: E731
@@ -741,9 +873,16 @@ class ImuFirstGuide:
                     first_rtk_fit=self.cfg.rtk_fit,
                     first_fit_points=self.fit_points, first_persists=self.persists,
                     first_rtk_accepted=self.rtk_accepted,
+                    first_position_follow=self._position_e is not None,
+                    first_position_fit_e=self.fit_e,
+                    first_position_confirmed_m=round(self._position_confirmed_m, 4),
+                    first_position_correction_m=self._position_correction,
                     first_fit_sigma_deg=None if self._fit is None else round(math.degrees(math.sqrt(max(0.0, self._fit['P'][1][1]))), 4),
                     first_fit_lag=None if self._fit is None else round(self._fit_now(self._travel)[0] - self._fit['c'], 4),
                     first_fit_rate_deg_m=None if self._fit is None else round(math.degrees(self._fit['x'][2]), 5),
+                    first_crab_k=None if self._fit is None else round(self._fit['x'][3], 4),
+                    first_crab_deg=round(math.degrees(self.crab), 4),
+                    first_roll_deg=None if self.roll is None else round(math.degrees(self.roll), 3),
                     first_start_dual_deg=deg((self.start or {}).get('dual')),
                     first_start_carried_deg=deg((self.start or {}).get('carried')),
                     first_start_sigma_deg=deg((self.start or {}).get('sigma')),
@@ -811,6 +950,8 @@ class ImuAlignment:
         self.calibrations = 0
         self.rate = None                 # 最近一条线拟合好的漂移速度 (时刻, rad/m, 误差 rad/m)，下一条线开头带过去
         self._rate_pending = None
+        self.crab = None                 # 最近一条线拟合好的侧滑 k (时刻, k, 误差)，下一条线开头带过去（同一块场地）
+        self._crab_pending = None
 
     # 旧接口：value / t 是最近一条线的 c 和时刻
     @property
@@ -838,6 +979,8 @@ class ImuAlignment:
         """新的一条线开头（偏移刚锁住）调用：上一条线记下的 c 定下来，能和再上一条配成对就校准。返回这条线的号。"""
         if self._rate_pending is not None:
             self.rate, self._rate_pending = self._rate_pending, None
+        if self._crab_pending is not None:
+            self.crab, self._crab_pending = self._crab_pending, None
         p, o = self.pending, self.obs
         if p is not None:
             if (o is not None and p[3] is not None and o[3] is not None and p[1] is not None and o[1] is not None
@@ -859,6 +1002,18 @@ class ImuAlignment:
         if r is None or self.obs is None or not math.isfinite(now) or not 0.0 <= now - r[0] <= self.cfg.max_age_s:
             return None
         return r[1], math.hypot(r[2], self.cfg.rate_walk_deg_m * DEG * math.sqrt((now - r[0]) / 60.0))
+
+    def update_crab(self, token, t, k, sigma):
+        """这条线拟合出的侧滑 k（侧滑 / 横滚）和误差，下一条线开头带过去。"""
+        if token == self.token and all(math.isfinite(v) for v in (t, k, sigma)):
+            self._crab_pending = (t, k, sigma)
+
+    def predict_crab(self, now):
+        """上一条线的侧滑 (k, 误差)；太旧（> max_age_s）返回 None。场地不变，k 不随转角、时间漂，误差不放大。"""
+        c = self.crab
+        if c is None or not math.isfinite(now) or not 0.0 <= now - c[0] <= self.cfg.max_age_s:
+            return None
+        return c[1], c[2]
 
     def update_line(self, token, t, c, sigma=None):
         """这条线的 c（偏移 + β）；sigma（rad）为空表示没经卫星拟合，只给下一条借、不参与校准和加权。"""
@@ -928,6 +1083,38 @@ def paint_pull(cfg, along_m):
     return (1.0 - w) * cfg.head_k_e + w * cfg.k_e, (1.0 - w) * cfg.head_max_bias_deg + w * cfg.max_bias_deg
 
 
+class PullBoost:
+    """画线时往回拉加强（ImuFirstConfig.boost_*，2026-10-11 用户）：卫星可信、喷头横偏同一边持续超过 boost_e_m 走满
+    boost_persist_m 就打开，回到 boost_release_e_m 以内或卫星不可信就关。每条直线 reset。"""
+
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self.reset()
+
+    def reset(self):
+        self.on, self.sign, self.dist = False, 0, 0.0
+
+    def update(self, e, rtk_good, step):
+        cfg = self.cfg
+        if e is None or not math.isfinite(e) or not rtk_good:
+            self.reset()
+            return False
+        if abs(e) <= cfg.boost_release_e_m:
+            self.reset()
+        elif abs(e) > cfg.boost_e_m:
+            sign = 1 if e > 0 else -1
+            if sign != self.sign:
+                self.on, self.sign, self.dist = False, sign, 0.0
+            self.dist += max(0.0, step)
+            if self.dist >= cfg.boost_persist_m - 1e-9:
+                self.on = True
+        return self.on
+
+    def limit(self, pull):
+        """paint_pull 给的 (k_e, 最多偏几度)：打开时上限放到 boost_max_bias_deg（线头段本来更大的照旧）。"""
+        return (pull[0], max(pull[1], self.cfg.boost_max_bias_deg)) if self.on else pull
+
+
 def runup_weight(cfg, along_m):
     """线头前保持助跑控制，线头后按距离连续退出；两端斜率为零。"""
     u=max(0.,min(1.,along_m/cfg.runup_blend_m))
@@ -946,7 +1133,7 @@ def imu_first_target(cfg, guide, target, line_yaw, dt, align_rate_deg_s, align_d
     excess = max(0.0, abs(e) - cfg.deadband_m)
     lim = max_bias_deg * DEG
     bias = max(-lim, min(lim, -math.atan(k_e * math.copysign(excess, e))))
-    desired = wrap(line_yaw - guide.offset - guide.beta + bias)
+    desired = wrap(line_yaw - guide.offset - guide.beta - getattr(guide, 'crab', 0.0) + bias)
     rate = cfg.rate_deg_s if aligned and not guide.fast else align_rate_deg_s
     rate += entry_weight*(max(align_rate_deg_s,cfg.runup_rate_deg_s)-rate)
     gap = wrap(desired - target)
