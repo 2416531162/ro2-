@@ -273,6 +273,29 @@ class ImuFirstConfig:
     position_follow_confirm_m: float = 1.0
     position_follow_tau_m: float = 0.35
     position_follow_near_tau_m: float = 1.5
+    # 0.5 m/s 草地直线：质量/跳点门通过后连续跟随位置，过线附近不突然放慢。
+    # 只由路径直线显式启用；圆弧和原来的高速参数不共用此策略。
+    grass_lateral: bool = False
+    grass_position_confirm_m: float = 0.3
+    grass_position_tau_m: float = 0.35
+    grass_trend_tau_m: float = 0.75
+    grass_convergence_m: float = 0.25
+    grass_convergence_limit_m: float = 0.005
+    grass_pull_k_e: float = 0.8
+    grass_max_bias_deg: float = 0.6
+    grass_motion_tau_m: float = 2.0
+    grass_motion_limit_deg: float = 0.35
+    grass_motion_min_error_m: float = 0.0025
+    grass_motion_confirm_m: float = 1.0
+    # Precision mode has one position integral; beta/crab remain diagnostics and
+    # quality models, not a second steering correction layered on top of the PI.
+    grass_pi_k_e: float = 1.919
+    grass_pi_k_i: float = 0.390
+    grass_pi_max_deg: float = 2.0
+    grass_pi_position_tau_m: float = 0.0715
+    grass_pi_deadband_m: float = 0.001
+    grass_pi_position_rate_m: float = 0.05
+    grass_pi_target_rate_deg_s: float = 1.5
     fit_min_baseline_m: float = 0.30
     fit_max_baseline_m: float = 0.50
     # 跳点只挡短暂的：跳开后 jump_accept_s 内没回来、但新位置自己稳定（扣掉直线趋势后散布 ≤ rejoin_m），就认卫星，照常慢慢纠
@@ -353,7 +376,13 @@ class ImuFirstConfig:
                      'runup_rtk_tau_m', 'runup_k_e', 'runup_max_bias_deg', 'runup_rate_deg_s', 'runup_target_accel_deg_s2', 'runup_blend_m',
                      'fit_prior_rate_deg', 'fit_walk_r_deg', 'fit_max_rate_deg', 'fit_start_beta_rate_deg',
                      'persist_m', 'persist_e_m', 'position_follow_min_e_m', 'position_follow_confirm_m',
-                     'position_follow_tau_m', 'position_follow_near_tau_m', 'fit_anchor_sigma', 'target_accel_deg_s2',
+                     'position_follow_tau_m', 'position_follow_near_tau_m', 'grass_position_confirm_m',
+                     'grass_position_tau_m', 'grass_trend_tau_m', 'grass_convergence_m',
+                     'grass_convergence_limit_m', 'grass_pull_k_e', 'grass_max_bias_deg',
+                     'grass_motion_tau_m', 'grass_motion_limit_deg', 'grass_motion_min_error_m', 'grass_motion_confirm_m',
+                     'grass_pi_k_e', 'grass_pi_k_i', 'grass_pi_max_deg', 'grass_pi_position_tau_m',
+                     'grass_pi_deadband_m', 'grass_pi_position_rate_m', 'grass_pi_target_rate_deg_s',
+                     'fit_anchor_sigma', 'target_accel_deg_s2',
                      'head_k_e', 'head_max_bias_deg', 'crab_prior_sigma', 'crab_max', 'crab_roll_tau_s',
                      'crab_max_roll_deg', 'crab_roll_fresh_s', 'boost_e_m', 'boost_release_e_m', 'boost_persist_m',
                      'boost_max_bias_deg'):
@@ -366,6 +395,8 @@ class ImuFirstConfig:
             raise ValueError('crab_walk 必须是有限非负数')
         if type(self.crab_enabled) is not bool:
             raise ValueError('crab_enabled 必须是 True 或 False')
+        if type(self.grass_lateral) is not bool:
+            raise ValueError('grass_lateral 必须是 True 或 False')
         if self.boost_release_e_m > self.boost_e_m:
             raise ValueError('boost_release_e_m 不能大于 boost_e_m')
         for name in ('deadband_m', 'trust_from_m', 'fast_m', 'min_baseline_m', 'max_baseline_m', 'baseline_hold_s',
@@ -438,6 +469,17 @@ class ImuFirstGuide:
         self._position_sign = 0
         self._position_confirmed_m = 0.0
         self._position_correction = 0.0
+        self._grass_trusted_m = 0.0
+        self._grass_trend = 0.0
+        self._grass_last_e = None
+        self._grass_motion = 0.0
+        self._grass_motion_sign = 0
+        self._grass_motion_confirmed_m = 0.0
+        self._grass_pi_integral = 0.0
+        self._grass_pi_distance = 0.0
+        self._grass_pi_sequence = 0
+        self._grass_pi_consumed = -1
+        self._grass_pi_anchor_pending = True
 
     @property
     def travel(self):
@@ -638,6 +680,14 @@ class ImuFirstGuide:
         self._fit_hist.clear()
         self._position_sign = 0
         self._position_confirmed_m = 0.0
+        self._grass_trusted_m = 0.0
+        self._grass_trend = 0.0
+        self._grass_last_e = None
+        self._grass_motion = 0.0
+        self._grass_motion_sign = 0
+        self._grass_motion_confirmed_m = 0.0
+        self._grass_pi_anchor_pending=True
+        self._grass_pi_distance=0.
 
     def _settled(self):
         """跳开以后最近 jump_accept_s 的卫星点自己稳定：扣掉直线趋势后散布 ≤ rejoin_m。"""
@@ -736,9 +786,13 @@ class ImuFirstGuide:
         确认必须连续且有实际轮程，助跑不累计；丢定位后保留已确认的位置，只按惯性预测。
         β/侧滑是模型修正，不是车头真的转动，不能进入喷头转动杠杆项。
         """
+        if self.cfg.grass_lateral:
+            return self._precision_position(measured,rel,distance,nozzle)
         cfg, step = self.cfg, abs(distance)
         sign = 1 if measured > 0.0 else -1
-        qualified = self.rtk_accepted and not self.fast and abs(measured) > cfg.position_follow_min_e_m
+        good = self.rtk_accepted and not self.fast
+        self._grass_trusted_m = self._grass_trusted_m + step if good else 0.0
+        qualified = good and abs(measured) > cfg.position_follow_min_e_m
         if qualified:
             if sign != self._position_sign:
                 self._position_confirmed_m = 0.0
@@ -750,7 +804,8 @@ class ImuFirstGuide:
         self._position_correction = 0.0
         heading = self.beta + self.crab
         if self._position_e is None:
-            if self._position_confirmed_m >= cfg.position_follow_confirm_m:
+            if (self._position_confirmed_m >= cfg.position_follow_confirm_m
+                    or cfg.grass_lateral and self._grass_trusted_m >= cfg.grass_position_confirm_m):
                 self._position_e = self.fit_e
                 self._position_rel = rel
                 self._position_heading = heading
@@ -759,17 +814,96 @@ class ImuFirstGuide:
         # 两拍间实际转动用 IMU 相对角；参考角修正只参与平移方向。
         nx, ny = nozzle
         h = 0.5 * (rel + previous + heading + self._position_heading)
-        self._position_e += (distance * math.sin(h)
-                             + nx * (math.sin(rel + self.beta) - math.sin(previous + self.beta))
-                             + ny * (math.cos(rel + self.beta) - math.cos(previous + self.beta)))
+        motion = (distance * math.sin(h)
+                  + nx * (math.sin(rel + self.beta) - math.sin(previous + self.beta))
+                  + ny * (math.cos(rel + self.beta) - math.cos(previous + self.beta)))
+        if cfg.grass_lateral:motion+=distance*self._grass_motion
+        self._position_e += motion
         self._position_rel, self._position_heading = rel, heading
         if self.rtk_accepted:
-            tau = cfg.position_follow_tau_m if qualified else cfg.position_follow_near_tau_m
-            correction = (1.0 - math.exp(-step / tau)) * (measured - self._position_e)
+            tau = (cfg.grass_position_tau_m if cfg.grass_lateral
+                   else cfg.position_follow_tau_m if qualified else cfg.position_follow_near_tau_m)
+            innovation=measured-self._position_e
+            if cfg.grass_lateral and good:
+                sign=1 if innovation>0 else -1
+                if abs(innovation)>cfg.grass_motion_min_error_m:
+                    if sign!=self._grass_motion_sign:self._grass_motion_confirmed_m=0.0
+                    self._grass_motion_sign=sign
+                    self._grass_motion_confirmed_m+=step
+                else:
+                    self._grass_motion_sign=0
+                    self._grass_motion_confirmed_m=0.0
+                self._grass_motion*=math.exp(-step/(5.*cfg.grass_motion_tau_m))
+                if self._grass_motion_confirmed_m>=cfg.grass_motion_confirm_m:
+                    self._grass_motion+=step*innovation/(cfg.grass_motion_tau_m**2)
+                limit=cfg.grass_motion_limit_deg*DEG
+                self._grass_motion=max(-limit,min(limit,self._grass_motion))
+            correction = (1.0 - math.exp(-step / tau)) * innovation
             limit = cfg.fit_rate_m * step
             self._position_correction = max(-limit, min(limit, correction))
             self._position_e += self._position_correction
+        if cfg.grass_lateral:
+            if good and step > 1e-9 and self._grass_last_e is not None:
+                # RTK 位置修正不是实际瞬时速度；提前收敛用运动预测和有界慢残差。
+                slope = motion/step
+                slope = max(-math.tan(2.*DEG),min(math.tan(2.*DEG),slope))
+                self._grass_trend += (1.-math.exp(-step/cfg.grass_trend_tau_m))*(slope-self._grass_trend)
+            elif not good or step <= 1e-9:
+                self._grass_trend = 0.0
+                self._grass_motion_sign=0
+                self._grass_motion_confirmed_m=0.0
+            self._grass_last_e = self._position_e
         return self._position_e
+
+    def convergence_error(self):
+        """有界沿程预估只供转向使用，位置报告仍为 e；向中心线运动时提前减小纠偏。"""
+        cfg = self.cfg
+        if cfg.grass_lateral:return self.e
+        if (not cfg.grass_lateral or self.fast or not self.rtk_accepted
+                or self._position_e is None or self.e is None):
+            return self.e
+        lead = cfg.grass_convergence_m*self._grass_trend
+        return self.e+max(-cfg.grass_convergence_limit_m,min(cfg.grass_convergence_limit_m,lead))
+
+    def _precision_position(self, measured, rel, distance, nozzle):
+        """Measured nozzle position closes the outer loop; IMU only predicts between fixes."""
+        cfg=self.cfg;step=abs(distance)
+        self._grass_pi_distance=step;self._grass_pi_sequence+=1
+        if self._position_e is None:
+            self._position_e=measured if self.rtk_accepted else self.fit_e
+            self._position_rel=rel;self._grass_pi_anchor_pending=not self.rtk_accepted
+            return self._position_e
+        if self._grass_pi_anchor_pending and self.rtk_accepted:
+            self._position_e=measured;self._position_rel=rel
+            self._grass_pi_integral=0.;self._grass_pi_anchor_pending=False
+            return self._position_e
+        nx,ny=nozzle;previous=self._position_rel
+        course=.5*(rel+previous)+cfg.grass_pi_k_i*self._grass_pi_integral
+        self._position_e+=(distance*math.sin(course)+nx*(math.sin(rel)-math.sin(previous))
+                           +ny*(math.cos(rel)-math.cos(previous)))
+        self._position_rel=rel;self._position_correction=0.
+        if self.rtk_accepted:
+            correction=(1.-math.exp(-step/cfg.grass_pi_position_tau_m))*(measured-self._position_e)
+            limit=cfg.grass_pi_position_rate_m*step
+            self._position_correction=max(-limit,min(limit,correction))
+            self._position_e+=self._position_correction
+        return self._position_e
+
+    def precision_position_target(self):
+        """Consume each position update once. Bad fixes and stopped wheels never wind up I."""
+        cfg=self.cfg
+        excess=math.copysign(max(0.,abs(self.e)-cfg.grass_pi_deadband_m),self.e)
+        limit=math.tan(cfg.grass_pi_max_deg*DEG)
+        if self._grass_pi_consumed!=self._grass_pi_sequence:
+            self._grass_pi_consumed=self._grass_pi_sequence
+            proposed=self._grass_pi_integral+self._grass_pi_distance*excess
+            output=cfg.grass_pi_k_e*excess+cfg.grass_pi_k_i*proposed
+            if (self.rtk_accepted and not self._grass_pi_anchor_pending and abs(self.e)<.10
+                    and (abs(output)<limit or output*excess<0)):
+                self._grass_pi_integral=proposed
+            bound=limit/cfg.grass_pi_k_i
+            self._grass_pi_integral=max(-bound,min(bound,self._grass_pi_integral))
+        return excess+cfg.grass_pi_k_i/cfg.grass_pi_k_e*self._grass_pi_integral
 
     def _fit_start_wrong(self, hu, z, ph=None):
         """拟合起点那拍不可信时，第一个可信点（路程 hu、值 z、∫横滚 ph）和预测差多少个标准差，超过 fit_anchor_sigma 为 True。"""
@@ -877,6 +1011,13 @@ class ImuFirstGuide:
                     first_position_fit_e=self.fit_e,
                     first_position_confirmed_m=round(self._position_confirmed_m, 4),
                     first_position_correction_m=self._position_correction,
+                    first_grass_lateral=self.cfg.grass_lateral,
+                    first_convergence_e=self.convergence_error(),
+                    first_lateral_trend=self._grass_trend,
+                    first_grass_motion_deg=math.degrees(self._grass_motion),
+                    first_position_pi=self.cfg.grass_lateral,
+                    first_position_integral_m2=self._grass_pi_integral,
+                    first_position_trim_deg=-math.degrees(self.cfg.grass_pi_k_i*self._grass_pi_integral),
                     first_fit_sigma_deg=None if self._fit is None else round(math.degrees(math.sqrt(max(0.0, self._fit['P'][1][1]))), 4),
                     first_fit_lag=None if self._fit is None else round(self._fit_now(self._travel)[0] - self._fit['c'], 4),
                     first_fit_rate_deg_m=None if self._fit is None else round(math.degrees(self._fit['x'][2]), 5),
@@ -1080,7 +1221,9 @@ def paint_pull(cfg, along_m):
         w = max(0.0, min(1.0, (along_m - cfg.head_m) / cfg.head_blend_m))
     else:
         w = 1.0 if along_m >= cfg.head_m else 0.0
-    return (1.0 - w) * cfg.head_k_e + w * cfg.k_e, (1.0 - w) * cfg.head_max_bias_deg + w * cfg.max_bias_deg
+    k_e=(1.0 - w) * cfg.head_k_e + w * cfg.k_e
+    limit=(1.0 - w) * cfg.head_max_bias_deg + w * cfg.max_bias_deg
+    return (max(k_e,cfg.grass_pull_k_e),max(limit,cfg.grass_max_bias_deg)) if cfg.grass_lateral else (k_e,limit)
 
 
 class PullBoost:
@@ -1126,14 +1269,34 @@ def imu_first_target(cfg, guide, target, line_yaw, dt, align_rate_deg_s, align_d
     阶段（guide.fast）按 align_rate_deg_s 转，上线以后每秒最多改 cfg.rate_deg_s。pull：(k_e, 车头最多偏几度)，
     None 用 cfg.k_e / cfg.max_bias_deg（画线时见 paint_pull）。entry_weight 是助跑控制权重 0..1。
     返回 (目标, 往回拉的偏置, 在对准, 对准过)。"""
+    if cfg.grass_lateral:
+        error=guide.precision_position_target()
+        limit=cfg.grass_pi_max_deg*DEG
+        bias=max(-limit,min(limit,-math.atan(cfg.grass_pi_k_e*error)))
+        desired=wrap(line_yaw-guide.offset+bias)
+        gap=wrap(desired-target)
+        rate=align_rate_deg_s if guide.fast else cfg.grass_pi_target_rate_deg_s
+        step=rate*DEG*max(0.,dt)
+        advance=max(-step,min(step,gap))
+        target=wrap(target+advance)
+        guide.target_rate=advance/dt if dt>0 else 0.
+        left=abs(wrap(desired-target))
+        # Feedforward is disabled for this servo: do not add an acceleration
+        # integrator that can overshoot its own changing position reference.
+        ready=left<=align_deg*DEG
+        return target,bias,not ready,aligned or ready
     k_e, max_bias_deg = (cfg.k_e, cfg.max_bias_deg) if pull is None else pull
+    if cfg.grass_lateral:
+        k_e = max(k_e,cfg.grass_pull_k_e)
+        max_bias_deg = max(max_bias_deg,cfg.grass_max_bias_deg)
     k_e += entry_weight*(cfg.runup_k_e-k_e)
     max_bias_deg += entry_weight*(cfg.runup_max_bias_deg-max_bias_deg)
-    e = guide.e
+    e = guide.convergence_error() if cfg.grass_lateral else guide.e
     excess = max(0.0, abs(e) - cfg.deadband_m)
     lim = max_bias_deg * DEG
     bias = max(-lim, min(lim, -math.atan(k_e * math.copysign(excess, e))))
-    desired = wrap(line_yaw - guide.offset - guide.beta - getattr(guide, 'crab', 0.0) + bias)
+    motion = getattr(guide,'_grass_motion',0.0) if cfg.grass_lateral else 0.0
+    desired = wrap(line_yaw - guide.offset - guide.beta - getattr(guide, 'crab', 0.0) - motion + bias)
     rate = cfg.rate_deg_s if aligned and not guide.fast else align_rate_deg_s
     rate += entry_weight*(max(align_rate_deg_s,cfg.runup_rate_deg_s)-rate)
     gap = wrap(desired - target)

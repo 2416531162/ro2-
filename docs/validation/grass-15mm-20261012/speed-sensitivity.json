@@ -1,0 +1,945 @@
+{
+  "speed_mps": 0.45,
+  "scope": "Hypothetical only, not applied to the production configuration or the required 0.5 m/s acceptance.",
+  "passed": 150,
+  "cases": 156,
+  "worst_max_cm": 1.6133715845767818,
+  "records": [
+    {
+      "suite": "benchmark",
+      "index": 0,
+      "max_cm": 1.2005955619143378,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 1,
+      "max_cm": 1.2444745068103165,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 2,
+      "max_cm": 1.2184907996019225,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 3,
+      "max_cm": 1.2571706469743846,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 4,
+      "max_cm": 1.2678040110074427,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 5,
+      "max_cm": 1.2850428580447337,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 6,
+      "max_cm": 1.2898788162082468,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 7,
+      "max_cm": 1.2695125995477439,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 8,
+      "max_cm": 1.3591635720403845,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 9,
+      "max_cm": 1.3584801441823844,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 10,
+      "max_cm": 1.408335726202709,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 11,
+      "max_cm": 1.2942283517542945,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 12,
+      "max_cm": 1.157387491087555,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 13,
+      "max_cm": 1.2776908578213737,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 14,
+      "max_cm": 1.1099753331056061,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 15,
+      "max_cm": 1.241741291611411,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 16,
+      "max_cm": 1.248055048015976,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 17,
+      "max_cm": 1.3266271615745242,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 18,
+      "max_cm": 1.2079036238096985,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 19,
+      "max_cm": 1.2704286966364957,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 20,
+      "max_cm": 1.403186324639951,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 21,
+      "max_cm": 1.4809401373028928,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 22,
+      "max_cm": 1.4255404042798263,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 23,
+      "max_cm": 1.4059411750377553,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 24,
+      "max_cm": 1.0920277310325228,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 25,
+      "max_cm": 0.8290543693573882,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 26,
+      "max_cm": 1.0874701011132015,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 27,
+      "max_cm": 0.8547703035458206,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 28,
+      "max_cm": 1.228735126171824,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 29,
+      "max_cm": 0.9354565723307227,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 30,
+      "max_cm": 1.2580786348225537,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 31,
+      "max_cm": 0.913618099122443,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 32,
+      "max_cm": 1.4370259112020607,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 33,
+      "max_cm": 1.1583753302047353,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 34,
+      "max_cm": 1.6133715845767818,
+      "pass_15mm": false
+    },
+    {
+      "suite": "benchmark",
+      "index": 35,
+      "max_cm": 1.0254289168840627,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 36,
+      "max_cm": 1.1541637424036204,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 37,
+      "max_cm": 1.2452129357975361,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 38,
+      "max_cm": 1.0737265268410894,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 39,
+      "max_cm": 1.190128469528873,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 40,
+      "max_cm": 1.2104020766302994,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 41,
+      "max_cm": 1.309813801235074,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 42,
+      "max_cm": 1.1884015044872738,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 43,
+      "max_cm": 1.245842432232005,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 44,
+      "max_cm": 1.218791905607382,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 45,
+      "max_cm": 1.383559865365031,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 46,
+      "max_cm": 1.3550665909605273,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 47,
+      "max_cm": 1.3802974584506724,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 48,
+      "max_cm": 0.8811608772959695,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 49,
+      "max_cm": 0.9777784114894293,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 50,
+      "max_cm": 0.8206468728139056,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 51,
+      "max_cm": 0.9583819393049937,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 52,
+      "max_cm": 0.9385470183319955,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 53,
+      "max_cm": 1.0071645280964898,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 54,
+      "max_cm": 0.9376875357261881,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 55,
+      "max_cm": 0.9634424243997418,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 56,
+      "max_cm": 0.9917053496287046,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 57,
+      "max_cm": 1.0706794277437868,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 58,
+      "max_cm": 1.1655507789248516,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 59,
+      "max_cm": 1.076321855071475,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 60,
+      "max_cm": 0.8811608772959695,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 61,
+      "max_cm": 0.9777784114894293,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 62,
+      "max_cm": 0.859605150032653,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 63,
+      "max_cm": 0.9583819393049937,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 64,
+      "max_cm": 0.9385470183319955,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 65,
+      "max_cm": 1.0071645280964898,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 66,
+      "max_cm": 0.9376875357261881,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 67,
+      "max_cm": 0.9634424243997418,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 68,
+      "max_cm": 0.995342207461522,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 69,
+      "max_cm": 1.0706794277437868,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 70,
+      "max_cm": 1.1655507789248516,
+      "pass_15mm": true
+    },
+    {
+      "suite": "benchmark",
+      "index": 71,
+      "max_cm": 1.076321855071475,
+      "pass_15mm": true
+    },
+    {
+      "suite": "previous_holdout",
+      "index": 0,
+      "max_cm": 1.3197222184816937,
+      "pass_15mm": true
+    },
+    {
+      "suite": "previous_holdout",
+      "index": 1,
+      "max_cm": 1.0257575132630516,
+      "pass_15mm": true
+    },
+    {
+      "suite": "previous_holdout",
+      "index": 2,
+      "max_cm": 0.8961998785352565,
+      "pass_15mm": true
+    },
+    {
+      "suite": "previous_holdout",
+      "index": 3,
+      "max_cm": 1.2737020124443281,
+      "pass_15mm": true
+    },
+    {
+      "suite": "previous_holdout",
+      "index": 4,
+      "max_cm": 1.213532338540731,
+      "pass_15mm": true
+    },
+    {
+      "suite": "previous_holdout",
+      "index": 5,
+      "max_cm": 0.9324386299177746,
+      "pass_15mm": true
+    },
+    {
+      "suite": "previous_holdout",
+      "index": 6,
+      "max_cm": 1.2777742505025735,
+      "pass_15mm": true
+    },
+    {
+      "suite": "previous_holdout",
+      "index": 7,
+      "max_cm": 0.9861351465374556,
+      "pass_15mm": true
+    },
+    {
+      "suite": "previous_holdout",
+      "index": 8,
+      "max_cm": 0.881017163361536,
+      "pass_15mm": true
+    },
+    {
+      "suite": "previous_holdout",
+      "index": 9,
+      "max_cm": 1.2163772296133402,
+      "pass_15mm": true
+    },
+    {
+      "suite": "previous_holdout",
+      "index": 10,
+      "max_cm": 1.1927050379286364,
+      "pass_15mm": true
+    },
+    {
+      "suite": "previous_holdout",
+      "index": 11,
+      "max_cm": 0.9109833198212249,
+      "pass_15mm": true
+    },
+    {
+      "suite": "previous_holdout",
+      "index": 12,
+      "max_cm": 1.3945494898251334,
+      "pass_15mm": true
+    },
+    {
+      "suite": "previous_holdout",
+      "index": 13,
+      "max_cm": 1.077972903764685,
+      "pass_15mm": true
+    },
+    {
+      "suite": "previous_holdout",
+      "index": 14,
+      "max_cm": 0.9594927937615285,
+      "pass_15mm": true
+    },
+    {
+      "suite": "previous_holdout",
+      "index": 15,
+      "max_cm": 1.3255240453282742,
+      "pass_15mm": true
+    },
+    {
+      "suite": "previous_holdout",
+      "index": 16,
+      "max_cm": 1.2410115398372568,
+      "pass_15mm": true
+    },
+    {
+      "suite": "previous_holdout",
+      "index": 17,
+      "max_cm": 0.9629705868116524,
+      "pass_15mm": true
+    },
+    {
+      "suite": "previous_holdout",
+      "index": 18,
+      "max_cm": 1.3670475992626872,
+      "pass_15mm": true
+    },
+    {
+      "suite": "previous_holdout",
+      "index": 19,
+      "max_cm": 1.0476385361891347,
+      "pass_15mm": true
+    },
+    {
+      "suite": "previous_holdout",
+      "index": 20,
+      "max_cm": 0.9423862019232642,
+      "pass_15mm": true
+    },
+    {
+      "suite": "previous_holdout",
+      "index": 21,
+      "max_cm": 1.257632036585651,
+      "pass_15mm": true
+    },
+    {
+      "suite": "previous_holdout",
+      "index": 22,
+      "max_cm": 1.2130076330777888,
+      "pass_15mm": true
+    },
+    {
+      "suite": "previous_holdout",
+      "index": 23,
+      "max_cm": 0.9253669761769603,
+      "pass_15mm": true
+    },
+    {
+      "suite": "fresh_holdout",
+      "index": 0,
+      "max_cm": 1.242695029086433,
+      "pass_15mm": true
+    },
+    {
+      "suite": "fresh_holdout",
+      "index": 1,
+      "max_cm": 1.194795991696889,
+      "pass_15mm": true
+    },
+    {
+      "suite": "fresh_holdout",
+      "index": 2,
+      "max_cm": 1.112373913698469,
+      "pass_15mm": true
+    },
+    {
+      "suite": "fresh_holdout",
+      "index": 3,
+      "max_cm": 1.3275877182429972,
+      "pass_15mm": true
+    },
+    {
+      "suite": "fresh_holdout",
+      "index": 4,
+      "max_cm": 1.4084741726540582,
+      "pass_15mm": true
+    },
+    {
+      "suite": "fresh_holdout",
+      "index": 5,
+      "max_cm": 1.1600486341587506,
+      "pass_15mm": true
+    },
+    {
+      "suite": "fresh_holdout",
+      "index": 6,
+      "max_cm": 1.1918122522472656,
+      "pass_15mm": true
+    },
+    {
+      "suite": "fresh_holdout",
+      "index": 7,
+      "max_cm": 1.1283366259178527,
+      "pass_15mm": true
+    },
+    {
+      "suite": "fresh_holdout",
+      "index": 8,
+      "max_cm": 1.1019889145385784,
+      "pass_15mm": true
+    },
+    {
+      "suite": "fresh_holdout",
+      "index": 9,
+      "max_cm": 1.2698237837613684,
+      "pass_15mm": true
+    },
+    {
+      "suite": "fresh_holdout",
+      "index": 10,
+      "max_cm": 1.359585441613835,
+      "pass_15mm": true
+    },
+    {
+      "suite": "fresh_holdout",
+      "index": 11,
+      "max_cm": 1.142688926722004,
+      "pass_15mm": true
+    },
+    {
+      "suite": "fresh_holdout",
+      "index": 12,
+      "max_cm": 1.3168305646223015,
+      "pass_15mm": true
+    },
+    {
+      "suite": "fresh_holdout",
+      "index": 13,
+      "max_cm": 1.2328904915749612,
+      "pass_15mm": true
+    },
+    {
+      "suite": "fresh_holdout",
+      "index": 14,
+      "max_cm": 1.1713470532308945,
+      "pass_15mm": true
+    },
+    {
+      "suite": "fresh_holdout",
+      "index": 15,
+      "max_cm": 1.4045661011849344,
+      "pass_15mm": true
+    },
+    {
+      "suite": "fresh_holdout",
+      "index": 16,
+      "max_cm": 1.4599299844719875,
+      "pass_15mm": true
+    },
+    {
+      "suite": "fresh_holdout",
+      "index": 17,
+      "max_cm": 1.2162630722725767,
+      "pass_15mm": true
+    },
+    {
+      "suite": "fresh_holdout",
+      "index": 18,
+      "max_cm": 1.2399205447673844,
+      "pass_15mm": true
+    },
+    {
+      "suite": "fresh_holdout",
+      "index": 19,
+      "max_cm": 1.1818880160758192,
+      "pass_15mm": true
+    },
+    {
+      "suite": "fresh_holdout",
+      "index": 20,
+      "max_cm": 1.158357601236949,
+      "pass_15mm": true
+    },
+    {
+      "suite": "fresh_holdout",
+      "index": 21,
+      "max_cm": 1.3128131154263765,
+      "pass_15mm": true
+    },
+    {
+      "suite": "fresh_holdout",
+      "index": 22,
+      "max_cm": 1.3998135205963846,
+      "pass_15mm": true
+    },
+    {
+      "suite": "fresh_holdout",
+      "index": 23,
+      "max_cm": 1.2214699688095259,
+      "pass_15mm": true
+    },
+    {
+      "suite": "fresh_holdout",
+      "index": 24,
+      "max_cm": 1.4718046923820216,
+      "pass_15mm": true
+    },
+    {
+      "suite": "fresh_holdout",
+      "index": 25,
+      "max_cm": 1.2862640363841393,
+      "pass_15mm": true
+    },
+    {
+      "suite": "fresh_holdout",
+      "index": 26,
+      "max_cm": 1.262343417065851,
+      "pass_15mm": true
+    },
+    {
+      "suite": "fresh_holdout",
+      "index": 27,
+      "max_cm": 1.5484618347465153,
+      "pass_15mm": false
+    },
+    {
+      "suite": "fresh_holdout",
+      "index": 28,
+      "max_cm": 1.591432574823138,
+      "pass_15mm": false
+    },
+    {
+      "suite": "fresh_holdout",
+      "index": 29,
+      "max_cm": 1.3326602483581096,
+      "pass_15mm": true
+    },
+    {
+      "suite": "fresh_holdout",
+      "index": 30,
+      "max_cm": 1.4873209673728234,
+      "pass_15mm": true
+    },
+    {
+      "suite": "fresh_holdout",
+      "index": 31,
+      "max_cm": 1.4287950844108959,
+      "pass_15mm": true
+    },
+    {
+      "suite": "fresh_holdout",
+      "index": 32,
+      "max_cm": 1.278089003959115,
+      "pass_15mm": true
+    },
+    {
+      "suite": "fresh_holdout",
+      "index": 33,
+      "max_cm": 1.4908637269884606,
+      "pass_15mm": true
+    },
+    {
+      "suite": "fresh_holdout",
+      "index": 34,
+      "max_cm": 1.443078139762768,
+      "pass_15mm": true
+    },
+    {
+      "suite": "fresh_holdout",
+      "index": 35,
+      "max_cm": 1.355257597618093,
+      "pass_15mm": true
+    },
+    {
+      "suite": "final_holdout",
+      "index": 0,
+      "max_cm": 1.2580563614534332,
+      "pass_15mm": true
+    },
+    {
+      "suite": "final_holdout",
+      "index": 1,
+      "max_cm": 1.129363194292502,
+      "pass_15mm": true
+    },
+    {
+      "suite": "final_holdout",
+      "index": 2,
+      "max_cm": 1.2824529422926179,
+      "pass_15mm": true
+    },
+    {
+      "suite": "final_holdout",
+      "index": 3,
+      "max_cm": 1.1022931131528944,
+      "pass_15mm": true
+    },
+    {
+      "suite": "final_holdout",
+      "index": 4,
+      "max_cm": 1.2278475167708307,
+      "pass_15mm": true
+    },
+    {
+      "suite": "final_holdout",
+      "index": 5,
+      "max_cm": 1.0819860305869726,
+      "pass_15mm": true
+    },
+    {
+      "suite": "final_holdout",
+      "index": 6,
+      "max_cm": 1.2635383106582438,
+      "pass_15mm": true
+    },
+    {
+      "suite": "final_holdout",
+      "index": 7,
+      "max_cm": 1.082418769829255,
+      "pass_15mm": true
+    },
+    {
+      "suite": "final_holdout",
+      "index": 8,
+      "max_cm": 1.4383148569261814,
+      "pass_15mm": true
+    },
+    {
+      "suite": "final_holdout",
+      "index": 9,
+      "max_cm": 1.1704327871430953,
+      "pass_15mm": true
+    },
+    {
+      "suite": "final_holdout",
+      "index": 10,
+      "max_cm": 1.4860298842888202,
+      "pass_15mm": true
+    },
+    {
+      "suite": "final_holdout",
+      "index": 11,
+      "max_cm": 1.1809707043837765,
+      "pass_15mm": true
+    },
+    {
+      "suite": "final_holdout",
+      "index": 12,
+      "max_cm": 1.3825983702280502,
+      "pass_15mm": true
+    },
+    {
+      "suite": "final_holdout",
+      "index": 13,
+      "max_cm": 1.100153652680949,
+      "pass_15mm": true
+    },
+    {
+      "suite": "final_holdout",
+      "index": 14,
+      "max_cm": 1.4636445977672388,
+      "pass_15mm": true
+    },
+    {
+      "suite": "final_holdout",
+      "index": 15,
+      "max_cm": 1.0926759561732802,
+      "pass_15mm": true
+    },
+    {
+      "suite": "final_holdout",
+      "index": 16,
+      "max_cm": 1.5456760153218059,
+      "pass_15mm": false
+    },
+    {
+      "suite": "final_holdout",
+      "index": 17,
+      "max_cm": 1.2173141291233762,
+      "pass_15mm": true
+    },
+    {
+      "suite": "final_holdout",
+      "index": 18,
+      "max_cm": 1.5659299234749693,
+      "pass_15mm": false
+    },
+    {
+      "suite": "final_holdout",
+      "index": 19,
+      "max_cm": 1.2616594510370105,
+      "pass_15mm": true
+    },
+    {
+      "suite": "final_holdout",
+      "index": 20,
+      "max_cm": 1.4931351801325803,
+      "pass_15mm": true
+    },
+    {
+      "suite": "final_holdout",
+      "index": 21,
+      "max_cm": 1.1542724801141582,
+      "pass_15mm": true
+    },
+    {
+      "suite": "final_holdout",
+      "index": 22,
+      "max_cm": 1.539567780261162,
+      "pass_15mm": false
+    },
+    {
+      "suite": "final_holdout",
+      "index": 23,
+      "max_cm": 1.208861583148255,
+      "pass_15mm": true
+    }
+  ]
+}

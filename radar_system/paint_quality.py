@@ -1,8 +1,9 @@
-"""按正式喷线区间放行；偏差仅供显示和诊断，不再等待收稳或偏差达标才喷。"""
+"""正式喷线资格；低速草地直线按独立喷头几何检查 15 mm 精度要求。"""
 from robot_core.standstill import moving
 import math
 import os
 import route_plan as rp
+import paint_precision
 
 # Gen5 没有固定解（浮点、单点、平板中转断流）时按 IMU + 轮速推算接着走、接着喷；满 RTK_LOST_PAINT_STOP_S 先停喷，
 # 再走 RTK_LOST_STOP_DELAY_S 才停车（融合 rtk_hold_s = 两者之和，line_node 设），恢复后自动继续
@@ -91,11 +92,19 @@ def imu_straight(tracker):
 
 def status(m,record,phase,section,tracker):
     limit=offset_limit()
+    strict=paint_precision.active(m,section,tracker)
+    if strict and limit is not None:limit=min(limit,paint_precision.MAX_OFFSET_M)
     out=dict(paint_phase=bool(phase),painting=False,paint_blocked=None,
              nozzle_deviation_m=None,paint_offset_limit_m=limit)
+    stop_limit=None if limit is None else min(limit,paint_precision.STOP_OFFSET_M)
+    if strict:out.update(precision_mode=True,
+                         paint_start_limit_m=None if stop_limit is None else min(stop_limit,paint_precision.START_OFFSET_M),
+                         paint_stop_limit_m=stop_limit)
     if not phase:out['paint_blocked']='not_painting';return out
-    # 起点必须喷：起步收稳、速度达标和偏差大小不作为额外放行门槛。
-    # 任务暂停、真实定位失效、实际静止等原有运行状态仍独立处理。
+    if strict and limit is None:
+        out['paint_blocked']='paint_configuration_invalid';return out
+    # 低速精度模式检查收稳与几何偏差；其他模式保留既有喷线规则。
+    # 任务暂停、真实定位失效、实际静止等运行状态仍独立处理。
     pose=m.pose
     arc=continuous_arc(m,section,tracker)
     # 2026-10-06 用户：直线 IMU 为主，「只要和 IMU 推算对不上，直线上也听 IMU 的」：卫星跳了、暂时不是固定解时
@@ -104,6 +113,11 @@ def status(m,record,phase,section,tracker):
     if limit is None:out['paint_warning']='paint_configuration_invalid'
     if pose is None or not pose.usable_for_control:
         out['paint_blocked']='paint_position_untrusted';return out
+    if strict and not getattr(pose,'rtk_trusted',False):
+        out['paint_blocked']='paint_precision_untrusted';return out
+    guide=getattr(tracker,'_straight_guide',None)
+    if strict and guide is not None and guide.locked and not guide.rtk_accepted:
+        out['paint_blocked']='paint_precision_untrusted';return out
     if not getattr(pose,'rtk_trusted',False) and getattr(pose,'hold_age_s',0.)>=RTK_LOST_PAINT_STOP_S-1e-9:
         # 固定解断满 8 s：先停喷，车再走 1 s 才停（见 RTK_LOST_PAINT_STOP_S）
         out['paint_blocked']='paint_position_untrusted';return out
@@ -117,7 +131,7 @@ def status(m,record,phase,section,tracker):
     f,l=nozzle(m,record)
     if not all(type(v) in (int,float) and math.isfinite(v) for v in (f,l)):
         out['paint_blocked']='paint_nozzle_invalid';return out
-    if guided is not None:
+    if guided is not None and not strict:
         out['nozzle_deviation_m']=abs(guided)
         out['paint_control_source']='imu_line_hold' if holding else 'imu_line'
         if limit is not None and abs(guided)>limit:out['paint_warning']='paint_off_line'
@@ -126,7 +140,17 @@ def status(m,record,phase,section,tracker):
     point=rp.nozzle_at(pose.x,pose.y,pose.yaw,f,l)
     try:
         spec=m._route_local() if not record.get('field_plan') else None
-        if spec is not None and spec.kind=='circle':
+        if strict:
+            # Independent nozzle geometry; an optimistic control estimate must
+            # never replace the measured cross-track error used for qualification.
+            x,y,h=section.car_pose(min(section.path.length,max(0.,tracker.st.s)))
+            reference=rp.nozzle_at(x,y,h,f,l)
+            signed=-(point[0]-reference[0])*math.sin(h)+(point[1]-reference[1])*math.cos(h)
+            deviation=abs(signed)
+            out.update(nozzle_signed_deviation_m=signed,
+                       control_nozzle_deviation_m=None if guided is None else abs(guided),
+                       paint_control_source='rtk_nozzle_geometry')
+        elif spec is not None and spec.kind=='circle':
             deviation=abs(math.dist(point,spec.center)-spec.radius)
         else:
             # 当前实际执行的刷线段：按车身参考路径变换到喷头轨迹，禁止错配另一条交叉线。
@@ -142,6 +166,8 @@ def status(m,record,phase,section,tracker):
         out['paint_blocked']='paint_reference_unavailable';return out
     if not math.isfinite(deviation):out['paint_blocked']='paint_reference_invalid';return out
     out['nozzle_deviation_m']=deviation
+    if strict and deviation>=stop_limit:
+        out['paint_blocked']='paint_precision_exceeded';return out
     if arc:out['paint_control_source']='imu_hold' if holding else 'rtk_imu'
     if limit is not None and deviation>limit:out['paint_warning']='paint_off_line'
     out['painting']=True

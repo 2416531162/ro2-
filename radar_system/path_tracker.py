@@ -36,6 +36,7 @@ from line_tracker import lateral_integral_allowed, position_observation_allowed
 from heading_control import HeadingControl, HeadingControlConfig
 from heading_hold import HoldConfig
 from paint_start import PaintStartGuard
+import paint_precision
 from line_cascade import (CascadeConfig, ImuFirstConfig, ImuFirstGuide, PullBoost, imu_first_target, learn_heading_offset,
                           lateral_heading_step, paint_pull, runup_weight)
 
@@ -306,6 +307,7 @@ class PathConfig:
     approach_zone_m: float = 3.0
     # 长直线 IMU 为主、卫星辅助（line_cascade.ImuFirstConfig，2026-10-06 用户）；None 用原 A/B 控制律
     straight_imu_first: ImuFirstConfig | None = None
+    grass_lateral_enabled: bool = True
     # 画圆（整圆那一段）也 IMU 为主（2026-10-06 晚用户：起点终点交接错开 1–2 cm，选「画圆也 IMU 为主」）：原路径跟踪的
     # 弯道控制律不变，只换它看到的位姿——车头 = IMU 偏航 + 接入时学的换算（同 straight_imu_first），横偏 = IMU 推算
     # + 卫星慢慢拟合（可靠才用、突然跳开不跟），沿圆路程按走过的路推、往卫星挪（距离常数 arc_s_tau_m、每米最多 arc_s_rate_m，
@@ -364,7 +366,7 @@ class PathConfig:
             raise ValueError('圆弧固定速度必须为空或有效正速度')
         if not math.isfinite(self.run_out_decel_max_mps2) or not 0 < self.run_out_decel_max_mps2 <= 1.0:
             raise ValueError('run_out_decel_max_mps2 必须在 (0,1] 内')
-        for name in ('straight_imu_enabled', 'straight_target_feedforward', 'straight_direct_rate_damping',
+        for name in ('straight_imu_enabled', 'straight_target_feedforward', 'straight_direct_rate_damping', 'grass_lateral_enabled',
                      'arc_rtk_radial_enabled', 'arc_partial_imu_first'):
             if type(getattr(self, name)) is not bool:
                 raise ValueError(name + ' 必须是布尔值')
@@ -610,7 +612,7 @@ class PathTracker:
         self._entry_hold_from = 0.
         self._started_at = 0.0          # 这次起步 / 继续时在路线上的路程（画线时往回拉的线头段从这里也重新算）
         self._entry_ramp_released = False
-        self._entry_speed_guard = PaintStartGuard()
+        self._entry_speed_guard = self._new_paint_start_guard()
         self._entry_reference_piece = None
         self._paint_speed_key = None
         self._paint_speed_latched = None
@@ -635,17 +637,17 @@ class PathTracker:
         self._imu_history = deque(maxlen=64)
         self._straight_imu_rejected = False
         self._straight_nozzle = (config.straight_nozzle_x_m, 0.0)
-        self._straight_core = HeadingControl(HeadingControlConfig(
-            kp=config.straight_kp, ki=config.straight_ki, kd=config.straight_kd,
-            delay_s=config.delay_s if config.straight_prediction_delay_s is None else config.straight_prediction_delay_s,
-            drift_tc=config.straight_drift_tc,
-            max_wz=0.35, i_max=0.15, direct_rate_damping=config.straight_direct_rate_damping))
+        self._straight_core = HeadingControl(self._straight_core_config())
         first = config.straight_imu_first
-        self._straight_guide = None if first is None else ImuFirstGuide(first)
+        # 本轮草地策略只在巡航不超过 0.5 m/s 的长直线上启用。
+        # 依据任务巡航值固定选择，助跑加减速不会来回切观察器；圆弧仍用原配置。
+        straight_first = (None if first is None else replace(first,
+                          grass_lateral=config.grass_lateral_enabled and config.cruise_mps <= .5+1e-9))
+        self._straight_guide = None if first is None else ImuFirstGuide(straight_first)
         self._pull_boost = None if first is None else PullBoost(first)       # 画线往回拉加强（ImuFirstConfig.boost_*）
         self._attitude_in = None        # 任务层给的最近一帧横滚 (时刻, rad，扣掉水平零点、按行进方向)，侧滑补偿用
         self._roll_lp = None            # 低通后的横滚 (时刻, rad)
-        self._arc_guide = None if first is None else ImuFirstGuide(first)     # 画圆 IMU 为主（PathConfig.arc_imu_first）
+        self._arc_guide = None if first is None else ImuFirstGuide(replace(first,grass_lateral=False))
         self._baseline_bad_t = None     # 最近一次双天线基线不在 straight_imu_first 基线范围内的测量时刻
         self._baseline_frame_t = None   # 最近数过的测向帧时刻（任务层每拍都传最近一帧，同一帧只数一次）
         self._baseline_bad_n = 0        # 连续出界的帧数
@@ -674,7 +676,11 @@ class PathTracker:
         # shift：这拍用副天线时，报给 app 的位置要挪多少（世界系 x, y，m），shift_t 是哪一拍算的
         self._antenna = dict(offset=None, n=0, delta=None, t=None, choice=None, shift=None, shift_t=None)
         if self._straight_guide is not None:
+            self._straight_guide.cfg=replace(self._straight_guide.cfg,
+                                             grass_lateral=self.cfg.grass_lateral_enabled and self.cfg.cruise_mps <= .5+1e-9)
             self._straight_guide.reset()
+        # 每条直线固定选择；速度修改在下一次直线重置生效，不在喷线中切换内环。
+        self._straight_core.cfg=self._straight_core_config()
         if getattr(self, '_pull_boost', None) is not None:
             self._pull_boost.reset()
         self._straight_aligned = False
@@ -691,6 +697,18 @@ class PathTracker:
         self._straight_rate_pos = self._straight_rate_model_slow = 0.0
         self._straight_status = {'active': False, 'weight': 0.0, 'eligible': False}
         self._straight_core.reset()
+
+    def _new_paint_start_guard(self):
+        return PaintStartGuard(precision=paint_precision.enabled(self.cfg,self.geo.differential))
+
+    def _straight_core_config(self):
+        c=self.cfg
+        grass=paint_precision.enabled(c,self.geo.differential) and c.straight_imu_first is not None
+        return HeadingControlConfig(kp=2.119 if grass else c.straight_kp,
+            ki=0. if grass else c.straight_ki,kd=1.130 if grass else c.straight_kd,
+            delay_s=.309 if grass else c.delay_s if c.straight_prediction_delay_s is None else c.straight_prediction_delay_s,
+            drift_tc=c.straight_drift_tc,max_wz=.35,i_max=.15,
+            direct_rate_damping=c.straight_direct_rate_damping or grass)
 
     def _reset_arc(self):
         self._arc_weight = 0.0
@@ -1016,10 +1034,10 @@ class PathTracker:
         self._launch_ramp = False
         self._entry_hold_from=max(self.paint_from_m,self._hint)
         self._entry_ramp_released=False
-        self._entry_speed_guard=PaintStartGuard()
+        self._entry_speed_guard=self._new_paint_start_guard()
         self._entry_reference_piece=None
         if self.paint_start_guard is not None and not (resume and self.paint_start_guard.started):
-            self.paint_start_guard=PaintStartGuard()
+            self.paint_start_guard=self._new_paint_start_guard()
         self._paint_start_beta_history.clear()
         self._accel_prev = 0.0
         self._rolling_entry = False
@@ -1113,7 +1131,7 @@ class PathTracker:
         self._entry_speed_active=True
         self._entry_hold_from=a
         self._entry_ramp_released=False
-        self._entry_speed_guard=PaintStartGuard()
+        self._entry_speed_guard=self._new_paint_start_guard()
 
     def set_cruise(self, speed):
         if not math.isfinite(speed) or not .02<=speed<=MAX_SECTION_SPEED:
@@ -1532,6 +1550,12 @@ class PathTracker:
             nx, ny = self._straight_nozzle
             h = rel + guide.beta
             measured = base_lat + (nx-cfg.track_x_m)*math.sin(h) + ny*(math.cos(h)-1.0)
+            if first.grass_lateral:
+                # Close the position loop on the fused nozzle geometry itself,
+                # not on the slow beta-corrected substitute used by the old fit.
+                _,raw_lat,_,_=self.locate(pose.x,pose.y,pose.yaw,st.s)
+                raw_heading=wrap(pose.yaw-piece.yaw)
+                measured=raw_lat+(nx-cfg.track_x_m)*math.sin(raw_heading)+ny*(math.cos(raw_heading)-1.)
             # 卫星纠偏：拟合按用户定的可信规则（固定解 + 基线 0.30–0.50），观测器老办法仍按 0.40–0.42
             # 助跑冻结的是横偏积分，不是不许用可信位置拟合；否则起步锁住的角度误差一直推到线头。
             # 起喷前积分按设计冻结，正常融合校正也可冻结积分；二者都不应阻断可信位置拟合。
@@ -1620,7 +1644,8 @@ class PathTracker:
             CascadeConfig.align_deg, self._straight_aligned, pull=pull,entry_weight=entry_weight)
         self._straight_target_rate = wrap(self._straight_target-previous_target)/dt
         # β 相当于原 A/B 积分给的车头偏置（−β）：换成路径积分单位，交回原跟踪（进弯）时接着用
-        self._straight_integral = -guide.beta
+        self._straight_integral = (-first.grass_pi_k_i*guide._grass_pi_integral
+                                   if first.grass_lateral else -guide.beta)
         st.integral = max(-cfg.integral_limit/cfg.ki_per_m2, min(cfg.integral_limit/cfg.ki_per_m2,
                           -self._straight_integral*self.k_theta/cfg.ki_per_m2))
         sample_t, sample_yaw, _ = self._imu
@@ -1629,18 +1654,20 @@ class PathTracker:
         error = wrap(sample_yaw-self._straight_target + max(0.0, self._imu_now-sample_t)*target_rate)
         moving = (speed >= HoldConfig.moving_ratio*cfg.cruise_mps
                   and pose.speed >= HoldConfig.moving_ratio*speed)
+        applied_rate=target_rate if not first.grass_lateral or cfg.straight_target_feedforward else 0.
         inner_w = self._straight_core.step(self._imu_now, error, gyro, sample_t=sample_t,
-                                          moving=moving, target_rate=target_rate, dt=dt, record=False)
+                                          moving=moving, target_rate=applied_rate, dt=dt, record=False)
         output = legacy_w + max(self._straight_weight,self._launch_weight) * (inner_w-legacy_w)
         output = max(-self.kappa_max*speed, min(self.kappa_max*speed, output))
         if self._straight_weight >= 1.0:
             self._launch_weight = 0.0
-        self._straight_guided = (guide.e, rel + guide.beta)
+        self._straight_guided = (guide.e,rel+(first.grass_pi_k_i*guide._grass_pi_integral if first.grass_lateral else guide.beta))
         self._straight_status = dict(active=True, weight=self._straight_weight, eligible=eligible,
-            control_law='imu_first', launch_weight=self._launch_weight, target_deg=math.degrees(self._straight_target),
+            control_law='position_pi_imu_pd' if first.grass_lateral else 'imu_first', launch_weight=self._launch_weight, target_deg=math.degrees(self._straight_target),
             bias_deg=math.degrees(self._straight_bias), error_deg=math.degrees(error),
-            pull_k_e=pull[0]+entry_weight*(first.runup_k_e-pull[0]),
-            pull_max_bias_deg=pull[1]+entry_weight*(first.runup_max_bias_deg-pull[1]),
+            pull_k_e=first.grass_pi_k_e if first.grass_lateral else pull[0]+entry_weight*(first.runup_k_e-pull[0]),
+            pull_max_bias_deg=first.grass_pi_max_deg if first.grass_lateral else pull[1]+entry_weight*(first.runup_max_bias_deg-pull[1]),
+            applied_target_rate_deg_s=math.degrees(applied_rate),
             entry_blend_weight=round(entry_weight,4), pull_boost=boost,
             target_rate_deg_s=math.degrees(self._straight_target_rate), aligning=aligning, baseline_ok=baseline_ok,
             outer_e=guide.e, outer_e_rtk=measured, inner_wz=inner_w, legacy_wz=legacy_w, final_wz=output,
@@ -2567,7 +2594,7 @@ class SectionTracker:
                 # 倒车按行进方向换算控制点；差速车传入增益为 1，阿克曼车沿用其倒车补偿。
                 cfg = replace(cfg, cruise_mps=min(cfg.cruise_mps, reverse_mps), track_x_m=-cfg.track_x_m,
                               steer_gain=reverse_gain, straight_imu_enabled=reverse_straight,
-                              arc_imu_first=False, arc_speed_mps=None)
+                              arc_imu_first=False, arc_speed_mps=None,grass_lateral_enabled=False)
                 if reverse_straight:
                     # 10-08 三趟倒车中段的周期响应约放大 3 倍、滞后约 0.2 s。
                     # 共享内核但使用较缓的倒车参数，直接按实际角速度阻尼，覆盖响应失配。
@@ -2581,6 +2608,7 @@ class SectionTracker:
                     or any(not p.straight for p in sec.path.pieces) or sec.continuous_after
                     or i>0 and self.sections[i-1].continuous_after):
                 cfg=replace(cfg,accel_mps2=min(cfg.accel_mps2,.25),accel_jerk_mps3=.5)
+            if getattr(sec,'field_role',None)=='transit':cfg=replace(cfg,grass_lateral_enabled=False)
             tracker=PathTracker(sec.path, cfg, self.geo)
             tracker.reverse_straight=reverse_straight
             if reverse_straight:tracker.set_nozzle(cfg.track_x_m,0.)
@@ -2635,7 +2663,7 @@ class SectionTracker:
                 if (tracker.cfg.straight_imu_enabled and tracker.cfg.straight_imu_first is not None
                         and tracker.cfg.straight_imu_first.rtk_fit
                         and tracker.path._piece(mark).straight):
-                    tracker.paint_start_guard=PaintStartGuard()
+                    tracker.paint_start_guard=tracker._new_paint_start_guard()
                     # 渐入 IMU 与允许开喷分开判断。先在助跑内平滑交接，开喷仍需上面的 2 cm / 1° 检查。
                     tracker.cfg=replace(tracker.cfg,
                         runup_release_e_m=max(tracker.cfg.runup_release_e_m,.03),

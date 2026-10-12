@@ -1,0 +1,818 @@
+{
+  "scope": "Same recorded inputs and quality decisions, at original speeds; new geometric measurement and PI target are evaluated. Old physical paths are unchanged. Not a prediction of a 0.5 m/s field run.",
+  "summary": {
+    "jobs": 27,
+    "segments": 29,
+    "comparable_segments": 26,
+    "recorded_wrong_side_seconds": 43.37945000000224,
+    "replay_wrong_side_seconds": 1.5624700000007579,
+    "before_median_p95_gap_cm": 0.6202343967379293,
+    "after_median_p95_gap_cm": 0.12574612044026848
+  },
+  "records": [
+    {
+      "job": "20261007_225436_路线作业_09105b06",
+      "segment": "seg01",
+      "status": "no comparable straight input"
+    },
+    {
+      "job": "20261007_235618_路线作业_18d5c42c",
+      "segment": "seg01",
+      "status": "replayed",
+      "samples": 8119,
+      "before": {
+        "samples": 6409,
+        "distance_m": 63.96951,
+        "p95_estimation_gap_cm": 0.48915559896134936,
+        "rms_estimation_gap_cm": 0.25396723100442814,
+        "wrong_side_seconds": 2.5384800000019823,
+        "trend_alignment_lag_m": 1.175,
+        "max_convergence_lead_cm": 0.683345747793178
+      },
+      "after": {
+        "samples": 6409,
+        "distance_m": 63.96951,
+        "p95_estimation_gap_cm": 0.15342890623556232,
+        "rms_estimation_gap_cm": 0.08481565993351721,
+        "wrong_side_seconds": 0,
+        "trend_alignment_lag_m": 0.0,
+        "max_convergence_lead_cm": 0.0
+      },
+      "original_fused_nozzle_max_cm": 1.5700281286694207,
+      "original_record_within_15mm": false,
+      "original_speed_range_mps": [
+        0.08293,
+        0.92201
+      ]
+    },
+    {
+      "job": "20261007_232818_路线作业_1a2af9db",
+      "segment": "seg01",
+      "status": "replayed",
+      "samples": 3105,
+      "before": {
+        "samples": 2277,
+        "distance_m": 22.869190000000003,
+        "p95_estimation_gap_cm": 0.7722387956322316,
+        "rms_estimation_gap_cm": 0.4012835528560002,
+        "wrong_side_seconds": 3.300299999999879,
+        "trend_alignment_lag_m": 0.625,
+        "max_convergence_lead_cm": 0.8558107565436932
+      },
+      "after": {
+        "samples": 2277,
+        "distance_m": 22.869190000000003,
+        "p95_estimation_gap_cm": 0.12759040475360145,
+        "rms_estimation_gap_cm": 0.060640935954032506,
+        "wrong_side_seconds": 0,
+        "trend_alignment_lag_m": 0.025,
+        "max_convergence_lead_cm": 0.0
+      },
+      "original_fused_nozzle_max_cm": 2.3452626342305827,
+      "original_record_within_15mm": false,
+      "original_speed_range_mps": [
+        -0.74297,
+        0.74249
+      ]
+    },
+    {
+      "job": "20261007_235309_路线作业_1dfab500",
+      "segment": "seg01",
+      "status": "replayed",
+      "samples": 1709,
+      "before": {
+        "samples": 778,
+        "distance_m": 7.67524,
+        "p95_estimation_gap_cm": 0.7446385342097522,
+        "rms_estimation_gap_cm": 0.3928223627445161,
+        "wrong_side_seconds": 0,
+        "trend_alignment_lag_m": 1.9500000000000002,
+        "max_convergence_lead_cm": 0.8639526218012238
+      },
+      "after": {
+        "samples": 778,
+        "distance_m": 7.67524,
+        "p95_estimation_gap_cm": 0.08669307743130085,
+        "rms_estimation_gap_cm": 0.045940583362414855,
+        "wrong_side_seconds": 0,
+        "trend_alignment_lag_m": 0.0,
+        "max_convergence_lead_cm": 0.0
+      },
+      "original_fused_nozzle_max_cm": 1.4644853449328865,
+      "original_record_within_15mm": true,
+      "original_speed_range_mps": [
+        -0.62479,
+        0.74877
+      ]
+    },
+    {
+      "job": "20261007_235404_路线作业_20987e44",
+      "segment": "seg01",
+      "status": "replayed",
+      "samples": 2467,
+      "before": {
+        "samples": 570,
+        "distance_m": 5.572939999999999,
+        "p95_estimation_gap_cm": 0.5283780515381075,
+        "rms_estimation_gap_cm": 0.3152478181517247,
+        "wrong_side_seconds": 0,
+        "trend_alignment_lag_m": 0.0,
+        "max_convergence_lead_cm": 0.6445936458528831
+      },
+      "after": {
+        "samples": 570,
+        "distance_m": 5.572939999999999,
+        "p95_estimation_gap_cm": 0.11448543599241451,
+        "rms_estimation_gap_cm": 0.07313290560401316,
+        "wrong_side_seconds": 0,
+        "trend_alignment_lag_m": 0.0,
+        "max_convergence_lead_cm": 0.0
+      },
+      "original_fused_nozzle_max_cm": 1.3613255981490102,
+      "original_record_within_15mm": true,
+      "original_speed_range_mps": [
+        0.20964,
+        0.8703
+      ]
+    },
+    {
+      "job": "20261007_234545_路线作业_26336957",
+      "segment": "seg01",
+      "status": "replayed",
+      "samples": 6980,
+      "before": {
+        "samples": 6421,
+        "distance_m": 63.985910000000004,
+        "p95_estimation_gap_cm": 0.5232916292285308,
+        "rms_estimation_gap_cm": 0.25020313833755753,
+        "wrong_side_seconds": 1.9995299999982308,
+        "trend_alignment_lag_m": 0.025,
+        "max_convergence_lead_cm": 0.8493416861792329
+      },
+      "after": {
+        "samples": 6421,
+        "distance_m": 63.985910000000004,
+        "p95_estimation_gap_cm": 0.22699096751270328,
+        "rms_estimation_gap_cm": 0.1766003282810248,
+        "wrong_side_seconds": 1.3599800000001778,
+        "trend_alignment_lag_m": 0.0,
+        "max_convergence_lead_cm": 0.0
+      },
+      "original_fused_nozzle_max_cm": 2.6486925743050893,
+      "original_record_within_15mm": false,
+      "original_speed_range_mps": [
+        0.0605,
+        0.83161
+      ]
+    },
+    {
+      "job": "20261007_224615_路线作业_294ba33f",
+      "segment": "seg01",
+      "status": "replayed",
+      "samples": 2304,
+      "before": {
+        "samples": 1472,
+        "distance_m": 22.80534,
+        "p95_estimation_gap_cm": 1.1856108284341471,
+        "rms_estimation_gap_cm": 0.5336929533432249,
+        "wrong_side_seconds": 2.4817099999997936,
+        "trend_alignment_lag_m": 0.65,
+        "max_convergence_lead_cm": 1.5100365899741761
+      },
+      "after": {
+        "samples": 1472,
+        "distance_m": 22.80534,
+        "p95_estimation_gap_cm": 0.09723611790002967,
+        "rms_estimation_gap_cm": 0.05651225943247929,
+        "wrong_side_seconds": 0,
+        "trend_alignment_lag_m": 0.0,
+        "max_convergence_lead_cm": 0.0
+      },
+      "original_fused_nozzle_max_cm": 2.8699644221000575,
+      "original_record_within_15mm": false,
+      "original_speed_range_mps": [
+        -0.69205,
+        1.16997
+      ]
+    },
+    {
+      "job": "20261007_234827_路线作业_31345278",
+      "segment": "seg01",
+      "status": "replayed",
+      "samples": 7344,
+      "before": {
+        "samples": 6363,
+        "distance_m": 63.99244,
+        "p95_estimation_gap_cm": 0.5794632688407588,
+        "rms_estimation_gap_cm": 0.280431348016061,
+        "wrong_side_seconds": 0.3996900000001915,
+        "trend_alignment_lag_m": 1.05,
+        "max_convergence_lead_cm": 1.3443137523523858
+      },
+      "after": {
+        "samples": 6363,
+        "distance_m": 63.99244,
+        "p95_estimation_gap_cm": 0.25726465462574694,
+        "rms_estimation_gap_cm": 0.17108190875234833,
+        "wrong_side_seconds": 0,
+        "trend_alignment_lag_m": 0.0,
+        "max_convergence_lead_cm": 0.0
+      },
+      "original_fused_nozzle_max_cm": 2.4899853875719913,
+      "original_record_within_15mm": false,
+      "original_speed_range_mps": [
+        -0.73219,
+        0.76136
+      ]
+    },
+    {
+      "job": "20261007_224010_路线作业_31f600dc",
+      "segment": "seg01",
+      "status": "replayed",
+      "samples": 2450,
+      "before": {
+        "samples": 1479,
+        "distance_m": 22.80559,
+        "p95_estimation_gap_cm": 0.8761445118921989,
+        "rms_estimation_gap_cm": 0.38507782733269214,
+        "wrong_side_seconds": 2.158559999999966,
+        "trend_alignment_lag_m": 0.325,
+        "max_convergence_lead_cm": 0.9779169001283469
+      },
+      "after": {
+        "samples": 1479,
+        "distance_m": 22.80559,
+        "p95_estimation_gap_cm": 0.10905363551480622,
+        "rms_estimation_gap_cm": 0.06043805179523954,
+        "wrong_side_seconds": 0,
+        "trend_alignment_lag_m": 0.025,
+        "max_convergence_lead_cm": 0.0
+      },
+      "original_fused_nozzle_max_cm": 3.186597587674278,
+      "original_record_within_15mm": false,
+      "original_speed_range_mps": [
+        -0.78356,
+        1.13416
+      ]
+    },
+    {
+      "job": "20261007_230614_路线作业_364aa6fb",
+      "segment": "seg01",
+      "status": "replayed",
+      "samples": 2302,
+      "before": {
+        "samples": 1479,
+        "distance_m": 22.84297,
+        "p95_estimation_gap_cm": 0.5076603738099571,
+        "rms_estimation_gap_cm": 0.2830047290003079,
+        "wrong_side_seconds": 0,
+        "trend_alignment_lag_m": 0.0,
+        "max_convergence_lead_cm": 0.6854653356825774
+      },
+      "after": {
+        "samples": 1479,
+        "distance_m": 22.84297,
+        "p95_estimation_gap_cm": 0.09350207987621482,
+        "rms_estimation_gap_cm": 0.04661353495170685,
+        "wrong_side_seconds": 0,
+        "trend_alignment_lag_m": 0.0,
+        "max_convergence_lead_cm": 0.0
+      },
+      "original_fused_nozzle_max_cm": 2.5269492360564083,
+      "original_record_within_15mm": false,
+      "original_speed_range_mps": [
+        -0.74867,
+        1.08398
+      ]
+    },
+    {
+      "job": "20261007_232309_路线作业_4847fa1b",
+      "segment": "seg01",
+      "status": "replayed",
+      "samples": 3153,
+      "before": {
+        "samples": 2277,
+        "distance_m": 22.803179999999998,
+        "p95_estimation_gap_cm": 0.5935768709889395,
+        "rms_estimation_gap_cm": 0.32347294209821026,
+        "wrong_side_seconds": 2.4589800000007926,
+        "trend_alignment_lag_m": 0.05,
+        "max_convergence_lead_cm": 0.8658164032720277
+      },
+      "after": {
+        "samples": 2277,
+        "distance_m": 22.803179999999998,
+        "p95_estimation_gap_cm": 0.20717888447117677,
+        "rms_estimation_gap_cm": 0.11715159109885975,
+        "wrong_side_seconds": 0,
+        "trend_alignment_lag_m": 0.025,
+        "max_convergence_lead_cm": 0.0
+      },
+      "original_fused_nozzle_max_cm": 1.9792406957565234,
+      "original_record_within_15mm": false,
+      "original_speed_range_mps": [
+        -0.66538,
+        0.77503
+      ]
+    },
+    {
+      "job": "20261007_231844_路线作业_50a3ecea",
+      "segment": "seg01",
+      "status": "replayed",
+      "samples": 2238,
+      "before": {
+        "samples": 1475,
+        "distance_m": 22.869100000000003,
+        "p95_estimation_gap_cm": 0.6608993632130425,
+        "rms_estimation_gap_cm": 0.35928318198702003,
+        "wrong_side_seconds": 1.2206100000003062,
+        "trend_alignment_lag_m": 0.625,
+        "max_convergence_lead_cm": 0.812290426836273
+      },
+      "after": {
+        "samples": 1475,
+        "distance_m": 22.869100000000003,
+        "p95_estimation_gap_cm": 0.21520559250942292,
+        "rms_estimation_gap_cm": 0.11323211525310072,
+        "wrong_side_seconds": 0,
+        "trend_alignment_lag_m": 0.025,
+        "max_convergence_lead_cm": 0.0
+      },
+      "original_fused_nozzle_max_cm": 1.8902303085715388,
+      "original_record_within_15mm": false,
+      "original_speed_range_mps": [
+        -0.71368,
+        1.09703
+      ]
+    },
+    {
+      "job": "20261007_225214_路线作业_57c59849",
+      "segment": "seg01",
+      "status": "no comparable straight input"
+    },
+    {
+      "job": "20261007_225214_路线作业_57c59849",
+      "segment": "seg02",
+      "status": "replayed",
+      "samples": 1978,
+      "before": {
+        "samples": 1482,
+        "distance_m": 22.82511,
+        "p95_estimation_gap_cm": 0.5610647192671748,
+        "rms_estimation_gap_cm": 0.2832561947681656,
+        "wrong_side_seconds": 0.659689999999955,
+        "trend_alignment_lag_m": 0.65,
+        "max_convergence_lead_cm": 0.7195326271979102
+      },
+      "after": {
+        "samples": 1482,
+        "distance_m": 22.82511,
+        "p95_estimation_gap_cm": 0.10533752305910725,
+        "rms_estimation_gap_cm": 0.061807340719707456,
+        "wrong_side_seconds": 0,
+        "trend_alignment_lag_m": 0.0,
+        "max_convergence_lead_cm": 0.0
+      },
+      "original_fused_nozzle_max_cm": 2.51299069969644,
+      "original_record_within_15mm": false,
+      "original_speed_range_mps": [
+        0.1319,
+        1.14312
+      ]
+    },
+    {
+      "job": "20261007_231510_路线作业_585e35dc",
+      "segment": "seg01",
+      "status": "replayed",
+      "samples": 2036,
+      "before": {
+        "samples": 1477,
+        "distance_m": 22.841920000000002,
+        "p95_estimation_gap_cm": 0.6154732492352939,
+        "rms_estimation_gap_cm": 0.3209298578342521,
+        "wrong_side_seconds": 1.7002900000002228,
+        "trend_alignment_lag_m": 0.6000000000000001,
+        "max_convergence_lead_cm": 0.7415707704877819
+      },
+      "after": {
+        "samples": 1477,
+        "distance_m": 22.841920000000002,
+        "p95_estimation_gap_cm": 0.07252408650240555,
+        "rms_estimation_gap_cm": 0.046035624924081614,
+        "wrong_side_seconds": 0,
+        "trend_alignment_lag_m": 0.0,
+        "max_convergence_lead_cm": 0.0
+      },
+      "original_fused_nozzle_max_cm": 1.6286501385036067,
+      "original_record_within_15mm": false,
+      "original_speed_range_mps": [
+        -0.62777,
+        1.14805
+      ]
+    },
+    {
+      "job": "20261007_223748_路线作业_64fccd56",
+      "segment": "seg01",
+      "status": "replayed",
+      "samples": 1374,
+      "before": null,
+      "after": null,
+      "original_fused_nozzle_max_cm": 5.295802236598157,
+      "original_record_within_15mm": false,
+      "original_speed_range_mps": [
+        -0.69156,
+        0.55193
+      ]
+    },
+    {
+      "job": "20261007_223748_路线作业_64fccd56",
+      "segment": "seg02",
+      "status": "replayed",
+      "samples": 1933,
+      "before": {
+        "samples": 1468,
+        "distance_m": 22.789199999999997,
+        "p95_estimation_gap_cm": 0.7809917372300769,
+        "rms_estimation_gap_cm": 0.4002560122943882,
+        "wrong_side_seconds": 2.200800000000015,
+        "trend_alignment_lag_m": 0.5750000000000001,
+        "max_convergence_lead_cm": 1.044366686964915
+      },
+      "after": {
+        "samples": 1468,
+        "distance_m": 22.789199999999997,
+        "p95_estimation_gap_cm": 0.20100235447611486,
+        "rms_estimation_gap_cm": 0.10202444166368602,
+        "wrong_side_seconds": 0,
+        "trend_alignment_lag_m": 0.025,
+        "max_convergence_lead_cm": 0.0
+      },
+      "original_fused_nozzle_max_cm": 2.4701781374664833,
+      "original_record_within_15mm": false,
+      "original_speed_range_mps": [
+        -0.11572,
+        1.09244
+      ]
+    },
+    {
+      "job": "20261007_225455_路线作业_661157cc",
+      "segment": "seg01",
+      "status": "replayed",
+      "samples": 4255,
+      "before": {
+        "samples": 2282,
+        "distance_m": 22.82368,
+        "p95_estimation_gap_cm": 0.6249955442405648,
+        "rms_estimation_gap_cm": 0.2981445308622588,
+        "wrong_side_seconds": 0,
+        "trend_alignment_lag_m": 0.0,
+        "max_convergence_lead_cm": 0.8836259504954914
+      },
+      "after": {
+        "samples": 2282,
+        "distance_m": 22.82368,
+        "p95_estimation_gap_cm": 0.2021518858587029,
+        "rms_estimation_gap_cm": 0.14556922896519206,
+        "wrong_side_seconds": 0,
+        "trend_alignment_lag_m": 0.0,
+        "max_convergence_lead_cm": 0.0
+      },
+      "original_fused_nozzle_max_cm": 6.282839900614808,
+      "original_record_within_15mm": false,
+      "original_speed_range_mps": [
+        -0.74103,
+        0.74914
+      ]
+    },
+    {
+      "job": "20261007_234021_路线作业_829b154d",
+      "segment": "seg01",
+      "status": "replayed",
+      "samples": 3142,
+      "before": {
+        "samples": 2286,
+        "distance_m": 22.82191,
+        "p95_estimation_gap_cm": 0.9849346070523393,
+        "rms_estimation_gap_cm": 0.5156360602019675,
+        "wrong_side_seconds": 6.70173000000068,
+        "trend_alignment_lag_m": 0.55,
+        "max_convergence_lead_cm": 1.3677525880863592
+      },
+      "after": {
+        "samples": 2286,
+        "distance_m": 22.82191,
+        "p95_estimation_gap_cm": 0.20187453715669776,
+        "rms_estimation_gap_cm": 0.10809509124115108,
+        "wrong_side_seconds": 0.10271999999986292,
+        "trend_alignment_lag_m": 0.05,
+        "max_convergence_lead_cm": 0.0
+      },
+      "original_fused_nozzle_max_cm": 2.1118272490411982,
+      "original_record_within_15mm": false,
+      "original_speed_range_mps": [
+        -0.66961,
+        0.78129
+      ]
+    },
+    {
+      "job": "20261007_230116_路线作业_855c9264",
+      "segment": "seg01",
+      "status": "replayed",
+      "samples": 3151,
+      "before": {
+        "samples": 2267,
+        "distance_m": 22.81073,
+        "p95_estimation_gap_cm": 1.2057114163501204,
+        "rms_estimation_gap_cm": 0.5513933756723858,
+        "wrong_side_seconds": 2.2983999999999014,
+        "trend_alignment_lag_m": 1.125,
+        "max_convergence_lead_cm": 1.357140263137809
+      },
+      "after": {
+        "samples": 2267,
+        "distance_m": 22.81073,
+        "p95_estimation_gap_cm": 0.17934181353666304,
+        "rms_estimation_gap_cm": 0.10911216390623919,
+        "wrong_side_seconds": 0,
+        "trend_alignment_lag_m": 0.0,
+        "max_convergence_lead_cm": 0.0
+      },
+      "original_fused_nozzle_max_cm": 2.3617281062678686,
+      "original_record_within_15mm": false,
+      "original_speed_range_mps": [
+        -0.75896,
+        0.7409
+      ]
+    },
+    {
+      "job": "20261007_230946_路线作业_8897b6a5",
+      "segment": "seg01",
+      "status": "replayed",
+      "samples": 2255,
+      "before": {
+        "samples": 1476,
+        "distance_m": 22.826810000000002,
+        "p95_estimation_gap_cm": 0.5358354452461419,
+        "rms_estimation_gap_cm": 0.30823295489211877,
+        "wrong_side_seconds": 0.25957000000016706,
+        "trend_alignment_lag_m": 0.025,
+        "max_convergence_lead_cm": 0.620713386532638
+      },
+      "after": {
+        "samples": 1476,
+        "distance_m": 22.826810000000002,
+        "p95_estimation_gap_cm": 0.10530457303510013,
+        "rms_estimation_gap_cm": 0.06391633813985412,
+        "wrong_side_seconds": 0,
+        "trend_alignment_lag_m": 0.0,
+        "max_convergence_lead_cm": 0.0
+      },
+      "original_fused_nozzle_max_cm": 2.0129634520070994,
+      "original_record_within_15mm": false,
+      "original_speed_range_mps": [
+        -0.70598,
+        1.11505
+      ]
+    },
+    {
+      "job": "20261007_225827_路线作业_8a6b4504",
+      "segment": "seg01",
+      "status": "replayed",
+      "samples": 998,
+      "before": {
+        "samples": 498,
+        "distance_m": 4.992069999999999,
+        "p95_estimation_gap_cm": 0.3364606882248845,
+        "rms_estimation_gap_cm": 0.15271056235871797,
+        "wrong_side_seconds": 0.04028999999991356,
+        "trend_alignment_lag_m": 0.0,
+        "max_convergence_lead_cm": 0.32337627632495386
+      },
+      "after": {
+        "samples": 498,
+        "distance_m": 4.992069999999999,
+        "p95_estimation_gap_cm": 0.0824882407692392,
+        "rms_estimation_gap_cm": 0.0432604262326873,
+        "wrong_side_seconds": 0,
+        "trend_alignment_lag_m": 0.0,
+        "max_convergence_lead_cm": 0.0
+      },
+      "original_fused_nozzle_max_cm": 0.5726561578966914,
+      "original_record_within_15mm": true,
+      "original_speed_range_mps": [
+        -0.79115,
+        0.719
+      ]
+    },
+    {
+      "job": "20261007_225918_路线作业_92a11a3e",
+      "segment": "seg01",
+      "status": "replayed",
+      "samples": 2934,
+      "before": {
+        "samples": 2268,
+        "distance_m": 22.81735,
+        "p95_estimation_gap_cm": 0.7995210115818782,
+        "rms_estimation_gap_cm": 0.3645789503921843,
+        "wrong_side_seconds": 1.400000000000091,
+        "trend_alignment_lag_m": 0.7250000000000001,
+        "max_convergence_lead_cm": 1.0666319089899754
+      },
+      "after": {
+        "samples": 2268,
+        "distance_m": 22.81735,
+        "p95_estimation_gap_cm": 0.10433165687240627,
+        "rms_estimation_gap_cm": 0.056600345796298066,
+        "wrong_side_seconds": 0,
+        "trend_alignment_lag_m": 0.0,
+        "max_convergence_lead_cm": 0.0
+      },
+      "original_fused_nozzle_max_cm": 1.756507306472388,
+      "original_record_within_15mm": false,
+      "original_speed_range_mps": [
+        -0.6864,
+        0.82133
+      ]
+    },
+    {
+      "job": "20261007_224122_路线作业_b2949967",
+      "segment": "seg01",
+      "status": "replayed",
+      "samples": 2417,
+      "before": {
+        "samples": 1478,
+        "distance_m": 22.80085,
+        "p95_estimation_gap_cm": 1.3369713981572249,
+        "rms_estimation_gap_cm": 0.5640767008596231,
+        "wrong_side_seconds": 3.9422400000000835,
+        "trend_alignment_lag_m": 0.025,
+        "max_convergence_lead_cm": 1.4315769818364503
+      },
+      "after": {
+        "samples": 1478,
+        "distance_m": 22.80085,
+        "p95_estimation_gap_cm": 0.1938759577841813,
+        "rms_estimation_gap_cm": 0.09863558845328205,
+        "wrong_side_seconds": 0,
+        "trend_alignment_lag_m": 0.0,
+        "max_convergence_lead_cm": 0.0
+      },
+      "original_fused_nozzle_max_cm": 3.0054625232281307,
+      "original_record_within_15mm": false,
+      "original_speed_range_mps": [
+        -0.72469,
+        1.13589
+      ]
+    },
+    {
+      "job": "20261008_000003_路线作业_b6a49b9a",
+      "segment": "seg01",
+      "status": "replayed",
+      "samples": 7332,
+      "before": {
+        "samples": 6359,
+        "distance_m": 63.976440000000004,
+        "p95_estimation_gap_cm": 0.4924938157798722,
+        "rms_estimation_gap_cm": 0.23973000708016987,
+        "wrong_side_seconds": 1.079740000000129,
+        "trend_alignment_lag_m": 1.075,
+        "max_convergence_lead_cm": 0.9414117328985598
+      },
+      "after": {
+        "samples": 6359,
+        "distance_m": 63.976440000000004,
+        "p95_estimation_gap_cm": 0.1884813084252067,
+        "rms_estimation_gap_cm": 0.11152029220221905,
+        "wrong_side_seconds": 0,
+        "trend_alignment_lag_m": 0.0,
+        "max_convergence_lead_cm": 0.0
+      },
+      "original_fused_nozzle_max_cm": 1.6646177436408838,
+      "original_record_within_15mm": false,
+      "original_speed_range_mps": [
+        -0.64818,
+        0.78405
+      ]
+    },
+    {
+      "job": "20261007_233626_路线作业_c2969cdd",
+      "segment": "seg01",
+      "status": "replayed",
+      "samples": 3138,
+      "before": {
+        "samples": 2282,
+        "distance_m": 22.83936,
+        "p95_estimation_gap_cm": 1.0187389011313481,
+        "rms_estimation_gap_cm": 0.5394113300564456,
+        "wrong_side_seconds": 3.4204399999998714,
+        "trend_alignment_lag_m": 1.2000000000000002,
+        "max_convergence_lead_cm": 1.1235742295003106
+      },
+      "after": {
+        "samples": 2282,
+        "distance_m": 22.83936,
+        "p95_estimation_gap_cm": 0.1239018361269355,
+        "rms_estimation_gap_cm": 0.0682988936225786,
+        "wrong_side_seconds": 0,
+        "trend_alignment_lag_m": 0.0,
+        "max_convergence_lead_cm": 0.0
+      },
+      "original_fused_nozzle_max_cm": 1.742471582470717,
+      "original_record_within_15mm": false,
+      "original_speed_range_mps": [
+        -0.69864,
+        0.728
+      ]
+    },
+    {
+      "job": "20261007_225642_路线作业_c73829f8",
+      "segment": "seg01",
+      "status": "replayed",
+      "samples": 1417,
+      "before": {
+        "samples": 461,
+        "distance_m": 4.5437,
+        "p95_estimation_gap_cm": 0.359899574557352,
+        "rms_estimation_gap_cm": 0.24180719628607977,
+        "wrong_side_seconds": 0,
+        "trend_alignment_lag_m": 0.0,
+        "max_convergence_lead_cm": 0.4332117148899688
+      },
+      "after": {
+        "samples": 461,
+        "distance_m": 4.5437,
+        "p95_estimation_gap_cm": 0.06733042361074422,
+        "rms_estimation_gap_cm": 0.03488938559585422,
+        "wrong_side_seconds": 0,
+        "trend_alignment_lag_m": 0.0,
+        "max_convergence_lead_cm": 0.0
+      },
+      "original_fused_nozzle_max_cm": 4.429548560385498,
+      "original_record_within_15mm": false,
+      "original_speed_range_mps": [
+        -0.60242,
+        0.77629
+      ]
+    },
+    {
+      "job": "20261007_234148_路线作业_e0ab1da5",
+      "segment": "seg01",
+      "status": "replayed",
+      "samples": 3318,
+      "before": {
+        "samples": 2289,
+        "distance_m": 22.81861,
+        "p95_estimation_gap_cm": 0.7483257265173457,
+        "rms_estimation_gap_cm": 0.39664353399128405,
+        "wrong_side_seconds": 2.679849999999533,
+        "trend_alignment_lag_m": 0.525,
+        "max_convergence_lead_cm": 1.150617514489901
+      },
+      "after": {
+        "samples": 2289,
+        "distance_m": 22.81861,
+        "p95_estimation_gap_cm": 0.2189632173979957,
+        "rms_estimation_gap_cm": 0.11468928976850508,
+        "wrong_side_seconds": 0.09977000000071712,
+        "trend_alignment_lag_m": 0.025,
+        "max_convergence_lead_cm": 0.0
+      },
+      "original_fused_nozzle_max_cm": 1.8705646277166865,
+      "original_record_within_15mm": false,
+      "original_speed_range_mps": [
+        -0.75106,
+        0.74112
+      ]
+    },
+    {
+      "job": "20261007_230244_路线作业_e14ecc69",
+      "segment": "seg01",
+      "status": "replayed",
+      "samples": 3101,
+      "before": {
+        "samples": 2270,
+        "distance_m": 22.81342,
+        "p95_estimation_gap_cm": 0.5265501938764641,
+        "rms_estimation_gap_cm": 0.24376323296812016,
+        "wrong_side_seconds": 0.43855000000053224,
+        "trend_alignment_lag_m": 0.025,
+        "max_convergence_lead_cm": 0.6597838134651337
+      },
+      "after": {
+        "samples": 2270,
+        "distance_m": 22.81342,
+        "p95_estimation_gap_cm": 0.10469030738681351,
+        "rms_estimation_gap_cm": 0.05935047889527289,
+        "wrong_side_seconds": 0,
+        "trend_alignment_lag_m": 0.0,
+        "max_convergence_lead_cm": 0.0
+      },
+      "original_fused_nozzle_max_cm": 3.4734006526076624,
+      "original_record_within_15mm": false,
+      "original_speed_range_mps": [
+        -0.72324,
+        0.79649
+      ]
+    }
+  ]
+}

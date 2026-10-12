@@ -1,0 +1,218 @@
+[
+  {
+    "delay": 0.25,
+    "gain": 0.8,
+    "seed": 31,
+    "metrics": {
+      "state": "DONE",
+      "p95_cm": 0.6787438934112525,
+      "swing_cm": 1.032879729524794,
+      "max_cm": 0.803192484165349,
+      "damping": true
+    },
+    "planned_line_m": 64.0,
+    "planned_runout_m": 0.4,
+    "scored_from_m": 0.005284897240357633,
+    "scored_to_m": 63.994391765681115,
+    "complete": true,
+    "pass_15mm": true
+  },
+  {
+    "delay": 0.25,
+    "gain": 0.8,
+    "seed": 32,
+    "metrics": {
+      "state": "DONE",
+      "p95_cm": 0.6648584400553458,
+      "swing_cm": 1.024990846588689,
+      "max_cm": 0.742931745070898,
+      "damping": true
+    },
+    "planned_line_m": 64.0,
+    "planned_runout_m": 0.4,
+    "scored_from_m": 0.005297975064507021,
+    "scored_to_m": 63.99438306616527,
+    "complete": true,
+    "pass_15mm": true
+  },
+  {
+    "delay": 0.25,
+    "gain": 1.2,
+    "seed": 31,
+    "metrics": {
+      "state": "DONE",
+      "p95_cm": 0.6601439826524738,
+      "swing_cm": 0.9913532852881879,
+      "max_cm": 0.7580027435161398,
+      "damping": true
+    },
+    "planned_line_m": 64.0,
+    "planned_runout_m": 0.4,
+    "scored_from_m": 0.0052881736659950995,
+    "scored_to_m": 63.99445815408441,
+    "complete": true,
+    "pass_15mm": true
+  },
+  {
+    "delay": 0.25,
+    "gain": 1.2,
+    "seed": 32,
+    "metrics": {
+      "state": "DONE",
+      "p95_cm": 0.6458238181403223,
+      "swing_cm": 0.9847829226256762,
+      "max_cm": 0.7353324931053247,
+      "damping": true
+    },
+    "planned_line_m": 64.0,
+    "planned_runout_m": 0.4,
+    "scored_from_m": 0.005303042947643721,
+    "scored_to_m": 63.99445407585229,
+    "complete": true,
+    "pass_15mm": true
+  },
+  {
+    "delay": 0.44,
+    "gain": 0.8,
+    "seed": 31,
+    "metrics": {
+      "state": "DONE",
+      "p95_cm": 0.703253368515943,
+      "swing_cm": 1.0793540559872434,
+      "max_cm": 0.8397719013501574,
+      "damping": true
+    },
+    "planned_line_m": 64.0,
+    "planned_runout_m": 0.4,
+    "scored_from_m": 0.008280338045421498,
+    "scored_to_m": 63.9972857828613,
+    "complete": true,
+    "pass_15mm": true
+  },
+  {
+    "delay": 0.44,
+    "gain": 0.8,
+    "seed": 32,
+    "metrics": {
+      "state": "DONE",
+      "p95_cm": 0.687263168382203,
+      "swing_cm": 1.0684126523534196,
+      "max_cm": 0.7774600277487728,
+      "damping": true
+    },
+    "planned_line_m": 64.0,
+    "planned_runout_m": 0.4,
+    "scored_from_m": 0.00829639541431293,
+    "scored_to_m": 63.99727953909007,
+    "complete": true,
+    "pass_15mm": true
+  },
+  {
+    "delay": 0.44,
+    "gain": 1.2,
+    "seed": 31,
+    "metrics": {
+      "state": "DONE",
+      "p95_cm": 0.6802459143249797,
+      "swing_cm": 1.0283442764152522,
+      "max_cm": 0.8124874061609343,
+      "damping": true
+    },
+    "planned_line_m": 64.0,
+    "planned_runout_m": 0.4,
+    "scored_from_m": 0.008282372857391973,
+    "scored_to_m": 63.99737652042474,
+    "complete": true,
+    "pass_15mm": true
+  },
+  {
+    "delay": 0.44,
+    "gain": 1.2,
+    "seed": 32,
+    "metrics": {
+      "state": "DONE",
+      "p95_cm": 0.6660210392206607,
+      "swing_cm": 1.0230543547412496,
+      "max_cm": 0.7519907280565188,
+      "damping": true
+    },
+    "planned_line_m": 64.0,
+    "planned_runout_m": 0.4,
+    "scored_from_m": 0.008302175182853144,
+    "scored_to_m": 63.99737936476514,
+    "complete": true,
+    "pass_15mm": true
+  },
+  {
+    "delay": 0.65,
+    "gain": 0.8,
+    "seed": 31,
+    "metrics": {
+      "state": "DONE",
+      "p95_cm": 0.7775499748150376,
+      "swing_cm": 1.2111507051313097,
+      "max_cm": 0.9168311738812208,
+      "damping": true
+    },
+    "planned_line_m": 64.0,
+    "planned_runout_m": 0.4,
+    "scored_from_m": 0.005268166608859648,
+    "scored_to_m": 63.99396325796134,
+    "complete": true,
+    "pass_15mm": true
+  },
+  {
+    "delay": 0.65,
+    "gain": 0.8,
+    "seed": 32,
+    "metrics": {
+      "state": "DONE",
+      "p95_cm": 0.7384659046559834,
+      "swing_cm": 1.1845135902340787,
+      "max_cm": 0.8448300812967965,
+      "damping": true
+    },
+    "planned_line_m": 64.0,
+    "planned_runout_m": 0.4,
+    "scored_from_m": 0.005288196211286511,
+    "scored_to_m": 63.99396099555658,
+    "complete": true,
+    "pass_15mm": true
+  },
+  {
+    "delay": 0.65,
+    "gain": 1.2,
+    "seed": 31,
+    "metrics": {
+      "state": "DONE",
+      "p95_cm": 0.7248293625420593,
+      "swing_cm": 1.1112451839584154,
+      "max_cm": 0.919108221447071,
+      "damping": true
+    },
+    "planned_line_m": 64.0,
+    "planned_runout_m": 0.4,
+    "scored_from_m": 0.0052666974796484745,
+    "scored_to_m": 63.994101565786835,
+    "complete": true,
+    "pass_15mm": true
+  },
+  {
+    "delay": 0.65,
+    "gain": 1.2,
+    "seed": 32,
+    "metrics": {
+      "state": "DONE",
+      "p95_cm": 0.6975759200157711,
+      "swing_cm": 1.0945418758472365,
+      "max_cm": 0.8543325451120621,
+      "damping": true
+    },
+    "planned_line_m": 64.0,
+    "planned_runout_m": 0.4,
+    "scored_from_m": 0.00529331845571912,
+    "scored_to_m": 63.99413738317379,
+    "complete": true,
+    "pass_15mm": true
+  }
+]

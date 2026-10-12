@@ -168,4 +168,5 @@ class HeadingControl:
 
     def status(self):
         return dict(integral=self.integral, pred=self.pred, drift_lp=self.drift_lp, output=self.output,
-                    pending=self.pending, commanded=self.commanded, residual=self.residual, horizon=self.horizon)
+                    pending=self.pending, commanded=self.commanded, residual=self.residual, horizon=self.horizon,
+                    direct_rate_damping=self.cfg.direct_rate_damping)

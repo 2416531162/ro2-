@@ -14,7 +14,15 @@ class PaintStartGuard:
     MIN_FRAMES = 2
     TRUST_GRACE_S = .1  # 已收稳后，短暂欠观测只暂停许可；当前观测恢复合格才可放行。
 
-    def __init__(self):
+    def __init__(self, precision=False):
+        if precision:
+            # The old 2/2.5 cm gate cannot qualify a 1.5 cm straight-line requirement.
+            self.OFFSET_M=.008
+            self.HOLD_OFFSET_M=.010
+            self.AGREEMENT_M=.005
+            self.HOLD_AGREEMENT_M=.0075
+            self.HEADING_RAD=math.radians(.35)
+            self.HOLD_HEADING_RAD=math.radians(.5)
         self.stable_s = 0.
         self.frames = 0
         self.last_frame = None

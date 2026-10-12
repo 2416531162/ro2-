@@ -995,7 +995,8 @@ class LineMission:
                 return False
             self._reentry = dict(since=now, still_since=None)
         redo = self._reentry.get('deviation_m')
-        self.message = REENTRY_WAIT_NOTICE if redo is None else REDO_RUNUP_WAIT_NOTICE % (redo * 100)
+        self.message = (REENTRY_WAIT_NOTICE if redo is None else
+                        self._reentry.get('precision_notice') or REDO_RUNUP_WAIT_NOTICE % (redo * 100))
         if now - self._reentry['since'] > REENTRY_WAIT_S:
             self._reentry = None
             return False
@@ -1049,6 +1050,12 @@ class LineMission:
         self.tracker.stop('paint_start_off_line')
         self._reentry = dict(since=now, still_since=None, deviation_m=deviation)
         self.message = REDO_RUNUP_WAIT_NOTICE % (deviation * 100)
+        if paint.get('precision_mode'):
+            self.message=('线头方向或定位尚未收稳，已停喷，退回重新助跑'
+                          if paint.get('paint_blocked')=='paint_start_unsettled'
+                          else '线头喷头横偏 %.1f cm（起喷须小于 %.1f cm），已停喷，退回重新助跑'
+                          % (deviation*100,paint.get('paint_start_limit_m',.01)*100))
+            self._reentry['precision_notice']=self.message
         return True
 
     def _store_route(self, spec):
@@ -1149,7 +1156,15 @@ class LineMission:
             painting = bool(paint and paint['painting'])
         except Exception:
             paint = painting = None
-        if paint and paint.get('paint_blocked') == 'paint_start_off_line' and paint.get('nozzle_deviation_m') is not None:
+        blocked=None if paint is None else paint.get('paint_blocked')
+        if paint and paint.get('precision_mode') and blocked:
+            at_start=(getattr(self.operations,'_paint_started_key',None)!=self.operations._paint_key())
+            redo=(at_start and paint.get('nozzle_deviation_m') is not None
+                  and blocked in ('paint_start_off_line','paint_start_unsettled','paint_precision_exceeded')
+                  and self._redo_runup(now,paint))
+            if not redo and blocked not in ('not_painting','paint_stationary','repair_skip_covered'):
+                self.operations.pause_precision(now,paint)
+        elif paint and blocked == 'paint_start_off_line' and paint.get('nozzle_deviation_m') is not None:
             # 起喷门槛没过：第一个线头退回去重新助跑；否则如实告诉操作员为什么没喷（过了以后 _tick 改回「行驶中」）
             if not self._redo_runup(now, paint):
                 self.message = PAINT_START_OFF_NOTICE % (paint['nozzle_deviation_m'] * 100)

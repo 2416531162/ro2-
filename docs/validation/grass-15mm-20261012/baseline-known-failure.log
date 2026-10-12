@@ -1,0 +1,15 @@
+test_imu_takes_over_before_the_paint_starts_despite_start_wobble (test_imu_first_straight.RunupStart.test_imu_takes_over_before_the_paint_starts_despite_start_wobble) ... FAIL
+
+======================================================================
+FAIL: test_imu_takes_over_before_the_paint_starts_despite_start_wobble (test_imu_first_straight.RunupStart.test_imu_takes_over_before_the_paint_starts_despite_start_wobble)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/Admin1/Desktop/app/follow-cockpit/outputs/launch-twist-20261011/vehicle-source/tests/test_imu_first_straight.py", line 582, in test_imu_takes_over_before_the_paint_starts_despite_start_wobble
+    self.assertTrue(full is None or full > tr.paint_from_m)   # 原来 2°/s：线头还是原跟踪在开
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: False is not true
+
+----------------------------------------------------------------------
+Ran 1 test in 0.106s
+
+FAILED (failures=1)

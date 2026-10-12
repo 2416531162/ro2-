@@ -453,6 +453,10 @@ class RouteOperations:
         if not r or self.m.task != 'route' or self.m.phase not in ('RUNNING', 'PAUSING'):
             return
         progress=self.runtime_base+max(0,self.m.tracker.st.s-self.runtime_entry)
+        precision=r.get('precision_pause') or {}
+        if self.m.phase=='PAUSING' and str(r.get('reason','')).startswith('precision_'):
+            # Braking travel after closing the pump is not completed paint.
+            progress=min(progress,precision.get('resume_from_m',progress))
         if isinstance(self.m.tracker,SectionTracker):
             t=self.m.tracker;child=t.trackers[t.index]
             guard=getattr(child,'paint_start_guard',None)
@@ -659,8 +663,11 @@ class RouteOperations:
             if getattr(self,'_paint_started_key',None)!=key:
                 deviation=current.get('nozzle_deviation_m')
                 if (type(deviation) not in (int,float) or not math.isfinite(deviation)
-                        or deviation>=paint_quality.PAINT_START_MAX_OFFSET_M):
+                        or deviation>=current.get('paint_start_limit_m',paint_quality.PAINT_START_MAX_OFFSET_M)):
                     current.update(painting=False,paint_blocked='paint_start_off_line')
+                elif (current.get('precision_mode') and getattr(tr,'paint_start_guard',None) is not None
+                      and not tr.paint_start_guard.ready):
+                    current.update(painting=False,paint_blocked='paint_start_unsettled')
                 else:
                     self._paint_started_key=key
         return current
@@ -676,6 +683,7 @@ class RouteOperations:
             self._paint_mark_job, self._paint_mark_on = job, False
         painting = bool(painting) and job is not None
         if painting and isinstance(self.m.tracker,SectionTracker):
+            self.record['last_painted_cursor_m']=self.runtime_base+max(0.,self.m.tracker.st.s-self.runtime_entry)
             guard=getattr(self.m.tracker.trackers[self.m.tracker.index],'paint_start_guard',None)
             if guard is not None:guard.started=True
         if painting == self._paint_mark_on:
@@ -693,7 +701,7 @@ class RouteOperations:
             pass   # 没有位姿或喷头配置时只记开/关，App 照样断线，不画这个点
         self._paint_marks.append(dict(seq=self._paint_mark_seq, on=painting, x=x, y=y))
 
-    def pause(self, cmd, now):
+    def pause(self, cmd, now, *, reason='operator'):
         self.check_identity(cmd)
         if self.held:
             return '已暂停' if self.m.phase != 'PAUSING' else '正在停车'
@@ -703,10 +711,10 @@ class RouteOperations:
             self.capture(now, force=True)
         except ValueError:
             pass  # A disk error must never prevent the requested stop.
-        self.m.tracker.pause('operator')
+        self.m.tracker.pause(reason)
         self._arc_start_key=None
         self._arc_start_open=False
-        self.record.update(state='PAUSING', reason='operator')
+        self.record.update(state='PAUSING', reason=reason)
         self.preview = None
         self.m.phase, self.m.message = 'PAUSING', '正在停车，任务进度已保留'
         self.m._usable_since = self.still_since = None
@@ -715,6 +723,29 @@ class RouteOperations:
         except ValueError as exc:
             self.m.message += '；' + str(exc)
         return self.m.message
+
+    def pause_precision(self, now, paint):
+        """Stop a failed precision attempt and retain the last actually painted cursor."""
+        if not self.record or self.m.phase!='RUNNING':return
+        code=paint.get('paint_blocked') or 'paint_precision_untrusted'
+        resume=self.record.get('last_painted_cursor_m',self.record['cursor_m'])
+        if type(resume) not in (int,float) or not math.isfinite(resume):resume=self.record['cursor_m']
+        resume=max(0.,min(self.record['total_m'],resume))
+        deviation=paint.get('nozzle_deviation_m')
+        message=('喷头定位不能确认 1.5 cm 精度，已停喷并暂停'
+                 if code in ('paint_precision_untrusted','paint_position_untrusted','paint_reference_unavailable','paint_position_invalid')
+                 else '喷头尚未稳定在线头，已停喷并暂停' if code=='paint_start_unsettled'
+                 else '喷头横偏 %.1f cm，已到精度保护边界，停喷并暂停' % (100*deviation)
+                 if isinstance(deviation,(int,float)) and math.isfinite(deviation)
+                 else '喷头精度检查未通过，已停喷并暂停')
+        self.pause(dict(route_rev=self.m.route_rev,job_id=self.record['id']),now,reason='precision_hold')
+        self.record['precision_pause']=dict(code=code,message=message,resume_from_m=resume,
+            observed_cursor_m=self.record['cursor_m'],deviation_m=deviation,
+            required_limit_m=paint.get('paint_offset_limit_m'))
+        self.record['cursor_m']=min(self.record['cursor_m'],resume)
+        self.m.message=message
+        try:self.save()
+        except ValueError as exc:self.m.message+='；'+str(exc)
 
     def end(self, cmd, now):
         """迟到的补画结束请求不能结束刚恢复的原任务。"""
@@ -752,6 +783,8 @@ class RouteOperations:
         if self.still_since is not None and now - self.still_since >= 0.3 - 1e-8:
             self.record.update(state='PAUSED')
             self.m.phase, self.m.message = 'PAUSED', '已暂停，可手动挪车；点继续作业恢复'
+            if str(self.record.get('reason','')).startswith('precision_'):
+                self.m.message=(self.record.get('precision_pause') or {}).get('message',self.m.message)
             self.m._close_log()
             try:
                 self.save()
