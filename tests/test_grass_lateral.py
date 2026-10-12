@@ -98,6 +98,7 @@ class GrassPosition(unittest.TestCase):
             section.field_role=role
             tr=SectionTracker([section],cfg,GEO)
             self.assertFalse(tr.trackers[0]._straight_guide.cfg.grass_lateral)
+            self.assertFalse(tr.trackers[0]._straight_core.cfg.adaptive_response)
 
     def test_target_is_rate_bounded_and_each_measurement_is_integrated_once(self):
         g=warm();g.fast=False
@@ -119,6 +120,7 @@ class GrassPosition(unittest.TestCase):
             tr=PathTracker(Path((0.,0.,0.),[(20.,0.)]),differential_config(PathConfig(cruise_mps=speed)),GEO)
             self.assertEqual(tr._straight_guide.cfg.grass_lateral,enabled)
             self.assertEqual(tr._straight_core.cfg.direct_rate_damping,enabled)
+            self.assertEqual(tr._straight_core.cfg.adaptive_response,enabled)
             self.assertEqual(tr._straight_core.cfg.ki,0. if enabled else tr.cfg.straight_ki)
             self.assertFalse(tr._arc_guide.cfg.grass_lateral)
         tr.set_cruise(.5);tr._reset_straight()

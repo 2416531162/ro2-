@@ -18,8 +18,8 @@ def run(mod,variant,case):
     core=HeadingControl(HeadingControlConfig(**inner));core.reset(now=0)
     boost=mod.PullBoost(cfg)
     dt=.02;speed=case.get('speed_mps',.5);step=speed*dt;nx,ny=.24,-.4575
-    t=0.;s=-3.5;y=case.get('initial_cm',1.)/100;yaw=0.;w=0.;target=0.;aligned=False
-    sent=collections.deque([(-10.,0.)]);ys=[];commands=[];reference=[];est=[];target_rates=[];ss=[]
+    t=0.;tick=0;s=-3.5;y=case.get('initial_cm',1.)/100;yaw=0.;w=0.;target=0.;aligned=False
+    sent=collections.deque([(-10.,0.)]);ys=[];commands=[];reference=[];est=[];target_rates=[];ss=[];scales=[]
     rng=np.random.default_rng(case.get('seed',7));noise=0.
     while s<case.get('length',64.):
         nozzle=y+nx*math.sin(yaw)+ny*(math.cos(yaw)-1)
@@ -41,12 +41,15 @@ def run(mod,variant,case):
         target,bias,_,aligned=mod.imu_first_target(cfg,g,target,0.,dt,3.,1.,aligned,pull=pull,entry_weight=entry)
         tr=mod.wrap(target-old_target)/dt
         feedforward=tr if variant!='after' or case.get('feedforward',True) else 0.
-        cmd=core.step(t,mod.wrap(imu-target),gyro,sample_t=t,moving=True,dt=dt,target_rate=feedforward)
+        cmd=core.step(t,mod.wrap(imu-target),gyro,sample_t=t,moving=True,dt=dt,target_rate=feedforward,
+                      adaptation_ok=g.rtk_accepted)
         if variant=='after' and hasattr(mod,'direct_rate'):
             cmd=mod.direct_rate(g,imu,gyro,dt)
         sent.append((t,cmd))
-        while len(sent)>1 and sent[1][0]<=t-case['delay']:sent.popleft()
-        target_w=case['gain']*sent[0][1]
+        delay=case.get('delay_after',case['delay']) if s>=case.get('change_at_m',32.) else case['delay']
+        while len(sent)>1 and sent[1][0]<=t-delay:sent.popleft()
+        gain=case.get('gain_after',case['gain']) if s>=case.get('change_at_m',32.) else case['gain']
+        target_w=gain*sent[0][1]
         w+=(1-math.exp(-dt/case.get('tau',.12)))*(target_w-w)
         # Separate physical turning disturbance from sensor vibration.
         physical_w=w+case.get('turn_disturbance',.006)*math.sin(2*math.pi*.28*t+.3)
@@ -57,9 +60,11 @@ def run(mod,variant,case):
         y+=speed*math.sin(yaw)*dt+lateral*dt;yaw+=physical_w*dt
         if s>=0:
             ss.append(s);ys.append(nozzle);commands.append(cmd);est.append(g.e);reference.append(target);target_rates.append(tr)
-        s+=step;t+=dt
+            scales.append(core.response_scale)
+        tick+=1;s=-3.5+tick*step;t+=dt
     a=np.array(ys);c=np.array(commands);h=np.unwrap(reference)
     return (dict(p95_cm=float(np.percentile(abs(a),95)*100),rms_cm=float(np.sqrt(np.mean(a*a))*100),
         max_cm=float(np.max(abs(a))*100),swing_cm=float((np.percentile(a,95)-np.percentile(a,5))*100),
-        command_rms=float(np.sqrt(np.mean(c*c))),target_rate_max_deg_s=float(np.max(np.abs(target_rates))*180/math.pi)),
-        dict(s=ss,e=ys,estimate=est,cmd=commands,target=reference))
+        command_rms=float(np.sqrt(np.mean(c*c))),target_rate_max_deg_s=float(np.max(np.abs(target_rates))*180/math.pi),
+        response=core.response.status() if core.response is not None else None),
+        dict(s=ss,e=ys,estimate=est,cmd=commands,target=reference,response_scale=scales))

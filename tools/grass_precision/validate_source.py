@@ -59,7 +59,7 @@ def run(item):
 def main():
     (ROOT/'source-traces').mkdir(parents=True,exist_ok=True)
     policy=production_policy()
-    files=['radar_system/'+p+'.py' for p in ['line_cascade','path_tracker','heading_control','paint_precision','paint_quality','paint_start','line_mission','route_operations']]
+    files=['radar_system/'+p+'.py' for p in ['line_cascade','path_tracker','heading_control','turn_response','paint_precision','paint_quality','paint_start','line_mission','route_operations']]
     hashes={p:hashlib.sha256((sim.SOURCE/p).read_bytes()).hexdigest() for p in files}
     manifest=dict(speed_mps=.5,max_error_m=.015,source_sha256=hashes,production_policy=policy,
                   scope='Controller component closed loop; all intended samples included. Paint pauses are not used to hide errors. Synthetic plant is not field-calibrated.')

@@ -9,6 +9,7 @@
 import math
 from collections import deque
 from dataclasses import dataclass
+from turn_response import TurnResponse
 
 
 @dataclass(frozen=True)
@@ -21,10 +22,13 @@ class HeadingControlConfig:
     max_wz: float = 0.35
     i_max: float = 0.15
     direct_rate_damping: bool = False
+    adaptive_response: bool = False
 
     def __post_init__(self):
         if type(self.direct_rate_damping) is not bool:
             raise ValueError('direct_rate_damping 必须是布尔值')
+        if type(self.adaptive_response) is not bool:
+            raise ValueError('adaptive_response 必须是布尔值')
         for name in ('kp', 'ki', 'kd', 'delay_s', 'i_max'):
             value = getattr(self, name)
             if not math.isfinite(value) or value < 0:
@@ -59,6 +63,8 @@ class HeadingControl:
             if now is not None and t > now:
                 raise ValueError('已下发历史不能来自未来')
         self.sent.clear()
+        self.response=TurnResponse() if self.cfg.adaptive_response else None
+        self.response_scale=1.
         for t, wz in history:
             self.record_sent(t, wz)
         self.last_step = now
@@ -77,6 +83,7 @@ class HeadingControl:
             self.sent[-1] = (float(now), float(wz))
         else:
             self.sent.append((float(now), float(wz)))
+        if self.response is not None:self.response.record_sent(now,wz)
 
     def sent_since(self, t0, now):
         """返回 t0...now 的指令转角积分，以及 t0 时生效的指令角速度。"""
@@ -106,6 +113,9 @@ class HeadingControl:
             horizon = c.delay_s + (now - sample_t)
         else:
             pending, commanded, horizon = 0.0, target_rate, 0.0
+        if self.response is not None:
+            pending/=self.response_scale
+            commanded/=self.response_scale
         return pending, commanded, horizon, rate - commanded
 
     def prime(self, now, error, rate, *, sample_t=None, sent=(), output=0.0, target_rate=0.0):
@@ -129,7 +139,7 @@ class HeadingControl:
         return max(-c.max_wz, min(c.max_wz, achievable))
 
     def step(self, now, error, rate, *, sample_t=None, moving=True, target_rate=0.0,
-             reference_lead_s=0.0, dt=None, record=True):
+             reference_lead_s=0.0, dt=None, record=True, adaptation_ok=False):
         """计算角速度，error 为 sample_t 同时刻的航向减目标；默认固定目标。
 
         target_rate 为目标的连续变化率；reference_lead_s 表示调用方已经预测过的目标时域，避免重复前推。
@@ -137,7 +147,8 @@ class HeadingControl:
         必须由调用方随后 record_sent(now, 实际输出)。dt 可由安全层传入以保留其卡顿处理语义。
         """
         sample_t = now if sample_t is None else sample_t
-        pending, commanded, horizon, drift = self._terms(now, error, rate, sample_t, target_rate)
+        self._finite(now=now,error=error,rate=rate,sample_t=sample_t,target_rate=target_rate)
+        if sample_t>now:raise ValueError('航向样本不能来自未来')
         self._finite(reference_lead_s=reference_lead_s)
         if reference_lead_s < 0:
             raise ValueError('目标预瞄时域必须非负')
@@ -147,6 +158,10 @@ class HeadingControl:
         dt = min(max(dt, 0.0), 0.1)
         self.last_step = now
         c = self.cfg
+        if self.response is not None:
+            self.response.observe(now,sample_t,rate,eligible=bool(moving and adaptation_ok))
+            self.response_scale=self.response.advance(now,dt)
+        pending, commanded, horizon, drift = self._terms(now, error, rate, sample_t, target_rate)
         if moving:
             self.drift_lp += min(1.0, dt / c.drift_tc) * (drift - self.drift_lp)
         base = error + pending - max(0.0, horizon-reference_lead_s) * target_rate
@@ -155,18 +170,19 @@ class HeadingControl:
         bias_term = 0.0 if c.direct_rate_damping else c.kd*self.drift_lp
         pred = base + horizon * (self.integral + bias_term)
         wz = target_rate - (c.kp * pred + self.integral) - c.kd * damping
-        if abs(wz) < c.max_wz and moving:
+        if abs(wz*self.response_scale) < c.max_wz and moving:
             self.integral = max(-c.i_max, min(c.i_max, self.integral + c.ki * pred * dt))
             pred = base + horizon * (self.integral + bias_term)
             wz = target_rate - (c.kp * pred + self.integral) - c.kd * damping
         self.pred = pred
         self.pending, self.commanded, self.horizon, self.residual = pending, commanded, horizon, drift
-        self.output = max(-c.max_wz, min(c.max_wz, wz))
-        if record and c.delay_s > 0:
+        self.output = max(-c.max_wz, min(c.max_wz, wz*self.response_scale))
+        if record and (c.delay_s > 0 or self.response is not None):
             self.record_sent(now, self.output)
         return self.output
 
     def status(self):
         return dict(integral=self.integral, pred=self.pred, drift_lp=self.drift_lp, output=self.output,
                     pending=self.pending, commanded=self.commanded, residual=self.residual, horizon=self.horizon,
-                    direct_rate_damping=self.cfg.direct_rate_damping)
+                    direct_rate_damping=self.cfg.direct_rate_damping,adaptive_response=self.response is not None,
+                    **({} if self.response is None else self.response.status()))

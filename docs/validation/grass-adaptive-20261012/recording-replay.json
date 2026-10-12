@@ -1,0 +1,373 @@
+{
+  "scope": "Read-only response-observer replay; original physical trajectories are unchanged.\n\nRequires the local 27-job backup index. Matches previously received IMU samples\nto the logged heading. Wall/monotonic conversion uses the median trace offset;\nthis is a data-usability audit, not a counterfactual field-accuracy measurement.\n",
+  "jobs": 27,
+  "segments": 29,
+  "records": [
+    {
+      "job": "20261007_223748_路线作业_64fccd56",
+      "segment": "seg01",
+      "cruise_mps": 0.8,
+      "status": "outside_low_speed_scope"
+    },
+    {
+      "job": "20261007_223748_路线作业_64fccd56",
+      "segment": "seg02",
+      "cruise_mps": 0.8,
+      "status": "outside_low_speed_scope"
+    },
+    {
+      "job": "20261007_224010_路线作业_31f600dc",
+      "segment": "seg01",
+      "cruise_mps": 0.8,
+      "status": "outside_low_speed_scope"
+    },
+    {
+      "job": "20261007_224122_路线作业_b2949967",
+      "segment": "seg01",
+      "cruise_mps": 0.8,
+      "status": "outside_low_speed_scope"
+    },
+    {
+      "job": "20261007_224615_路线作业_294ba33f",
+      "segment": "seg01",
+      "cruise_mps": 0.8,
+      "status": "outside_low_speed_scope"
+    },
+    {
+      "job": "20261007_225214_路线作业_57c59849",
+      "segment": "seg01",
+      "cruise_mps": 0.8,
+      "status": "outside_low_speed_scope"
+    },
+    {
+      "job": "20261007_225214_路线作业_57c59849",
+      "segment": "seg02",
+      "cruise_mps": 0.8,
+      "status": "outside_low_speed_scope"
+    },
+    {
+      "job": "20261007_225436_路线作业_09105b06",
+      "segment": "seg01",
+      "cruise_mps": 0.8,
+      "status": "outside_low_speed_scope"
+    },
+    {
+      "job": "20261007_225455_路线作业_661157cc",
+      "segment": "seg01",
+      "cruise_mps": 0.5,
+      "status": "replayed",
+      "eligible_samples": 2559,
+      "timing_rejected": 0,
+      "accepted_windows": 0,
+      "rejected_windows": 0,
+      "scale_min": 1.0,
+      "scale_max": 1.0,
+      "reasons": {
+        "quality_or_motion_gate": 2642,
+        "collecting": 1363,
+        "waiting_for_fresh_imu": 1196
+      }
+    },
+    {
+      "job": "20261007_225642_路线作业_c73829f8",
+      "segment": "seg01",
+      "cruise_mps": 0.5,
+      "status": "replayed",
+      "eligible_samples": 438,
+      "timing_rejected": 7,
+      "accepted_windows": 0,
+      "rejected_windows": 0,
+      "scale_min": 1.0,
+      "scale_max": 1.0,
+      "reasons": {
+        "quality_or_motion_gate": 1598,
+        "collecting": 335,
+        "waiting_for_fresh_imu": 103
+      }
+    },
+    {
+      "job": "20261007_225827_路线作业_8a6b4504",
+      "segment": "seg01",
+      "cruise_mps": 0.5,
+      "status": "replayed",
+      "eligible_samples": 486,
+      "timing_rejected": 0,
+      "accepted_windows": 0,
+      "rejected_windows": 0,
+      "scale_min": 1.0,
+      "scale_max": 1.0,
+      "reasons": {
+        "quality_or_motion_gate": 687,
+        "collecting": 486
+      }
+    },
+    {
+      "job": "20261007_225918_路线作业_92a11a3e",
+      "segment": "seg01",
+      "cruise_mps": 0.5,
+      "status": "replayed",
+      "eligible_samples": 2222,
+      "timing_rejected": 0,
+      "accepted_windows": 0,
+      "rejected_windows": 0,
+      "scale_min": 1.0,
+      "scale_max": 1.0,
+      "reasons": {
+        "quality_or_motion_gate": 854,
+        "collecting": 1184,
+        "waiting_for_fresh_imu": 1038
+      }
+    },
+    {
+      "job": "20261007_230116_路线作业_855c9264",
+      "segment": "seg01",
+      "cruise_mps": 0.5,
+      "status": "replayed",
+      "eligible_samples": 2187,
+      "timing_rejected": 0,
+      "accepted_windows": 0,
+      "rejected_windows": 0,
+      "scale_min": 1.0,
+      "scale_max": 1.0,
+      "reasons": {
+        "quality_or_motion_gate": 1523,
+        "collecting": 1359,
+        "waiting_for_fresh_imu": 828
+      }
+    },
+    {
+      "job": "20261007_230244_路线作业_e14ecc69",
+      "segment": "seg01",
+      "cruise_mps": 0.5,
+      "status": "replayed",
+      "eligible_samples": 2235,
+      "timing_rejected": 0,
+      "accepted_windows": 0,
+      "rejected_windows": 0,
+      "scale_min": 1.0,
+      "scale_max": 1.0,
+      "reasons": {
+        "quality_or_motion_gate": 1646,
+        "collecting": 1163,
+        "waiting_for_fresh_imu": 1072
+      }
+    },
+    {
+      "job": "20261007_230614_路线作业_364aa6fb",
+      "segment": "seg01",
+      "cruise_mps": 0.8,
+      "status": "outside_low_speed_scope"
+    },
+    {
+      "job": "20261007_230946_路线作业_8897b6a5",
+      "segment": "seg01",
+      "cruise_mps": 0.8,
+      "status": "outside_low_speed_scope"
+    },
+    {
+      "job": "20261007_231510_路线作业_585e35dc",
+      "segment": "seg01",
+      "cruise_mps": 0.8,
+      "status": "outside_low_speed_scope"
+    },
+    {
+      "job": "20261007_231844_路线作业_50a3ecea",
+      "segment": "seg01",
+      "cruise_mps": 0.8,
+      "status": "outside_low_speed_scope"
+    },
+    {
+      "job": "20261007_232309_路线作业_4847fa1b",
+      "segment": "seg01",
+      "cruise_mps": 0.5,
+      "status": "replayed",
+      "eligible_samples": 2245,
+      "timing_rejected": 0,
+      "accepted_windows": 0,
+      "rejected_windows": 0,
+      "scale_min": 1.0,
+      "scale_max": 1.0,
+      "reasons": {
+        "quality_or_motion_gate": 1565,
+        "collecting": 1282,
+        "waiting_for_fresh_imu": 963
+      }
+    },
+    {
+      "job": "20261007_232818_路线作业_1a2af9db",
+      "segment": "seg01",
+      "cruise_mps": 0.5,
+      "status": "replayed",
+      "eligible_samples": 2245,
+      "timing_rejected": 0,
+      "accepted_windows": 0,
+      "rejected_windows": 0,
+      "scale_min": 1.0,
+      "scale_max": 1.0,
+      "reasons": {
+        "quality_or_motion_gate": 1585,
+        "collecting": 1225,
+        "waiting_for_fresh_imu": 1020
+      }
+    },
+    {
+      "job": "20261007_233626_路线作业_c2969cdd",
+      "segment": "seg01",
+      "cruise_mps": 0.5,
+      "status": "replayed",
+      "eligible_samples": 2263,
+      "timing_rejected": 0,
+      "accepted_windows": 0,
+      "rejected_windows": 0,
+      "scale_min": 1.0,
+      "scale_max": 1.0,
+      "reasons": {
+        "quality_or_motion_gate": 1878,
+        "collecting": 1261,
+        "waiting_for_fresh_imu": 1002
+      }
+    },
+    {
+      "job": "20261007_234021_路线作业_829b154d",
+      "segment": "seg01",
+      "cruise_mps": 0.5,
+      "status": "replayed",
+      "eligible_samples": 2250,
+      "timing_rejected": 0,
+      "accepted_windows": 0,
+      "rejected_windows": 0,
+      "scale_min": 1.0,
+      "scale_max": 1.0,
+      "reasons": {
+        "quality_or_motion_gate": 1710,
+        "collecting": 885,
+        "waiting_for_fresh_imu": 1365
+      }
+    },
+    {
+      "job": "20261007_234148_路线作业_e0ab1da5",
+      "segment": "seg01",
+      "cruise_mps": 0.5,
+      "status": "replayed",
+      "eligible_samples": 2235,
+      "timing_rejected": 0,
+      "accepted_windows": 0,
+      "rejected_windows": 0,
+      "scale_min": 1.0,
+      "scale_max": 1.0,
+      "reasons": {
+        "quality_or_motion_gate": 1844,
+        "collecting": 1421,
+        "waiting_for_fresh_imu": 814
+      }
+    },
+    {
+      "job": "20261007_234545_路线作业_26336957",
+      "segment": "seg01",
+      "cruise_mps": 0.5,
+      "status": "replayed",
+      "eligible_samples": 6319,
+      "timing_rejected": 0,
+      "accepted_windows": 0,
+      "rejected_windows": 0,
+      "scale_min": 1.0,
+      "scale_max": 1.0,
+      "reasons": {
+        "quality_or_motion_gate": 934,
+        "collecting": 3307,
+        "waiting_for_fresh_imu": 3012
+      }
+    },
+    {
+      "job": "20261007_234827_路线作业_31345278",
+      "segment": "seg01",
+      "cruise_mps": 0.5,
+      "status": "replayed",
+      "eligible_samples": 6275,
+      "timing_rejected": 0,
+      "accepted_windows": 0,
+      "rejected_windows": 1,
+      "scale_min": 1.0,
+      "scale_max": 1.0,
+      "reasons": {
+        "quality_or_motion_gate": 1673,
+        "collecting": 3022,
+        "waiting_for_fresh_imu": 3252,
+        "unexplained_response": 1
+      }
+    },
+    {
+      "job": "20261007_235309_路线作业_1dfab500",
+      "segment": "seg01",
+      "cruise_mps": 0.5,
+      "status": "replayed",
+      "eligible_samples": 757,
+      "timing_rejected": 0,
+      "accepted_windows": 0,
+      "rejected_windows": 0,
+      "scale_min": 1.0,
+      "scale_max": 1.0,
+      "reasons": {
+        "quality_or_motion_gate": 1566,
+        "collecting": 465,
+        "waiting_for_fresh_imu": 292
+      }
+    },
+    {
+      "job": "20261007_235404_路线作业_20987e44",
+      "segment": "seg01",
+      "cruise_mps": 0.5,
+      "status": "replayed",
+      "eligible_samples": 1642,
+      "timing_rejected": 0,
+      "accepted_windows": 0,
+      "rejected_windows": 0,
+      "scale_min": 1.0,
+      "scale_max": 1.0,
+      "reasons": {
+        "quality_or_motion_gate": 1736,
+        "collecting": 1306,
+        "waiting_for_fresh_imu": 336
+      }
+    },
+    {
+      "job": "20261007_235618_路线作业_18d5c42c",
+      "segment": "seg01",
+      "cruise_mps": 0.5,
+      "status": "replayed",
+      "eligible_samples": 7104,
+      "timing_rejected": 0,
+      "accepted_windows": 0,
+      "rejected_windows": 1,
+      "scale_min": 1.0,
+      "scale_max": 1.0,
+      "reasons": {
+        "quality_or_motion_gate": 1789,
+        "collecting": 2644,
+        "waiting_for_fresh_imu": 4424,
+        "unexplained_response": 36
+      }
+    },
+    {
+      "job": "20261008_000003_路线作业_b6a49b9a",
+      "segment": "seg01",
+      "cruise_mps": 0.5,
+      "status": "replayed",
+      "eligible_samples": 6291,
+      "timing_rejected": 0,
+      "accepted_windows": 0,
+      "rejected_windows": 1,
+      "scale_min": 1.0,
+      "scale_max": 1.0,
+      "reasons": {
+        "quality_or_motion_gate": 1602,
+        "collecting": 2623,
+        "waiting_for_fresh_imu": 3612,
+        "unexplained_response": 56
+      }
+    }
+  ],
+  "source_sha256": {
+    "radar_system/turn_response.py": "39d85b150e81c5509f567dfe78c792c09a0f1fe54868bffd4c5b6cc9c86390b9"
+  }
+}

@@ -1,0 +1,57 @@
+{
+  "status": "BOUNDED_ADAPTATION_IMPLEMENTED",
+  "software_feature_checks_passed": true,
+  "field_accuracy_qualified": false,
+  "installed_on_board": false,
+  "summary": {
+    "cases": 174,
+    "original_cases": 156,
+    "original_passed_before": 149,
+    "original_passed_after": 149,
+    "original_worst_after_mm": 15.436231543067558,
+    "original_max_regression_mm": 0.0,
+    "learning_cases": 13,
+    "transition_rms_improved": 3,
+    "transition_worst_regression_mm": 0.0,
+    "scale_min": 0.85,
+    "scale_max": 1.15
+  },
+  "transition_max_improved": 8,
+  "transition_max_unchanged": 10,
+  "transition_rms_worse": 6,
+  "transition_largest_rms_increase_mm": 0.1269369393521549,
+  "software_tests": {
+    "passed": 544,
+    "subtests_passed": 370,
+    "known_baseline_failures": 1
+  },
+  "replay": {
+    "jobs": 27,
+    "segments": 29,
+    "low_speed_segments": 17,
+    "learned_windows": 0,
+    "note": "No trusted gain was confirmed in the old recordings; this cannot prove field improvement."
+  },
+  "bounds": {
+    "scale_min": 0.85,
+    "scale_max": 1.15,
+    "learning_rate_per_s": 0.01,
+    "rollback_rate_per_s": 0.03,
+    "window_s": 12,
+    "confirm_windows": 2
+  },
+  "source_sha256": {
+    "radar_system/turn_response.py": "39d85b150e81c5509f567dfe78c792c09a0f1fe54868bffd4c5b6cc9c86390b9",
+    "radar_system/heading_control.py": "c1e25c82ce7d2520454d4ff1d35c91e15e92395a1469355ba3e82b53711061e9",
+    "radar_system/path_tracker.py": "573257409cd0d9191c0cd5333801ea474fafe7b430023a509080ab5eed06c941",
+    "tools/grass_precision/simulate.py": "706166cf822312180bc1754dde8599fa1cc62065a5002b364b603950159b7f6c",
+    "radar_system/line_cascade.py": "06737f00bf83c870a579c5bfae9fcfd21e1293db7206810a9474f02a231fd80f",
+    "radar_system/paint_precision.py": "06334afd4b2a995370f864b22ab5f6b133b112f9b0cfe485d27941a0d375e561",
+    "tools/grass_precision/validate_source.py": "df60fd070f652b9188e3b6661296aea6055cf2833c4b01a8fa9fddc2ed13d78e",
+    "tools/grass_precision/scenarios.py": "e54f29a90a94b9991f833bc9eed2e9943ce2ae8095edf404e6b1a2316d20a95b"
+  },
+  "final_compatibility_check": "Zero-horizon adaptive command recording is covered by a dedicated test; the paired matrix uses a 0.309 s horizon, so its executed branch is unchanged.",
+  "all_cases_max_before_mm": 18.447747549754887,
+  "all_cases_max_after_mm": 18.447747549754887,
+  "all_cases_passed_15mm": 161
+}

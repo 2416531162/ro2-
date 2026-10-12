@@ -308,6 +308,7 @@ class PathConfig:
     # 长直线 IMU 为主、卫星辅助（line_cascade.ImuFirstConfig，2026-10-06 用户）；None 用原 A/B 控制律
     straight_imu_first: ImuFirstConfig | None = None
     grass_lateral_enabled: bool = True
+    grass_response_adaptation: bool = True
     # 画圆（整圆那一段）也 IMU 为主（2026-10-06 晚用户：起点终点交接错开 1–2 cm，选「画圆也 IMU 为主」）：原路径跟踪的
     # 弯道控制律不变，只换它看到的位姿——车头 = IMU 偏航 + 接入时学的换算（同 straight_imu_first），横偏 = IMU 推算
     # + 卫星慢慢拟合（可靠才用、突然跳开不跟），沿圆路程按走过的路推、往卫星挪（距离常数 arc_s_tau_m、每米最多 arc_s_rate_m，
@@ -366,7 +367,7 @@ class PathConfig:
             raise ValueError('圆弧固定速度必须为空或有效正速度')
         if not math.isfinite(self.run_out_decel_max_mps2) or not 0 < self.run_out_decel_max_mps2 <= 1.0:
             raise ValueError('run_out_decel_max_mps2 必须在 (0,1] 内')
-        for name in ('straight_imu_enabled', 'straight_target_feedforward', 'straight_direct_rate_damping', 'grass_lateral_enabled',
+        for name in ('straight_imu_enabled', 'straight_target_feedforward', 'straight_direct_rate_damping', 'grass_lateral_enabled', 'grass_response_adaptation',
                      'arc_rtk_radial_enabled', 'arc_partial_imu_first'):
             if type(getattr(self, name)) is not bool:
                 raise ValueError(name + ' 必须是布尔值')
@@ -708,7 +709,8 @@ class PathTracker:
             ki=0. if grass else c.straight_ki,kd=1.130 if grass else c.straight_kd,
             delay_s=.309 if grass else c.delay_s if c.straight_prediction_delay_s is None else c.straight_prediction_delay_s,
             drift_tc=c.straight_drift_tc,max_wz=.35,i_max=.15,
-            direct_rate_damping=c.straight_direct_rate_damping or grass)
+            direct_rate_damping=c.straight_direct_rate_damping or grass,
+            adaptive_response=grass and c.grass_response_adaptation)
 
     def _reset_arc(self):
         self._arc_weight = 0.0
@@ -1656,7 +1658,10 @@ class PathTracker:
                   and pose.speed >= HoldConfig.moving_ratio*speed)
         applied_rate=target_rate if not first.grass_lateral or cfg.straight_target_feedforward else 0.
         inner_w = self._straight_core.step(self._imu_now, error, gyro, sample_t=sample_t,
-                                          moving=moving, target_rate=applied_rate, dt=dt, record=False)
+                                          moving=moving, target_rate=applied_rate, dt=dt, record=False,
+                                          adaptation_ok=(first.grass_lateral and guide.rtk_accepted
+                                              and old_weight>=1. and not st.integral_frozen
+                                              and abs(gyro)<.25 and not self._settling()))
         output = legacy_w + max(self._straight_weight,self._launch_weight) * (inner_w-legacy_w)
         output = max(-self.kappa_max*speed, min(self.kappa_max*speed, output))
         if self._straight_weight >= 1.0:

@@ -1,0 +1,25 @@
+..................................................................................................................................... [ 24%]
+............................................................................................................F.............................................................. [ 55%]
+.............................................. [ 64%]
+............................................................................... [ 78%]
+............................................................................................ [ 95%]
+........................                      [100%]
+=================================== FAILURES ===================================
+_ RunupStart.test_imu_takes_over_before_the_paint_starts_despite_start_wobble __
+
+self = <test_imu_first_straight.RunupStart testMethod=test_imu_takes_over_before_the_paint_starts_despite_start_wobble>
+
+    def test_imu_takes_over_before_the_paint_starts_despite_start_wobble(self):
+        tr, full = runup_start()
+        self.assertIsNotNone(full)
+        self.assertLess(full, tr.paint_from_m)               # 喷头到线头前 IMU 已经全接管
+        old = replace(differential_config(PathConfig()).straight_imu_first, gyro_max_deg_s=2.)
+        tr, full = runup_start(old)
+>       self.assertTrue(full is None or full > tr.paint_from_m)   # 原来 2°/s：线头还是原跟踪在开
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AssertionError: False is not true
+
+tests/test_imu_first_straight.py:582: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_imu_first_straight.py::RunupStart::test_imu_takes_over_before_the_paint_starts_despite_start_wobble
+1 failed, 544 passed, 370 subtests passed in 74.57s (0:01:14)
