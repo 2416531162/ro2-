@@ -581,8 +581,10 @@ class OidChassis:
     更新里程计。两台驱动器是独立的盒子，可能只有一台断电或掉线：两轮的反馈都在 feedback_timeout_s 内才算
     更新（上层据此判反馈过期、停车）；任一台报故障 telemetry() 会说明，由上层停车。"""
 
-    def __init__(self, link, wheels, *, feedback_timeout_s=0.3, clock=None, tuning=None):
+    def __init__(self, link, wheels, *, feedback_timeout_s=0.3, clock=None, tuning=None, speed_trim=None):
         self.link, self.wheels, self.feedback_timeout_s = link, wheels, feedback_timeout_s
+        self.speed_trim = speed_trim    # SpeedTrim：按位置算的真实轮速修正下发转速（驱动器低速测速不准），None = 不修正
+        self.target = {1: 0, 2: 0}      # 修正前的目标 erpm
         self.base_wheels = wheels       # oid.yaml 的轮子配置；App 改加减速时 wheels 换成改过的
         self.clock = clock
         self.odom = Odometry()
@@ -657,7 +659,10 @@ class OidChassis:
             if not self.wheels.configured and (v or w):
                 raise ValueError('pole_pairs_unconfigured')
             self.link.heartbeat(now)
-            self.sent = self.wheels.motor_erpm(v, w) if self.wheels.configured else {1: 0, 2: 0}
+            self.target = self.wheels.motor_erpm(v, w) if self.wheels.configured else {1: 0, 2: 0}
+            t = self.clock() if self.clock is not None else now
+            self.sent = (self.speed_trim.apply(t, self.target, self.link.state)
+                         if self.speed_trim is not None and self.wheels.configured else dict(self.target))
             self.link.command(self.sent)
         self.link.request(now)
         self.link.poll(now)
@@ -711,6 +716,8 @@ class OidChassis:
                 'speed_source': (self.odometry_measurement or {}).get('speed_source'),
                 'faults': {('左', '右')[m - 1]: oc.fault_text(c) for m, c in self.faults().items()},
                 'erpm_sent': [self.sent[1], self.sent[2]],
+                'erpm_target': [self.target[1], self.target[2]],
+                'speed_trim': self.speed_trim.status() if self.speed_trim is not None else None,
                 'erpm_read': [self.link.state[1].speed_erpm, self.link.state[2].speed_erpm],
                 'silent': [('左', '右')[m - 1] for m in self.silent(now)],
                 'stale': self.updated is None or now - self.updated > self.feedback_timeout_s,

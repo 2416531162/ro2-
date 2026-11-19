@@ -32,6 +32,7 @@ sys.path.insert(0, os.path.dirname(HERE))
 from robot_core.service_watchdog import watchdog
 from runtime_config import PROFILE, profile_hash  # noqa: E402,F401
 import wheeltec_driver as wd  # noqa: E402
+from speed_trim import SpeedTrim  # noqa: E402
 from wheeltec_driver import ControlPolicy, finite  # noqa: E402
 from oid_link import (CanLink, DriverTuning, OidChassis, Rs485Link, SerialPort, SocketCan, SplitLink,  # noqa: E402
                       TUNING_MAX_CURRENT_A, WheelConfig, HALL_STILL_MAX_MPS)
@@ -282,7 +283,9 @@ PARAMS = dict(confirmed=False, left_bus='can', right_bus='can',
               tx_hz=50.0, yaw_acceleration_rad_s2=2.0, manual_stop_decel_mps2=1.5,
               publish_tf=False, navigation_uses_lidar=False,
               # App「驱动器参数」：闭环最大电流上限（0 = 不许改，最多 TUNING_MAX_CURRENT_A）、保存位置（空 = 不能改）
-              max_current_limit_a=0.0, tuning_file='')
+              max_current_limit_a=0.0, tuning_file='',
+              # 低速转速修正（speed_trim.py）：按位置读数算真实轮速修正下发转速；表存 speed_trim_file（空 = 不存）
+              speed_trim=False, speed_trim_file='')
 
 
 class OidDriver(wd.WheeltecDriver):
@@ -315,6 +318,9 @@ class OidDriver(wd.WheeltecDriver):
         self.tuning_path = os.path.expanduser(str(gp('tuning_file') or ''))
         self.tuning_supported = confirmed and set(wheel_buses(self.params).values()) == {'can'}
         self.tuning, self.tuning_error = self.load_tuning()
+        # 重连时沿用同一个对象：学到的增益不丢
+        self.speed_trim = (SpeedTrim(self.wheels, path=os.path.expanduser(str(gp('speed_trim_file') or '')))
+                           if bool(gp('speed_trim')) and self.wheels.configured else None)
         self.tune_pending = None            # 已保存、等 IO 线程发给驱动器的指令 id
         self.tune_result = None             # 最近一次修改的结果 {id, ok, message}，ok=None 为正在下发
         self.legacy_commands = False
@@ -650,7 +656,7 @@ class OidDriver(wd.WheeltecDriver):
             with self.lock:
                 tuning = self.tuning if self.tuning_supported else None
             chassis = OidChassis(build_link(self.params), self.wheels, feedback_timeout_s=self.config.feedback_timeout_s,
-                                 clock=time.monotonic, tuning=tuning)
+                                 clock=time.monotonic, tuning=tuning, speed_trim=self.speed_trim)
             if send:
                 chassis.open(now)
                 opened_with = chassis.tuning
@@ -720,7 +726,7 @@ class OidDriver(wd.WheeltecDriver):
 
     def publish_trace(self, t, now):
         """/oid/trace：t（单调时钟，与 /line/trace、/gnss/raw 同一时钟）、v_cmd / w_cmd（限速后发给底盘的）、
-        erpm_sent / erpm_read（左、右）、wheels_mps（读回换算的左右轮速）、v / w（里程计）、
+        erpm_sent / erpm_read（左、右）、erpm_target（低速修正前的目标）/ erpm_true（位置算的真实转速，修正打开才有）、wheels_mps（读回换算的左右轮速）、v / w（里程计）、
         pos_cdeg（左、右驱动器读回的电机轴位置，0.01°，累计值，驱动器方向；轮毂电机直驱即轮子转角，
         用来看车身摆动是否跟轮子每转一圈锁相）。负载（左、右，驱动器方向，读数超过 LOAD_MAX_AGE_S 没更新写 null）：
         motor_a 电机电流 A、bus_a 母线电流 A、duty 占空比原始值、temp_c 驱动器温度 ℃；CAN 那台只查电机电流，
@@ -735,6 +741,8 @@ class OidDriver(wd.WheeltecDriver):
                 return [num(getattr(state[m], name)) if fresh[m] else None for m in (1, 2)]
             rec = {'t': round(now, 4), 'v_cmd': num(self._cmd[0]), 'w_cmd': num(self._cmd[1]),
                    'erpm_sent': [num(x) for x in t.get('erpm_sent') or []],
+                   'erpm_target': [num(x) for x in t.get('erpm_target') or []],
+                   'erpm_true': [num(x) for x in ((t.get('speed_trim') or {}).get('measured_erpm') or [])],
                    'erpm_read': [num(x) for x in t.get('erpm_read') or []],
                    'wheels_mps': [num(x) for x in t.get('wheels_mps') or []],
                    'v': num(o.v), 'w': num(o.w), 'stale': bool(t.get('stale')),
