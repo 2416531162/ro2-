@@ -10,3 +10,9 @@ sch16t_imu:
     # 模块按 +X 朝车头、顶盖朝上装（固件只支持水平安装）。上车核对：垫高车头时 app 的俯仰应为车头抬起，
     # 左转时 /imu 的 angular_velocity.z 为正；不对就改这里
     mount_yaw_deg: 0.0
+    # 原始 CAN 帧记录（数据帧 + 0x401 指令 + 0x402 应答，原样存，留着离线改进 IMU）。空 = 不记；上一级目录不存在也不记。
+    # 全量 0x3F、20 ms 约 450 帧/s，gzip 后约每小时 15–40 MB（3000 MB 约记一周多）。读取：python3 rion_protocol/sch16t_rawlog.py 文件
+    raw_log_dir: /userdata/rtk/imu_raw
+    raw_log_max_mb: 3000.0       # 目录总量上限，超了从最老的文件删起
+    raw_log_min_free_mb: 2048.0  # 磁盘剩余少于这个也删老文件（作业记录在同一块盘），删光还不够就暂停
+    raw_log_file_s: 3600.0       # 每个文件记多久

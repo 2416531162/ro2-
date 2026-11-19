@@ -9,7 +9,8 @@ SCH16T 倾角 / 姿态模块，CAN 原生协议 V1.0（模块工程 `docs/CAN协
 | --- | --- |
 | `sch16t_codec.py` | 数据帧解码（角度 / 加速度 / 陀螺 / 高精度姿态 / 状态 / 原始）、换到 REP-103。纯计算 |
 | `sch16t_imu.py` | ROS 节点，只收不发 |
-| `sch16t.yaml` | 参数：数据帧 ID（出厂 0x400）、`mount_yaw_deg` |
+| `sch16t_rawlog.py` | 原始 CAN 帧记录（节点里用）+ 读取工具 |
+| `sch16t.yaml` | 参数：数据帧 ID（出厂 0x400）、`mount_yaw_deg`、原始记录 |
 
 - **轴向**：加速度帧、陀螺帧就是 X 前、Y 左、Z 上（= REP-103），不取反；角度帧是和 HDA536T 一样的欧拉角（俯仰前高为正、
   方位角顺时针为正），换成 REP-103 是（横滚, −俯仰, −方位角）。见 `tests/test_sch16t.py`。
@@ -20,6 +21,18 @@ SCH16T 倾角 / 姿态模块，CAN 原生协议 V1.0（模块工程 `docs/CAN协
   `/imu/status`；状态帧的帧计数用来数丢了几个周期（`sequence_gaps`）。
 - **安装**：按模块 +X 朝车头、顶盖朝上装时 `mount_yaw_deg: 0`；上车先核对垫高车头时 app 俯仰是车头抬起、左转时
   `angular_velocity.z` 为正。
+
+### 原始帧记录（2026-11-19 起）
+
+节点把收到的每一帧数据帧（0x400）和 0x401 指令、0x402 应答原样存到 `raw_log_dir`（车上 `/userdata/rtk/imu_raw`），
+留着离线改进 IMU（标定、零偏、滤波）。作业记录不存 CAN 原始帧，要分析 IMU 就用这个。
+
+- 文件 `sch16t_YYYYmmdd_HHMMSS.raw.gz`，每小时一个；头两行是 `SCH16T-RAW 1` 和一行 JSON，后面每帧 27 字节
+  `<qqHB8s`（墙钟 ns、单调钟 ns、CAN ID、长度、8 字节数据）。约 2 s 刷一次盘，断电只丢最后几秒，截断文件照样能读。
+- 空间：总量超过 `raw_log_max_mb`（3000）或磁盘剩余少于 `raw_log_min_free_mb`（2048，和作业记录同一块盘）就删最老的文件；
+  删光还不够就暂停，`/imu/status` 的 `raw_log.paused` 写原因。写盘出错只暂停记录，不影响 `/imu`。
+- 读：`python3 rion_protocol/sch16t_rawlog.py 文件...`（`--csv` 出 CSV），或在 python 里 `sch16t_rawlog.read(路径)`，
+  数据用 `sch16t_codec.decode` 解。板子 RTC 不准时墙钟会偏，按单调钟算间隔。
 
 ## 瑞芬 HDA536T（原来的，留作回退）
 

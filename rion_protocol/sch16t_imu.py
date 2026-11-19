@@ -30,6 +30,7 @@ sys.path.insert(0, os.path.dirname(HERE))
 
 import sch16t_codec as sc  # noqa: E402
 from hda536t_imu import CanSocket, fill_imu  # noqa: E402  同一条 CAN、同样的 Imu 消息填法
+from sch16t_rawlog import RawLog  # noqa: E402
 from robot_core.service_watchdog import watchdog  # noqa: E402
 
 try:
@@ -186,17 +187,36 @@ class Sch16t:
         return out
 
 
+def make_raw_log(p, log):
+    """raw_log_dir 空、或它的上一级目录不存在（比如没有 /userdata 的板子）就不记。记数据帧和指令（数据帧 ID + 1，0x401）、应答（+ 2，0x402）。"""
+    d = str(p.get('raw_log_dir') or '')
+    if not d:
+        return None
+    if not os.path.isdir(os.path.dirname(os.path.abspath(d))):
+        log.warn('IMU 原始记录不开：%s 的上一级目录不存在' % d)
+        return None
+    data_id = int(p['data_id'])
+    log.info('IMU 原始帧记到 %s' % d)
+    return RawLog(d, (data_id, data_id + 1, data_id + 2), float(p['raw_log_max_mb']),
+                  float(p['raw_log_min_free_mb']), float(p['raw_log_file_s']),
+                  meta={'data_id': data_id, 'mount_yaw_deg': float(p['mount_yaw_deg'])})
+
+
 class Sch16tNode(Node):
     def __init__(self, bus=None, clock=time.monotonic):
         super().__init__('sch16t_imu')
         from robot_core.config import PROFILE
-        for name, value in (('can_channel', 'can0'), ('data_id', sc.DATA_ID), ('stale_s', 0.1),
-                            ('mount_yaw_deg', 0.0), ('frame_id', PROFILE['frames']['imu'])):
+        defaults = (('can_channel', 'can0'), ('data_id', sc.DATA_ID), ('stale_s', 0.1),
+                    ('mount_yaw_deg', 0.0), ('frame_id', PROFILE['frames']['imu']),
+                    ('raw_log_dir', ''), ('raw_log_max_mb', 3000.0), ('raw_log_min_free_mb', 2048.0),
+                    ('raw_log_file_s', 3600.0))
+        for name, value in defaults:
             self.declare_parameter(name, value)
-        p = {n: self.get_parameter(n).value for n in ('can_channel', 'data_id', 'stale_s', 'mount_yaw_deg', 'frame_id')}
+        p = {n: self.get_parameter(n).value for n, _ in defaults}
         self.frame_id, self.clock = p['frame_id'], clock
         self.imu = Sch16t(int(p['data_id']), float(p['stale_s']), float(p['mount_yaw_deg']))
         self.bus = bus or CanSocket(p['can_channel'])
+        self.raw_log = make_raw_log(p, self.get_logger())
         self.pub_raw = self.create_publisher(Imu, '/imu', 20)
         self.pub_data = self.create_publisher(Imu, '/imu/data', 20)
         self.pub_status = self.create_publisher(String, '/imu/status', 1)
@@ -209,6 +229,8 @@ class Sch16tNode(Node):
         got = self.bus.recv()
         if got is None:
             return False
+        if self.raw_log is not None:
+            self.raw_log.write(*got)
         sample = self.imu.feed(self.clock(), *got)
         if sample is not None:
             stamp = self.get_clock().now().to_msg()
@@ -227,6 +249,8 @@ class Sch16tNode(Node):
 
     def publish_status(self):
         st = self.imu.status(self.clock())
+        if self.raw_log is not None:
+            st['raw_log'] = self.raw_log.status()
         self.pub_status.publish(String(data=json.dumps(st, ensure_ascii=False)))
         if st['problem'] != self._reported:
             (self.get_logger().warn if st['problem'] else self.get_logger().info)(st['problem'] or 'IMU 正常')
@@ -247,6 +271,9 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        node.running = False
+        if node.raw_log is not None:
+            node.raw_log.close()
         watchdog.close()
         node.running = False
         reader.join(timeout=1.0)
