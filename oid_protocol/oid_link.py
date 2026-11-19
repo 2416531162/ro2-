@@ -270,7 +270,8 @@ class CanLink:
         self.heartbeat_s, self.slow_s, self.load_s = heartbeat_s, slow_s, load_s
         self.motors = sorted(self.node_ids)
         self.state = {m: MotorState() for m in self.motors}
-        self._beat = self._slow = self._load = -math.inf
+        self._beat = self._slow = self._load = self._volt = -math.inf
+        self._beat_sent = False         # 这一拍发过心跳：附加查询挪到下一拍（帧间隔下一拍 ≤ 8 帧）
         self.tx = self.rx = self.unknown = 0
         self.errors = 0
 
@@ -314,6 +315,7 @@ class CanLink:
             for m in self.motors:
                 self._send(m, oc.can_heartbeat())
             self._beat = now
+            self._beat_sent = True
 
     def command(self, erpm):
         for m in self.motors:
@@ -328,15 +330,20 @@ class CanLink:
         for m in self.motors:
             self._send(m, oc.can_query(oc.Q_SPEED))
             self._send(m, oc.can_query(oc.Q_POSITION))
+        # 附加查询每拍最多一对（两台各一帧），发过心跳的那拍不发：每帧隔 3 ms、40 Hz 时一拍 ≤ 8 帧 ≈ 24 ms
+        beat, self._beat_sent = self._beat_sent, False
+        if beat and self.frame_gap_s > 0:
+            return
         if now - self._load >= self.load_s:
-            for m in self.motors:
-                self._send(m, oc.can_query(oc.Q_MOTOR_CURRENT))
-            self._load = now
-        elif now - self._slow >= self.slow_s:      # 和电流错开一拍：帧间隔下一拍不超 10 帧
-            for m in self.motors:
-                self._send(m, oc.can_query(oc.Q_FAULT))
-                self._send(m, oc.can_query(oc.Q_VOLTAGE))
-            self._slow = now
+            item, self._load = oc.Q_MOTOR_CURRENT, now
+        elif now - self._slow >= self.slow_s:
+            item, self._slow = oc.Q_FAULT, now
+        elif now - self._volt >= self.slow_s:
+            item, self._volt = oc.Q_VOLTAGE, now
+        else:
+            return
+        for m in self.motors:
+            self._send(m, oc.can_query(item))
 
     def close(self):
         self.bus.close()
