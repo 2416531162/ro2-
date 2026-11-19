@@ -54,7 +54,7 @@ class DiffConfig:
     max_yaw_rate_rad_s: float = PROFILE['driver']['max_yaw_rate_rad_s']
     acceleration_m_s2: float = PROFILE['driver']['acceleration_m_s2']
     yaw_acceleration_rad_s2: float = 2.0
-    manual_stop_decel_mps2: float = 1.5       # 普通松手停车；急停仍由驱动器减速度制动
+    manual_stop_decel_mps2: float = 1.0       # 普通松手停车；急停仍由驱动器减速度制动（2026-11-19 用户：1.5 停得太冲）
     cmd_timeout_s: float = PROFILE['driver']['cmd_timeout_s']
     feedback_timeout_s: float = PROFILE['driver']['feedback_timeout_s']
     startup_stop_s: float = PROFILE['driver']['startup_stop_s']
@@ -83,13 +83,16 @@ class DiffConfig:
 # 停车放空（2026-11-19 方案一）。纯霍尔的驱动器锁在零速闭环里会来回找位置；11-19 为草地起步调硬的零速 Kp/Ki
 # （不改回去，不然草地开不动）在地上锁零速时自己约 1 Hz 前后摇，原来「停稳满 1 s 才放空」永远等不到、一直摇。改为：
 # - 开机还没有任何操作：直接放空，不先发零速；
-# - 停车（空闲、手动松手、急停、故障）：先发零速刹车，刹到零（wheels_slow：两轮读回都不超过 HALL_STILL_MAX_MPS，
-#   或已经反转）马上放空，之后只读反馈，手推时保持放空。不等霍尔安静：11-19 地上手动停车实测，驱动器零速闭环在
-#   轮子过零后会往回打 0.2–0.4 m/s（车往后蹿一下），等霍尔 0.25 s 不跨格正好让它打完；刹到零就放空，最后顺着滑停几厘米；
+# - 手动松手（渐停）：不锁零速。渐停指令降到两轮都不超过 MANUAL_STOP_RELEASE_MPS 就放空，最后几厘米靠地面阻力滑停。
+#   11-19 地上 CAN 实录：轮子跟着渐停指令刹到零，驱动器零速闭环马上往回推；读回转速比霍尔位置慢约 0.1–0.2 s，
+#   等读回「到零」再放空时车已经往回走了，每次往后退 2–10 cm。按指令放空不看读回，驱动器没有机会往回推；
+# - 其它停车（空闲、急停、故障、没收到松手零速的超时）：先发零速刹车，刹到零（wheels_slow：两轮读回都不超过
+#   HALL_STILL_MAX_MPS，或已经反转）马上放空，之后只读反馈，手推时保持放空；
 # - 自动作业（导航、跟随）中途发零速照旧锁零速，不放空；
 # - 兜底（任何状态）：在发零速、过了正常刹车时间轮子还一直在动，就放空；作业中同时转故障（zero_hold_oscillation），
 #   作业中断、断点保留，复位后可「继续作业」；急停时驱动器不回话也放空。
 # 新的手动指令或自动作业重新取得控制时恢复速度闭环：起步从放空直接发目标转速。
+MANUAL_STOP_RELEASE_MPS = 0.10     # 手动松手渐停：指令降到两轮都不超过这个速度就放空（之后按约 0.3 m/s² 地面阻力滑 2–6 cm）
 ZERO_HOLD_FRESH_S = 0.2             # 判「刹到零」只认这么新的反馈
 ZERO_HOLD_MOVING_RELEASE_S = 0.5    # 空闲、手动、急停、故障：发零速后轮子一直在动这么久就放空
 # 作业中放空要连带中断作业，判得更严：只认霍尔跨格（读回转速在零速闭环里会跳），一直在动这么久才转故障。
@@ -318,7 +321,7 @@ PARAMS = dict(confirmed=False, left_bus='can', right_bus='can',
               rs485_word_order='big', rs485_timeout_s=0.03, rs485_echo=False,
               heartbeat_s=0.1, pole_pairs=0, erpm_per_rpm=0.0, wheel_radius_m=0.2046, gear_ratio=1.0,
               left_sign=1, right_sign=-1, wheel_accel_mps2=1.0, wheel_decel_mps2=2.0,
-              tx_hz=50.0, yaw_acceleration_rad_s2=2.0, manual_stop_decel_mps2=1.5,
+              tx_hz=50.0, yaw_acceleration_rad_s2=2.0, manual_stop_decel_mps2=1.0,
               publish_tf=False, navigation_uses_lidar=False,
               # App「驱动器参数」：闭环最大电流上限（0 = 不许改，最多 TUNING_MAX_CURRENT_A）、保存位置（空 = 不能改）
               max_current_limit_a=0.0, tuning_file='',
@@ -657,6 +660,13 @@ class OidDriver(wd.WheeltecDriver):
         directions = z.directions if z.epoch == self.authority.epoch else (0, 0)
         return all((x * d if d else abs(x)) <= HALL_STILL_MAX_MPS for x, d in zip(speeds, directions))
 
+    def manual_stop_coasting(self, now, v, w):
+        """手动松手渐停的最后一段：这一拍指令两轮都不超过 MANUAL_STOP_RELEASE_MPS 就放空滑停，不锁零速
+        （11-19 硬零速参数下，刹到零后驱动器零速闭环马上往回推，车往后退）。急停、故障、超时清零不走这里。"""
+        if not self.policy.manual_stopping(now):
+            return False
+        return abs(v) + abs(w) * self.wheels.track_m / 2 <= MANUAL_STOP_RELEASE_MPS
+
     def zero_hold_release(self, now, v, w):
         """发零速时要不要因为零速压不住（轮子一直在动）或急停时驱动器不回话而放空：
         返回 (原因, 这一拍要不要发放空指令)；原因 None = 不走兜底（停车是否放空看 automatic_release_allowed）。"""
@@ -674,16 +684,18 @@ class OidDriver(wd.WheeltecDriver):
         return reason, send
 
     def automatic_release_allowed(self, now, v, w):
-        """不在作业、没有手动运动请求、发的是零速时放空：开机还没有任何操作就直接放空，其余刹到轮速很小再放空；
-        已放空后手推不能触发零速锁轮。"""
+        """不在作业、没有手动运动请求时放空：开机还没有任何操作就直接放空；手动松手渐停到很慢就放空滑停；
+        其余发零速刹到轮速很小再放空。已放空后手推不能触发零速锁轮。"""
         if self.push_mode:  # 仅兼容旧客户端的显式推行协议，新 App 不再提供此入口。
             return True
         if self.authority.mode in ('NAVIGATION', 'FOLLOW'):
             return False
-        if v != 0.0 or w != 0.0 or self.policy.manual_stopping(now):
-            return False
         request = self.authority.request
         if self.authority.mode == 'MANUAL' and (request.vx != 0.0 or request.wz != 0.0):
+            return False
+        if self.manual_stop_coasting(now, v, w):
+            return True
+        if v != 0.0 or w != 0.0 or self.policy.manual_stopping(now):
             return False
         if self.authority.mode == 'IDLE' and self.authority.reason == 'startup':
             return True

@@ -158,14 +158,48 @@ class TestZeroHoldRelease(unittest.TestCase):
         self.assertFalse(self.motion()['estop_released'])                   # 走的是正常停车放空，不是兜底
         self.assertIsNone(self.motion()['zero_hold_release_reason'])
 
-    def test_manual_stop_releases_once_wheels_are_slow(self):
+    def test_manual_stop_releases_near_end_of_ramp_without_zero_hold(self):
+        # 11-19 地上 CAN 实录：刹到零后驱动器零速闭环往回推，读回又慢 0.1–0.2 s，等读回到零再放空车已经往后退了。
+        # 松手渐停（1.0 m/s²）降到 0.1 m/s 就放空滑停，从不发零速
+        self.assertEqual(self.node.config.manual_stop_decel_mps2, 1.0)
         self.drive(.6)
+        self.device.sent.clear()
         took = self.step(3.0, (0.0, 0.0), until=lambda n: n.released)
         self.assertIsNotNone(took)
-        self.assertLess(took, 1.2)                                            # 松手渐停 + 刹到轮速很小
+        self.assertAlmostEqual(took, (.6 - oid_driver.MANUAL_STOP_RELEASE_MPS) / 1.0, delta=.06)
+        speeds = [oc.parse_can_reply(b'\x0f\x01' + d[1:5]) for _, d in self.device.sent if d[0] == oc.CAN_SPEED]
+        erpm = [abs(v) for _, v in speeds]
+        self.assertTrue(erpm)
+        self.assertNotIn(0, erpm)                                             # 没进零速闭环
+        self.assertLessEqual(erpm[-1], self.node.wheels.to_erpm(oid_driver.MANUAL_STOP_RELEASE_MPS) + 1)
         self.assertEqual(self.node.authority.mode, 'MANUAL')
-        self.assertLessEqual(self.max_speed_mps(), .06)
+        self.assertFalse(any(self.speed_mode()))
         self.assertIsNone(self.motion()['zero_hold_release_reason'])
+        self.device.sent.clear()
+        self.step(1.0, (0.0, 0.0))                                            # 渐停指令走完、之后都不再发零速
+        self.assertTrue(self.node.released)
+        self.assertFalse(self.frames(oc.CAN_SPEED))
+        self.assertLess(self.max_speed_mps(), .01)
+        self.assertIsNone(self.motion()['zero_hold_release_reason'])
+
+    def test_push_again_while_coasting_drives_again(self):
+        self.drive(.6)
+        self.assertIsNotNone(self.step(3.0, (0.0, 0.0), until=lambda n: n.released))
+        self.step(.5, (.4, 0.0))                                              # 还在滑停时又推摇杆：马上恢复速度闭环
+        self.assertFalse(self.node.released)
+        self.assertTrue(all(self.speed_mode()))
+        self.assertGreater(min(abs(m.speed) for m in self.device.motors.values()), self.node.wheels.to_erpm(.2))
+
+    def test_estop_still_brakes_with_zero_speed(self):
+        # 急停不走滑停：照旧零速刹车，刹到零再放空
+        self.drive(.6)
+        self.node.on_stop(None, NS())
+        self.device.sent.clear()
+        took = self.step(3.0, until=lambda n: n.released)
+        self.assertIsNotNone(took)
+        self.assertGreaterEqual(took, .6 / 2.0)
+        zero = [d for _, d in self.device.sent if d[0] == oc.CAN_SPEED and d[1:5] == b'\x00\x00\x00\x00']
+        self.assertTrue(zero)
 
     def test_manual_stop_releases_at_zero_before_driver_swings_back(self):
         # 11-19 地上手动停车：驱动器刹到零后零速闭环往回打 0.2–0.4 m/s，车往后蹿；刹到零就放空，不留反冲的时间
