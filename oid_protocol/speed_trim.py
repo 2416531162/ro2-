@@ -18,11 +18,24 @@ import os
 import tempfile
 from collections import deque
 
-# 轮速节点（m/s，按目标轮速的绝对值）→ 增益。11-19 架空：0.1 → 1/1.84、0.2 → 1/1.65、0.3 左对右半程 1.67×、0.5 都对
-DEFAULT_TABLE = ((0.05, 0.55), (0.1, 0.55), (0.2, 0.6), (0.3, 0.8), (0.4, 1.0), (0.5, 1.0), (0.8, 1.0), (1.2, 1.0))
+# 轮速节点（m/s，按目标轮速的绝对值）→ 增益。11-19 架空：0.1 → 1/1.84、0.2 → 1/1.65、0.3 左对右半程 1.67×、0.5 都对。
+# 0.3–0.4 之间是驱动器两套测速的切换处，增益在这里从约 0.55 跳到约 1.0（11-19 学到 0.3 → 0.5–0.56、0.35 左 0.98）：
+# 节点只放 0.3 和 0.4 时线性插值表示不了这个台阶，0.33 m/s（v 0.5、R1 圆弧的内轮）实际只有 92%，所以在 0.32、0.35 加点。
+DEFAULT_TABLE = ((0.05, 0.55), (0.1, 0.55), (0.2, 0.55), (0.25, 0.55), (0.3, 0.55), (0.32, 0.8), (0.35, 1.0),
+                 (0.4, 1.0), (0.5, 1.0), (0.8, 1.0), (1.2, 1.0))
 GAIN_MIN, GAIN_MAX = 0.35, 1.3
 MIN_LEARN_MPS = 0.04        # 太慢的位置分辨率不够（霍尔一格就是好几个百分点），不学
 MAX_STEP = 0.05             # 每次学习增益最多改 5%（对数）
+
+
+def _interp(nodes, gains, x):
+    if x <= nodes[0]:
+        return gains[0]
+    if x >= nodes[-1]:
+        return gains[-1]
+    i = max(k for k in range(len(nodes) - 1) if nodes[k] <= x)
+    f = (x - nodes[i]) / (nodes[i + 1] - nodes[i])
+    return gains[i] * (1 - f) + gains[i + 1] * f
 
 
 class SpeedTrim:
@@ -35,6 +48,7 @@ class SpeedTrim:
         default = [g for _, g in table]
         self.gains = {1: list(default), 2: list(default)}
         self.load_error = None
+        self._dirty, self._saved_at = False, None
         self._load()
         self.pos = {1: deque(maxlen=64), 2: deque(maxlen=64)}
         self.target = {1: 0, 2: 0}          # 上一周期的目标 erpm（修正前）
@@ -42,7 +56,6 @@ class SpeedTrim:
         self.steady_since = {1: None, 2: None}
         self.measured = {1: None, 2: None}  # 位置算的真实转速 erpm（驱动器符号）
         self.learned = 0
-        self._dirty, self._saved_at = False, None
         self._last = None
 
     # ---- 增益表 ----
@@ -51,13 +64,20 @@ class SpeedTrim:
             return
         try:
             data = json.load(open(self.path))
-            if [float(n) for n in data['nodes']] != self.nodes:
-                raise ValueError('轮速节点和代码不一致')
+            nodes = [float(n) for n in data['nodes']]
+            if len(nodes) < 2 or any(b <= a for a, b in zip(nodes, nodes[1:])):
+                raise ValueError('轮速节点不合理')
+            loaded = {}
             for m, key in ((1, 'left'), (2, 'right')):
                 g = [float(x) for x in data[key]]
-                if len(g) != len(self.nodes) or not all(math.isfinite(x) and GAIN_MIN <= x <= GAIN_MAX for x in g):
+                if len(g) != len(nodes) or not all(math.isfinite(x) and GAIN_MIN <= x <= GAIN_MAX for x in g):
                     raise ValueError('%s 增益不合理' % key)
-                self.gains[m] = g
+                loaded[m] = g
+            # 节点和代码不一样（升级加了点）：按旧表插值到新节点，学过的不丢
+            for m, g in loaded.items():
+                self.gains[m] = g if nodes == self.nodes else [_interp(nodes, g, n) for n in self.nodes]
+            if nodes != self.nodes:
+                self._dirty = True
         except (OSError, ValueError, KeyError, TypeError) as exc:
             self.load_error = '%s: %s（用默认值）' % (type(exc).__name__, exc)
 

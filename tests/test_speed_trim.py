@@ -125,5 +125,32 @@ class SpeedTrimTest(unittest.TestCase):
         self.assertEqual(plain.link.cmds[-1], target)
 
 
+class TableMigrationTest(unittest.TestCase):
+    def test_old_table_resampled_onto_new_nodes(self):
+        old = {'nodes': [0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.8, 1.2],
+               'left': [0.55, 0.584, 0.527, 0.702, 1.0, 1.0, 1.0, 1.0],
+               'right': [0.55, 0.579, 0.504, 0.489, 1.0, 1.0, 1.0, 1.0]}
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, 'trim.json')
+            json.dump(old, open(path, 'w'))
+            trim = SpeedTrim(W, path=path, save_every_s=0)
+            self.assertIsNone(trim.load_error)
+            self.assertEqual(trim.nodes, [n for n, _ in DEFAULT_TABLE])
+            self.assertAlmostEqual(trim.gain(2, 0.3), 0.489, places=3)       # 原节点上的值不变
+            self.assertAlmostEqual(trim.gain(2, 0.35), 0.489 + 0.5 * (1 - 0.489), places=3)
+            trim.apply(0.0, {1: 0, 2: 0}, {})                                # 停着：按新节点存回
+            self.assertEqual(json.load(open(path))['nodes'], trim.nodes)
+
+    def test_step_near_switch_learned(self):
+        """驱动器 0.32 m/s 以下跑快 1.83×、以上正确：0.33 m/s 学到接近 100%，0.3 m/s 也不被带偏。"""
+        plant = Plant(lambda c: c * (1.83 if abs(c) < 0.32 * PER else 1.0))
+        trim = SpeedTrim(W)
+        t, a33, _ = plant.run(trim, 0.331, 20.0, 0.0)
+        t, a30, _ = plant.run(trim, 0.30, 20.0, t)
+        t, b33, _ = plant.run(trim, 0.331, 10.0, t)
+        self.assertAlmostEqual(a30, 0.30, delta=0.30 * 0.04)
+        self.assertAlmostEqual(b33, 0.331, delta=0.331 * 0.04)
+
+
 if __name__ == '__main__':
     unittest.main()
