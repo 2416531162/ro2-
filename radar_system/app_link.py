@@ -232,6 +232,11 @@ def parse_command(text):
     elif kind == 'imu_zero':
         if not out.get('id'):
             raise CommandError('imu_zero 必须带指令 id')
+        action = msg.get('action')
+        if action is not None:
+            if action not in ('start', 'stop'):
+                raise CommandError('imu_zero.action 必须是 start 或 stop')
+            out['action'] = action
     elif kind == 'driver_tune':
         # 四项都要带（整份覆盖）；范围、上限由驱动节点按 oid.yaml 检查，结果看遥测 drivers.result（按 id）
         if not out.get('id'):
@@ -648,8 +653,8 @@ def _line_tilt(t):
     reason = t.get('reason')
     return {'height_m': _num(t.get('height_m'), 3), 'active': t['active'],
             'reason': reason if isinstance(reason, str) else None,
-            **{k: t[k] for k in ('enabled', 'imu_zero_supported', 'zeroed', 'zero_persistent') if type(t.get(k)) is bool},
-            **{k: t.get(k) for k in ('blocked', 'zero_blocked', 'zero_save_error') if k in t and (t.get(k) is None or isinstance(t.get(k), str))},
+            **{k: t[k] for k in ('enabled', 'imu_zero_supported', 'zeroed', 'zero_persistent', 'calibrating') if type(t.get(k)) is bool},
+            **{k: t.get(k) for k in ('blocked', 'zero_blocked', 'zero_save_error', 'calibration_progress') if k in t and (t.get(k) is None or isinstance(t.get(k), str))},
             **{k: _num(t[k], 2) for k in ('zero_roll_deg', 'zero_pitch_deg') if k in t},
             'roll_deg': _num(t.get('roll_deg'), 2), 'pitch_deg': _num(t.get('pitch_deg'), 2),
             'forward_m': _num(t.get('forward_m'), 4), 'left_m': _num(t.get('left_m'), 4)}

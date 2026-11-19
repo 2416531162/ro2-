@@ -861,7 +861,8 @@ class RadarHTTPHandler(http.server.BaseHTTPRequestHandler):
                             else:
                                 bridge_node.pub_line.publish(String(data=json.dumps({
                                     'cmd':kind,'id':cmd.get('id'),
-                                    **({'enabled':cmd['enabled']} if kind=='tilt' else {})})))
+                                    **({'enabled':cmd['enabled']} if kind=='tilt' else {}),
+                                    **({'action':cmd['action']} if kind=='imu_zero' and 'action' in cmd else {})})))
                             reply(cmd,True,'forwarded')
                         except ValueError as exc:
                             reply(cmd,False,str(exc))

@@ -48,11 +48,14 @@ OBSOLETE_FUSION_KEYS = ('baseline_m', 'baseline_tol_m', 'baseline_check',
 # 前 0.235、左 0.197（ANT2 前 0.234、右 0.212，间距 0.409 对得上），两根都比手量的靠后约 0.5 cm、靠右约 1 cm。
 # 用户（2026-10-06）：「修复，改车端」。车上文件还是手量值时用实测值；文件里写了别的值照用。不改车上的文件，回滚版本即恢复。
 GEN5_ANTENNA_HAND = (0.24, 0.2075)
-GEN5_ANTENNA_MEASURED = (0.235, 0.197)
+# 2026-11-19 用户：「改成用车的默认图纸，包括两个天线的位置」「就用图纸默认的参数」。天线支架图纸
+# Antennenhalterung innen 20240723-0040-A：两块安装板孔位中心相距 0.41 m、左右对称 → 左右各 0.205；
+# 支架在总装图是散件（Pos. 1 lose beilegen），前后位置图纸没给，沿用实测的前 0.235。上面 10-06 实测值留作对照。
+GEN5_ANTENNA_MEASURED = (0.235, 0.205)
 # 单天线流动站（平板转来，um982.Um982Stream.antenna_mode = single）装在现在双天线的右天线（ANT2）位置
 # （2026-10-07 用户：右天线前 0.234 m、右 0.212 m，即上面 GEN5_ANTENNA_MEASURED 同一次反推的 ANT2）。车体系 (前, 左) 米。
 # 喷头参数按后轴中心存，换单天线照用
-SINGLE_ANTENNA_XY = (0.234, -0.212)
+SINGLE_ANTENNA_XY = (0.235, -0.205)   # 2026-11-19 改为图纸右天线位置（原实测 0.234, -0.212）
 # 单天线没有测向：车头 = IMU 航向角 + 偏移，偏移按卫星位移对 IMU + 轮程推算位移的夹角定、修（gnss_fusion._imu_course，
 # 2026-10-07 用户：「用 imu 的航向角做航向，偏移来修正」；原来按「走直」的轨迹回归定，全链路仿真里实车拟合底盘低速
 # 车身摆 ±1–4°/s，一次也定不出）。起步往前走 0.5 m 定第一次（用户 10-07 定；仿真车头误差中位 0.3°、最差 0.7°），
@@ -303,6 +306,19 @@ class LineNode(Node):
         elif cmd.get('cmd') in ('tilt', 'imu_zero'):
             ok, message = self.attitude_controls.command(cmd, self.clock(),
                 self.motion.state if self.motion.fresh() else None, self._attitude)
+            if cmd.get('cmd') == 'imu_zero' and ok and self.attitude_controls.calibrating:
+                self.publish_status()
+                return
+            done = self.attitude_controls.pop_result()
+            if done is not None:
+                self.last_result = done
+                self.publish_status()
+                return
+        elif cmd.get('cmd') == 'stop' and self.attitude_controls.calibrating:
+            ok, message = self.attitude_controls.stop('操作员停止', cmd.get('id'))
+            self.attitude_controls.pop_result()
+        elif self.attitude_controls.calibrating:
+            ok, message = False, '正在执行 IMU 旋转标定，请等待完成或先停止'
         else:
             ok, message = self.mission.command(cmd, self.clock())
         self.last_result = dict(ok=ok, message=message, id=cmd.get('id'), cmd=cmd.get('cmd'))
@@ -320,7 +336,16 @@ class LineNode(Node):
                 self.mission.on_wheel_motion(sample)
                 self.attitude_controls.observe_sample(sample)
         mode = self.mode()
-        vx, wz, select = self.mission.tick(now, mode)
+        if self.attitude_controls.active:
+            vx, wz, select = self.attitude_controls.tick(now, mode, self._attitude)
+            cal_active = self.attitude_controls.calibrating
+            done = self.attitude_controls.pop_result()
+            if done is not None:
+                self.last_result = done
+                self.publish_status()
+        else:
+            cal_active = False
+            vx, wz, select = self.mission.tick(now, mode)
         if select is True:
             if self._select_at is None or now - self._select_at > SELECT_RETRY_S:
                 if self.motion.select(True) is not None:
@@ -330,7 +355,7 @@ class LineNode(Node):
             self.motion.publish(0.0, 0.0)
             self.motion.select(False)
         # 任务已结束 / 已暂停但还在渐停（mission.braking）也照常下发，不然下一拍就停发、驱动器按 3 m/s² 刹停
-        sent = (self.mission.phase in ('RUNNING', 'PAUSING', 'ORIENTING') or self.mission.braking) and self.motion.active()
+        sent = (cal_active or self.mission.phase in ('RUNNING', 'PAUSING', 'ORIENTING') or self.mission.braking) and self.motion.active()
         if sent:
             self.motion.publish(vx, wz)
         self.publish_trace(now, mode, vx, wz, select, sent)
@@ -361,6 +386,9 @@ class LineNode(Node):
         return super().destroy_node()
 
     def stop_robot(self):
+        if self.attitude_controls.calibrating:
+            self.attitude_controls.stop('服务停止')
+            self.attitude_controls.pop_result()
         self.mission.command({'cmd': 'stop'}, self.clock())
         self.motion.publish(0.0, 0.0)
         self.motion.select(False)
