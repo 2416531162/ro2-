@@ -283,7 +283,7 @@ class SingleAntennaMission(unittest.TestCase):
         car = Car(m)
         car.run(1.0)
         self.assertEqual(m.antenna_mode, 'single')
-        self.assertEqual(fusion.config.antenna_xy, (0.234, -0.212))
+        self.assertEqual(fusion.config.antenna_xy, (0.235, -0.205))   # 11-19 图纸右天线
         self.assertEqual(m.status()['antenna_mode'], 'single')
         pose = fusion.pose(car.t)
         self.assertIn('heading_uninitialized', pose.reasons)    # 没有测向，停着定不了车头
