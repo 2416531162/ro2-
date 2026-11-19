@@ -738,6 +738,10 @@ class OidChassis:
         """与 /wheel/odometry 共用同一计数窗口和新鲜回读速度证据。"""
         return self.wheel_aligner.stationary(now, self.link.state) is True
 
+    def last_hall_motion(self, now):
+        """最近一次霍尔/位置读数确实在变的时刻（停着在格边抖、停下后等确认静止的那段都不算），没有为 None。"""
+        return self.wheel_aligner.last_motion(now)
+
     def telemetry(self, now):
         """与 wheeltec 驱动的遥测同一结构（控制策略、状态页用）：velocity=[v, 0, w]，voltage。"""
         volts = [s.voltage for s in self.link.state.values() if s.voltage is not None]

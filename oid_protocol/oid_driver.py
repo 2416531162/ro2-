@@ -85,6 +85,52 @@ class DiffConfig:
 # 新的手动指令或自动作业重新取得控制时恢复速度闭环。
 RELEASE_STATIONARY_S = 1.0
 
+# 急停时驱动器自己的零速闭环振荡（2026-11-19 地面前后摇约 1 Hz，急停只发零速压不住）：车端已经在发零速、
+# 轮子还在动约 0.5 s，或驱动器不回话，就让驱动器放空不再出力。正常急停刹车时轮子本来就在动（速度 / 减速度，
+# 再加驱动器响应），过了这段刹车时间才算「零速压不住」；轮子马上停住的照旧零速刹车、停稳满 1 s 再放空。
+ESTOP_MOVING_RELEASE_S = 0.5
+ESTOP_MOVING_GAP_S = 0.25       # 振荡换向时会短暂读到静止：两次读到「在动」隔得不超过这么久仍算一直在动
+ESTOP_BRAKE_RESPONSE_S = 0.3    # 驱动器响应约 0.25 s（2026-09-29 实车换向实测），算正常刹车时间时另加这一段
+ESTOP_RELEASE_RESEND_S = 0.5    # 放空以后轮子还在动或驱动器还不回话：隔这么久再发一次放空
+
+
+class EstopRelease:
+    """一次急停（按仲裁代次区分）里发零速以后轮子的运动记录；纯计算，调用方持锁。"""
+
+    def __init__(self):
+        self.clear()
+
+    def clear(self):
+        self.epoch = self.started = None
+        self.brake_until = None
+        self.moving_since = self.moving_at = None
+        self.reason = None          # 已因急停放空驱动器：wheels_moving（零速压不住）/ driver_silent（驱动器不回话）
+        self.sent_at = None
+
+    def start(self, epoch, now, speed_mps, decel_mps2):
+        self.clear()
+        self.epoch, self.started = epoch, now
+        self.brake_until = now + abs(speed_mps) / max(decel_mps2, 0.1) + ESTOP_BRAKE_RESPONSE_S
+
+    def observe(self, motion_at):
+        """每次读回反馈调一次；motion_at = 最近一次确实在动的时刻（霍尔/位置在变或读回轮速超过 HALL_STILL_MAX_MPS），
+        没有为 None。急停开始之前的运动不算：这里只记发零速以后的。"""
+        if self.epoch is None or motion_at is None or motion_at < self.started:
+            return
+        if self.moving_at is not None and motion_at <= self.moving_at:
+            return
+        if self.moving_at is None or motion_at - self.moving_at > ESTOP_MOVING_GAP_S:
+            self.moving_since = motion_at
+        self.moving_at = motion_at
+
+    def moving(self, now):
+        return self.moving_at is not None and 0 <= now - self.moving_at <= ESTOP_MOVING_GAP_S
+
+    def kept_moving(self, now):
+        """发零速以后轮子一直在动满 ESTOP_MOVING_RELEASE_S，并且已过了正常刹车该停下的时刻。"""
+        return (self.moving(now) and now - self.moving_since >= ESTOP_MOVING_RELEASE_S
+                and now >= self.brake_until)
+
 
 class DiffControlPolicy(ControlPolicy):
     """与 wheeltec 的 ControlPolicy 同一套上电、超时、保持、防撞逻辑；差速车允许原地转（车速 0、角速度不为 0），
@@ -344,6 +390,7 @@ class OidDriver(wd.WheeltecDriver):
         self.parser = _Counters()
         self.chassis, self.port = None, bus_label(self.params)
         self.released = False               # 停稳后已放空电机（见 RELEASE_STATIONARY_S）
+        self.estop = EstopRelease()         # 急停时零速压不住 / 驱动器不回话就放空（见 ESTOP_MOVING_RELEASE_S）
         self.push_mode = False              # 明确退出前保持放空，手推移动不能恢复零速锁定
         self.running = True
         self.tx_packets = self.tx_bytes = self.rx_bytes = self.io_errors = 0
@@ -543,7 +590,8 @@ class OidDriver(wd.WheeltecDriver):
     def on_stop(self, request, response):
         with self.lock:
             self.push_mode = False
-            self.released = False  # 急停先恢复零速制动，停稳后再自动放空。
+            # 急停先恢复零速制动，停稳后再自动放空；零速压不住（轮子还在动）或驱动器不回话时提前放空（track_estop）。
+            self.released = False
             return super().on_stop(request, response)
 
     def on_arm(self, request, response):
@@ -556,8 +604,62 @@ class OidDriver(wd.WheeltecDriver):
             return super().on_arm(request, response)
 
     def motion_extensions(self, now):
+        # estop_released：这次急停里因为轮子还在动（wheels_moving）或驱动器不回话（driver_silent）已让驱动器放空，
+        # estop_release_reason 是哪一种；急停复位或重新取得控制后回到 false / null
+        estop = self.estop_released_reason()
         return {'push_mode': self.push_mode, 'push_released': self.push_mode and self.released,
-                'auto_release': True, 'wheels_released': self.released}
+                'auto_release': True, 'wheels_released': self.released,
+                'estop_released': estop is not None, 'estop_release_reason': estop}
+
+    def estop_released_reason(self):
+        if (self.released and self.authority.mode == 'ESTOP' and self.estop.epoch == self.authority.epoch):
+            return self.estop.reason
+        return None
+
+    def track_estop(self, now):
+        """进入急停（新的仲裁代次）时按当时的轮速和驱动器减速度记下正常刹车要多久；离开急停就清掉。
+        在本拍 policy.tick 之前调：self._cmd 还是上一拍下发的车速、角速度。"""
+        a = self.authority
+        if a.mode != 'ESTOP':
+            if self.estop.epoch is not None:
+                self.estop.clear()
+            return
+        if self.estop.epoch == a.epoch:
+            return
+        speeds = [abs(x) for x in (self.policy.last_received or {}).get('wheels_mps') or []
+                  if isinstance(x, (int, float)) and math.isfinite(x)]
+        v, w = self._cmd
+        speeds.append(abs(v) + abs(w) * self.wheels.track_m / 2)
+        wheels = self.chassis.wheels if self.chassis is not None else self.wheels     # App 改过减速度时用改过的
+        self.estop.start(a.epoch, now, max(speeds), wheels.decel_mps2)
+
+    def drivers_unresponsive(self, now):
+        """连上超过反馈超时以后，有驱动器不回话或两轮反馈过期（刚连上还没到超时不算）。"""
+        p, c, timeout = self.policy, self.chassis, self.config.feedback_timeout_s
+        if c is None or not now - p.connect_at > timeout:
+            return False
+        return bool(c.silent(now)) or p.last_rx is None or not 0 <= now - p.last_rx <= timeout
+
+    def wheels_motion_at(self, telemetry, now):
+        """最近一次确实在动的时刻：读回轮速超过 HALL_STILL_MAX_MPS 就是这次读回（now），否则看霍尔/位置最后一次跨格。"""
+        if any(isinstance(x, (int, float)) and math.isfinite(x) and abs(x) > HALL_STILL_MAX_MPS
+               for x in telemetry.get('wheels_mps') or []):
+            return now
+        return self.chassis.last_hall_motion(now)
+
+    def estop_release(self, now, v, w):
+        """急停时要不要让驱动器放空：返回 (原因, 这一拍要不要发放空指令)。原因 None = 照原来零速刹车、停稳满 1 s 再放空。
+        只看急停（ESTOP）：普通停车、作业中暂停、故障停车都不走这里。"""
+        e = self.estop
+        if self.authority.mode != 'ESTOP' or e.epoch != self.authority.epoch or v != 0.0 or w != 0.0:
+            return None, False
+        unresponsive = self.drivers_unresponsive(now)
+        reason = e.reason or ('driver_silent' if unresponsive else 'wheels_moving' if e.kept_moving(now) else None)
+        if reason is None:
+            return None, False
+        send = (e.reason is None or not self.released
+                or ((unresponsive or e.moving(now)) and now - e.sent_at >= ESTOP_RELEASE_RESEND_S))
+        return reason, send
 
     def automatic_release_allowed(self, now, v, w):
         """无作业、无手动运动请求时自动放空；已放空后手推不能触发零速锁轮。"""
@@ -679,19 +781,27 @@ class OidDriver(wd.WheeltecDriver):
                     self.tune_pending = None
                     self.tune_result = dict(id=pending, ok=True, message='已发给两台驱动器')
         with self.lock:
+            self.track_estop(now)
             self.apply_motion(now)
             v, w = self.policy.tick(now)
             self._cmd = (v, w)
-            idle = send and self.automatic_release_allowed(now, v, w)
+            estop_reason = self.estop_release(now, v, w)[0] if send else None
+            idle = send and (estop_reason is not None or self.automatic_release_allowed(now, v, w))
             release_epoch = self.authority.epoch
         if idle:
             # 与急停/退出串行化这条放空命令，不能在控制代次已经变更后再执行旧的放空决定。
             with self.lock:
                 # MANUAL 同一代次也可能收到新的非零请求，不能执行它到来前的放空决定。
-                idle = (release_epoch == self.authority.epoch and self.automatic_release_allowed(now, v, w))
-                if idle and not self.released:
+                idle = release_epoch == self.authority.epoch
+                estop_reason, estop_send = self.estop_release(now, v, w) if idle else (None, False)
+                idle = idle and (estop_reason is not None or self.automatic_release_allowed(now, v, w))
+                if idle and (not self.released or estop_send):
                     self.chassis.release(now)
                     self.released = True
+                    if estop_reason is not None:
+                        if self.estop.reason is None:
+                            print('estop_release reason=%s' % estop_reason, file=sys.stderr, flush=True)
+                        self.estop.reason, self.estop.sent_at = estop_reason, now
         if idle:
             updated = self.chassis.step(now, 0.0, 0.0, send=False)     # 只读反馈，不发心跳和零速
         else:
@@ -710,6 +820,7 @@ class OidDriver(wd.WheeltecDriver):
                 self.policy.fault = ('、'.join('%s轮驱动器：%s' % kv for kv in telemetry['faults'].items())
                                      if self.chassis.faults() else None)
                 self.policy.feedback(telemetry, now)
+                self.estop.observe(self.wheels_motion_at(telemetry, now))
                 self.parser.good += 1
                 self.rx_times.append(now)
                 self.rx_times = self.rx_times[-100:]

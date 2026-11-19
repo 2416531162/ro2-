@@ -33,6 +33,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from runtime_config import PROFILE      # 先导入：它把仓库根目录加进 sys.path，下面才找得到 robot_core
 from robot_core.kinematics import ChassisGeometry, yaw_from_steer, steer_from_yaw
 from robot_core.service_watchdog import watchdog
+from robot_core import motion_text  # 底盘故障代码 → 给 App 看的中文
 from motion_client import MotionClient
 from manual_drive import ManualDriveLatch
 from heading_hold import HeadingHold, yaw_from_quaternion
@@ -199,7 +200,7 @@ def emergency_stop():
 
 def motion_reset():
     if bridge_node is None:
-        return False, 'motion bridge unavailable'
+        return False, '车辆底盘服务未就绪，不能复位'
     with bridge_node.control_lock:
         bridge_node.straight.end('manual')
         bridge_node.manual_drive.set(0.0, 0.0)
@@ -362,12 +363,12 @@ class WebBridgeNode(Node):
     @staticmethod
     def call_motion_service(client, request):
         if not client.service_is_ready():
-            return False, 'motion service unavailable; update and restart chassis driver'
+            return False, '底盘驱动服务没有响应，请检查或重启底盘服务'
         future = client.call_async(request)
         done = threading.Event()
         future.add_done_callback(lambda _: done.set())
         if not done.wait(2.0):
-            return False, 'motion service response timeout; inspect /motion/status'
+            return False, '底盘驱动服务 2 秒没有应答，请查看底盘状态'
         try:
             result = future.result()
             return result.success, result.message
@@ -399,9 +400,8 @@ class WebBridgeNode(Node):
         if not fresh:
             return False, '运动状态已过期，请检查底盘服务'
         if not current.get('healthy', False):
-            faults = current.get('health_faults', [])
-            fault_desc = (', '.join(faults)) if faults else '待确认'
-            return False, f'传感器或底盘仍有故障 ({fault_desc})，拒绝复位'
+            fault_desc = motion_text.faults_text(current.get('health_faults', []))
+            return False, f'传感器或底盘仍有故障（{fault_desc}），拒绝复位'
         if current.get('waiting_stationary', True):
             return False, '等待车辆确认静止后才能复位'
         return self.call_motion_service(self.cli_reset, Trigger.Request())

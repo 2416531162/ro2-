@@ -82,6 +82,23 @@ class WheelMotionAligner:
             evidence.append(still)
         return True if all(v is True for v in evidence) else False if any(v is False for v in evidence) else None
 
+    def last_motion(self, now):
+        """两轮里最近一次霍尔确实跨格（不是停着在格边来回抖）的时刻；没有新鲜位置读数或没跨过格返回 None。
+        与 stationary() 不同：轮子停下以后霍尔要安静 0.3–1 s 才确认静止，那段时间 stationary() 是 False，
+        这里给的仍是最后一次跨格的时刻，不把等确认的那段当成在动。"""
+        times = []
+        for m in (1, 2):
+            try:
+                position_t = self.position[m][-1][0]
+            except IndexError:
+                continue
+            if not 0 <= now-position_t <= self.max_age:
+                continue
+            hall = self.hall[m].at(position_t, use_window=False)
+            if hall is not None and hall[2] is False:
+                times.append(position_t-hall[3])
+        return max(times) if times else None
+
     def update(self, now, states):
         wl = self.wheels
         base = dict(version=1, time_basis='host_receive', t_rx=now, seq=self.seq,

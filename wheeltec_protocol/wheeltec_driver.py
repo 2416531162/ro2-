@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from runtime_config import PROFILE, profile_hash
 from robot_core.service_watchdog import watchdog
 from robot_core.kinematics import ChassisGeometry, yaw_from_steer, steer_from_yaw, max_yaw_at_speed
+from robot_core import motion_text  # 服务回复给 App / 网页看，一律中文
 from motion_authority import MotionAuthority
 from scan_guard import GuardConfig, ScanGuard  # noqa: E402
 
@@ -605,7 +606,7 @@ class WheeltecDriver(Node):
             if request.data and not self.lidar_installed and self.lidar_required(source):
                 # 先拒绝，不能先接受再因为没有雷达数据转成 FAULT
                 response.success = False
-                response.message = self.authority.mode + ': ' + source + ' needs the lidar, which is not deployed'
+                response.message = '%s需要雷达，这台车没有装雷达' % motion_text.SOURCE_TEXT.get(source, '这个模式')
                 return response
             now = time.monotonic()
             self.authority.output(now)
@@ -619,7 +620,7 @@ class WheeltecDriver(Node):
             # or a rejected selection must not interrupt active manual drive.
             if (response.success and request.data) or self.authority.mode in ('IDLE', 'FAULT', 'ESTOP'):
                 self.clear_motion_output()
-            response.message = self.authority.mode + ': ' + self.authority.reason
+            response.message = motion_text.status_text(self.authority.mode, self.authority.reason)
         return response
 
     def reset_motion(self, request, response):
@@ -632,7 +633,7 @@ class WheeltecDriver(Node):
                 response.success, _ = self.policy.arm(now)
                 if not response.success:
                     self.authority.fault('reset_failed', now=now)
-            response.message = 'IDLE; select a new task' if response.success else 'wait for healthy sensors and stationary chassis'
+            response.message = '已复位，请重新选择任务' if response.success else '复位没成功：请等传感器和底盘正常、车停稳后再复位'
         return response
 
     def apply_motion(self, now):
@@ -651,13 +652,14 @@ class WheeltecDriver(Node):
         with self.lock:
             if request.data:
                 if not self.legacy_commands and self.authority.mode in ('ESTOP', 'FAULT'):
-                    response.success, response.message = False, 'use /motion/reset first'
+                    response.success, response.message = False, '急停或故障锁存中，请先复位'
                     return response
-                response.success, response.message = self.policy.arm(time.monotonic())
+                response.success, reason = self.policy.arm(time.monotonic())
+                response.message = motion_text.ready_text(reason)
             else:
                 self.authority.stop(emergency=True)
                 self.policy.stop("operator_disarmed")
-                response.success, response.message = True, "disarmed; zero frames scheduled"
+                response.success, response.message = True, '已锁定底盘，正在发零速停车'
         return response
 
     def on_stop(self, request, response):
@@ -665,7 +667,7 @@ class WheeltecDriver(Node):
             self.authority.stop(emergency=True)
             self.policy.stop("operator_stop")
             # Serial writes have no software backlog; state change takes effect at next tick.
-        response.success, response.message = True, "stop latched; check telemetry and physical stop"
+        response.success, response.message = True, '已急停，请到现场确认车已停下'
         return response
 
     # Rejecting one malformed command is not a safety fault -- ignoring that
