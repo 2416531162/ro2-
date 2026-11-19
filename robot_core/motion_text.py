@@ -21,6 +21,7 @@ REASON_TEXT = {
     'manual_takeover': '手动接管',
     'reset': '已复位，等待重新选择任务',
     'reset_failed': '复位时底盘没就绪，继续锁定停车',
+    'zero_hold_oscillation': '停车锁轮时轮子一直来回动，已松开驱动器、中断作业',
 }
 
 # ControlPolicy.ready / arm 的原因
