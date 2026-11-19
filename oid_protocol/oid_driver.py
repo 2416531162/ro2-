@@ -266,7 +266,8 @@ def build_link(params):
                                    word_order=str(params['rs485_word_order']), latency_s=float(params['rs485_timeout_s']),
                                    clock=time.monotonic))
         if can:
-            links.append(CanLink(SocketCan(params['can_channel']), can, heartbeat_s=params['heartbeat_s'], clock=time.monotonic))
+            links.append(CanLink(SocketCan(params['can_channel']), can, heartbeat_s=params['heartbeat_s'], clock=time.monotonic,
+                                 frame_gap_s=float(params.get('can_frame_gap_s', 0.0))))
     except Exception:
         for link in links:
             link.close()
@@ -275,7 +276,7 @@ def build_link(params):
 
 
 PARAMS = dict(confirmed=False, left_bus='can', right_bus='can',
-              can_channel='can0', can_left_id=1, can_right_id=2,
+              can_channel='can0', can_left_id=1, can_right_id=2, can_frame_gap_s=0.0,
               rs485_port='/dev/ttyS3', rs485_baud=115200, rs485_parity='N', rs485_left_id=1, rs485_right_id=2,
               rs485_word_order='big', rs485_timeout_s=0.03, rs485_echo=False,
               heartbeat_s=0.1, pole_pairs=0, erpm_per_rpm=0.0, wheel_radius_m=0.2046, gear_ratio=1.0,

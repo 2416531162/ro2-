@@ -257,8 +257,13 @@ class CanLink:
     tx_retries = property(lambda self: getattr(self.bus, 'tx_retries', 0))
     tx_retry_timeouts = property(lambda self: getattr(self.bus, 'tx_retry_timeouts', 0))
 
-    def __init__(self, bus, node_ids, reply_ids=None, *, heartbeat_s=0.1, slow_s=0.5, load_s=0.1, clock=None):
+    def __init__(self, bus, node_ids, reply_ids=None, *, heartbeat_s=0.1, slow_s=0.5, load_s=0.1, clock=None,
+                 frame_gap_s=0.0, sleep=time.sleep):
         self.clock = clock
+        # 帧间隔（2026-11-19 实测）：给两台驱动器连着发一串查询，先被查的那台大量丢回复（服务原来的顺序左只回 18%），
+        # 每帧隔 2 ms 两台都 100%。frame_gap_s > 0 时每帧至少隔这么久再发，等的时候顺手收回复（接收时刻准）。
+        self.frame_gap_s, self._sleep = frame_gap_s, sleep
+        self._last_tx = -math.inf
         self.bus, self.node_ids = bus, _motor_ids(node_ids, ' CAN 节点 ID')
         reply = _motor_ids(reply_ids, ' CAN 回复 ID') if reply_ids else self.node_ids
         self.reply_to_motor = {can_id: m for m, can_id in reply.items()}
@@ -269,9 +274,24 @@ class CanLink:
         self.tx = self.rx = self.unknown = 0
         self.errors = 0
 
+    def _now(self):
+        return self.clock() if self.clock is not None else time.monotonic()
+
+    def _pace(self):
+        if self.frame_gap_s <= 0:
+            return
+        while True:
+            wait = self._last_tx + self.frame_gap_s - self._now()
+            if wait <= 0:
+                return
+            self._receive(self._now())
+            self._sleep(min(wait, 0.0005))
+
     def _send(self, motor, data):
+        self._pace()
         try:
             self.bus.send(self.node_ids[motor], data)
+            self._last_tx = self._now()
         except OSError as exc:
             # 保留原 errno 与故障处理，只补足是速度/心跳/查询哪一帧失败。
             raise OSError(exc.errno, 'CAN tx id=0x%03x frame=%s: %s' %
@@ -312,7 +332,7 @@ class CanLink:
             for m in self.motors:
                 self._send(m, oc.can_query(oc.Q_MOTOR_CURRENT))
             self._load = now
-        if now - self._slow >= self.slow_s:
+        elif now - self._slow >= self.slow_s:      # 和电流错开一拍：帧间隔下一拍不超 10 帧
             for m in self.motors:
                 self._send(m, oc.can_query(oc.Q_FAULT))
                 self._send(m, oc.can_query(oc.Q_VOLTAGE))
@@ -322,6 +342,9 @@ class CanLink:
         self.bus.close()
 
     def poll(self, now):
+        self._receive(now)
+
+    def _receive(self, now):
         for can_id, data in self.bus.recv():
             motor = self.reply_to_motor.get(can_id)
             reply = oc.parse_can_reply(data) if motor else None
