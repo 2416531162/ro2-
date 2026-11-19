@@ -2,10 +2,12 @@
 # -*- coding: utf-8 -*-
 """作业自动记录（排查问题用）：每次点「开始作业」（车进入 SELECTING / RUNNING），自动把这次作业的全部数据存下来。
 手动页的「IMU 直行」（/straight/status 的 state 为 running）也一样记，按任务名「IMU直行」加开始时间单独成一个作业。
+不在作业、也不在 IMU 直行时，只要车在运行（/motion/status 的 mode 为手动 MANUAL 或自动 NAVIGATION / FOLLOW）也记
+（2026-11-19 用户：不管手动和自动，只要在运行就记下来），任务名「手动驾驶」/「自动运行」；停下 DRIVE_POST_S 秒内又开，接着记在同一段。
 
 不碰控制：只订阅话题、写文件，本进程出错或退出都不影响开车。
 
-    订阅  /line/status、/straight/status（判断作业开始、结束）和 TOPICS 里的话题（原始字节原样写盘；几个状态话题另外解码算摘要）
+    订阅  /line/status、/straight/status、/motion/status（判断作业、运行的开始、结束）和 TOPICS 里的话题（原始字节原样写盘；几个状态话题另外解码算摘要）
     发布  /jobrec/status（1 Hz，String JSON：在不在记、记到哪、占多少空间、出错原因）
 
 每个作业一个目录 ~/rtk/jobs/<开始时间>_<作业名>_<id 前 8 位>/：
@@ -33,6 +35,9 @@ MAX_TOTAL_MB = 2048
 MIN_FREE_MB = 1024
 ACTIVE_PHASES = ('SELECTING', 'RUNNING')
 STRAIGHT_TASK = 'IMU直行'   # IMU 定向直行在跑时当成这个任务（目录名、job.json 的 label）
+# 不在作业、不在 IMU 直行时，车在运行（控制权模式）也记，当成这些任务
+DRIVE_TASKS = {'MANUAL': '手动驾驶', 'NAVIGATION': '自动运行', 'FOLLOW': '自动运行'}
+DRIVE_POST_S = 30.0       # 运行记录：停下（控制权回到空闲等）这么久才结束；手动开开停停不拆成一堆目录
 ENDED_STATES = ('DONE', 'CANCELLED')
 MAX_MODE_CHANGES = 500
 MAX_MESSAGES = 200
@@ -100,6 +105,8 @@ def dir_size(path):
 README = '''# 作业记录（job_recorder 自动记）
 
 给事后分析用（为什么走不直、为什么停车、定位跳……）。一次「开始」或「继续」是一段（segNN）。
+任务名「手动驾驶」/「自动运行」是不在作业时车在运行就记的（摇杆开车、标定画圈等）：没有 `/line/trace`
+（只有作业时才发），双天线航向看 `/gnss/raw`、`/gnss/heading`，陀螺看 `/imu/data`，轮子看 `/oid/trace`、`/wheel/odometry`。
 
 ## 文件
 - `job.json`：作业信息、结果（state / reason）、每段起止时间、摘要（横偏 e 的分布、RTK 解算状态占比、控制权切换、
@@ -161,8 +168,8 @@ class JobWatch:
     """由 /line/status 判断作业的开始、结束。update() 按顺序返回要做的事：
     ('open_job', key, job) / ('open_segment',) / ('close_segment', 为什么) / ('close_job', 最后看到的作业记录)"""
 
-    def __init__(self, post_s=POST_S, wall=time.time):
-        self.post_s, self.wall = post_s, wall
+    def __init__(self, post_s=POST_S, wall=time.time, drive_post_s=DRIVE_POST_S):
+        self.post_s, self.wall, self.drive_post_s = post_s, wall, drive_post_s
         self.key = None            # 当前作业：作业记录的 id；没有作业记录的任务是 task-<任务>-<开始时间>
         self.job = None            # 当前作业最近一次的作业记录（operations.job）
         self.recording = False
@@ -174,18 +181,24 @@ class JobWatch:
         job = ops.get('job') if isinstance(ops, dict) else None
         return job if isinstance(job, dict) and isinstance(job.get('id'), str) else None
 
+    @staticmethod
+    def _drive_key(key):
+        return bool(key) and any(key.startswith('task-%s-' % t) for t in set(DRIVE_TASKS.values()))
+
     def update(self, status, now):
         out = []
         job = self._job(status)
         if status.get('phase') in ACTIVE_PHASES:
+            task = status.get('task') or 'line'
             # 作业记录只属于路线任务；跑完的记录会一直留着（DONE），不能把后面的 A—B 直线算进去
             own = job if job and status.get('task') == 'route' and job.get('state') not in ENDED_STATES else None
             if own:
                 key = own['id']
-            elif self.recording and self.key and self.key.startswith('task-'):
-                key = self.key
+            elif (self.recording and self.key and self.key.startswith('task-')
+                  and self._drive_key(self.key) == (task in DRIVE_TASKS.values())):
+                key = self.key              # 运行记录和别的任务之间切换要另起一个作业
             else:
-                key = 'task-%s-%s' % (status.get('task') or 'line', time.strftime('%Y%m%d_%H%M%S', time.localtime(self.wall())))
+                key = 'task-%s-%s' % (task, time.strftime('%Y%m%d_%H%M%S', time.localtime(self.wall())))
             if key != self.key:
                 if self.recording:
                     out.append(('close_segment', 'job_change'))
@@ -206,7 +219,7 @@ class JobWatch:
         if self.recording:
             if self.idle_since is None:
                 self.idle_since = now
-            if now - self.idle_since < self.post_s:
+            if now - self.idle_since < (self.drive_post_s if self._drive_key(self.key) else self.post_s):
                 return out
             out.append(('close_segment', 'idle'))
             self.recording = False
@@ -406,6 +419,7 @@ class JobRecorder:
         self.segment = self.seg = self.summary = None
         self.last_status = None
         self.line = self.straight = None    # 最近一条 /line/status、/straight/status
+        self.motion = None                  # 最近一条 /motion/status（车在不在运行）
         self.error = None
         os.makedirs(root, exist_ok=True)
         prune(root, None, max_total_mb, min_free_mb, log)
@@ -419,24 +433,30 @@ class JobRecorder:
             self.ring.append((t_ns, topic, type_name, data))
             while self.ring and self.ring[0][0] < t_ns - self.pre_ns:
                 self.ring.popleft()
-        if topic in ('/line/status', '/straight/status') and isinstance(decoded, dict):
+        if topic in ('/line/status', '/straight/status', '/motion/status') and isinstance(decoded, dict):
             self.last_status = now
             if topic == '/line/status':
                 self.line = decoded
-            else:
+            elif topic == '/straight/status':
                 self.straight = decoded
+            else:
+                self.motion = decoded
             for action in self.watch.update(self._merged(), now):
                 self._act(action)
         if self.segment is not None and decoded is not None:
             self.summary.feed(topic, decoded, now - self.seg['t0'])
 
     def _merged(self):
-        """给 JobWatch 的状态：路线作业在跑用它；没有路线作业、IMU 直行在跑时当成任务 STRAIGHT_TASK。"""
+        """给 JobWatch 的状态：路线作业在跑用它；没有路线作业、IMU 直行在跑时当成任务 STRAIGHT_TASK；
+        都没有、车在运行（控制权手动 / 自动）时当成任务 DRIVE_TASKS。"""
         line = self.line or {}
         if line.get('phase') in ACTIVE_PHASES:
             return line
         if (self.straight or {}).get('state') == 'running':
             return {'phase': 'RUNNING', 'task': STRAIGHT_TASK}
+        drive = DRIVE_TASKS.get((self.motion or {}).get('mode'))
+        if drive:
+            return {'phase': 'RUNNING', 'task': drive}
         return line
 
     def tick(self):
