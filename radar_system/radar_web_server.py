@@ -340,6 +340,9 @@ class WebBridgeNode(Node):
         self.sub_line = self.create_subscription(String, '/line/status', self.line_status_cb, 1)
         self.sub_paint_trace = self.create_subscription(String, '/line/trace', self.paint_trace_cb, 1)
         self.pub_line = self.create_publisher(String, '/line/command', 10)
+        # App「驱动器参数」：状态取 /oid/status 的 tuning，修改转给 Gen5 驱动节点（oid_driver）
+        self.sub_oid = self.create_subscription(String, '/oid/status', self.oid_status_cb, 1)
+        self.pub_oid_tune = self.create_publisher(String, '/oid/tune', 10)
 
         self.get_logger().info('>>> 底盘、RTK、走直线节点状态已连接')
 
@@ -481,6 +484,16 @@ class WebBridgeNode(Node):
 
     def gnss_status_cb(self, msg):
         self._store_status('gnss', msg)
+
+    def oid_status_cb(self, msg):
+        try:
+            tuning = json.loads(msg.data).get('tuning')
+        except (TypeError, ValueError, AttributeError):
+            return
+        if isinstance(tuning, dict):
+            tuning['_rx_monotonic'] = time.monotonic()
+            with data_lock:
+                state['oid_tuning'] = tuning
 
     def paint_trace_cb(self, msg):
         # 只有明确开启真实驱动后才按每拍喷线资格开泵；模拟模式和旧手动模式不自动开泵。
@@ -827,6 +840,16 @@ class RadarHTTPHandler(http.server.BaseHTTPRequestHandler):
                         ok, message = PUMP.command(session, cmd, blocker)
                     if cmd['action'] in ('set','mode') or not ok:
                         reply(cmd, ok, message)
+                elif kind == 'driver_tune':
+                    # ack 只表示已转发；驱动节点再查停稳、范围并存盘，结果看遥测 drivers.result（按 id）
+                    if bridge_node is None:
+                        reply(cmd, False, '车辆底盘服务未就绪')
+                    elif not configuration_allowed(snapshot_state(), time.monotonic()):
+                        reply(cmd, False, '请先锁定手动控制、结束作业并停稳，再改驱动器参数')
+                    else:
+                        bridge_node.pub_oid_tune.publish(String(data=json.dumps(
+                            {k: cmd[k] for k in ('id',) + app_link.DRIVER_TUNE_FIELDS})))
+                        reply(cmd, True, 'forwarded')
                 elif kind in ('tilt', 'imu_zero', 'imu_source'):
                     if bridge_node is None:
                         reply(cmd, False, '车辆定位服务未就绪')

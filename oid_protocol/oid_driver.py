@@ -33,11 +33,14 @@ from robot_core.service_watchdog import watchdog
 from runtime_config import PROFILE, profile_hash  # noqa: E402,F401
 import wheeltec_driver as wd  # noqa: E402
 from wheeltec_driver import ControlPolicy, finite  # noqa: E402
-from oid_link import CanLink, OidChassis, Rs485Link, SerialPort, SocketCan, SplitLink, WheelConfig, HALL_STILL_MAX_MPS  # noqa: E402
+from oid_link import (CanLink, DriverTuning, OidChassis, Rs485Link, SerialPort, SocketCan, SplitLink,  # noqa: E402
+                      TUNING_MAX_CURRENT_A, WheelConfig, HALL_STILL_MAX_MPS)
 
 
 # 两台驱动器走的总线：都 CAN、都 485，或一台 485 一台 CAN
 BUS_KINDS = ('can', 'rs485', 'rs485+can')
+# /oid/trace 里电流等负载读数超过这么久没更新就写 null，不把旧值当现在的（CAN 每 0.1 s 查一次）
+LOAD_MAX_AGE_S = 0.5
 
 
 @dataclass(frozen=True)
@@ -277,7 +280,9 @@ PARAMS = dict(confirmed=False, left_bus='can', right_bus='can',
               heartbeat_s=0.1, pole_pairs=0, wheel_radius_m=0.2046, gear_ratio=1.0,
               left_sign=1, right_sign=-1, wheel_accel_mps2=1.0, wheel_decel_mps2=2.0,
               tx_hz=50.0, yaw_acceleration_rad_s2=2.0, manual_stop_decel_mps2=1.5,
-              publish_tf=False, navigation_uses_lidar=False)
+              publish_tf=False, navigation_uses_lidar=False,
+              # App「驱动器参数」：闭环最大电流上限（0 = 不许改，最多 TUNING_MAX_CURRENT_A）、保存位置（空 = 不能改）
+              max_current_limit_a=0.0, tuning_file='')
 
 
 class OidDriver(wd.WheeltecDriver):
@@ -304,6 +309,13 @@ class OidDriver(wd.WheeltecDriver):
                                   accel_mps2=float(gp('wheel_accel_mps2')), decel_mps2=float(gp('wheel_decel_mps2')))
         if confirmed and not self.wheels.configured:
             raise ValueError('confirmed=true 之前先填 pole_pairs（上位机识别的磁极对数）')
+        # App「驱动器参数」（只支持两台都接 CAN）：存在车上，连上驱动器时、驱动器断电重启回话时重发
+        self.tuning_limit_a = min(TUNING_MAX_CURRENT_A, max(0.0, float(gp('max_current_limit_a'))))
+        self.tuning_path = os.path.expanduser(str(gp('tuning_file') or ''))
+        self.tuning_supported = confirmed and set(wheel_buses(self.params).values()) == {'can'}
+        self.tuning, self.tuning_error = self.load_tuning()
+        self.tune_pending = None            # 已保存、等 IO 线程发给驱动器的指令 id
+        self.tune_result = None             # 最近一次修改的结果 {id, ok, message}，ok=None 为正在下发
         self.legacy_commands = False
         self.navigation_uses_lidar = bool(gp('navigation_uses_lidar'))
         self.lidar_installed = bool(gp('lidar_installed'))
@@ -356,6 +368,7 @@ class OidDriver(wd.WheeltecDriver):
         self.create_service(wd.Trigger, '/motion/reset', self.reset_motion)
         self.create_service(wd.Trigger, '/motion/stop', self.on_stop)
         self.create_service(wd.SetBool, '/motion/push', self.on_push)
+        self.create_subscription(wd.String, '/oid/tune', self.on_tune, 10)
         self.create_subscription(wd.LaserScan, '/scan', self.on_scan,
                                  wd.QoSProfile(depth=1, reliability=wd.ReliabilityPolicy.BEST_EFFORT))
         self.create_service(wd.SetBool, '/wheeltec/arm', self.on_arm)
@@ -418,6 +431,86 @@ class OidDriver(wd.WheeltecDriver):
             response.message = '正在放松底盘' if self.push_mode else '已退出推行模式，请重新解锁手动'
         self.publish_status()
         return response
+
+    def load_tuning(self):
+        """车端保存的驱动器参数；没有文件 = 都不下发。读不出来或底盘不支持时不下发，在状态里说明。"""
+        if not self.tuning_path or not os.path.exists(self.tuning_path):
+            return DriverTuning(), None
+        try:
+            with open(self.tuning_path, encoding='utf-8') as f:
+                tuning = DriverTuning.parse(json.load(f), self.tuning_limit_a)
+        except (OSError, ValueError) as exc:
+            return DriverTuning(), '保存的驱动器参数读不出来，没有下发（重新设置会覆盖）：%s' % exc
+        if not tuning.empty and not self.tuning_supported:
+            return DriverTuning(), '保存了驱动器参数，但两台驱动器不是都接 CAN，没有下发'
+        return tuning, None
+
+    def save_tuning(self, tuning):
+        """整份写临时文件再换名，断电不会留下半个文件。"""
+        os.makedirs(os.path.dirname(self.tuning_path) or '.', exist_ok=True)
+        tmp = self.tuning_path + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(dict(tuning.as_dict(), saved_at=time.strftime('%Y-%m-%d %H:%M:%S')), f, ensure_ascii=False, indent=1)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, self.tuning_path)
+
+    def tune_blocker(self, now):
+        if not self.tuning_supported:
+            return '两台驱动器都接 CAN 并核对过（oid.yaml confirmed）才能改驱动器参数'
+        if not self.tuning_path:
+            return '车端没有设保存位置（oid.yaml 的 tuning_file），不能改驱动器参数'
+        if self.tune_pending is not None:
+            return '上一次修改还在下发，请稍后再试'
+        p = self.policy
+        if (self.chassis is None or not self.authority.healthy or self.authority.mode not in ('IDLE', 'MANUAL', 'ESTOP')
+                or p.last_rx is None or not 0 <= now - p.last_rx <= self.config.feedback_timeout_s
+                or p.stationary_frames < 5 or p.output != (0.0, 0.0)):
+            return '请先停车，确认底盘正常且没有作业再改驱动器参数'
+        return None
+
+    def on_tune(self, message):
+        """/oid/tune（网页服务转来的 App 指令）：{id, max_current_a, config_table, accel_mps2, decel_mps2}，
+        null = 不下发 / 用默认。先存盘，再由 IO 线程发给两台驱动器；结果按 id 放进 /oid/status 的 tuning.result。"""
+        try:
+            cmd = json.loads(message.data)
+            ident = str(cmd.get('id') or '')[:40]
+        except (TypeError, ValueError, AttributeError):
+            return
+        if not ident:
+            return
+        with self.lock:
+            problem = self.tune_blocker(time.monotonic())
+            tuning = None
+            if problem is None:
+                try:
+                    tuning = DriverTuning.parse(cmd, self.tuning_limit_a)
+                except ValueError as exc:
+                    problem = str(exc)
+            if problem is None:
+                try:
+                    self.save_tuning(tuning)
+                except OSError as exc:
+                    problem = '保存失败，参数没有改：%s' % exc
+            if problem is None:
+                self.tuning, self.tuning_error = tuning, None
+                self.tune_pending = ident
+                self.tune_result = dict(id=ident, ok=None, message='已保存，正在发给驱动器')
+            else:
+                self.tune_result = dict(id=ident, ok=False, message=problem)
+        self.publish_oid_status()
+
+    def tuning_status(self):
+        """给 App 的驱动器参数状态（/oid/status 的 tuning）。sent：这次连上驱动器以后已经按 values 发过。"""
+        with self.lock:
+            c = self.chassis
+            active = self.tuning if self.tuning_supported else DriverTuning()
+            sent = (c is not None and not self.config.receive_only and self.tune_pending is None
+                    and getattr(c, 'tuning', None) == active)
+            return dict(supported=self.tuning_supported, limit_a=self.tuning_limit_a, values=self.tuning.as_dict(),
+                        defaults=dict(accel_mps2=self.wheels.accel_mps2, decel_mps2=self.wheels.decel_mps2),
+                        sent=sent, reapplied=getattr(c, 'reapplied', 0) if c is not None else 0,
+                        error=self.tuning_error, result=self.tune_result)
 
     def on_motion(self, source, message):
         with self.lock:
@@ -551,11 +644,15 @@ class OidDriver(wd.WheeltecDriver):
         """一个控制周期：连上（第一次）→ 仲裁、控制策略给出 (车速, 角速度) → 发给驱动器、取反馈 → 更新状态。
         总线收发不占锁；异常由 io_loop 处理（断开、0.25 s 后重连）。"""
         send = not self.config.receive_only
+        opened_with = None
         if self.chassis is None:
+            with self.lock:
+                tuning = self.tuning if self.tuning_supported else None
             chassis = OidChassis(build_link(self.params), self.wheels, feedback_timeout_s=self.config.feedback_timeout_s,
-                                 clock=time.monotonic)
+                                 clock=time.monotonic, tuning=tuning)
             if send:
                 chassis.open(now)
+                opened_with = chassis.tuning
             with self.lock:
                 self.chassis = chassis
                 self.last_odom = None
@@ -563,6 +660,16 @@ class OidDriver(wd.WheeltecDriver):
                 self.rx_times.clear()
                 self.policy.link(True, now)
                 self.released = False
+        with self.lock:
+            pending, tuning = self.tune_pending, self.tuning
+        if pending is not None:
+            # App 改了驱动器参数：刚连上时已按新参数发过就不重发；发帧出错由 io_loop 重连，重连时按新参数发
+            if opened_with != tuning:
+                self.chassis.retune(tuning)
+            with self.lock:
+                if self.tune_pending == pending:
+                    self.tune_pending = None
+                    self.tune_result = dict(id=pending, ok=True, message='已发给两台驱动器')
         with self.lock:
             self.apply_motion(now)
             v, w = self.policy.tick(now)
@@ -614,17 +721,25 @@ class OidDriver(wd.WheeltecDriver):
         """/oid/trace：t（单调时钟，与 /line/trace、/gnss/raw 同一时钟）、v_cmd / w_cmd（限速后发给底盘的）、
         erpm_sent / erpm_read（左、右）、wheels_mps（读回换算的左右轮速）、v / w（里程计）、
         pos_cdeg（左、右驱动器读回的电机轴位置，0.01°，累计值，驱动器方向；轮毂电机直驱即轮子转角，
-        用来看车身摆动是否跟轮子每转一圈锁相）。出错只丢这一条。"""
+        用来看车身摆动是否跟轮子每转一圈锁相）。负载（左、右，驱动器方向，读数超过 LOAD_MAX_AGE_S 没更新写 null）：
+        motor_a 电机电流 A、bus_a 母线电流 A、duty 占空比原始值、temp_c 驱动器温度 ℃；CAN 那台只查电机电流，
+        另外三项是 null。出错只丢这一条。"""
         try:
             def num(x):
                 return round(x, 4) if isinstance(x, (int, float)) and math.isfinite(x) else None
-            o = self.chassis.odom
+            o, state = self.chassis.odom, self.chassis.link.state
+            fresh = {m: state[m].t_load is not None and now - state[m].t_load <= LOAD_MAX_AGE_S for m in (1, 2)}
+
+            def load(name):
+                return [num(getattr(state[m], name)) if fresh[m] else None for m in (1, 2)]
             rec = {'t': round(now, 4), 'v_cmd': num(self._cmd[0]), 'w_cmd': num(self._cmd[1]),
                    'erpm_sent': [num(x) for x in t.get('erpm_sent') or []],
                    'erpm_read': [num(x) for x in t.get('erpm_read') or []],
                    'wheels_mps': [num(x) for x in t.get('wheels_mps') or []],
                    'v': num(o.v), 'w': num(o.w), 'stale': bool(t.get('stale')),
-                   'pos_cdeg': [self.chassis.link.state[m].position_cdeg for m in (1, 2)]}
+                   'pos_cdeg': [state[m].position_cdeg for m in (1, 2)],
+                   'motor_a': load('motor_current_a'), 'bus_a': load('bus_current_a'),
+                   'duty': load('duty'), 'temp_c': load('temp_c')}
             self.pub_trace.publish(wd.String(data=json.dumps(rec, allow_nan=False)))
         except Exception:
             pass
@@ -665,7 +780,7 @@ class OidDriver(wd.WheeltecDriver):
             data = dict(bus=self.config.protocol, channel=self.port, confirmed=self.config.protocol_confirmed,
                         wheel_buses={('左', '右')[m - 1]: b for m, b in wheel_buses(self.params).items()},
                         wheels=vars(self.wheels), connected=c is not None, last_error=self.last_error,
-                        io_errors=self.io_errors, released=self.released)
+                        io_errors=self.io_errors, released=self.released, tuning=self.tuning_status())
             if c is not None:
                 data.update(telemetry=c.telemetry(time.monotonic()), tx=c.link.tx, rx=c.link.rx,
                             can_tx_retries=getattr(c.link, 'tx_retries', 0),

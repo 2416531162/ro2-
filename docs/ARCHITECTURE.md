@@ -14,14 +14,14 @@
 | --- | --- | --- |
 | `rk3588-wheeltec`（chassis） | `oid_protocol/oid_driver.py`（差速车）；旧车 `wheeltec_protocol/wheeltec_driver.py` | 唯一的电机出口：控制权仲裁（`wheeltec_protocol/motion_authority.py`）、指令超时停车、驱动器心跳、轮速里程 `/odom` |
 | `rk3588-perception@rtk` | `radar_system/rtk_node.py` | UM982 串口或平板串口转发（WiFi TCP 48622 / 蓝牙 RFCOMM 通道 22，`gnss_bridge.py`）→ `/gnss/raw`（JSON）、`/gnss/fix`、`/gnss/heading`；车端 CORS（`ntrip_config.py`） |
-| `rk3588-perception@imu` | `rion_protocol/hda536t_imu.py` | CAN 上的 HDA536T → `/imu`、`/imu/data`（航向角、横滚俯仰） |
+| `rk3588-perception@imu` | `rion_protocol/sch16t_imu.py` | CAN 上的 SCH16T 模块（2026-11-16 代替 HDA536T）→ `/imu`、`/imu/data`（航向角、横滚俯仰） |
 | `rk3588-perception@line` | `radar_system/line_node.py` | 融合（`gnss_fusion.py`）+ 作业状态机（`line_mission.py`）→ `/navigation/command`、`/line/status` |
 | `rk3588-perception@web` | `radar_system/radar_web_server.py` | 平板 app 的 WebSocket（`/ws`，协议 `app_link.py`、[APP_PROTOCOL.md](APP_PROTOCOL.md)）；手动、IMU 定向直行（`heading_hold.py`）；转发 `/line/command`；车载屏幕 `/display`；网页手动遥控兜底页 `/`（`templates/index.html`：方向键、急停、状态） |
 | `rk3588-perception@jobrec` | `radar_system/job_recorder.py` | 点开始作业就把原始话题录成 mcap（`~/rtk/jobs`，见 [JOB_RECORDS.md](JOB_RECORDS.md)） |
 
 ```
 UM982 ─串口/平板转发─► rtk_node ─/gnss/raw─┐
-HDA536T ─CAN─► hda536t_imu ─/imu/data────────┼─► line_node: gnss_fusion → LineMission ─/navigation/command─┐
+SCH16T ──CAN─► sch16t_imu ──/imu/data────────┼─► line_node: gnss_fusion → LineMission ─/navigation/command─┐
 欧艾迪驱动器 ◄─RS485/CAN─ oid_driver ─/odom──┘        (路线 / 定点画线 / 场地作业)                          │
       ▲                  ▲ motion_authority（手动 / 导航 / 急停 仲裁） ◄───────────────────────────────────┘
       └──────────────────┴─ /manual/command ◄─ radar_web_server ◄─ app（WebSocket）
@@ -83,7 +83,7 @@ Gen5 默认值由 `line_node.load_fusion_config()` 补齐，车上 `fusion.json`
 | --- | --- | --- |
 | 车型、几何、手动档、驱动类型 | `robot_core/robot_gen5.json`（`RK3588_ROBOT_CONFIG` 指定），旧车 `robot.json`；读取校验 `robot_core/config.py` | 是 |
 | 电机驱动器（总线、极对数 20、轮半径 0.194 m、加减速） | `oid_protocol/oid.yaml` | 是 |
-| IMU | `rion_protocol/hda536t.yaml` | 是 |
+| IMU | `rion_protocol/sch16t.yaml` | 是 |
 | 跟踪参数（差速车） | `radar_system/path_tracker.py` 的 `differential_config()` | 是（代码） |
 | 融合标定（天线杆臂、天线高度） | 车上 `~/rtk/fusion.json`；Gen5 专用默认值在 `line_node.load_fusion_config()` | 否（车上文件） |
 | CORS 账号 | 车上 `~/rtk/ntrip.env`（app 可写） | 否 |

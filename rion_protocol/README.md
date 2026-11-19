@@ -1,4 +1,27 @@
-# 瑞芬 HDA536T 动态倾角传感器（Gen5 的 IMU）
+# Gen5 的 IMU：SCH16T 模块（现用）与瑞芬 HDA536T（原来的）
+
+## SCH16T 模块（2026-11-16 起 imu 组件用它）
+
+SCH16T 倾角 / 姿态模块，CAN 原生协议 V1.0（模块工程 `docs/CAN协议.md`、固件 `App/can_protocol.c` 2.3.0）。
+`sch16t_imu.py` 代替 `hda536t_imu.py`：话题、消息、坐标系不变（`/imu`、`/imu/data`、`/imu/status`），line_node、app 不用改。
+
+| 文件 | 内容 |
+| --- | --- |
+| `sch16t_codec.py` | 数据帧解码（角度 / 加速度 / 陀螺 / 高精度姿态 / 状态 / 原始）、换到 REP-103。纯计算 |
+| `sch16t_imu.py` | ROS 节点，只收不发 |
+| `sch16t.yaml` | 参数：数据帧 ID（出厂 0x400）、`mount_yaw_deg` |
+
+- **轴向**：加速度帧、陀螺帧就是 X 前、Y 左、Z 上（= REP-103），不取反；角度帧是和 HDA536T 一样的欧拉角（俯仰前高为正、
+  方位角顺时针为正），换成 REP-103 是（横滚, −俯仰, −方位角）。见 `tests/test_sch16t.py`。
+- **要陀螺帧**：模块出厂掩码 0x19 只发角度、高精度姿态、状态，没有陀螺、加速度帧，融合用不了（`/imu/status` 会提示）。
+  打开：向 0x401 发 `40 30 10 00 17 00 00 00`（角度 + 加速度 + 陀螺 + 状态，立即生效并保存）。周期出厂 10 ms，
+  融合要陀螺 ≥ 20 Hz。
+- **flag**：b3b2 = 01 未就绪（上电标定、中断后重新捕获、陀螺零偏清除）、10 故障时不发 `/imu`，原因按状态帧的位写进
+  `/imu/status`；状态帧的帧计数用来数丢了几个周期（`sequence_gaps`）。
+- **安装**：按模块 +X 朝车头、顶盖朝上装时 `mount_yaw_deg: 0`；上车先核对垫高车头时 app 俯仰是车头抬起、左转时
+  `angular_velocity.z` 为正。
+
+## 瑞芬 HDA536T（原来的，留作回退）
 
 旧车的陀螺在 Wheeltec 板上，由它的驱动发 `/imu`。Gen5 没有这块板，融合没有陀螺就给不出可用定位（app 显示「IMU 数据中断」，车不会开）。Gen5 用瑞芬 HDA536T：内置陀螺和加速度计，自带卡尔曼滤波算横滚、俯仰，CAN 输出，和两台欧艾迪驱动器挂同一条总线。
 
@@ -15,7 +38,7 @@
 | `hda536t_setup.py` | 上车前设置传感器（不需要 ROS） |
 | `hda536t.yaml` | 参数 |
 
-`deployment/run_component.sh imu` 按共享配置选：`drive.type = differential`（`robot_core/robot_gen5.json`）时启动本驱动，否则还是 `imu_filter_madgwick`（旧车）。所有带 `line` 的部署组合都带 `imu`。
+`deployment/run_component.sh imu` 按共享配置选：`drive.type = differential`（`robot_core/robot_gen5.json`）时启动 SCH16T 驱动（原来是本驱动），否则还是 `imu_filter_madgwick`（旧车）。所有带 `line` 的部署组合都带 `imu`。
 
 ## 输出
 

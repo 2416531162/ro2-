@@ -1,0 +1,12 @@
+# SCH16T 倾角 / 姿态模块（Gen5 的 IMU，代替 HDA536T），与两台欧艾迪驱动器挂同一条 CAN。
+# 共享配置 drive.type = differential（robot_core/robot_gen5.json）时，deployment/run_component.sh 的 imu 组件
+# 启动本驱动。协议见 sch16t_codec.py；模块出厂只发角度、高精度姿态、状态三帧，没有陀螺帧时 /imu/status 会提示。
+sch16t_imu:
+  ros__parameters:
+    can_channel: can0
+    data_id: 1024           # 数据帧 ID：0x400（出厂 0x400 系列）；模块切到 HDA536T 模式时填 BASE + 节点号，如 0x585 = 1413
+    stale_s: 0.1            # 陀螺帧到时，同一周期的角度帧、加速度帧不超过这么久才带上
+    # 模块 +X 在车上朝哪（从上往下看逆时针为正）：0 朝车头、90 朝车左、-90 朝车右、180 朝车尾。
+    # 模块按 +X 朝车头、顶盖朝上装（固件只支持水平安装）。上车核对：垫高车头时 app 的俯仰应为车头抬起，
+    # 左转时 /imu 的 angular_velocity.z 为正；不对就改这里
+    mount_yaw_deg: 0.0

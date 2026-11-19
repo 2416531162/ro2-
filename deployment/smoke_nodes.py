@@ -9,7 +9,7 @@ robot_core）。这里按 systemd 直接运行 radar_system/xxx_node.py 的方�
 
     bash deployment/smoke.sh <发布目录> [rtk line imu oid jobrec web]  # activate 之前在车上跑，失败就不要激活
 
-imu（Gen5 的 HDA536T 驱动）用假 CAN 总线喂一个周期，查真 sensor_msgs/Imu 能填好、发出去；oid（Gen5 底盘驱动）
+imu（Gen5 的 SCH16T 驱动）用假 CAN 总线喂一个周期，查真 sensor_msgs/Imu 能填好、发出去；oid（Gen5 底盘驱动）
 只在共享配置是差速车时查，默认只收不发，没有 can0 也能构造、发状态。换到正点原子 RK3588（ROS 2 Jazzy）后第一次
 上板，先跑这个。
 """
@@ -69,15 +69,16 @@ def _script_dir(name):
 
 def check_imu():
     _script_dir('rion_protocol')
-    import hda536t_codec as hc
-    import hda536t_imu
+    import sch16t_codec as sc
+    import sch16t_imu
 
     class Bus:
-        """一个输出周期：角度、加速度、陀螺三帧（左转 10°/s，车头抬起 2°，静止水平）。"""
+        """一个输出周期：角度、加速度、陀螺、状态四帧（左转 10°/s，车头抬起 2°，静止水平）。"""
         def __init__(self):
-            self.frames = [(0x585, hc.encode_pdo(hc.ANGLE, 1.0, 2.0, 3.0, 25)),
-                           (0x585, hc.encode_pdo(hc.ACCEL, 0.0, 0.0, -1.0)),
-                           (0x585, hc.encode_pdo(hc.GYRO, 0.0, 0.0, -10.0))]
+            self.frames = [(sc.DATA_ID, sc.encode(sc.ANGLE, 1.0, 2.0, -3.0, 25)),
+                           (sc.DATA_ID, sc.encode(sc.ACCEL, 0.0, 0.0, 1.0)),
+                           (sc.DATA_ID, sc.encode(sc.GYRO, 0.0, 0.0, 10.0)),
+                           (sc.DATA_ID, sc.encode_status(sc.ST_VALID | 0x2, 357.0, 0.01, 7))]
             self.sent = []
 
         def recv(self):
@@ -90,7 +91,7 @@ def check_imu():
             pass
 
     bus = Bus()
-    node = hda536t_imu.Hda536tNode(bus=bus)
+    node = sch16t_imu.Sch16tNode(bus=bus)
     try:
         raw, data = [], []
         for pub, out in ((node.pub_raw, raw), (node.pub_data, data)):

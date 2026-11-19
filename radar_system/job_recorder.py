@@ -74,7 +74,7 @@ def context_files():
     home = os.path.expanduser('~')
     return [os.environ.get('RK3588_ROBOT_CONFIG', os.path.join(RELEASE_ROOT, 'robot_core', 'robot.json')),
             os.path.join(RELEASE_ROOT, 'oid_protocol', 'oid.yaml'),
-            os.path.join(RELEASE_ROOT, 'rion_protocol', 'hda536t.yaml'),
+            os.path.join(RELEASE_ROOT, 'rion_protocol', 'sch16t.yaml'),
             os.path.join(home, 'rtk', 'fusion.json'),
             os.path.join(home, 'rtk', 'route.json'),
             os.path.join(home, 'rtk', 'line_state.json'),
@@ -127,12 +127,15 @@ README = '''# 作业记录（job_recorder 自动记）
   `/line/status`（5 Hz）带 phase、message、diag（定位跳动计数等）和路线。
 - 发的：`/navigation/command`（发给底盘仲裁的 vx、wz）。
 - 车做的：`/oid/trace`（约 50 Hz）：`v_cmd` / `w_cmd` 限速后发给底盘的、`erpm_sent` / `erpm_read` 左右轮下发 / 读回转速、
-  `wheels_mps` 读回的左右轮速、`v` / `w` 里程计、`pos_cdeg` 左右电机轴位置（0.01°，累计，轮毂直驱即轮子转角）。`/oid/status`（2 Hz）驱动器故障、通信错误。`/motion/status` 控制权、急停、健康。
+  `wheels_mps` 读回的左右轮速、`v` / `w` 里程计、`pos_cdeg` 左右电机轴位置（0.01°，累计，轮毂直驱即轮子转角）、
+  负载（左、右，驱动器方向，0.5 s 没更新写 null）：`motor_a` 电机电流 A、`bus_a` 母线电流 A、`duty` 占空比原始值、
+  `temp_c` 驱动器温度 ℃（右轮走 CAN 只查电机电流，约 10 Hz，另外三项为 null）。`/oid/status`（2 Hz）驱动器故障、通信错误。`/motion/status` 控制权、急停、健康。
 
 ## 分析走不直的常用对照
 1. `/line/trace` 的 `tracker.e`（横偏）随时间：是慢漂（航向 / 标定）、周期摆（增益 / 延迟）、还是跳（定位）。
 2. `pose.yaw` 对比 `/gnss/raw` heading（双天线）和 `/imu/data` 航向：融合航向是不是偏了、偏多少。
 3. `wz`（算的）→ `/oid/trace` `w_cmd`（限速后）→ `w`（读回）：转向有没有被限、延迟多少、左右轮是否一侧跟不上。
+   轮子给了转速却不动（原地转卡住）时看 `motor_a`：一直贴着同一个值 = 顶到驱动器上位机设的最大电流。
 4. `/gnss/raw` 的 `sol` 和 `t_rx - t`：解算状态掉了没有、数据有没有晚到 / 断流（蓝牙、WiFi、CAN 转发）。
 '''
 

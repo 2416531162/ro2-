@@ -7,11 +7,11 @@ oid_driver:
     # false：只收不发（不写驱动器配置、不发心跳和转速）。架空轮子，核对 pole_pairs、左右轮和方向后改 true
     confirmed: true           # 2026-09-29 两轮架空核对完（磁极对数、方向、左 485 / 右 CAN）
     # ---- 每台走哪条总线：can 或 rs485 ----
-    left_bus: rs485
+    left_bus: can             # 2026-11-16 用户：左轮驱动器也改接 CAN（原 485 /dev/ttyS3）
     right_bus: can
     # ---- CAN（在上位机「CAN 总线」页设）----
     can_channel: can0         # sudo ip link set can0 up type can bitrate 500000（与驱动器的「CAN 波特率」一致）
-    can_left_id: 1            # 左轮驱动器的「CAN 节点 ID」（左轮走 CAN 时才用）
+    can_left_id: 126          # 左轮驱动器的「CAN 节点 ID」（左轮走 CAN 时才用）；2026-11-19 实车 500k 扫出来是 126（原为出厂 1）
     can_right_id: 116         # 右轮驱动器的「CAN 节点 ID」（2026-09-29 上位机重配后变成 116，原为出厂 1）；两台都在 CAN 上时不能相同
     # ---- RS485（Modbus RTU，在上位机「串口（485）参数」里设）----
     # 正点原子 RK3588 板载 485 = UART3 = /dev/ttyS3（与 RS232 复用：JP6 两个跳线帽插到下面）；A 接 A、B 接 B
@@ -42,5 +42,9 @@ oid_driver:
     tx_hz: 30.0               # 每轮写一次转速、查一次状态；2026-10-06 用户要求 10 → 30 Hz，周期约 33 ms。
     yaw_acceleration_rad_s2: 2.0
     manual_stop_decel_mps2: 1.5 # 普通手动松手两轮同步渐停；不改变急停和掉线制动
+    # App「更多 → 工程调试 → 驱动器参数」（2026-11-16）：只在两台驱动器都接 CAN（left_bus / right_bus 都是 can）时能用。
+    # 闭环最大电流（CAN 0x14）、配置表（0x0E）、速度环加减速（0x0A / 0x10）存在车上，连上驱动器时、驱动器断电重启回话时重发。
+    max_current_limit_a: 20.0 # 闭环最大电流最多设到多少 A：用户 2026-11-16 定 20 A（代码里也最多 20，这里只能往下调）；0 = 不许改
+    tuning_file: "~/rtk/oid_tuning.json" # 保存位置；删掉文件 = 不再下发（驱动器断电重启后回到上位机保存的值）
     publish_tf: true          # 唯一的 odom → base_link 动态 TF（与 wheeltec 驱动相同）
     navigation_uses_lidar: false

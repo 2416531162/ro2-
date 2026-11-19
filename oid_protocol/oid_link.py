@@ -17,7 +17,7 @@ import math
 import socket
 import struct
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from robot_core.standstill import HALL_STILL_MAX_MPS
 
@@ -96,8 +96,73 @@ class MotorState:
     voltage: float = None
     t_speed: float = None
     t_position: float = None
-    temp_c: int = None              # 485 一帧读全状态时顺带有
-    current_a: float = None
+    # 负载：485 一帧读全状态时四项都有；CAN 只每 load_s 查一次电机电流。t_load 是这几项的接收时刻
+    motor_current_a: float = None   # 电机电流 A（驱动器读数 10 mA，带符号）
+    bus_current_a: float = None     # 母线电流 A
+    duty: int = None                # 占空比，驱动器原始读数
+    temp_c: int = None              # 驱动器温度 ℃
+    t_load: float = None
+
+
+# App「驱动器参数」（2026-11-16 用户：草地起步原地转推不动，要能在 App 里改驱动器）。只对 CAN 驱动器：
+# 都是控制指令，驱动器不回复、读不回来，车端记住发过什么，连上驱动器时、驱动器断电重启回话时重发。
+TUNING_FIELDS = ('max_current_a', 'config_table', 'accel_mps2', 'decel_mps2')
+TUNING_MAX_CURRENT_A = 20.0         # 用户 2026-11-16 定：闭环最大电流最多 20 A；oid.yaml 只能往下调
+TUNING_RANGES = {'max_current_a': (0.5, TUNING_MAX_CURRENT_A, 'A', '闭环最大电流'),
+                 'accel_mps2': (0.2, 3.0, 'm/s²', '加速度'),
+                 # 减速度也是急停、指令超时时驱动器自己刹车的斜坡，不许设得太软
+                 'decel_mps2': (1.0, 6.0, 'm/s²', '减速度')}
+
+
+@dataclass(frozen=True)
+class DriverTuning:
+    """App 设的驱动器参数，左右两台相同。None = 不下发：配置表、最大电流用驱动器自己保存的（上位机写进去的），
+    加减速用 oid.yaml 的 wheel_accel_mps2 / wheel_decel_mps2（与原来一样）。
+
+    max_current_a  闭环最大电流（CAN 0x14，10 mA 分辨率）：速度环最多出多大力。
+    config_table   电机配置表 0–3（CAN 0x0E，上位机的 1–4 号；驱动器开机用 0，掉电不保存）。
+    accel_mps2 / decel_mps2  速度环加减速（CAN 0x0A / 0x10），按轮子线速度给。"""
+    max_current_a: float = None
+    config_table: int = None
+    accel_mps2: float = None
+    decel_mps2: float = None
+
+    @classmethod
+    def parse(cls, data, max_current_limit_a=TUNING_MAX_CURRENT_A):
+        """dict（App 指令或保存的文件）→ DriverTuning；没有的项当 None。不合法抛 ValueError（给操作员看的中文）。"""
+        if not isinstance(data, dict):
+            raise ValueError('驱动器参数格式不对')
+        out = {}
+        for name in TUNING_FIELDS:
+            value = data.get(name)
+            if value is None:
+                out[name] = None
+            elif name == 'config_table':
+                if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 3:
+                    raise ValueError('配置表只能是 1–4 号')
+                out[name] = value
+            else:
+                lo, hi, unit, label = TUNING_RANGES[name]
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                    raise ValueError('%s必须是数字' % label)
+                if name == 'max_current_a':
+                    hi = min(hi, max_current_limit_a)
+                    if hi < lo:
+                        raise ValueError('车端没有设闭环最大电流上限（oid.yaml 的 max_current_limit_a），不能改最大电流')
+                if not lo <= value <= hi:
+                    raise ValueError('%s要在 %g–%g %s 之间' % (label, lo, hi, unit))
+                out[name] = round(float(value), 2)
+        return cls(**out)
+
+    @property
+    def empty(self):
+        return all(getattr(self, name) is None for name in TUNING_FIELDS)
+
+    def as_dict(self):
+        return {name: getattr(self, name) for name in TUNING_FIELDS}
+
+    def max_current_centiamps(self):
+        return None if self.max_current_a is None else int(round(self.max_current_a * 100))
 
 
 def _motor_ids(ids, what):
@@ -179,22 +244,23 @@ class CanLink:
     reply_ids 只在回复 ID 不同时给（双驱的「CAN 发送 ID」）。按 (左, 右) 给；只有一台在 CAN 上时给
     {1: 左} 或 {2: 右}。
 
-    每个控制周期：每台发一帧目标转速，查询一次转速和位置；心跳按 heartbeat_s 发；故障、电压每 slow_s 查一次。
+    每个控制周期：每台发一帧目标转速，查询一次转速和位置；心跳按 heartbeat_s 发；电机电流每 load_s 查一次
+    （看原地转卡住时是不是顶到电流上限，10 Hz 够用，少占总线）；故障、电压每 slow_s 查一次。
     驱动器在上位机设了主动回传时，回传帧格式与查询回复相同，照样收。
     """
     kind = 'can'
     tx_retries = property(lambda self: getattr(self.bus, 'tx_retries', 0))
     tx_retry_timeouts = property(lambda self: getattr(self.bus, 'tx_retry_timeouts', 0))
 
-    def __init__(self, bus, node_ids, reply_ids=None, *, heartbeat_s=0.1, slow_s=0.5, clock=None):
+    def __init__(self, bus, node_ids, reply_ids=None, *, heartbeat_s=0.1, slow_s=0.5, load_s=0.1, clock=None):
         self.clock = clock
         self.bus, self.node_ids = bus, _motor_ids(node_ids, ' CAN 节点 ID')
         reply = _motor_ids(reply_ids, ' CAN 回复 ID') if reply_ids else self.node_ids
         self.reply_to_motor = {can_id: m for m, can_id in reply.items()}
-        self.heartbeat_s, self.slow_s = heartbeat_s, slow_s
+        self.heartbeat_s, self.slow_s, self.load_s = heartbeat_s, slow_s, load_s
         self.motors = sorted(self.node_ids)
         self.state = {m: MotorState() for m in self.motors}
-        self._beat = self._slow = -math.inf
+        self._beat = self._slow = self._load = -math.inf
         self.tx = self.rx = self.unknown = 0
         self.errors = 0
 
@@ -207,10 +273,16 @@ class CanLink:
                           (self.node_ids[motor], bytes(data).hex(), exc.strerror)) from exc
         self.tx += 1
 
-    def configure(self, accel_erpm_s2, decel_erpm_s2):
-        for m in self.motors:
+    def configure(self, accel_erpm_s2, decel_erpm_s2, *, max_current_ca=None, config_table=None, motors=None):
+        """写速度环加减速；App 设了的话先切配置表（切表会换成那张表自己的参数），最后设闭环最大电流。
+        motors 只给断电重启后重发的那几台。"""
+        for m in motors or self.motors:
+            if config_table is not None:
+                self._send(m, oc.can_config_table(config_table))
             self._send(m, oc.can_speed_accel(accel_erpm_s2[m]))
             self._send(m, oc.can_speed_decel(decel_erpm_s2[m]))
+            if max_current_ca is not None:
+                self._send(m, oc.can_max_current(max_current_ca))
 
     def heartbeat(self, now, force=False):
         if force or now - self._beat >= self.heartbeat_s:
@@ -231,6 +303,10 @@ class CanLink:
         for m in self.motors:
             self._send(m, oc.can_query(oc.Q_SPEED))
             self._send(m, oc.can_query(oc.Q_POSITION))
+        if now - self._load >= self.load_s:
+            for m in self.motors:
+                self._send(m, oc.can_query(oc.Q_MOTOR_CURRENT))
+            self._load = now
         if now - self._slow >= self.slow_s:
             for m in self.motors:
                 self._send(m, oc.can_query(oc.Q_FAULT))
@@ -259,6 +335,9 @@ class CanLink:
                 s.fault = value
             elif item == oc.Q_VOLTAGE:
                 s.voltage = float(value)
+            elif item == oc.Q_MOTOR_CURRENT:
+                # 按 10 mA 换算（同 CAN 电流指令和 485 的 5006）；上车后和上位机显示的电流核一次
+                s.motor_current_a, s.t_load = value / 100.0, received
 
 
 class SerialPort:
@@ -407,7 +486,8 @@ class Rs485Link:
                 s.speed_erpm, s.t_speed = st['erpm'], received
                 s.position_cdeg, s.t_position = st['position_cdeg'], received
                 s.fault, s.voltage = st['fault'], float(st['voltage'])
-                s.temp_c, s.current_a = st['temp_c'], st['motor_ca'] / 100.0
+                s.motor_current_a, s.bus_current_a = st['motor_ca'] / 100.0, st['bus_ca'] / 100.0
+                s.duty, s.temp_c, s.t_load = st['duty'], st['temp_c'], received
             if slow:
                 mode = self._transact(m, om.read_holding(a, om.REG_MODE, 1))
                 if mode:
@@ -496,8 +576,9 @@ class OidChassis:
     更新里程计。两台驱动器是独立的盒子，可能只有一台断电或掉线：两轮的反馈都在 feedback_timeout_s 内才算
     更新（上层据此判反馈过期、停车）；任一台报故障 telemetry() 会说明，由上层停车。"""
 
-    def __init__(self, link, wheels, *, feedback_timeout_s=0.3, clock=None):
+    def __init__(self, link, wheels, *, feedback_timeout_s=0.3, clock=None, tuning=None):
         self.link, self.wheels, self.feedback_timeout_s = link, wheels, feedback_timeout_s
+        self.base_wheels = wheels       # oid.yaml 的轮子配置；App 改加减速时 wheels 换成改过的
         self.clock = clock
         self.odom = Odometry()
         self.sent = {1: 0, 2: 0}
@@ -505,16 +586,68 @@ class OidChassis:
         self.odometry_measurement = None
         self.wheel_aligner = WheelMotionAligner(wheels, max_age_s=min(.2, feedback_timeout_s))
         self.wheel_motion = None
+        self.tuning = DriverTuning()
+        self.reapplied = 0              # 驱动器断电重启回话后重发参数的次数（台次）
+        self._needs_config = set()      # 反馈断过、回话时要重发参数的驱动器
+        self._opened_at = None
+        if tuning is not None:
+            self._set_tuning(tuning)
 
-    def open(self, now):
+    @property
+    def tunable(self):
+        """App「驱动器参数」只支持两台都在 CAN 上（指令按 CAN 编程手册）。"""
+        return getattr(self.link, 'kind', None) == 'can'
+
+    def _set_tuning(self, tuning):
+        if not tuning.empty and not self.tunable:
+            raise ValueError('驱动器参数只支持两台驱动器都接 CAN')
+        b = self.base_wheels
+        self.tuning = tuning
+        self.wheels = replace(b, accel_mps2=tuning.accel_mps2 or b.accel_mps2, decel_mps2=tuning.decel_mps2 or b.decel_mps2)
+        self.wheel_aligner.wheels = self.wheels     # 轮程不确定度按实际的加减速估
+
+    def _configure(self, motors=None):
         w = self.wheels
         per = w.erpm_per_mps() if w.configured else 0.0
         accel = int(round(w.accel_mps2 * per))
         decel = int(round(w.decel_mps2 * per))
-        self.link.configure({1: accel, 2: accel}, {1: decel, 2: decel})
+        extra = {}
+        if self.tunable:
+            extra = dict(max_current_ca=self.tuning.max_current_centiamps(), config_table=self.tuning.config_table)
+            if motors is not None:
+                extra['motors'] = motors
+        self.link.configure({1: accel, 2: accel}, {1: decel, 2: decel}, **extra)
+
+    def open(self, now):
+        self._configure()
         self.link.heartbeat(now, force=True)
+        self._opened_at = now
+        self._needs_config.clear()
+
+    def retune(self, tuning):
+        """App 改了参数：换上新参数并马上发给两台驱动器（只在停稳、没有作业时调，由驱动节点检查）。"""
+        self._set_tuning(tuning)
+        self._configure()
+
+    def _reconfigure_returned(self, now, send):
+        """驱动器单独断电重启会丢掉指令设的配置表、最大电流和加减速（回到上位机保存的）：反馈断过的那台
+        （或连上以后超过反馈超时还没回过话的）重新回话时，在发转速之前重发一遍。不发指令的周期（只收不发、
+        停稳放空）只记下来，等下一个发指令的周期再发。"""
+        back = []
+        for m, s in self.link.state.items():
+            if s.t_speed is not None and now - s.t_speed <= self.feedback_timeout_s:
+                if m in self._needs_config:
+                    back.append(m)
+            elif s.t_speed is not None or (self._opened_at is not None and now - self._opened_at > self.feedback_timeout_s):
+                self._needs_config.add(m)
+        if back and send:
+            self._needs_config.difference_update(back)
+            self._configure(motors=back)
+            self.reapplied += len(back)
 
     def step(self, now, v, w, *, send=True):
+        if self.tunable:
+            self._reconfigure_returned(self.clock() if self.clock is not None else now, send)
         if send:
             if not self.wheels.configured and (v or w):
                 raise ValueError('pole_pairs_unconfigured')

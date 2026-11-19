@@ -13,7 +13,7 @@
 ```
 ~/rtk/jobs/<开始时间>_<作业名>_<id 前 8 位>/      （服务用 root 跑：/root/rtk/jobs）
     job.json          作业 id、名称、结果（DONE / CANCELLED / PAUSED…）、每段起止、每段摘要
-    context/segNN/    这一段开始时的配置快照：release.txt（版本）、robot 配置、oid.yaml、hda536t.yaml、
+    context/segNN/    这一段开始时的配置快照：release.txt（版本）、robot 配置、oid.yaml、sch16t.yaml（IMU）、
                       fusion.json、route.json、line_state.json、route_operations.json、runtime.env
     segNN/            这一段的 ROS 2 bag（mcap）
 ```

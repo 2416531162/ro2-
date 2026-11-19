@@ -60,12 +60,35 @@ def tail(sections, distance):
             remaining.paint_spans=None if section.paint_spans is None else [(max(0.,a-consumed),b-consumed) for a,b in section.paint_spans if b>consumed]
             if remaining.paint_spans:
                 remaining.paint_from_m,remaining.paint_to_m=remaining.paint_spans[0][0],remaining.paint_spans[-1][1]
+            remaining.paint_dashed=getattr(section,'paint_dashed',False)
             if remaining.paint_spans == []:remaining.field_role='transit'
             out.append(remaining)
         offset = end
     if not out:
         raise ValueError('当前任务已到终点，无需继续')
     return out
+
+
+def field_paint_spans(raw, sec):
+    """场地规划刷线段的虚线喷线区间（field_planner.assemble）：段内路程 [起, 止]，升序不重叠，落在起喷—停喷之内。
+    没有（实线、旧规划）返回 None，照 paint_from_m—paint_to_m 整段喷。"""
+    if raw is None:
+        return None
+    if not isinstance(raw, list) or not 1 <= len(raw) <= 2000 or sec.paint_to_m is None:
+        raise ValueError('规划虚线区间无效')
+    spans, last = [], sec.paint_from_m - 1e-6
+    for item in raw:
+        if not isinstance(item, list) or len(item) != 2:
+            raise ValueError('规划虚线区间无效')
+        a = rp._number(item[0], '虚线起点', 0, sec.path.length)
+        b = rp._number(item[1], '虚线终点', 0, sec.path.length)
+        if not last <= a < b <= sec.paint_to_m + 1e-6:
+            raise ValueError('规划虚线区间无效')
+        spans.append((a, b))
+        last = b
+    if abs(spans[0][0] - sec.paint_from_m) > 1e-6 or abs(spans[-1][1] - sec.paint_to_m) > 1e-6:
+        raise ValueError('规划虚线区间与起喷、停喷点不一致')
+    return spans
 
 
 def painting_start(sections):
@@ -143,6 +166,7 @@ def pivot_entry_to(sections, car, radius, nozzle):
     sec.paint_from_m=getattr(first,'paint_from_m',0.)+shift
     sec.paint_to_m=None if first.paint_to_m is None else first.paint_to_m+shift
     sec.paint_spans=None if first.paint_spans is None else [(a+shift,b+shift) for a,b in first.paint_spans]
+    sec.paint_dashed=getattr(first,'paint_dashed',False)
     return head + sections[1:], length, entry
 
 
@@ -295,7 +319,8 @@ class RouteOperations:
                             pieces=[[p.length, p.kappa] for p in sec.path.pieces],speed=getattr(sec,'cruise_mps',None),
                             field_role=getattr(sec,'field_role',None),paint_from=getattr(sec,'paint_from_m',0.0),
                             paint_to=sec.paint_to_m,paint_spans=sec.paint_spans,continuous_after=sec.continuous_after,
-                            entry_speed=getattr(sec,'entry_speed_mps',None)))
+                            entry_speed=getattr(sec,'entry_speed_mps',None),
+                            **({'paint_dashed':True} if getattr(sec,'paint_dashed',False) else {})))
         return out
 
     def decode(self, record):
@@ -310,6 +335,7 @@ class RouteOperations:
             restored.paint_from_m=float(sec.get('paint_from') or 0.0)
             restored.paint_to_m=sec.get('paint_to')
             restored.paint_spans=sec.get('paint_spans')
+            restored.paint_dashed=sec.get('paint_dashed') is True
             restored.continuous_after=sec.get('continuous_after',False)
             out.append(restored)
         return out
@@ -818,6 +844,9 @@ class RouteOperations:
             # 刷线段前面的直线助跑不喷（field_planner.RUN_IN_M）；旧规划没有这一项按 0
             sec.paint_from_m=rp._number(item.get('paint_from',0.0),'助跑长度',0,sec.path.length)
             sec.paint_to_m=rp._number(item['paint_to'],'划线终点',sec.paint_from_m,sec.path.length) if item.get('paint_to') is not None else None
+            # 虚线：只在这几截内开泵（field_planner.assemble）；转场段不带
+            sec.paint_spans=field_paint_spans(item.get('paint_spans'),sec) if sec.field_role=='paint' else None
+            sec.paint_dashed=sec.paint_spans is not None
             sections.append(sec);last=sec.car_pose(sec.path.length)[:2]
         from dataclasses import replace
         tracker=SectionTracker(sections,replace(self.m.path_cfg,track_x_m=0,start_min_left_m=0),self.m.geo,**self.m.section_options())
@@ -946,6 +975,7 @@ class RouteOperations:
                 lead.cruise_mps,lead.field_role,lead.paint_from_m=first.cruise_mps,'paint',first.paint_from_m+extra
                 lead.paint_to_m=None if first.paint_to_m is None else first.paint_to_m+extra
                 lead.paint_spans=None if first.paint_spans is None else [(a+extra,b+extra) for a,b in first.paint_spans]
+                lead.paint_dashed=getattr(first,'paint_dashed',False)
                 lead.entry_speed_mps=getattr(first,'entry_speed_mps',None)
                 lead.continuous_after=first.continuous_after
                 rest=[lead]+rest[1:]

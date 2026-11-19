@@ -61,6 +61,12 @@ def crop(stroke, start, end):
         # 全圆也固定在原图纸起角量区间；不能让全圆优化器重新挑起角。
         out.update(kind='arc', start=stroke['start'] + sign * start / stroke['r'],
                    sweep=sign * (end - start) / stroke['r'])
+    if stroke.get('paint_ranges') is not None:
+        # 虚线按原图形的位置截取再平移，补画出来的各截与原线对齐；范围里全是空隙就没有要补的
+        out['paint_ranges'] = [(max(a, start) - start, min(b, end) - start)
+                               for a, b in stroke['paint_ranges'] if min(b, end) - max(a, start) > 1e-6]
+        if not out['paint_ranges']:
+            raise ValueError('补画范围内都是虚线空隙，没有要喷的')
     return out
 
 
@@ -126,5 +132,9 @@ def prepare(record, mission, command, car):
     sec.field_role = 'paint'
     sec.paint_from_m = option.get('paint_from', 0.0)
     sec.paint_to_m = option.get('paint_to')
-    target = [dict(direction=1, points=[list(p) for p in target_points(option)])]
+    if option.get('paint_offsets') is not None:
+        sec.paint_spans = [(sec.paint_from_m + a, sec.paint_from_m + b) for a, b in option['paint_offsets']]
+        sec.paint_dashed = True
+        sec.paint_from_m, sec.paint_to_m = sec.paint_spans[0][0], sec.paint_spans[-1][1]
+    target =[dict(direction=1, points=[list(p) for p in target_points(option)])]
     return [sec], entry, entry_m, outside, target, selected['name']

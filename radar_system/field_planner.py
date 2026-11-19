@@ -45,8 +45,62 @@ LOOP_STEP_DEG = 5
 # （2026-10-03 Gen5 标定仿真：边线、角球弧线头 1.5–1.9 cm 都是这样来的；原地转的做法是倒完再原地转，万向轮先转到侧面）
 
 
+# 虚线（app 场地「划线线型」，FieldDash；2026-11-16 车端接上，之前车端不读、整条照喷实线）：喷头沿原图形从起点量，
+# length 模式每段 dash 米、空 gap 米；count 模式 count 段、线与间隔等长、两端有线。闭合折线每条边、每条弧各自从起点
+# 重新算，倒着画也按原起点量。只决定这一笔哪几截开泵（Section.paint_spans），行驶路径、助跑、转场、排序都不变；
+# 同一直线上的空隙不重新起步（path_tracker._prepare_entry_window），停喷越线截止、弧提前停喷按每一截照常
+DASH_MAX_SEGMENTS = 500
+
+
 def number(v, name, lo, hi):
     return rp._number(v, name, lo, hi)
+
+
+def dash_ranges(style, length, name='图形'):
+    """虚线设置 -> 喷头沿原图形从起点量的喷线区间 [(起, 止)]（米）；None 是实线。与 app FieldDash.ranges 同一算法。"""
+    if style is None:
+        return None
+    if not isinstance(style, dict) or style.get('mode') not in ('length', 'count'):
+        raise ValueError(name + '：虚线模式无效')
+    if style['mode'] == 'count':
+        count = style.get('count')
+        if type(count) is not int or not 2 <= count <= DASH_MAX_SEGMENTS:
+            raise ValueError(name + '：虚线段数须为 2–%d' % DASH_MAX_SEGMENTS)
+        dash = gap = length / (2 * count - 1)
+    else:
+        dash = number(style.get('dash'), name + ' 虚线线长', .2, 100)
+        gap = number(style.get('gap'), name + ' 虚线间隔', .2, 100)
+    if dash < .05 or gap < .05 or math.ceil(length / (dash + gap)) > DASH_MAX_SEGMENTS:
+        raise ValueError(name + '：虚线过密，请增大线长或减少段数')
+    out = []
+    for i in range(math.ceil(length / (dash + gap))):
+        lo, hi = i * (dash + gap), min(length, i * (dash + gap) + dash)
+        if hi - lo > 1e-8:
+            out.append((lo, hi))
+    return out
+
+
+def travel_spans(ranges, length, reverse=False, offset=None):
+    """原图形上的喷线区间 -> 这一走法喷头从线头起走过的米数区间，升序、相接的合并；ranges 为 None（实线）返回 None。
+    reverse：从原终点往原起点画。offset（只给整圆）：喷头从原图形 offset 米处起画，区间可以跨过原起点。"""
+    if ranges is None:
+        return None
+    closed = offset is not None
+    u0 = offset if closed else (length if reverse else 0.0)
+    out = []
+    for lo, hi in ranges:
+        a, b = (u0 - hi, u0 - lo) if reverse else (lo - u0, hi - u0)
+        for k in ((-length, 0.0, length) if closed else (0.0,)):
+            x, y = max(0.0, a + k), min(length, b + k)
+            if y - x > 1e-9:
+                out.append((x, y))
+    merged = []
+    for a, b in sorted(out):
+        if merged and a <= merged[-1][1] + 1e-9:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], b))
+        else:
+            merged.append((a, b))
+    return merged
 
 
 def point(v):
@@ -265,7 +319,7 @@ def parse_strokes(raw,selected=None,max_strokes=80):
         ident=item.get('id');name=item.get('name',ident)
         if not isinstance(ident,str) or not 1<=len(ident)<=100 or ident in ids:raise ValueError('图形 ID 缺失或重复')
         if not isinstance(name,str) or len(name)>100:raise ValueError('图形名称无效')
-        ids.add(ident);kind=item.get('kind')
+        ids.add(ident);kind=item.get('kind');dash=item.get('dash')
         if kind=='polyline':
             points=item.get('points')
             if not isinstance(points,list) or not 2<=len(points)<=400:raise ValueError('折线点数无效')
@@ -273,13 +327,17 @@ def parse_strokes(raw,selected=None,max_strokes=80):
             if item.get('closed',False) and points[0]!=points[-1]:points.append(points[0])
             for i,(a,b) in enumerate(zip(points,points[1:])):
                 if math.dist(a,b)<.05:raise ValueError('划线分段太短')
-                add(dict(id=ident+'/'+str(i),name=name+' · '+str(i+1),kind='line',a=a,b=b),ident,i)
+                stroke=dict(id=ident+'/'+str(i),name=name+' · '+str(i+1),kind='line',a=a,b=b)
+                if dash is not None:stroke['paint_ranges']=dash_ranges(dash,math.dist(a,b),stroke['name'])
+                add(stroke,ident,i)
         elif kind in ('circle','arc'):
             c=point(item.get('center'));radius=number(item.get('radius'),'圆弧半径',.05,200)
             start=math.radians(number(item.get('start_deg',0),'圆弧起角',-3600,3600))
             sweep=TAU if kind=='circle' else math.radians(number(item.get('sweep_deg'),'圆弧范围',-360,360))
             if abs(sweep)*radius<.05:raise ValueError('圆弧太短')
-            add(dict(id=ident,name=name,kind=kind,c=c,r=radius,start=start,sweep=sweep),ident,None)
+            stroke=dict(id=ident,name=name,kind=kind,c=c,r=radius,start=start,sweep=sweep)
+            if dash is not None:stroke['paint_ranges']=dash_ranges(dash,radius*abs(sweep),name)
+            add(stroke,ident,None)
         elif kind=='point':
             mark=dict(id=ident,name=name,point=point(item.get('center')),reason='点位需人工标记')
             if selected is None:manual.append(mark)
@@ -321,7 +379,8 @@ def stroke_options(stroke,cfg,planes):
             h=math.atan2(q1[1]-q0[1],q1[0]-q0[0]);c,s=math.cos(h),math.sin(h)
             axle=(q0[0]-a*c+b*s,q0[1]-a*s-b*c,h)
             sec,run=with_run_in(axle,[(math.dist(q0,q1),0)]+([(cfg.run_out,0)] if cfg.run_out>0 else []),cfg,planes)
-            out.append(dict(section=sec,reverse=reverse,target=[q0,q1],nozzle_length=math.dist(q0,q1),paint_from=run,paint_to=run+math.dist(q0,q1)))
+            out.append(dict(section=sec,reverse=reverse,target=[q0,q1],nozzle_length=math.dist(q0,q1),paint_from=run,paint_to=run+math.dist(q0,q1),
+                            paint_offsets=travel_spans(stroke.get('paint_ranges'),math.dist(q0,q1),reverse)))
     else:
         r=stroke['r']
         if r<=abs(a)+1e-6:return []
@@ -337,8 +396,12 @@ def stroke_options(stroke,cfg,planes):
                 cx,cy=stroke['c'];qx=cx+r*math.cos(angle);qy=cy+r*math.sin(angle)
                 axle=(qx-a*math.cos(h)+b*math.sin(h),qy-a*math.sin(h)-b*math.cos(h),h)
                 sec,run=with_run_in(axle,[(rear_radius*abs(sweep),sign/rear_radius),(rp.CIRCLE_RUN_OUT_M,sign/rear_radius)],cfg,planes)
+                # 虚线按喷头沿原弧的米数算，换成后轴路程乘 rear_radius/r；整圆从这个起角起画，原起点在中途
+                spans=travel_spans(stroke.get('paint_ranges'),r*abs(sweep),reverse,
+                                   r*(((angle-stroke['start'])*(1 if stroke['sweep']>0 else -1))%TAU) if stroke['kind']=='circle' else None)
                 out.append(dict(section=sec,reverse=reverse,target_arc=(cx,cy,r,angle,sweep),
-                                nozzle_length=r*abs(sweep),nozzle_radius=r,paint_from=run,paint_to=run+rear_radius*abs(sweep)))
+                                nozzle_length=r*abs(sweep),nozzle_radius=r,paint_from=run,paint_to=run+rear_radius*abs(sweep),
+                                paint_offsets=None if spans is None else [(a*rear_radius/r,b*rear_radius/r) for a,b in spans]))
                 if stroke['kind']=='arc':
                     out[-1]['circle']=dict(pose=axle,kappa=sign/rear_radius,length=rear_radius*abs(sweep))
     circle_scores={}
@@ -635,8 +698,11 @@ def assemble(selected,start,planes,cfg,connect=None):
             section=Section(1,Path(last.path.pose(0),[(p.length,p.kappa) for p in last.path.pieces+section.path.pieces]))
             paint_from+=last.path.length
             if paint_to is not None:paint_to+=last.path.length
+        # 虚线：各截从这一笔线头（paint_from）起算；起喷、停喷改成第一截头、最后一截尾（倒着画时第一截可能不在线头）
+        spans=None if option.get('paint_offsets') is None else [(paint_from+a,paint_from+b) for a,b in option['paint_offsets']]
+        if spans:paint_from,paint_to=spans[0][0],spans[-1][1]
         motions.extend(dict(section=s,role='transit',speed=transit_limit(s,cfg),id=option['id']) for s in path)
-        motions.append(dict(section=section,role='paint',speed=option['speed'],id=option['id'],paint_from=paint_from,paint_to=paint_to,entry_speed=entry_speed))
+        motions.append(dict(section=section,role='paint',speed=option['speed'],id=option['id'],paint_from=paint_from,paint_to=paint_to,entry_speed=entry_speed,paint_spans=spans))
         pose=option['end']
     return motions,score,pivots
 
@@ -687,7 +753,8 @@ def improve_actual_order(selected,baseline,groups,start,planes,cfg):
 def serialize_motion(m):
     s=m['section'];x,y,h=s.path.pose(0)
     return dict(direction=s.direction,start=[x,y,h],pieces=[[p.length,p.kappa] for p in s.path.pieces],
-                speed=m['speed'],role=m['role'],element_id=m['id'],paint_from=m.get('paint_from',0.0),paint_to=m.get('paint_to'),entry_speed=m.get('entry_speed'),continuous_after=m.get('continuous_after',False))
+                speed=m['speed'],role=m['role'],element_id=m['id'],paint_from=m.get('paint_from',0.0),paint_to=m.get('paint_to'),entry_speed=m.get('entry_speed'),continuous_after=m.get('continuous_after',False),
+                paint_spans=None if not m.get('paint_spans') else [[a,b] for a,b in m['paint_spans']])
 
 
 def corner_best(candidates):
@@ -799,7 +866,8 @@ def plan(job,start,cfg):
                 span.append(points[i]);spans.append(span);span=[]
         if span:spans.append(span)
         preview.append(dict(role=motion['role'],points=points,outside_spans=spans,
-                            paint_from_m=round(motion.get('paint_from',0.0),3),paint_to_m=motion.get('paint_to'),length_m=round(sec.path.length,3)))
+                            paint_from_m=round(motion.get('paint_from',0.0),3),paint_to_m=motion.get('paint_to'),length_m=round(sec.path.length,3),
+                            paint_spans_m=None if not motion.get('paint_spans') else [[round(a,3),round(b,3)] for a,b in motion['paint_spans']]))
         peak=path_violation(sec,planes,cfg)
         if peak>1e-7:
             outside_seconds+=duration(sec.path.length,motion['speed'],cfg.accel)*sum(violation(p,planes,cfg.body,cfg.margin)>1e-7 for p in poses)/len(poses)
@@ -820,7 +888,9 @@ def plan(job,start,cfg):
                 selection_mode='selected' if requested is not None else 'all',
                 inside=peak<=1e-7,max_outside_m=peak,outside_time_estimate_s=outside_seconds,outside_penalty_m_s=score[0],duration_s=score[2],
                 paint_speed=cfg.paint_speed,transit_speed=cfg.transit_speed,body=list(cfg.body),nozzle_forward_m=cfg.forward,nozzle_right_m=cfg.right,boundary=outline,
-                distance_m=sum(m['section'].path.length for m in motions),paint_length_m=sum(v['nozzle_length'] for v in selected),
+                distance_m=sum(m['section'].path.length for m in motions),
+                paint_length_m=sum(v['nozzle_length'] if v.get('paint_offsets') is None else
+                                   sum(b-a for a,b in v['paint_offsets'])*v['nozzle_length']/(v['paint_to']-v['paint_from']) for v in selected),
                 start=list(start),order=[dict(id=v['id'],name=v['name'],reversed=v['reverse'],selection=v['selection']) for v in selected],
                 target=[target_points(v) for v in selected],preview=preview,outside=outside,manual=manual,
                 motions=[serialize_motion(m) for m in motions])

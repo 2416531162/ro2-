@@ -194,7 +194,7 @@ ack 仍仅表示转发，执行结果用 `line.last_result.id` 关联。预览�
 
 可选 `turn`：转场的掉头方式（`field_planner.TURN_STYLES`）。`pivot` 原地转（默认，不带就是它，和以前一样）；`arc` 圆弧——只往前开、按 `turn_radius`（米，不小于车的最小转弯半径，app 给 1.0 / 1.5 / 2.0，默认 1.0）绕弧线接到下一条线，场外 2 m 空地放不下时倒一把；`lock` 方向打满——按车能稳定跟踪的最小半径（`route_limits.min_radius`）前进 / 倒车弧线掉头（Reeds–Shepp，可三点掉头）。`arc` / `lock` 不原地转；弧线最后先沿下一条线直线摆正 0.8 m（场边放不下缩到 0.4 m 或不加，`TURN_ALIGN_M`），往前开进线的那段与助跑 + 刷线合成一段不停车（`paint_from` 相应后移）；实在放不下才在那一处用原地转。`arc` 进圆弧（角球弧等）时另有一种走法：从上一条线的终点只往前开出去、与弧同向按 `turn_radius` 绕一圈，切进这条弧自己的圆，沿圆先转 ≥ 0.6 m 再喷（`field_planner.loop_entry`：先直行、转弯、再直行，切入点按路程最短取）；原来的转场要倒车或原地转、或绕圈更省时就用它，整段一笔不停车。足球场角球弧水泵在右侧只能右转画，于是每个角都是边线画到头 → 继续往前、右转绕一圈 → 接上角球弧接着画（2026-10-03 用户手绘）。这段绕圈的外伸在 `LOOP_SPACE_M`（4 m，用户：「不用担心右边空间」）以内按空地以内排序，R1.0 时车身伸出场地约 2.1 m，`max_outside_m` 照实报告。返回的 `plan` 带 `turn`、`turn_radius`（`pivot` 为 null）、`pivot_count`（原地转次数）、`reverse_count`（倒车段数）；老车端不认 `turn` 时结果里没有这几项、实际按原地转，app 据此提示。
 
-成功返回 `{ok:true,plan:{...}}`。`plan` 包含 token、当前 `start:[x,y,yaw_rad]`、原点和路线版本、划线顺序、车行预览、人工点位、预计时间、`inside` 与 `max_outside_m`。`preview[].outside_spans` 标识有车身外伸的区段；`outside[].body` 是外廓示意。连续曲线及转向的最大外伸通过解析检查求出，预览位置与外场时间为采样估计。每条刷线段在线头前带一段助跑（`field_planner.RUN_IN_M`，1.2 m，同路线作业倒车助跑），助跑不喷；圆弧的助跑后一半沿同一个圆先转起来（`PRE_ARC_FRACTION`），到线头时已是稳态转弯；助跑朝场外时车身最多伸出场地 `Settings.run_in_outside_max`（2 m，需场外空地、拔掉角旗），放不下缩短到 2/3、1/3 或不接；车端内部的 `motions[].paint_from` 是段内从第几米起喷，`preview` 的车行轨迹包含助跑。预计时间计入每段起步慢走、段间停车与原地转（按 Gen5 实车标定仿真校准）。车身伸出场地不超过场外可用空地 `field_planner.OUTSIDE_SPACE_M`（2 m，用户确认场外有 2 m 空地、作业前拔掉角旗）的走法优先，空地以内的外伸只轻罚、不为几十厘米绕远；超出的仍按原来的重罚，`inside` / `max_outside_m` 照常如实报告。划线顺序从车的当前位置排起：最近邻（从车位置、离车最近的几条线、图纸原顺序分别起手）+ 按顺序选方向的 DP + or-opt / 2-opt 局部搜索（`field_planner.ORDER_EVALS` 次近似评估，按次数不按时间，同样输入在车上和电脑上排出同一顺序），排序估算里每次原地转都计停稳时间；再用真实转场代价细调，车在场外起步时换离车近的线打头比较。足球场上角球弧在画到那个角时顺路画，不会四条边画完再回来补。
+成功返回 `{ok:true,plan:{...}}`。`plan` 包含 token、当前 `start:[x,y,yaw_rad]`、原点和路线版本、划线顺序、车行预览、人工点位、预计时间、`inside` 与 `max_outside_m`。`preview[].outside_spans` 标识有车身外伸的区段；`outside[].body` 是外廓示意。连续曲线及转向的最大外伸通过解析检查求出，预览位置与外场时间为采样估计。每条刷线段在线头前带一段助跑（`field_planner.RUN_IN_M`，1.2 m，同路线作业倒车助跑），助跑不喷；圆弧的助跑后一半沿同一个圆先转起来（`PRE_ARC_FRACTION`），到线头时已是稳态转弯；助跑朝场外时车身最多伸出场地 `Settings.run_in_outside_max`（2 m，需场外空地、拔掉角旗），放不下缩短到 2/3、1/3 或不接；车端内部的 `motions[].paint_from` 是段内从第几米起喷，图形带 `dash`（App「划线线型」）时 `motions[].paint_spans` / `preview[].paint_spans_m` 是这一段要喷的各截，车端只在各截内开泵（见 `docs/FIELD_DASH.md`），`preview` 的车行轨迹包含助跑。预计时间计入每段起步慢走、段间停车与原地转（按 Gen5 实车标定仿真校准）。车身伸出场地不超过场外可用空地 `field_planner.OUTSIDE_SPACE_M`（2 m，用户确认场外有 2 m 空地、作业前拔掉角旗）的走法优先，空地以内的外伸只轻罚、不为几十厘米绕远；超出的仍按原来的重罚，`inside` / `max_outside_m` 照常如实报告。划线顺序从车的当前位置排起：最近邻（从车位置、离车最近的几条线、图纸原顺序分别起手）+ 按顺序选方向的 DP + or-opt / 2-opt 局部搜索（`field_planner.ORDER_EVALS` 次近似评估，按次数不按时间，同样输入在车上和电脑上排出同一顺序），排序估算里每次原地转都计停稳时间；再用真实转场代价细调，车在场外起步时换离车近的线打头比较。足球场上角球弧在画到那个角时顺路画，不会四条边画完再回来补。
 
 ```json
 {"type":"route","action":"field_start","preview_token":"服务端返回的 token","allow_outside":true}
@@ -275,3 +275,22 @@ App「车辆状态 → 定位与姿态」提供「开启 / 关闭坡度补偿」
 - WebSocket ack `forwarded` 仅表示转发，以匹配 id 的 `line.last_result` 为最终结果。断连或 5 s 无结果会结束等待，不自动重发。
 - 仅 IDLE / MANUAL、运动状态新鲜健康、无控制指令、实测底盘轮速连续停稳 0.3 s、无运行 / 暂停待续任务时接受。清零另需 0.2 s 内的新鲜 IMU 姿态。停稳判断不依赖 RTK 固定解或融合位姿初始化。
 - `line.tilt` 的 `zero_persistent=true` 明确声明永久保存；`zeroed` 表示已应用零点，`zero_roll_deg/zero_pitch_deg` 为已应用的原始零点角度，`zero_save_error` 为保存文件读取错误或 null。缺少新字段的旧车仍按临时清零显示。开关能力及 `blocked/zero_blocked` 保持原接口。
+
+## 驱动器参数（App 1.11.41，2026-11-16）
+
+App「更多 → 工程调试 → 驱动器参数」。Gen5 两台欧艾迪驱动器都接 CAN 时，可以改闭环最大电流、配置表和速度环加减速。范围、存盘和重发规则见 `oid_protocol/README.md`。
+
+- 上行：`{"type":"driver_tune","id":"dt1","max_current_a":15.0,"config_table":1,"accel_mps2":null,"decel_mps2":null}`。
+  - 四项都要带，整份覆盖。
+  - null 表示不设：最大电流、配置表用驱动器自己保存的，加减速用 oid.yaml。
+  - `config_table` 是 0–3，对应上位机的 1–4 号。
+- ack `forwarded` 只表示网页服务已转发。没停稳或有作业时直接回 `ok=false`。
+- 最终结果在遥测 `drivers.result`，按 id 对应：`ok=null` 正在下发，`true` 已发给两台驱动器，`false` 被拒绝（附原因）。
+- 遥测 `drivers`：只在驱动节点 3 s 内报过状态时出现，旧车端没有这一段。字段如下：
+  - `supported`：两台都接 CAN 并核对过。
+  - `limit_a`：最大电流上限。
+  - `values`：车端保存的四项。
+  - `defaults`：oid.yaml 的加减速。
+  - `sent`：这次连上驱动器后已经按 `values` 发过。
+  - `reapplied`：驱动器断电重启后重发的台次。
+  - `error`：保存文件读不出来等原因。

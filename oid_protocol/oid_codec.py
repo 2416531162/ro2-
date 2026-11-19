@@ -7,7 +7,8 @@
 
 标准帧 11 位 ID，一台驱动器一个节点 ID，回复用同一个 ID
     控制指令无返回：DATA[0] 为指令，参数大端。0x00 心跳；0x02 转速（int32，erpm）；0x0A / 0x10 速度环
-    加速度 / 减速度（int32，erpm/s²）；0x08 刹车电流（int16，10 mA）；0x01 电流（int16，10 mA）。
+    加速度 / 减速度（int32，erpm/s²）；0x08 刹车电流（int16，10 mA）；0x01 电流（int16，10 mA）；
+    0x0E 切换电机配置表（1 字节 0–3，掉电不保存）；0x14 闭环最大电流（int16，10 mA）。
     查询：DATA = [0x0F, 项目]，回复 [0x0F, 项目, 值…]（值按回复长度：4 字节 int32、2 字节 int16）。
     驱动器也可以在上位机里设成按周期主动回传，格式与查询回复相同。
 
@@ -45,6 +46,7 @@ CAN_HEARTBEAT = 0x00
 CAN_CURRENT = 0x01
 CAN_SPEED = 0x02
 CAN_BRAKE = 0x08
+CAN_CONFIG_TABLE = 0x0E
 CAN_SPEED_ACCEL = 0x0A
 CAN_QUERY = 0x0F
 CAN_SPEED_DECEL = 0x10
@@ -80,6 +82,21 @@ def can_brake(centiamps):
     if centiamps < 0:
         raise ValueError('刹车电流只能是正值')
     return bytes([CAN_BRAKE]) + struct.pack('>h', _i16(centiamps))
+
+
+def can_max_current(centiamps):
+    """速度闭环 / 位置闭环时的最大输出电流（手册 7.13「闭环模式设置最大扭矩」），单位 10 mA，只能是正值。
+    控制指令，驱动器不回复，读不回来。"""
+    if centiamps <= 0:
+        raise ValueError('闭环最大电流只能是正值')
+    return bytes([CAN_MAX_CURRENT]) + struct.pack('>h', _i16(centiamps))
+
+
+def can_config_table(index):
+    """切换电机当前使用的配置表（手册 7.11）：0–3 对应上位机的 1–4 号配置；开机用 0（1 号），掉电不保存。"""
+    if isinstance(index, bool) or not isinstance(index, int) or not 0 <= index <= 3:
+        raise ValueError('配置表只能是 0–3')
+    return bytes([CAN_CONFIG_TABLE, index])
 
 
 def can_query(item):

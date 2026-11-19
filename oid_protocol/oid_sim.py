@@ -28,7 +28,11 @@ class SimMotor:
         self.position = 0.0
         self.accel = self.decel = 5000.0
         self.fault = 0
+        self.motor_ca = self.bus_ca = self.duty = 0     # 负载读数（电流 10 mA），测试里直接设
+        self.temp_c = 30
         self.speed_mode = False         # 收到转速指令后进速度闭环；电流 0 为放空
+        self.max_current_ca = None      # 0x14 闭环最大电流（10 mA）；None = 上位机保存的，模拟里不限扭矩
+        self.config_table = 0           # 0x0E 配置表，开机 0
         self.beat = None
         self.timeout_s = timeout_s
         self.powered = True
@@ -80,10 +84,15 @@ class SimOidBus:
             m.accel = struct.unpack('>i', data[1:5])[0]
         elif cmd == oc.CAN_SPEED_DECEL:
             m.decel = struct.unpack('>i', data[1:5])[0]
+        elif cmd == oc.CAN_MAX_CURRENT:
+            m.max_current_ca = struct.unpack('>h', data[1:3])[0]
+        elif cmd == oc.CAN_CONFIG_TABLE:
+            m.config_table = data[1]
         elif cmd == oc.CAN_QUERY:
             item = data[1]
             value = {oc.Q_SPEED: ('>i', int(m.speed)), oc.Q_POSITION: ('>i', int(m.position)),
-                     oc.Q_FAULT: ('>h', m.fault), oc.Q_VOLTAGE: ('>h', self.voltage)}.get(item)
+                     oc.Q_FAULT: ('>h', m.fault), oc.Q_VOLTAGE: ('>h', self.voltage),
+                     oc.Q_MOTOR_CURRENT: ('>h', m.motor_ca)}.get(item)
             if value:
                 self.inbox.append((can_id, bytes([0x0F, item]) + struct.pack(*value)))
 
@@ -131,8 +140,8 @@ class SimModbusPort:
             start, count = struct.unpack('>HH', request[2:6])
             if start != om.REG_FAULT or count > om.STATUS_COUNT:
                 return error(2)
-            regs = ([m.fault] + om.i32_words(int(m.speed), self.word_order) + [0, 0, self.voltage, 0, 0, 30,
-                    int(m.position) % 36000] + om.i32_words(int(m.position), self.word_order))[:count]
+            regs = ([m.fault] + om.i32_words(int(m.speed), self.word_order) + [m.duty, 0, self.voltage, m.motor_ca,
+                    m.bus_ca, m.temp_c, int(m.position) % 36000] + om.i32_words(int(m.position), self.word_order))[:count]
             return om.frame(a, bytes([fc, 2 * count]) + struct.pack('>%dH' % count, *[v & 0xFFFF for v in regs]))
         if fc == om.FC_READ_HOLDING:
             start, count = struct.unpack('>HH', request[2:6])

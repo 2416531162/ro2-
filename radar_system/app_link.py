@@ -178,6 +178,10 @@ RTK_STALE_S = 2.0      # /gnss/status 2 Hz
 LINE_STALE_S = 1.5     # /line/status 5 Hz
 
 
+# App「驱动器参数」四项（oid_link.TUNING_FIELDS）：null = 不下发 / 用默认
+DRIVER_TUNE_FIELDS = ('max_current_a', 'config_table', 'accel_mps2', 'decel_mps2')
+
+
 class CommandError(ValueError):
     pass
 
@@ -228,6 +232,24 @@ def parse_command(text):
     elif kind == 'imu_zero':
         if not out.get('id'):
             raise CommandError('imu_zero 必须带指令 id')
+    elif kind == 'driver_tune':
+        # 四项都要带（整份覆盖）；范围、上限由驱动节点按 oid.yaml 检查，结果看遥测 drivers.result（按 id）
+        if not out.get('id'):
+            raise CommandError('驱动器参数必须带指令 id')
+        for name in DRIVER_TUNE_FIELDS:
+            if name not in msg:
+                raise CommandError('驱动器参数缺 ' + name)
+            value = msg[name]
+            if value is None:
+                out[name] = None
+            elif name == 'config_table':
+                if type(value) is not int:
+                    raise CommandError('config_table 必须是整数或 null')
+                out[name] = value
+            elif isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                raise CommandError(name + ' 必须是有限数值或 null')
+            else:
+                out[name] = float(value)
     elif kind == 'imu_source':
         if not out.get('id'):
             raise CommandError('IMU 切换必须带指令 id')
@@ -664,6 +686,24 @@ def straight_telemetry(st):
     return out
 
 
+def drivers_telemetry(tuning, now):
+    """驱动节点 /oid/status 的 tuning → App「驱动器参数」；旧车端、驱动节点没在跑或 3 s 没更新时为 None。"""
+    t = _fresh(tuning, now, 3.0)
+    if t is None:
+        return None
+    values = t.get('values') if isinstance(t.get('values'), dict) else {}
+    defaults = t.get('defaults') if isinstance(t.get('defaults'), dict) else {}
+    result = t.get('result') if isinstance(t.get('result'), dict) else None
+    return {'supported': t.get('supported') is True, 'limit_a': _num(t.get('limit_a')),
+            'values': {name: (values.get(name) if name == 'config_table' and type(values.get(name)) is int
+                              else _num(values.get(name))) for name in DRIVER_TUNE_FIELDS},
+            'defaults': {k: _num(defaults.get(k)) for k in ('accel_mps2', 'decel_mps2')},
+            'sent': t.get('sent') is True, 'reapplied': t.get('reapplied') if type(t.get('reapplied')) is int else 0,
+            'error': t.get('error') if isinstance(t.get('error'), str) else None,
+            'result': ({'id': str(result.get('id')), 'ok': result.get('ok') if type(result.get('ok')) is bool else None,
+                        'message': str(result.get('message') or '')} if result else None)}
+
+
 def build_telemetry(snap, *, now, seq):
     """radar_web_server 的 state 快照 -> 紧凑遥测。"""
     wt = snap.get('wheeltec') or {}
@@ -703,6 +743,9 @@ def build_telemetry(snap, *, now, seq):
         out['network'] = network
     if isinstance(snap.get('pump'), dict):
         out['pump'] = snap['pump']
+    drivers = drivers_telemetry(snap.get('oid_tuning'), now)
+    if drivers is not None:
+        out['drivers'] = drivers
     return out
 
 

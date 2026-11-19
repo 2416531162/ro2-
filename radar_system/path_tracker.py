@@ -2469,6 +2469,8 @@ class Section:
         self.direction, self.path = direction, path
         self.paint_to_m = None
         self.paint_spans = None
+        # True：paint_spans 是场地虚线的各截，只用来开关水泵，行驶按 paint_from_m..paint_to_m 整条线
+        self.paint_dashed = False
         self.continuous_after = False
 
     def car_pose(self, s):
@@ -2552,7 +2554,7 @@ class SectionTracker:
                 cfg=replace(cfg,cruise_mps=sec.cruise_mps)
             mark=getattr(sec,'paint_from_m',0.)
             end=sec.path.length if sec.paint_to_m is None else sec.paint_to_m
-            spans=sec.paint_spans if sec.paint_spans is not None else [(mark,end)]
+            spans=sec.paint_spans if sec.paint_spans is not None and not getattr(sec,'paint_dashed',False) else [(mark,end)]
             if (self.geo.differential and sec.direction>0 and getattr(sec,'field_role',None)=='paint'
                     and cfg.arc_speed_mps is not None
                     and spans and all(any(not p.straight and p.s0<b-1e-8 and p.s0+p.length>a+1e-8
@@ -2598,7 +2600,9 @@ class SectionTracker:
             if tracker.constant_paint_speed and not sec.continuous_after and sec.path.length-end<.10:
                 raise ValueError('喷线后缺少不喷缓停段，请重新规划后作业')
             tracker.paint_spans = sec.paint_spans
-            if tracker.paint_spans is None and getattr(sec,'field_role',None)=='paint':
+            if (tracker.paint_spans is None or getattr(sec,'paint_dashed',False)) and getattr(sec,'field_role',None)=='paint':
+                # 虚线只管水泵（route_operations.paint_status 按 sec.paint_spans 开关）；车速、纠偏、线头起步按整条线走，
+                # 空隙里不提速、下一截不当新线头重新起步
                 tracker.paint_spans=[(mark,end)]
             if (self.geo.differential and sec.direction>0 and getattr(sec,'field_role',None)=='paint'
                     and end < sec.path.length and all(p.straight for p in sec.path.pieces if p.s0+p.length>end+1e-9)):

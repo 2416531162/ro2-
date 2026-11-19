@@ -25,7 +25,7 @@ case "${1:-}" in
     IMU762_ARGS=(--port "$IMU762_PORT" --baud "${IMU762_BAUD:-460800}" --ros --print-hz 0)
     if [ -n "${IMU762_LOG:-}" ]; then IMU762_ARGS+=(--log "$IMU762_LOG"); fi
     exec "$RK3588_PYTHON" -u "$ROOT/rion_protocol/imu762_reader.py" "${IMU762_ARGS[@]}" ;;
-  # IMU 跟着底盘选。Gen5（differential）底盘驱动没有陀螺：起瑞芬 HDA536T 驱动（同一条 CAN），它发原始 /imu
+  # IMU 跟着底盘选。Gen5（differential）底盘驱动没有陀螺：起 SCH16T 模块驱动（同一条 CAN，2026-11-16 代替 HDA536T），它发原始 /imu
   # （融合用）和带传感器自己算的姿态的 /imu/data（app 显示）。
   # 旧车：ROS 2 标准的 imu_filter_madgwick 读底盘驱动的原始 /imu（陀螺 + 加速度，不带姿态），
   # 发带横滚、俯仰的 /imu/data。没有磁力计，偏航只是相对启动时、会漂（app 上写明是相对值）；
@@ -34,7 +34,7 @@ case "${1:-}" in
   imu)
     DRIVE="$(cd "$ROOT" && "$RK3588_PYTHON" -c 'from robot_core.config import PROFILE; print(PROFILE["drive"]["type"])')" || DRIVE=ackermann
     if [ "$DRIVE" = differential ]; then
-      exec "$RK3588_PYTHON" -u "$ROOT/rion_protocol/hda536t_imu.py" --ros-args --params-file "$ROOT/rion_protocol/hda536t.yaml"
+      exec "$RK3588_PYTHON" -u "$ROOT/rion_protocol/sch16t_imu.py" --ros-args --params-file "$ROOT/rion_protocol/sch16t.yaml"
     fi
     exec "/opt/ros/$ROS_DISTRO/lib/imu_filter_madgwick/imu_filter_madgwick_node" --ros-args \
          -p use_mag:=false -p publish_tf:=false -p world_frame:=enu -p gain:=0.01 \
