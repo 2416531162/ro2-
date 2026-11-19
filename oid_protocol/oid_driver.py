@@ -83,13 +83,14 @@ class DiffConfig:
 # 停车放空（2026-11-19 方案一）。纯霍尔的驱动器锁在零速闭环里会来回找位置；11-19 为草地起步调硬的零速 Kp/Ki
 # （不改回去，不然草地开不动）在地上锁零速时自己约 1 Hz 前后摇，原来「停稳满 1 s 才放空」永远等不到、一直摇。改为：
 # - 开机还没有任何操作：直接放空，不先发零速；
-# - 停车（空闲、手动松手、急停、故障）：先发零速刹车，刹到轮速很小（wheels_slow）马上放空，之后只读反馈，手推时保持放空；
+# - 停车（空闲、手动松手、急停、故障）：先发零速刹车，刹到零（wheels_slow：两轮读回都不超过 HALL_STILL_MAX_MPS，
+#   或已经反转）马上放空，之后只读反馈，手推时保持放空。不等霍尔安静：11-19 地上手动停车实测，驱动器零速闭环在
+#   轮子过零后会往回打 0.2–0.4 m/s（车往后蹿一下），等霍尔 0.25 s 不跨格正好让它打完；刹到零就放空，最后顺着滑停几厘米；
 # - 自动作业（导航、跟随）中途发零速照旧锁零速，不放空；
 # - 兜底（任何状态）：在发零速、过了正常刹车时间轮子还一直在动，就放空；作业中同时转故障（zero_hold_oscillation），
 #   作业中断、断点保留，复位后可「继续作业」；急停时驱动器不回话也放空。
 # 新的手动指令或自动作业重新取得控制时恢复速度闭环：起步从放空直接发目标转速。
-ZERO_HOLD_FRESH_S = 0.2             # 判「轮速很小」只认这么新的反馈
-ZERO_HOLD_QUIET_S = 0.25            # 判「轮速很小」：霍尔这么久没跨格（Gen5 一格约 1 cm，即慢于约 4 cm/s）
+ZERO_HOLD_FRESH_S = 0.2             # 判「刹到零」只认这么新的反馈
 ZERO_HOLD_MOVING_RELEASE_S = 0.5    # 空闲、手动、急停、故障：发零速后轮子一直在动这么久就放空
 # 作业中放空要连带中断作业，判得更严：只认霍尔跨格（读回转速在零速闭环里会跳），一直在动这么久才转故障。
 # 2026-10-02 作业中一拍停车后零速闭环回拉过 9–11 cm（约 1 s），不能当成振荡把作业停掉。
@@ -111,11 +112,13 @@ class ZeroHoldGuard:
         self.moving_since = self.moving_at = None
         self.reason = None          # 已因此放空驱动器：wheels_moving（零速压不住）/ driver_silent（急停时驱动器不回话）
         self.sent_at = None
+        self.directions = (0, 0)    # 开始发零速时左右轮的转向（+1 / -1；读回不超过 HALL_STILL_MAX_MPS 为 0）
 
-    def start(self, epoch, now, speed_mps, decel_mps2):
+    def start(self, epoch, now, speed_mps, decel_mps2, directions=(0, 0)):
         self.clear()
         self.epoch, self.started = epoch, now
         self.brake_until = now + abs(speed_mps) / max(decel_mps2, 0.1) + ZERO_HOLD_BRAKE_RESPONSE_S
+        self.directions = tuple(directions)
 
     def observe(self, motion_at):
         """每次读回反馈调一次；motion_at = 最近一次确实在动的时刻，没有为 None。开始发零速之前的运动不算。"""
@@ -618,12 +621,13 @@ class OidDriver(wd.WheeltecDriver):
             return
         if z.epoch == a.epoch:
             return
-        speeds = [abs(x) for x in (self.policy.last_received or {}).get('wheels_mps') or []
-                  if isinstance(x, (int, float)) and math.isfinite(x)]
+        readback = [x if isinstance(x, (int, float)) and math.isfinite(x) else 0.0
+                    for x in (self.policy.last_received or {}).get('wheels_mps') or []]
+        directions = tuple(0 if abs(x) <= HALL_STILL_MAX_MPS else 1 if x > 0 else -1 for x in readback)
         pv, pw = self._cmd
-        speeds.append(abs(pv) + abs(pw) * self.wheels.track_m / 2)
+        speed = max([abs(x) for x in readback] + [abs(pv) + abs(pw) * self.wheels.track_m / 2])
         wheels = self.chassis.wheels if self.chassis is not None else self.wheels     # App 改过减速度时用改过的
-        z.start(a.epoch, now, max(speeds), wheels.decel_mps2)
+        z.start(a.epoch, now, speed, wheels.decel_mps2, directions if len(directions) == 2 else (0, 0))
 
     def drivers_unresponsive(self, now):
         """连上超过反馈超时以后，有驱动器不回话或两轮反馈过期（刚连上还没到超时不算）。"""
@@ -641,16 +645,17 @@ class OidDriver(wd.WheeltecDriver):
         return self.chassis.last_hall_motion(now)
 
     def wheels_slow(self, now):
-        """刹到轮速很小：ZERO_HOLD_FRESH_S 内有反馈，两轮读回都不超过 HALL_STILL_MAX_MPS，霍尔 ZERO_HOLD_QUIET_S 内没跨格。"""
-        p, c = self.policy, self.chassis
-        if c is None or p.last_rx is None or not 0 <= now - p.last_rx <= ZERO_HOLD_FRESH_S:
+        """刹到零：ZERO_HOLD_FRESH_S 内有反馈，两轮读回都不超过 HALL_STILL_MAX_MPS，或已经比开始发零速时反过来转了
+        （驱动器零速闭环过零往回打：这时放空，反冲最小）。只在发零速时用（automatic_release_allowed）。"""
+        p = self.policy
+        if self.chassis is None or p.last_rx is None or not 0 <= now - p.last_rx <= ZERO_HOLD_FRESH_S:
             return False
         speeds = (p.last_received or {}).get('wheels_mps') or []
-        if len(speeds) != 2 or not all(isinstance(x, (int, float)) and math.isfinite(x)
-                                       and abs(x) <= HALL_STILL_MAX_MPS for x in speeds):
+        if len(speeds) != 2 or not all(isinstance(x, (int, float)) and math.isfinite(x) for x in speeds):
             return False
-        last = c.last_hall_motion(now)
-        return last is None or now - last > ZERO_HOLD_QUIET_S
+        z = self.zero_hold
+        directions = z.directions if z.epoch == self.authority.epoch else (0, 0)
+        return all((x * d if d else abs(x)) <= HALL_STILL_MAX_MPS for x, d in zip(speeds, directions))
 
     def zero_hold_release(self, now, v, w):
         """发零速时要不要因为零速压不住（轮子一直在动）或急停时驱动器不回话而放空：

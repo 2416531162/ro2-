@@ -20,18 +20,40 @@ import wheeltec_driver as wd  # noqa: E402
 from robot_core import motion_text  # noqa: E402
 
 
-def hunt(motor, amplitude_erpm, hz=1.0, until=None):
-    """模拟驱动器零速保持环振荡：转速模式下目标为 0 时自己来回转（模拟时间到 until 为止，None 一直摇）；
-    放空、心跳超时或有非零目标时按原来的速度环。"""
+def hunt(motor, amplitude_erpm, hz=1.0, until=None, offset_erpm=0.0):
+    """模拟驱动器零速保持环压不住：转速模式下目标为 0 时自己转，offset + 正弦（offset 0 = 来回摇；offset 比振幅大
+    = 一直往一个方向蹭、刹不到零）；模拟时间到 until 为止（None 一直这样）。放空、心跳超时或有非零目标时按原来的速度环。"""
     normal = motor.step
 
     def step(t, dt):
         if (motor.alive(t) and motor.speed_mode and not motor.fault and motor.target == 0
                 and (until is None or t < until)):
-            motor.speed = amplitude_erpm * math.sin(2 * math.pi * hz * t)
+            motor.speed = offset_erpm + amplitude_erpm * math.sin(2 * math.pi * hz * t)
             motor.position += motor.speed / motor.pole_pairs * 360.0 / 60.0 * 100.0 * dt
         else:
             normal(t, dt)
+    motor.step = step
+
+
+def overshoot(motor, back_erpm, hz=1.2):
+    """模拟 11-19 地上手动停车：目标 0 时先按减速度刹到零，过零后零速闭环往回打（反向起摆、一直来回摇）。"""
+    normal = motor.step
+    st = dict(sign=None, cross=None)
+
+    def step(t, dt):
+        if not (motor.alive(t) and motor.speed_mode and not motor.fault and motor.target == 0):
+            st.update(sign=None, cross=None)
+            normal(t, dt)
+            return
+        if st['sign'] is None:
+            st['sign'] = (motor.speed > 0) - (motor.speed < 0)
+        if st['cross'] is None:
+            normal(t, dt)
+            if motor.speed * st['sign'] <= 0:
+                st['cross'] = t
+            return
+        motor.speed = -st['sign'] * back_erpm * math.sin(2 * math.pi * hz * (t - st['cross']))
+        motor.position += motor.speed / motor.pole_pairs * 360.0 / 60.0 * 100.0 * dt
     motor.step = step
 
 
@@ -62,10 +84,26 @@ class TestZeroHoldRelease(unittest.TestCase):
         self.assertEqual(self.node.authority.mode, source.upper())
         self.assertTrue(all(m.speed_mode for m in self.device.motors.values()))
 
-    def hunt_all(self, speed_mps, seconds=None):
+    def hunt_all(self, speed_mps, seconds=None, creep_mps=0.0):
+        """creep_mps：零速时顺着现在的转向一直蹭着走（刹不到零），用来测兜底。"""
         until = None if seconds is None else self.device.t + seconds
         for m in self.device.motors.values():
-            hunt(m, self.node.wheels.to_erpm(speed_mps), until=until)
+            sign = (m.speed > 0) - (m.speed < 0)
+            hunt(m, self.node.wheels.to_erpm(speed_mps), until=until,
+                 offset_erpm=sign * self.node.wheels.to_erpm(creep_mps))
+
+    def stop_and_watch(self, seconds, command=None):
+        """停车：一拍一拍走到放空为止，返回 (用了多久, 过零后最大反冲 m/s)。"""
+        signs = {k: (m.speed > 0) - (m.speed < 0) for k, m in self.device.motors.items()}
+        dt = 1.0 / self.node.config.tx_hz
+        back, took = 0.0, None
+        for i in range(int(seconds / dt)):
+            self.step(dt, command)
+            back = max([back] + [-signs[k] * self.node.wheels.to_mps(m.speed) for k, m in self.device.motors.items()])
+            if self.node.released:
+                took = (i + 1) * dt
+                break
+        return took, back
 
     def frames(self, cmd):
         return [can_id for can_id, data in self.device.sent if data[0] == cmd]
@@ -129,6 +167,31 @@ class TestZeroHoldRelease(unittest.TestCase):
         self.assertLessEqual(self.max_speed_mps(), .06)
         self.assertIsNone(self.motion()['zero_hold_release_reason'])
 
+    def test_manual_stop_releases_at_zero_before_driver_swings_back(self):
+        # 11-19 地上手动停车：驱动器刹到零后零速闭环往回打 0.2–0.4 m/s，车往后蹿；刹到零就放空，不留反冲的时间
+        self.drive(.5)
+        for m in self.device.motors.values():
+            overshoot(m, self.node.wheels.to_erpm(.3))
+        took, back = self.stop_and_watch(3.0, (0.0, 0.0))
+        self.assertIsNotNone(took)
+        self.assertLess(back, .08, '放空前往回打了 %.2f m/s' % back)
+        self.assertIsNone(self.motion()['zero_hold_release_reason'])          # 正常停车放空，不是兜底
+        self.assertFalse(any(self.speed_mode()))
+        self.step(1.0, (0.0, 0.0))
+        self.assertTrue(self.node.released)
+        self.assertLess(self.max_speed_mps(), .01)
+
+    def test_estop_releases_at_zero_before_driver_swings_back(self):
+        self.drive(.5)
+        for m in self.device.motors.values():
+            overshoot(m, self.node.wheels.to_erpm(.3))
+        self.node.on_stop(None, NS())
+        took, back = self.stop_and_watch(3.0)
+        self.assertIsNotNone(took)
+        self.assertGreaterEqual(took, .5 / 2.0 - .05)                         # 先零速刹车到零
+        self.assertLess(back, .08, '放空前往回打了 %.2f m/s' % back)
+        self.assertFalse(self.motion()['estop_released'])
+
     def test_hard_stop_from_high_speed_is_normal_braking_not_hunting(self):
         # 1.2 m/s、减速度 2 m/s² 要刹 0.6 s：比 0.5 s 长，也不能当成零速压不住提前放空
         self.drive(1.2)
@@ -143,8 +206,9 @@ class TestZeroHoldRelease(unittest.TestCase):
     # ---- 兜底：零速压不住 ----
 
     def test_hunting_driver_is_released_about_half_a_second_after_estop(self):
+        # 零速压不住、刹不到零（一直顺着蹭）：过了刹车时间还在动约 0.5 s 就放空
         self.drive(.3)
-        self.hunt_all(.4)
+        self.hunt_all(.1, creep_mps=.3)
         self.node.on_stop(None, NS())
         self.assertEqual(self.node.authority.mode, 'ESTOP')
         self.assertIsNone(self.step(.4, until=lambda n: n.released))     # 先按零速刹车
@@ -162,18 +226,20 @@ class TestZeroHoldRelease(unittest.TestCase):
         self.assertEqual(self.node.authority.mode, 'ESTOP')
         self.assertLess(max(abs(m.speed) for m in self.device.motors.values()), 1.0)
 
-    def test_manual_zero_hold_hunting_is_released(self):
-        # 原来普通停车要停稳满 1 s 才放空，零速闭环振荡时永远等不到、一直摇
+    def test_stop_without_reaching_zero_is_released_by_guard(self):
+        # 零速压不住、轮子刹不到零（一直顺着蹭）：原来停稳满 1 s 才放空，永远等不到；兜底约 0.5 s 放空。
+        # App 断线不再发指令：指令超时（Gen5 1.5 s）后回空闲、直接发零速（没有松手渐停），轮子没机会先刹到零
         self.drive(.3)
-        self.hunt_all(.4)
-        took = self.step(2.0, (0.0, 0.0), until=lambda n: n.released)
+        self.hunt_all(.1, creep_mps=.3)
+        took = self.step(4.0, until=lambda n: n.released)
         self.assertIsNotNone(took)
-        self.assertLess(took, 1.2)
-        self.assertEqual(self.node.authority.mode, 'MANUAL')
+        decel = self.node.chassis.wheels.decel_mps2
+        self.assertLess(took, self.node.authority.timeout_s + .4 / decel + .3 + .5 + .1)   # 指令超时 + 正常刹车时间 + 0.5 s
+        self.assertEqual(self.node.authority.mode, 'IDLE')
         self.assertEqual(self.motion()['zero_hold_release_reason'], 'wheels_moving')
         self.assertFalse(self.motion()['estop_released'])                   # 不是急停
         self.assertFalse(any(self.speed_mode()))
-        self.step(1.0, (0.0, 0.0))
+        self.step(1.0)
         self.assertTrue(self.node.released)
         self.step(1.0, (.3, 0.0))                                            # 再推摇杆：恢复速度闭环
         self.assertFalse(self.node.released)
@@ -245,7 +311,7 @@ class TestZeroHoldRelease(unittest.TestCase):
 
     def test_reset_after_estop_release_restores_drive(self):
         self.drive(.3)
-        self.hunt_all(.4)
+        self.hunt_all(.1, creep_mps=.3)
         self.node.on_stop(None, NS())
         self.assertIsNotNone(self.step(1.0, until=lambda n: n.motion_extensions(self.clock[0])['estop_released']))
         self.step(2.0)                                                       # 放空后停下来、确认静止
