@@ -277,7 +277,7 @@ PARAMS = dict(confirmed=False, left_bus='can', right_bus='can',
               can_channel='can0', can_left_id=1, can_right_id=2,
               rs485_port='/dev/ttyS3', rs485_baud=115200, rs485_parity='N', rs485_left_id=1, rs485_right_id=2,
               rs485_word_order='big', rs485_timeout_s=0.03, rs485_echo=False,
-              heartbeat_s=0.1, pole_pairs=0, wheel_radius_m=0.2046, gear_ratio=1.0,
+              heartbeat_s=0.1, pole_pairs=0, erpm_per_rpm=0.0, wheel_radius_m=0.2046, gear_ratio=1.0,
               left_sign=1, right_sign=-1, wheel_accel_mps2=1.0, wheel_decel_mps2=2.0,
               tx_hz=50.0, yaw_acceleration_rad_s2=2.0, manual_stop_decel_mps2=1.5,
               publish_tf=False, navigation_uses_lidar=False,
@@ -303,7 +303,8 @@ class OidDriver(wd.WheeltecDriver):
                                  tx_hz=float(gp('tx_hz')), yaw_acceleration_rad_s2=float(gp('yaw_acceleration_rad_s2')),
                                  manual_stop_decel_mps2=float(gp('manual_stop_decel_mps2')))
         self.wheels = WheelConfig(wheel_radius_m=float(gp('wheel_radius_m')), track_m=PROFILE['geometry']['track_m'],
-                                  pole_pairs=int(gp('pole_pairs')), gear_ratio=float(gp('gear_ratio')),
+                                  pole_pairs=int(gp('pole_pairs')), erpm_per_rpm=float(gp('erpm_per_rpm')),
+                                  gear_ratio=float(gp('gear_ratio')),
                                   left_sign=int(gp('left_sign')),
                                   right_sign=int(gp('right_sign')), max_wheel_mps=PROFILE['driver']['max_speed_m_s'],
                                   accel_mps2=float(gp('wheel_accel_mps2')), decel_mps2=float(gp('wheel_decel_mps2')))

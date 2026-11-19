@@ -35,6 +35,9 @@ class WheelConfig:
     track_m: float = 0.675                  # Gen5 CAD 后轮轮距
     pole_pairs: int = 0                     # 0 = 还没填，不许出力
     gear_ratio: float = 1.0
+    # 驱动器 CAN / 485 转速单位 erpm 是电机每分钟机械转数的几倍（实测）。0 = 等于 pole_pairs（手册写法）。
+    # 2026-11-19 两台驱动器上位机磁极对数 10，实测 295 erpm 时电机每分钟转 59.7 圈 → 约 5，和 pole_pairs 不相等
+    erpm_per_rpm: float = 0.0
     left_sign: int = 1
     right_sign: int = -1
     max_wheel_mps: float = 1.2
@@ -48,6 +51,8 @@ class WheelConfig:
             raise ValueError('磁极对数必须是 0–100 的整数（0 为未填）')
         if not 0.01 <= self.gear_ratio <= 100:
             raise ValueError('减速比不合理')
+        if not (math.isfinite(self.erpm_per_rpm) and 0 <= self.erpm_per_rpm <= 100):
+            raise ValueError('驱动器转速换算比必须是 0–100（0 为等于磁极对数）')
         if self.left_sign not in (1, -1) or self.right_sign not in (1, -1):
             raise ValueError('方向只能是 ±1')
         if not (0 < self.max_wheel_mps <= 3.0 and 0 < self.accel_mps2 <= 10 and 0 < self.decel_mps2 <= 20):
@@ -58,8 +63,8 @@ class WheelConfig:
         return self.pole_pairs > 0
 
     def erpm_per_mps(self):
-        """轮子 1 m/s 对应的电机电角度转速 erpm。"""
-        return 60.0 / (2.0 * math.pi * self.wheel_radius_m) * self.gear_ratio * self.pole_pairs
+        """轮子 1 m/s 对应的驱动器转速单位 erpm（电机 rpm × erpm_per_rpm，没填按磁极对数）。"""
+        return 60.0 / (2.0 * math.pi * self.wheel_radius_m) * self.gear_ratio * (self.erpm_per_rpm or self.pole_pairs)
 
     def to_erpm(self, wheel_mps):
         return int(round(wheel_mps * self.erpm_per_mps()))
