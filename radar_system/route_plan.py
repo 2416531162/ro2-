@@ -41,6 +41,10 @@ KINDS = ('path', 'points', 'circle')
 #   pivot  停车原地转向，倒车助跑回拐角（默认，旧路线没有这个字段也是它）
 #   arc    圆弧掉头：像阿克曼车那样只往前开、不停车，按路线的 turn_radius 绕过去接到下一条边上（见 _arc_turn）
 TURNS = ('pivot', 'arc')
+# 差速车进线（开到助跑起点）的转法（2026-11-19 用户「可选圆弧还是原地」）：pivot 原地转正后顺线倒回再起步（RUNUP_BACK_M）；
+# arc 只往前按圆弧开上线、不停车，要填助跑起点车尾后方有多少空地（entry_space_m），不到 ENTRY_ARC_MIN_SPACE_M 不走圆弧
+ENTRY_TURNS = ('pivot', 'arc')
+ENTRY_SPACE_RANGE = (0.0, 50.0)
 MAX_POINTS = 400
 COVER_TOL_M = 0.05           # 缓弯直接圆弧转过去时，车身中心离拐角点最多这么远；更急的弯掉头补角
 VERTEX_PASS_M = 0.05         # 车身中心开过拐角 / 终点这么远才换向、停车：差一两厘米也压得过去
@@ -115,6 +119,8 @@ class RouteSpec:
     turn_radius: float = 2.5     # 拐角圆弧、接入路线的转弯半径；差速车连线路线圆弧掉头的半径
     cruise: float = DEFAULT_PAINT_SPEED
     turn: str = 'pivot'          # 差速车连线路线急弯的转法，见 TURNS；阿克曼车、圆、路点折线不用
+    entry_turn: str = 'pivot'    # 差速车连线路线进线的转法，见 ENTRY_TURNS
+    entry_space_m: float = 0.0   # 圆弧进线：车停在助跑起点时车尾后方还有多少米空地（圆弧不许开出去）
     # 圆：后轴从圆上哪个方位角出发（rad，东 0、逆时针为正）；None 为最南点。开始作业时按车的位置临时换
     # （见 start_from_nearest），不存盘、不发给 app
     start_angle: float = None
@@ -130,7 +136,7 @@ class RouteSpec:
         return dict(kind=self.kind, points=[r(p) for p in self.points], closed=self.closed,
                     center=None if self.center is None else r(self.center), radius=self.radius,
                     clockwise=self.clockwise, laps=self.laps, turn_radius=self.turn_radius, cruise=self.cruise,
-                    turn=self.turn)
+                    turn=self.turn, entry_turn=self.entry_turn, entry_space=self.entry_space_m)
 
 
 def _number(value, name, lo, hi):
@@ -176,11 +182,16 @@ def parse_spec(d, *, geodetic=False):
     turn = d.get('turn', 'pivot')       # 旧 app、旧存盘路线没有：原地转向
     if turn not in TURNS:
         raise ValueError('急弯转法必须是 ' + '/'.join(TURNS))
+    entry_turn = d.get('entry_turn', 'pivot')   # 旧 app、旧存盘路线没有：原地转进线
+    if entry_turn not in ENTRY_TURNS:
+        raise ValueError('进线转法必须是 ' + '/'.join(ENTRY_TURNS))
+    entry_space = _number(d.get('entry_space', 0.0), '后方空地', *ENTRY_SPACE_RANGE)
     return RouteSpec(kind=kind, points=points, closed=flags['closed'], center=center,
                      radius=_number(d.get('radius', 3.0), '圆半径', *CIRCLE_RADIUS_RANGE),
                      clockwise=flags['clockwise'], laps=laps if flags['closed'] or kind == 'circle' else 1,
                      turn_radius=_number(d.get('turn_radius', 2.5), '转弯半径', *TURN_RADIUS_RANGE),
-                     cruise=_number(d.get('cruise', DEFAULT_PAINT_SPEED), '速度', *CRUISE_RANGE), turn=turn)
+                     cruise=_number(d.get('cruise', DEFAULT_PAINT_SPEED), '速度', *CRUISE_RANGE), turn=turn,
+                     entry_turn=entry_turn, entry_space_m=entry_space)
 
 
 def wrap(a):
@@ -661,7 +672,8 @@ PIVOT_REVERSE_MIN_M = 1.20  # 旧后轴距离，兼容历史配置；新助跑�
 # 2026-10-10 用户：助跑 2.5 → 2.8（先说加 0.5 m，后定 2.8 m）。10-10 实录 10 条直线起步摆动要走 1.3–2 m 才收住，
 # 7 条到线头还在纠，开喷时车头差 0.6–2.4°；起步头 1 m 先稳再纠偏见 path_tracker launch_settle_*
 # 2026-10-11 用户：暂时 2.8 → 3.5（18:34 实录起步车头扭 5.6°，到线头喷头还偏 6 cm，被起喷门槛挡掉 0.72 m）
-RUN_UP_M = 3.50
+# 2026-11-19 用户：3.5 → 2 m（「已经不是加助跑和开喷检查的问题，是根本就不会协调两个轮子控制进线」）
+RUN_UP_M = 2.00
 # 起步扭头（2026-10-11 实录 3 天 37 次直线起步）：起步前最后一下是原地转（一边轮子往前、一边往后），起步时要换向的那个
 # 轮子比另一个晚动 0.1–0.5 s（编码器不动，驱动器的事，暂时不能换），车头往它那边扭：只左轮换向 18 次中位 +4.7°、
 # 只右轮换向 12 次 −3.7°；两轮一起换向（直线倒车后）3 次、都不换向 4 次都在 2° 以内。所以要在助跑起点 G 原地转正时，
@@ -670,7 +682,11 @@ RUN_UP_M = 3.50
 # 现在关着（RUNUP_BACK_M = 0，规划与原来相同）：转正后开始倒车那一下也是单轮换向，实录倒车起步扭头中位 1.9°（前进 4.7°），
 # 倒 1 m 能纠回去；仿真（换向晚动 0.3–0.6 s）看不出好处、每条线多约 5 s。2026-10-11 用户：这次先不带，实车看起步还扭再开
 # （开的话 App PivotRoute.viaRunup 要照改，路线样例重新导出）
-RUNUP_BACK_M = 0.0
+# 2026-11-19 打开 1.5 m（用户：「根本就不会协调两个轮子控制进线」「给我找个最合适的路线」）。10-11 草地 26 次进线：21 次斜着
+# （约 14°，换方向时后轴要侧移 2×喷头横向 ≈0.9 m）倒到 G、原地转约 14° 后直接起步，起步 1 m 扭 5–10°、助跑横偏 5–12 cm；
+# 顺线直倒进来的只扭 1.8–3.6°。仿真（换向轮晚动 0.35 / 0.5 s，6 种车位）：起步扭 8.2° → 0.1–0.9°，线头 1.7–2.1 → 0.0–0.6 cm，
+# 每次进线多 1–6 s；倒 1.0 m 与 1.5 m 线头相当，1.5 m 助跑里最大横偏小一半（0.6–0.9 vs 1.0–1.6 cm），草地留余量
+RUNUP_BACK_M = 1.5
 RUNUP_BACK_TURN_RAD = math.radians(3.0)
 # 喷头在后轴前时后轴被喷头拖着走（见 _pulled_cover）：每片喷头走不超过 nozzle_x × PULL_STEP，片内按等曲率接
 # （片端车头方向准确，片内误差约 (PULL_STEP·d)²·φ/(12d)，d 0.30 m、拐 28° 约 0.8 mm）；车头与边的夹角
@@ -1053,6 +1069,10 @@ def _via_runup(first, car, direction):
     moved = 0.0
     if dist >= ON_LINE_M:
         to_p = math.atan2(py - y, px - x)
+        if back > 0.0:
+            # 转正点 P 之后还要原地转正，开过去还是倒过去只看哪个原地转得少（车在 G 与 P 之间时不掉头去倒）；
+            # 倒车（连同转正后倒回的 back）不超过 REVERSE_ENTRY_MAX_M
+            direction = 1 if abs(wrap(to_p - yaw)) <= math.pi / 2 or dist + back > REVERSE_ENTRY_MAX_M + 1e-9 else -1
         out.pivot(wrap(to_p + (0.0 if direction > 0 else math.pi) - yaw))
         out.add(direction, dist, 0.0)
         moved = dist
@@ -1117,10 +1137,85 @@ def pivot_entry(first, car, nozzle_x=0.0):
         return runup_entry(first, car, nozzle_x)
     bare = (first[0], first[1], [])
     back = _via_runup(bare, car, -1)[0]
+    turned_back = _turned(back, yaw)
+    # 直线倒到 G 一下都不用原地转（最后一下本来就是顺线倒车）：直接倒，不再先开到转正点（RUNUP_BACK_M）绕一下
     if sum(sum(v for v, _ in p) for d, _, p in back if d < 0) <= REVERSE_ENTRY_MAX_M + 1e-9 and \
-            _turned(back, yaw) + REVERSE_ENTRY_TURN_SAVE_RAD <= _turned(_via_runup(bare, car, 1)[0], yaw) + 1e-9:
+            (turned_back < 1e-9 or turned_back + REVERSE_ENTRY_TURN_SAVE_RAD <= _turned(_via_runup(bare, car, 1)[0], yaw) + 1e-9):
         return _via_runup(first, car, -1)
     return _via_runup(first, car, 1)
+
+
+# 圆弧进线（ENTRY_TURNS arc）：只往前、按 Dubins 最短路开到助跑起点 G 时车头已顺线，接着助跑，中间不停车不原地转
+# （起步扭头来自原地转后单边轮换向，圆弧两轮同向就没有）。半径从大往小试（R2–3 实车转得准，R1 只转出 79%），
+# 最小 1.5 m（内轮 ≥0.3 m/s：圆弧后轴 0.5 m/s 时内轮 0.39）。整条接入车身四角不许退到「车在 G 时车尾」后方
+# entry_space_m − ENTRY_ARC_MARGIN_M 以外（车本来就在更后面的照它自己的位置算）。R1.5 掉头进线车身最多到车尾后约 1.3 m，
+# 所以要求后方空地至少 1.5 m；哪个半径都放不下就照原地转进线。
+ENTRY_ARC_MIN_SPACE_M = 1.5
+ENTRY_ARC_RADII = (3.0, 2.5, 2.0, 1.5)
+ENTRY_ARC_MARGIN_M = 0.1
+ENTRY_ARC_STEP_M = 0.05
+# 车头在后轴前 0.91 m：掉头进线时车头会扫到 G 后方，空地紧时圆弧接上线的位置往线头挪（少一点助跑），直线助跑至少留这么多
+ENTRY_ARC_MIN_STRAIGHT_M = 1.0
+ENTRY_ARC_SHIFT_STEP_M = 0.1
+
+
+def _default_body():
+    from runtime_config import PROFILE
+    g = PROFILE['geometry']
+    return g['front_m'], g['rear_m'], g['half_width_m']
+
+
+def _body_min_along(x, y, yaw, body, h0, x0, y0):
+    """车身四角在线方向（h0，过 (x0, y0)）上最靠后的坐标。"""
+    front, rear, half = body
+    c, s_ = math.cos(yaw), math.sin(yaw)
+    u = math.cos(h0), math.sin(h0)
+    best = math.inf
+    for f in (front, -rear):
+        for l in (half, -half):
+            px, py = x + f * c - l * s_, y + f * s_ + l * c
+            best = min(best, (px - x0) * u[0] + (py - y0) * u[1])
+    return best
+
+
+def arc_entry(first, car, space_m, body=None):
+    """圆弧进线：(分段, 接入路程米)；后方空地不够任何半径用时返回 None（调用方照原地转进线）。"""
+    if space_m < ENTRY_ARC_MIN_SPACE_M - 1e-9:
+        return None
+    body = body or _default_body()
+    _, (x0, y0, h0), pieces = first
+    run = RUN_UP_M
+    gx, gy = _offset((x0, y0), h0, -run)
+    goal = (gx, gy, h0)
+    limit = min(_body_min_along(gx, gy, h0, body, h0, x0, y0) - (space_m - ENTRY_ARC_MARGIN_M),
+                _body_min_along(*car, body, h0, x0, y0))
+    shifts = [i * ENTRY_ARC_SHIFT_STEP_M for i in range(int((run - ENTRY_ARC_MIN_STRAIGHT_M) / ENTRY_ARC_SHIFT_STEP_M + 1e-9) + 1)]
+    for shift, radius in ((a, r) for a in shifts for r in ENTRY_ARC_RADII):
+        goal = _offset((gx, gy), h0, shift) + (h0,)
+        way = dubins(tuple(car), goal, radius)
+        x, y, yaw = car
+        ok = True
+        for length, k in way:
+            n = max(1, int(math.ceil(length / ENTRY_ARC_STEP_M)))
+            for _ in range(n):
+                x, y, yaw = advance(x, y, yaw, length / n, k)
+                if _body_min_along(x, y, yaw, body, h0, x0, y0) < limit - 1e-9:
+                    ok = False
+                    break
+            if not ok:
+                break
+        if not ok:
+            continue
+        moved = sum(length for length, _ in way)
+        out = _PivotSections(tuple(car))
+        for length, k in way:
+            out.add(1, length, k)
+        out.pose = goal          # Dubins 终点已验算到 1e-6 以内；接着助跑，同一段不停车
+        out.add(1, run - shift, 0.0)
+        for length, k in pieces:
+            out.add(1, length, k)
+        return out.out, moved + run - shift
+    return None
 
 
 def runup_entry(first, car, nozzle_x):
@@ -1556,6 +1651,14 @@ def plan_current(spec, car_pose, min_radius, *, body=None, max_entry_m=MAX_ENTRY
     if run.kind != 'circle':
         entry_fn, run_in = _entry_fn(route[0], car_pose, nozzle_x), 0.0
     entry, entry_m = entry_fn(route[0], car_pose, nozzle_x)
+    arc = None
+    # 圆弧进线；原地方式本来就一下都不用原地转（顺线直倒 / 直开进来，两轮同时换向）时照用它，更短
+    if run.kind == 'path' and run.entry_turn == 'arc' and _turned(entry, car_pose[2]) > 1e-9:
+        arc = arc_entry(route[0], car_pose, run.entry_space_m, body)
+    if info is not None:
+        info['entry_turn'] = 'arc' if arc is not None else 'pivot'
+    if arc is not None:
+        entry, entry_m = arc
     if entry_m > max_entry_m:
         raise ValueError('车离路线太远（接入路线 %.0f m，最多 %.0f m），请先把车开近些' % (entry_m, max_entry_m))
     sections = _planned_sections(entry, route, 'route_'+run.kind+'_')

@@ -144,10 +144,10 @@ class Integration(unittest.TestCase):
     def test_field_and_normal_route_share_requested_runup(self):
         import field_planner
         # 2026-10-10 用户：助跑 2.5 → 2.8，路线与场地共用；2026-10-11 暂时 3.5
-        self.assertEqual(rp.RUN_UP_M,3.5);self.assertEqual(field_planner.RUN_IN_M,3.5)
+        self.assertEqual(rp.RUN_UP_M,2.0);self.assertEqual(field_planner.RUN_IN_M,2.0)
         sec=Section(1,Route((0.,0.,0.),[(13.,0.)]));sec.field_role='paint';sec.paint_from_m=3.5
         tr=SectionTracker([sec],differential_config(PathConfig()),GEO,constant_straight_speed=True)
-        self.assertEqual(tr.trackers[0].runup_distance_m,3.5)
+        self.assertEqual(tr.trackers[0].runup_distance_m,rp.RUN_UP_M)
         self.assertIsNotNone(tr.trackers[0].paint_start_guard)
 
 if __name__=='__main__':unittest.main()

@@ -52,17 +52,28 @@ def headings(sections, car_yaw):
 BESIDE = line_car(.3, .25, math.pi)
 
 
-BACK_ON = 1.0        # 打开时的回倒长度
+BACK_ON = 1.5        # 打开时的回倒长度（2026-11-19 起默认）
 
 
 class RunupPlan(unittest.TestCase):
-    def test_off_by_default_plan_unchanged(self):
-        # 2026-10-11 用户：这次先不带
-        self.assertEqual(rp.RUNUP_BACK_M, 0.)
+    def test_on_by_default(self):
+        # 2026-11-19 打开（10-11 草地 26 次进线 21 次转完直接起步扭 5–10°）：默认就是转正后顺线倒回 1.5 m 再起步
+        self.assertEqual(rp.RUNUP_BACK_M, 1.5)
         secs, _ = rp.plan_current(LINE, BESIDE, .556, nozzle_x=NOZZLE)
-        *_, (d2, _, t2), (d3, _, _) = headings(secs, BESIDE[2])
+        *_, (d2, l2, t2), (d3, _, t3) = headings(secs, BESIDE[2])
         self.assertEqual((d2, d3), (-1, 1))
-        self.assertGreater(abs(t2), 150.)          # 转过去倒到助跑起点，到了再转正就起步（原来的走法）
+        self.assertAlmostEqual(l2, rp.RUNUP_BACK_M)
+        self.assertLess(abs(t3), 1e-6)
+
+    def test_after_finishing_the_same_line_backwards(self):
+        # 刚把同一条线反方向画完、停在线尾外：最后一下顺线倒回再起步，不在助跑起点原地转
+        car = line_car(12.5, 0., 0.)
+        spec = rp.RouteSpec(kind='path', points=((12., 0.), (0., 0.)), closed=False, cruise=.8)
+        secs, _ = rp.plan_current(spec, car, .556, nozzle_x=NOZZLE)
+        *_, (d2, l2, _), (d3, _, t3) = headings(secs, car[2])
+        self.assertEqual((d2, d3), (-1, 1))
+        self.assertAlmostEqual(l2, rp.RUNUP_BACK_M)
+        self.assertLess(abs(t3), 1e-6)
 
     @mock.patch.object(rp, 'RUNUP_BACK_M', BACK_ON)
     def test_pivot_at_runup_start_then_straight_reverse_into_it(self):
@@ -90,7 +101,7 @@ class RunupPlan(unittest.TestCase):
             self.assertEqual([s.direction for s in secs], [-1, 1], headings(secs, car[2]))
 
     def test_run_up_is_three_point_five(self):
-        self.assertEqual(rp.RUN_UP_M, 3.5)
+        self.assertEqual(rp.RUN_UP_M, 2.0)
 
 
 class WheelDeadCar(Car):

@@ -7,11 +7,13 @@ import math
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / 'radar_system'), str(ROOT), str(ROOT / 'tests')]
 import line_mission as lm
 import paint_quality as pq
+import route_plan as rp
 from test_offline_reentry import DT, Car, mission
 
 
@@ -40,6 +42,9 @@ class PaintStartGate(unittest.TestCase):
     def test_threshold_is_five_centimetres(self):
         self.assertEqual(pq.PAINT_START_MAX_OFFSET_M, .05)
 
+    # 2026-11-19 进线改成转正后顺线倒回 RUNUP_BACK_M：倒的这 1.5 m 已把 27° 航向错带来的横偏收回，到线头不再过门槛；
+    # 这里关掉它，只验门槛本身
+    @mock.patch.object(rp, 'RUNUP_BACK_M', 0.)
     def test_wrong_heading_start_backs_up_and_paints_from_the_head(self):
         # 2026-10-11 用户：第一个线头没过门槛不跳过线头往前喷，退回去重新助跑（见 test_launch_twist）
         car = Car(-3., 1.7, math.radians(100.), err_deg=27.)
@@ -54,6 +59,9 @@ class PaintStartGate(unittest.TestCase):
         self.assertEqual(len(on), 1)
         self.assertLess(abs(on[0]['x']), .05)          # 从线头开喷，没有拦掉的一截
 
+    # 2026-11-19 进线改成转正后顺线倒回 RUNUP_BACK_M：倒的这 1.5 m 已把 27° 航向错带来的横偏收回，到线头不再过门槛；
+    # 这里关掉它，只验门槛本身
+    @mock.patch.object(rp, 'RUNUP_BACK_M', 0.)
     def test_wrong_heading_start_does_not_paint_until_within_5cm(self):
         # 退回去的次数用完（REENTRY_MAX）：照旧车照走、先不喷，到 5 cm 内才开
         car = Car(-3., 1.7, math.radians(100.), err_deg=27.)

@@ -67,7 +67,8 @@ class LineEntry(unittest.TestCase):
 
     def test_slightly_off_line_reverses_with_small_turns(self):
         m, _ = self.plan(line_car(-1., .3))
-        self.assertEqual(m[1][0], '倒', m)
+        # 2026-11-19：到 G 还要转正，改成在 G 前方转正、最后一下顺线倒回 RUNUP_BACK_M 再起步
+        self.assertEqual(m[-2], ('倒', rp.RUNUP_BACK_M), m)
         self.assertLess(max(pivots(m)), 45., m)
 
     def test_past_start_reverses_back(self):
@@ -81,10 +82,15 @@ class LineEntry(unittest.TestCase):
         m, _ = self.plan(car)
         self.assertNotIn('倒', [v[0] for v in approach(m) if isinstance(v, tuple)], m)
 
-    def test_longer_runup_preserves_the_existing_reverse_distance_limit(self):
+    def test_runup_keeps_the_existing_reverse_distance_limit(self):
+        # 2026-11-19 助跑 3.5 → 2 m：喷头在线头前 0.8 m 时倒回助跑起点只要 2.8 m，在 REVERSE_ENTRY_MAX_M 以内就直线倒回去；
+        # 再往前（倒车超过上限）照旧原地掉头开过去
         m, _ = self.plan(line_car(.8))
-        self.assertGreater(rp.RUN_UP_M+.8,rp.REVERSE_ENTRY_MAX_M)
-        self.assertNotIn('倒',[v[0] for v in approach(m) if isinstance(v,tuple)],m)
+        back = [v[1] for v in approach(m) if isinstance(v, tuple) and v[0] == '倒']
+        self.assertTrue(back and max(back) <= rp.REVERSE_ENTRY_MAX_M + 1e-9, m)
+        self.assertEqual(pivots(m), [], m)
+        m, _ = self.plan(line_car(rp.REVERSE_ENTRY_MAX_M - rp.RUN_UP_M + .2))
+        self.assertNotIn('倒', [v[0] for v in approach(m) if isinstance(v, tuple)], m)
 
     def test_on_extension_turns_once_and_drives_in(self):
         # 车已在线的延长线上、助跑起点后方，车头朝外：原地转正一次直接开进来，中间不在助跑起点停
@@ -100,8 +106,10 @@ class LineEntry(unittest.TestCase):
         car = (0., 0., 0.)
         spec = rp.RouteSpec(kind='path', points=((-1.0, 0.), (-6., 0.)), closed=False)
         sections, _ = rp.plan_current(spec, car, MIN_R, nozzle_x=NOZZLE)
-        m = approach(moves(sections, car))
-        self.assertNotIn('倒', [v[0] for v in m if isinstance(v, tuple)], m)
+        m = moves(sections, car)
+        # 2026-11-19：到 G 要原地转时先到 G 前方 RUNUP_BACK_M 转正再顺线倒回；去转正点开过去还是倒过去按哪个转得少，倒得很短
+        self.assertEqual(m[-2], ('倒', rp.RUNUP_BACK_M), m)
+        self.assertLessEqual(sum(v[1] for v in m if isinstance(v, tuple) and v[0] == '倒'), rp.REVERSE_ENTRY_MAX_M + 1e-9, m)
 
 
 class ReverseRunup(unittest.TestCase):
@@ -161,7 +169,7 @@ class CircleEntry(unittest.TestCase):
         self.assertAlmostEqual(sections[-1].path.pieces[0].length,rp.RUN_UP_M)
         # 进圆过渡本身多走 CIRCLE_TRANSITION_M；直线和圆相接处往回挪约半个过渡，可能要多倒这一段。
         # 助跑比原来的 2.5 m 长出的部分（10-10 起 2.8 m）要先倒回去再开回来，接入多走两遍
-        extra = 2*(rp.RUN_UP_M-2.5)
+        extra = 2*max(0.,rp.RUN_UP_M-2.5) + 2*rp.RUNUP_BACK_M    # 2026-11-19 转正后顺线倒回：多开到转正点再倒回
         self.assertLess(entry_m, rp.RUN_UP_M+1.0 + extra + 1.5*rp.CIRCLE_TRANSITION_M + rp.CIRCLE_RUN_IN_M*r/1.5)
 
     def test_far_outside_turns_once(self):
