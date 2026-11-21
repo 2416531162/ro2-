@@ -162,12 +162,19 @@ class ImuFirstConfig:
     fast_observer_m: float = 0.4     # 对准阶段（助跑、推算开始 fast_m 内）的距离尺度：卫星快速把 IMU 方向对到线上
     fast_m: float = 2.0              # 推算开始后这么远内算对准阶段（另：助跑还没到线头也算）
     max_heading_fix_deg: float = 3.0  # β（卫星轨迹看出来的参考航向误差）上限
-    deadband_m: float = 0.002        # 喷头横偏（推算）在这以内不往回拉
+    # 喷头横偏（推算）在这以内不往回拉：助跑、线头段、不在喷时用 deadband_m（照旧 2 mm），画线时线头段之后按 paint_deadband_m
+    # （和 k_e 一样在 head_blend_m 内过渡，见 paint_deadband）。11-21 用户「去死区」：2 mm 让平地整条线停在 +0.2–0.3 cm
+    # 不回 0。线头段不去：起步模型（test_launch_settle）里线头也去掉死区时线头中位 0.37 → 0.50 cm（线头不能变差，用户规矩）
+    deadband_m: float = 0.002
+    paint_deadband_m: float = 0.0
     # 画线时（线头之后）往回拉：横偏 → 车头偏置 k_e（1/m），车头最多偏 max_bias_deg。10-08 用户「慢慢修」：原来 0.8 / 1°，
     # 10-06 23:47 那条 37.8 m 线 22–24 m 推算偏右 1 cm 多，车头目标 2 m 内转 +0.55°，3 m 横挪约 2.5 cm，地上看得见一个弯；
-    # 卫星那几米读大了约 1 cm，又冲到左边。改成 1.5–2 cm 的偏差 4–6 m 内平缓收回
-    k_e: float = 0.4
-    max_bias_deg: float = 0.3
+    # 卫星那几米读大了约 1 cm，又冲到左边。改成 0.4 / 0.3°，1.5–2 cm 的偏差 4–6 m 内平缓收回。
+    # 11-21 用户「去死区 + k_e 0.8」：草地中途侧滑拉不回（偏差 0.5–1 cm、最大 2–2.5 cm），改 0.8 / 0.6°。
+    # 仿真（0.36 s 延迟车模型 + 卫星噪声 + 草地侧滑）：草地平均 0.89→0.70 cm、p95 1.9→1.5，平地 0.24→0.19；
+    # 代价是卫星读偏 1 cm 持续 3 m 时线跟着多偏（最大 0.76→0.91 cm）
+    k_e: float = 0.8
+    max_bias_deg: float = 0.6
     rate_deg_s: float = 1.0          # 上线以后目标车头每秒最多改这么多（原 A/B 3°/s）
     target_accel_deg_s2: float = 4.0  # RTK 拟合模式的目标角加速度；及时响应，同时避免拟合点更新时突变
     # 线头段：这条直线开喷处（线头 / 弯道出口 / 暂停后继续处）后 head_m 内仍按原来的 head_k_e / head_max_bias_deg
@@ -341,6 +348,22 @@ class ImuFirstConfig:
     boost_release_e_m: float = 0.005
     boost_persist_m: float = 1.0
     boost_max_bias_deg: float = 0.6
+    # 草地模式（2026-11-21 用户「做草地模式」）：草地上车会侧滑，「IMU 车头 → 实际走向」的角度几米就变 0.2° 左右；
+    # 拟合按 fit_walk_b_deg（0.005°/√m，平地这个角几乎不变）学得太慢。直线上按走过的路取最近 grass_window_m 的两轮
+    # 电机电流（|A| 平均）中位数，≥ grass_on_a 算草地、≤ grass_off_a 才回平地（11-21 实录喷线 2 m 中位：平地最高 4.3 A、
+    # 一般 2.2–2.4 A；草地一般 8–12 A）；草地时线头段之后（同 paint_pull 过渡）角度游走用 grass_fit_walk_b_deg。
+    # 仿真（车头扰动按 11-21 草地实录校准）：在 k_e 0.8 / 0.6° 之上草地平均 0.75 → 0.61 cm（0.5 m/s）、0.86 → 0.63 cm
+    # （0.8 m/s），草地卫星读偏 1 cm 也更好；平地开它卫星读偏时最大 0.87 → 1.2–1.4 cm，所以只在草地开。
+    # 只记喷线中、车速 ≥ grass_min_speed_mps 的电流（停车、原地转、倒车助跑和慢速起步不进窗口：11-21 11:17 平地那趟
+    # 倒车助跑、0.35 m/s 起步时两轮电流一个 10 A 一个 1 A 来回跳，中位数到 6 A，按「直线在开就记」会把平地认成草地）；
+    # 电流读数断了 grass_current_fresh_s 清空回平地。回放 11-21 六趟：草地线线头后 78–100% 认成草地，平地 0%
+    grass_enabled: bool = True
+    grass_window_m: float = 2.0
+    grass_on_a: float = 5.0
+    grass_off_a: float = 4.0
+    grass_min_speed_mps: float = 0.4
+    grass_current_fresh_s: float = 0.5
+    grass_fit_walk_b_deg: float = 0.1
 
     def __post_init__(self):
         for name in ('observer_m', 'fast_observer_m', 'max_heading_fix_deg', 'k_e', 'max_bias_deg', 'rate_deg_s', 'jump_m',
@@ -356,10 +379,15 @@ class ImuFirstConfig:
                      'position_follow_tau_m', 'position_follow_near_tau_m', 'fit_anchor_sigma', 'target_accel_deg_s2',
                      'head_k_e', 'head_max_bias_deg', 'crab_prior_sigma', 'crab_max', 'crab_roll_tau_s',
                      'crab_max_roll_deg', 'crab_roll_fresh_s', 'boost_e_m', 'boost_release_e_m', 'boost_persist_m',
-                     'boost_max_bias_deg'):
+                     'boost_max_bias_deg', 'grass_window_m', 'grass_on_a', 'grass_off_a', 'grass_min_speed_mps',
+                     'grass_current_fresh_s', 'grass_fit_walk_b_deg'):
             value = getattr(self, name)
             if not math.isfinite(value) or value <= 0:
                 raise ValueError(name + ' 必须是有限正数')
+        if type(self.grass_enabled) is not bool:
+            raise ValueError('grass_enabled 必须是 True 或 False')
+        if self.grass_off_a > self.grass_on_a:
+            raise ValueError('grass_off_a 不能大于 grass_on_a')
         if not math.isfinite(self.crab_prior) or abs(self.crab_prior) > self.crab_max:
             raise ValueError('crab_prior 必须在 ±crab_max 内')
         if not math.isfinite(self.crab_walk) or self.crab_walk < 0:
@@ -368,7 +396,7 @@ class ImuFirstConfig:
             raise ValueError('crab_enabled 必须是 True 或 False')
         if self.boost_release_e_m > self.boost_e_m:
             raise ValueError('boost_release_e_m 不能大于 boost_e_m')
-        for name in ('deadband_m', 'trust_from_m', 'fast_m', 'min_baseline_m', 'max_baseline_m', 'baseline_hold_s',
+        for name in ('deadband_m', 'paint_deadband_m', 'trust_from_m', 'fast_m', 'min_baseline_m', 'max_baseline_m', 'baseline_hold_s',
                      'fit_walk_c_m', 'fit_walk_b_deg', 'fit_min_baseline_m', 'fit_max_baseline_m', 'fit_start_m',
                      'fit_start_points_m', 'head_m', 'head_blend_m',
                      'borrow_max_age_s', 'borrow_max_gap_deg'):
@@ -438,6 +466,13 @@ class ImuFirstGuide:
         self._position_sign = 0
         self._position_confirmed_m = 0.0
         self._position_correction = 0.0
+        self.grass_weight = 0.0      # 草地模式权重 0..1（跟踪器每拍给，见 ImuFirstConfig.grass_*）：拟合角度游走往 grass_fit_walk_b_deg 放
+
+    def _walk_b(self):
+        """拟合角度 b 的随机游走，rad/√m：平地 fit_walk_b_deg，草地按 grass_weight 放到 grass_fit_walk_b_deg。"""
+        cfg = self.cfg
+        w = max(0.0, min(1.0, self.grass_weight))
+        return (cfg.fit_walk_b_deg + w * (cfg.grass_fit_walk_b_deg - cfg.fit_walk_b_deg)) * DEG
 
     @property
     def travel(self):
@@ -788,7 +823,7 @@ class ImuFirstGuide:
         cfg, f = self.cfg, self._fit
         x, P = f['x'], f['P']
         d = max(0.0, hu - f['u'])
-        wb, wr = (cfg.fit_walk_b_deg * DEG) ** 2 * d, (cfg.fit_walk_r_deg * DEG) ** 2 * d
+        wb, wr = self._walk_b() ** 2 * d, (cfg.fit_walk_r_deg * DEG) ** 2 * d
         wk = (cfg.crab_walk ** 2 * d) if cfg.crab_enabled else 0.0
         pbb = P[1][1] + 2.0 * d * P[1][2] + d * d * P[2][2] + wb
         pbr = P[1][2] + d * P[2][2]
@@ -840,7 +875,7 @@ class ImuFirstGuide:
         d = max(0.0, hu - f['u'])
         dphi = (f['Phi'] if ph is None else ph) - f['Phi']
         F = [[1.0, d, d * d / 2, dphi], [0.0, 1.0, d, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]]
-        q = [cfg.fit_walk_c_m ** 2 * d, (cfg.fit_walk_b_deg * DEG) ** 2 * d, (cfg.fit_walk_r_deg * DEG) ** 2 * d,
+        q = [cfg.fit_walk_c_m ** 2 * d, self._walk_b() ** 2 * d, (cfg.fit_walk_r_deg * DEG) ** 2 * d,
              cfg.crab_walk ** 2 * d if cfg.crab_enabled else 0.0]
         n = 4
         x[:] = [sum(F[i][k] * x[k] for k in range(n)) for i in range(n)]
@@ -1073,14 +1108,64 @@ class ImuAlignment:
                     align_c_deg=deg(None if self.obs is None else self.obs[2]))
 
 
+def paint_weight(cfg, along_m):
+    """开喷处后 along_m 米时线头段之后那组参数（往回拉、死区、草地模式）的权重：head_m 内 0，再 head_blend_m 内线性到 1。"""
+    if cfg.head_blend_m > 0:
+        return max(0.0, min(1.0, (along_m - cfg.head_m) / cfg.head_blend_m))
+    return 1.0 if along_m >= cfg.head_m else 0.0
+
+
 def paint_pull(cfg, along_m):
     """画线时往回拉的 (k_e, 车头最多偏几度)：开喷处后 along_m 米。head_m 内按 head_k_e / head_max_bias_deg，
     再 head_blend_m 内线性过渡到 k_e / max_bias_deg（ImuFirstConfig）。"""
-    if cfg.head_blend_m > 0:
-        w = max(0.0, min(1.0, (along_m - cfg.head_m) / cfg.head_blend_m))
-    else:
-        w = 1.0 if along_m >= cfg.head_m else 0.0
+    w = paint_weight(cfg, along_m)
     return (1.0 - w) * cfg.head_k_e + w * cfg.k_e, (1.0 - w) * cfg.head_max_bias_deg + w * cfg.max_bias_deg
+
+
+def paint_deadband(cfg, along_m):
+    """画线时往回拉的死区，m：线头段（和不在喷时 along_m = 0）按 deadband_m，之后同 paint_pull 过渡到 paint_deadband_m。"""
+    w = paint_weight(cfg, along_m)
+    return (1.0 - w) * cfg.deadband_m + w * cfg.paint_deadband_m
+
+
+class GroundLoad:
+    """草地识别（ImuFirstConfig.grass_*，2026-11-21 用户）：按走过的路（喷线中、车速够才记）记两轮电机电流（|A| 平均），取最近 grass_window_m
+    的中位数，≥ grass_on_a 算草地，≤ grass_off_a 回平地（中间保持）。窗口没走满不算草地；读数断了清空。纯计算。"""
+
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self.reset()
+
+    def reset(self):
+        self.grass = False
+        self.median = None               # 最近 grass_window_m 电流中位数，A；窗口没走满为空
+        self._dist = 0.0
+        self._samples = deque()          # (走过的路 m, 电流 A)
+
+    def update(self, step_m, current_a):
+        """这一拍走了 step_m（只在车速够时给，停车、原地转给 0 不记）、两轮电流 |A| 平均（读数断了为 None：清空、
+        回平地）。返回是不是草地。"""
+        cfg = self.cfg
+        if current_a is None or not math.isfinite(current_a):
+            self.reset()
+            return False
+        if not step_m > 0.0:
+            return self.grass
+        self._dist += step_m
+        self._samples.append((self._dist, abs(current_a)))
+        while len(self._samples) > 1 and self._dist - self._samples[1][0] >= cfg.grass_window_m:
+            self._samples.popleft()
+        if self._dist - self._samples[0][0] < 0.95 * cfg.grass_window_m:
+            self.median = None                           # 窗口还没走满
+            return self.grass
+        values = sorted(v for _, v in self._samples)
+        n = len(values)
+        self.median = values[n // 2] if n % 2 else 0.5 * (values[n // 2 - 1] + values[n // 2])
+        if self.grass and self.median <= cfg.grass_off_a:
+            self.grass = False
+        elif not self.grass and self.median >= cfg.grass_on_a:
+            self.grass = True
+        return self.grass
 
 
 class PullBoost:
@@ -1121,16 +1206,17 @@ def runup_weight(cfg, along_m):
     return 1.-u*u*(3.-2.*u)
 
 
-def imu_first_target(cfg, guide, target, line_yaw, dt, align_rate_deg_s, align_deg, aligned, pull=None, entry_weight=0.):
-    """目标车头（IMU 系）：线方向 − 偏移 − β + 横偏往回拉（推算横偏 deadband_m 内不拉）。还没对准过、或在对准
-    阶段（guide.fast）按 align_rate_deg_s 转，上线以后每秒最多改 cfg.rate_deg_s。pull：(k_e, 车头最多偏几度)，
-    None 用 cfg.k_e / cfg.max_bias_deg（画线时见 paint_pull）。entry_weight 是助跑控制权重 0..1。
+def imu_first_target(cfg, guide, target, line_yaw, dt, align_rate_deg_s, align_deg, aligned, pull=None, entry_weight=0.,
+                     deadband=None):
+    """目标车头（IMU 系）：线方向 − 偏移 − β + 横偏往回拉（推算横偏 deadband 内不拉，None 用 cfg.deadband_m；画线时见
+    paint_deadband）。还没对准过、或在对准阶段（guide.fast）按 align_rate_deg_s 转，上线以后每秒最多改 cfg.rate_deg_s。
+    pull：(k_e, 车头最多偏几度)，None 用 cfg.k_e / cfg.max_bias_deg（画线时见 paint_pull）。entry_weight 是助跑控制权重 0..1。
     返回 (目标, 往回拉的偏置, 在对准, 对准过)。"""
     k_e, max_bias_deg = (cfg.k_e, cfg.max_bias_deg) if pull is None else pull
     k_e += entry_weight*(cfg.runup_k_e-k_e)
     max_bias_deg += entry_weight*(cfg.runup_max_bias_deg-max_bias_deg)
     e = guide.e
-    excess = max(0.0, abs(e) - cfg.deadband_m)
+    excess = max(0.0, abs(e) - (cfg.deadband_m if deadband is None else deadband))
     lim = max_bias_deg * DEG
     bias = max(-lim, min(lim, -math.atan(k_e * math.copysign(excess, e))))
     desired = wrap(line_yaw - guide.offset - guide.beta - getattr(guide, 'crab', 0.0) + bias)

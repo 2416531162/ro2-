@@ -108,6 +108,8 @@ class LineNode(Node):
         self.wheel_input = (WheelInput(self.clock(), getattr(config, 'sensor_timeout_s', .2))
                             if getattr(config, 'wheel_increment_enabled', False) else None)
         self.create_subscription(String, '/wheel/odometry', self.on_wheel_motion, 50)
+        # 两轮电机电流（驱动器 /oid/trace 的 motor_a）：直线草地识别（line_cascade.ImuFirstConfig.grass_*）
+        self.create_subscription(String, '/oid/trace', self.on_oid_trace, 50)
         self.attitude_controls = AttitudeControls(mission, fusion_path)
         supported = bool(getattr(mission,'differential',False))
         source_path = os.path.join(os.path.dirname(fusion_path),'imu_source.json') if supported and fusion_path else None
@@ -280,6 +282,20 @@ class LineNode(Node):
                 self.attitude_controls.observe_wheel(t, v, wz)
             else:
                 self.wheel_input.legacy(self.msg_time(msg), v, wz)
+
+    def on_oid_trace(self, msg):
+        """/oid/trace 里的 motor_a [左, 右]（A，0.5 s 没更新为 null）按收到时刻交给任务层；坏帧丢掉。"""
+        handler = getattr(self.mission, 'on_motor_current', None)
+        if not callable(handler):
+            return
+        try:
+            motor = json.loads(msg.data).get('motor_a')
+            if not isinstance(motor, list) or len(motor) != 2:
+                return
+            left, right = (float(a) if isinstance(a, (int, float)) and math.isfinite(a) else None for a in motor)
+            handler(self.clock(), left, right)
+        except (ValueError, TypeError, AttributeError):
+            return
 
     def on_wheel_motion(self, msg):
         if self.wheel_input is None:

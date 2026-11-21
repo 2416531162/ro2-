@@ -2,7 +2,9 @@
 # -*- coding: utf-8 -*-
 """画线时（线头之后）慢慢修（2026-10-08 用户）：10-06 23:47 那条 37.8 m 线中途推算偏右 1 cm 多，往回拉 k_e 0.8 / 最多 1°
 车头目标 2 m 内转 +0.55°、3 m 横挪约 2.5 cm，地上画出一个看得见的 S 弯。改成车头最多偏 0.3°（k_e 0.4），
-1.5–2 cm 的偏差 4–6 m 内平缓收回、不冲过头；线头段（开喷后 head_m 内）照旧，线头精度不变。"""
+1.5–2 cm 的偏差 4–6 m 内平缓收回、不冲过头；线头段（开喷后 head_m 内）照旧，线头精度不变。
+2026-11-21 用户「去死区 + k_e 0.8」：草地侧滑拉不回，改 k_e 0.8 / 最多 0.6°，线头段之后死区 2 mm → 0（线头段照旧 2 mm，
+线头不能变差）；1.5–3 cm 约 1.5–3 m 收回（10-08 那组要多走一倍），仍不冲过头。"""
 import math
 import os
 import sys
@@ -11,19 +13,19 @@ from types import SimpleNamespace as NS
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import test_reverse_runup_handoff as runup  # noqa: E402
-from line_cascade import ImuFirstConfig, imu_first_target, paint_pull  # noqa: E402
+from line_cascade import ImuFirstConfig, imu_first_target, paint_deadband, paint_pull  # noqa: E402
 
 DT = .02
 CFG = ImuFirstConfig(rtk_trim=False, rtk_fit=True)
 
 
-def recover(e0, pull, v=.5, length=20.):
+def recover(e0, pull, v=.5, length=20., deadband=None):
     """理想内环（车头 = 目标）、推算 = 真实：从 e0 收回。返回 (回到 0.5 cm 内走的路, 最大偏置°, 最小横偏, 任意 2 m 内最大横移)。"""
     g = NS(e=e0, offset=0., beta=0., fast=False, target_rate=0.)
     y, target, s, back, bias_max, y_min, hist = e0, 0., 0., None, 0., e0, []
     for _ in range(int(length / v / DT)):
         g.e = y
-        target, bias, _, _ = imu_first_target(CFG, g, target, 0., DT, 3., 1., True, pull=pull)
+        target, bias, _, _ = imu_first_target(CFG, g, target, 0., DT, 3., 1., True, pull=pull, deadband=deadband)
         bias_max = max(bias_max, abs(bias))
         s += v * DT
         y += v * DT * math.sin(target)
@@ -47,18 +49,24 @@ class PaintPull(unittest.TestCase):
         self.assertEqual(paint_pull(CFG, CFG.head_m + CFG.head_blend_m), (CFG.k_e, CFG.max_bias_deg))
         self.assertEqual(paint_pull(CFG, 30.), (CFG.k_e, CFG.max_bias_deg))
 
-    def test_gentle_pull_tilts_at_most_0_3_deg_and_recovers_in_4_to_6_m_without_overshoot(self):
-        pull = paint_pull(CFG, 30.)
-        for e0, lo, hi in ((.015, 3.5, 6.), (.02, 4., 6.)):
-            back, bias, y_min, move = recover(e0, pull)
-            self.assertLessEqual(bias, .3 + 1e-9)
+    def test_paint_pull_tilts_at_most_0_6_deg_and_recovers_in_1_to_3_m_without_overshoot(self):
+        pull, deadband = paint_pull(CFG, 30.), paint_deadband(CFG, 30.)
+        self.assertEqual((pull, deadband), ((.8, .6), 0.))
+        for e0, lo, hi in ((.015, 1.2, 2.2), (.02, 1.6, 2.6), (.03, 2.5, 3.5)):
+            back, bias, y_min, move = recover(e0, pull, deadband=deadband)
+            self.assertLessEqual(bias, .6 + 1e-9)
             self.assertTrue(lo <= back <= hi, (e0, back))
             self.assertGreater(y_min, 0.)                    # 不冲过头
-            self.assertLess(move, .011)                       # 任意 2 m 内横挪不到 1.1 cm
-        # 原来 0.8 / 1°：2 cm 2.5 m 就收回，2 m 内横挪 1.4 cm
-        back, bias, _, move = recover(.02, (.8, 1.))
-        self.assertLess(back, 3.)
-        self.assertGreater(move, .013)
+            back_old, _, _, _ = recover(e0, (.4, .3), deadband=.002)     # 10-08 的 0.4 / 0.3°、2 mm：要多走一倍
+            self.assertGreater(back_old, 1.7 * back)
+
+
+    def test_deadband_kept_in_line_head_and_removed_after(self):
+        self.assertEqual(paint_deadband(CFG, 0.), .002)               # 助跑、线头段、不在喷：2 mm 照旧
+        self.assertEqual(paint_deadband(CFG, CFG.head_m), .002)
+        self.assertAlmostEqual(paint_deadband(CFG, CFG.head_m + CFG.head_blend_m / 2), .001)
+        self.assertEqual(paint_deadband(CFG, CFG.head_m + CFG.head_blend_m), 0.)
+        self.assertEqual(paint_deadband(CFG, 30.), 0.)
 
 
 class TrackerPull(unittest.TestCase):
@@ -87,9 +95,16 @@ class TrackerPull(unittest.TestCase):
         head, _ = self.bias_at(tr.paint_from_m + .5)
         self.assertAlmostEqual(head, 1., places=6)            # 线头段照旧：3 cm 限到 1°
         middle, status = self.bias_at(tr.paint_from_m + 6.)
-        self.assertLessEqual(middle, .3 + 1e-6)              # 之后最多 0.3°
-        self.assertGreater(middle, .29)
+        self.assertLessEqual(middle, .6 + 1e-6)              # 之后最多 0.6°（11-21；10-08 起是 0.3°）
+        self.assertGreater(middle, .59)
         self.assertEqual((status['pull_k_e'], status['pull_max_bias_deg']), (CFG.k_e, CFG.max_bias_deg))
+
+    def test_small_offset_pulled_only_after_line_head(self):
+        tr = runup.tracker()
+        head, _ = self.bias_at(tr.paint_from_m + .5, e=.0015)
+        self.assertEqual(head, 0.)                             # 线头段：1.5 mm 在 2 mm 死区内，不拉
+        middle, _ = self.bias_at(tr.paint_from_m + 6., e=.0015)
+        self.assertGreater(middle, .03)                        # 之后没有死区：1.5 mm 也往回拉（≈ atan(0.8×1.5 mm)）
 
     def test_restart_mid_line_is_a_new_line_head(self):
         tr = runup.tracker()

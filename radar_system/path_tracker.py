@@ -36,8 +36,8 @@ from line_tracker import lateral_integral_allowed, position_observation_allowed
 from heading_control import HeadingControl, HeadingControlConfig
 from heading_hold import HoldConfig
 from paint_start import PaintStartGuard
-from line_cascade import (CascadeConfig, ImuFirstConfig, ImuFirstGuide, PullBoost, imu_first_target, learn_heading_offset,
-                          lateral_heading_step, paint_pull, runup_weight)
+from line_cascade import (CascadeConfig, GroundLoad, ImuFirstConfig, ImuFirstGuide, PullBoost, imu_first_target,
+                          learn_heading_offset, lateral_heading_step, paint_deadband, paint_pull, paint_weight, runup_weight)
 
 
 def wrap(a):
@@ -643,6 +643,9 @@ class PathTracker:
         first = config.straight_imu_first
         self._straight_guide = None if first is None else ImuFirstGuide(first)
         self._pull_boost = None if first is None else PullBoost(first)       # 画线往回拉加强（ImuFirstConfig.boost_*）
+        # 草地识别（ImuFirstConfig.grass_*）：整段跟踪共用，换直线不清（地面不随线变）；任务层给的最近一帧两轮电机电流
+        self._ground = None if first is None else GroundLoad(first)
+        self._motor_in = None           # (时刻, 左 A 或 None, 右 A 或 None)
         self._attitude_in = None        # 任务层给的最近一帧横滚 (时刻, rad，扣掉水平零点、按行进方向)，侧滑补偿用
         self._roll_lp = None            # 低通后的横滚 (时刻, rad)
         self._arc_guide = None if first is None else ImuFirstGuide(first)     # 画圆 IMU 为主（PathConfig.arc_imu_first）
@@ -746,6 +749,38 @@ class PathTracker:
                 self._attitude_in = (t, roll)
         except TypeError:
             pass
+
+    def set_motor_current(self, t, left_a, right_a):
+        """最近一帧两轮电机电流（与 sync 同一单调时钟；A，驱动器方向，没有读数为 None）：草地识别用
+        （ImuFirstConfig.grass_*）。"""
+        def ok(a):
+            return a if isinstance(a, (int, float)) and math.isfinite(a) else None
+        try:
+            if math.isfinite(t):
+                self._motor_in = (t, ok(left_a), ok(right_a))
+        except TypeError:
+            pass
+
+    def _motor_now(self):
+        """两轮电机电流 |A| 平均（只有一个轮有读数就用它）；没有、或比 IMU 时钟旧 grass_current_fresh_s 以上为 None。"""
+        first, m = self.cfg.straight_imu_first, self._motor_in
+        if first is None or m is None or self._imu_now is None or self._imu_now - m[0] > first.grass_current_fresh_s:
+            return None
+        values = [abs(a) for a in m[1:] if a is not None]
+        return sum(values) / len(values) if values else None
+
+    def _grass_weight(self, pose, dt, piece):
+        """草地识别走一拍（在喷且车速够才记路；电流读数断了回平地），返回这拍草地模式权重 0..1：认出草地且在喷、
+        线头段之后（paint_weight）。"""
+        first, ground = self.cfg.straight_imu_first, self._ground
+        if first is None or ground is None or not first.grass_enabled:
+            return 0.0
+        along = self._paint_along(piece)
+        speed = abs(pose.speed) if math.isfinite(pose.speed) else 0.0
+        step = speed * dt if along > 0.0 and speed >= first.grass_min_speed_mps and dt > 0 else 0.0
+        if not ground.update(step, self._motor_now()):
+            return 0.0
+        return paint_weight(first, along)
 
     def _roll_now(self, dt):
         """侧滑补偿用的横滚：新鲜（crab_roll_fresh_s 内）才用，低通 crab_roll_tau_s；没有或断了为 None。"""
@@ -1560,6 +1595,8 @@ class PathTracker:
             self._antenna['shift'] = None if pick is None or pick[0] != 'second' else (
                 -math.sin(piece.yaw) * pick[1], math.cos(piece.yaw) * pick[1])
             self._antenna['shift_t'] = self._imu_now
+            # 草地模式（ImuFirstConfig.grass_*）：电流认出草地时，线头段之后（同 paint_pull 过渡）拟合角度跟侧滑跟得快些
+            guide.grass_weight = self._grass_weight(pose, dt, piece)
             # steering：IMU 已经在开（上一拍权重 > 0）；rtk_trim、rtk_fit 都关时这以后卫星不再修正
             guide.update(measured, rel, max(0.0, pose.speed)*dt, dt, (nx, ny), rtk_ok, fast=st.s < self.paint_from_m,
                          steering=self._straight_weight > 0.0, roll=self._roll_now(dt))
@@ -1619,12 +1656,14 @@ class PathTracker:
             self._straight_core.reset(now=self._imu_now, sent=sent, output=legacy_w)
         previous_target = self._straight_target
         # 纠偏增益、限幅、目标角速度/加速度与位置观察器一起连续交接，避免开喷那拍突然松手。
-        pull = paint_pull(first, self._paint_along(piece))
+        along = self._paint_along(piece)
+        pull = paint_pull(first, along)
         boost = self._pull_boost.update(guide.e, guide.rtk_accepted and guide.mode == 'rtk', max(0.0, pose.speed)*dt)
         pull = self._pull_boost.limit(pull)
         self._straight_target, self._straight_bias, aligning, self._straight_aligned = imu_first_target(
             first, guide, self._straight_target, piece.yaw, dt,cfg.straight_target_rate_deg_s,
-            CascadeConfig.align_deg, self._straight_aligned, pull=pull,entry_weight=entry_weight)
+            CascadeConfig.align_deg, self._straight_aligned, pull=pull,entry_weight=entry_weight,
+            deadband=paint_deadband(first, along))
         self._straight_target_rate = wrap(self._straight_target-previous_target)/dt
         # β 相当于原 A/B 积分给的车头偏置（−β）：换成路径积分单位，交回原跟踪（进弯）时接着用
         self._straight_integral = -guide.beta
@@ -1649,6 +1688,9 @@ class PathTracker:
             pull_k_e=pull[0]+entry_weight*(first.runup_k_e-pull[0]),
             pull_max_bias_deg=pull[1]+entry_weight*(first.runup_max_bias_deg-pull[1]),
             entry_blend_weight=round(entry_weight,4), pull_boost=boost,
+            grass=bool(self._ground is not None and self._ground.grass),
+            ground_a=None if self._ground is None or self._ground.median is None else round(self._ground.median, 2),
+            grass_weight=round(guide.grass_weight, 4),
             target_rate_deg_s=math.degrees(self._straight_target_rate), aligning=aligning, baseline_ok=baseline_ok,
             outer_e=guide.e, outer_e_rtk=measured, inner_wz=inner_w, legacy_wz=legacy_w, final_wz=output,
             **guide.status(), **self._antenna_status(), **self._straight_core.status(),
@@ -2808,6 +2850,10 @@ class SectionTracker:
     def set_rtk_quality(self, t, sigma_m, sats, pair_m=None, fixed=None):
         for tracker in self.trackers:
             tracker.set_rtk_quality(t, sigma_m, sats, pair_m, fixed)
+
+    def set_motor_current(self, t, left_a, right_a):
+        for tracker in self.trackers:
+            tracker.set_motor_current(t, left_a, right_a)
 
     def set_secondary_fix(self, t, x, y, fixed, lever):
         for sec,tracker in zip(self.sections,self.trackers):

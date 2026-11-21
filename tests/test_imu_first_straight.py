@@ -100,6 +100,8 @@ class Guide(unittest.TestCase):
         g.e = .001
         target, bias, aligning, aligned = imu_first_target(cfg, g, 0., 0., DT, 3., 1., True)
         self.assertEqual(bias, 0.)                           # 死区内不拉
+        target, bias, aligning, aligned = imu_first_target(cfg, g, 0., 0., DT, 3., 1., True, deadband=0.)
+        self.assertAlmostEqual(bias, -math.atan(cfg.k_e * .001))   # 画线时线头段之后（paint_deadband）不留死区
         g.e = .05
         target, bias, aligning, aligned = imu_first_target(cfg, g, 0., 0., DT, 3., 1., True)
         self.assertAlmostEqual(bias, -cfg.max_bias_deg * DEG)

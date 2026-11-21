@@ -214,6 +214,7 @@ class LineMission:
         self._antenna = None            # 最近一次天线定位 (t, lat, lon, sol, sigma)
         self._imu = None                # 最近一帧 IMU (t, 偏航 rad, 陀螺 z rad/s)，差速车定点画线的内环用
         self._attitude = None           # 最近一帧 IMU 姿态 (t, 横滚, 俯仰) rad，直线侧滑补偿用
+        self._motor = None              # 最近一帧两轮电机电流 (收到时刻, 左 A, 右 A)，没有读数为 None：直线草地识别用
         self._heading_baseline = None   # 最近一帧双天线测向 (测量时刻, 基线长 m)：直线 IMU 为主时基线不对就不用卫星修正
         self._rtk_quality = None        # 最近一帧主天线定位 (测量时刻, σ m, 卫星数, 两天线距离误差 m, 固定解)：直线卫星纠偏只在合格时用
         self._fix2 = None               # 最近一帧副天线 (测量时刻, 本地 x, y, 固定解, 两天线标称距离 m)：两根对不上时直线选天线用
@@ -393,6 +394,10 @@ class LineMission:
         before = self._latency.value
         self._latency.on_wheel(t, speed)
         self._save_latency(before)
+
+    def on_motor_current(self, t, left_a, right_a):
+        """两轮电机电流（/oid/trace motor_a，A；t 收到时刻，与 IMU 同一单调时钟）：直线草地识别用。"""
+        self._motor = (t, left_a, right_a)
 
     def on_wheel_motion(self, sample):
         self.fusion.add_wheel(sample)
@@ -834,6 +839,9 @@ class LineMission:
                     roll = None
                 if roll is not None:
                     attitude(a[0], roll)
+            motor = getattr(tracker, 'set_motor_current', None)
+            if callable(motor) and self._motor is not None:
+                motor(*self._motor)                     # 草地识别（ImuFirstConfig.grass_*）
             secondary = getattr(tracker, 'set_secondary_fix', None)
             lever = self._antenna_lever()
             primary = getattr(tracker, 'set_primary_fix', None)
