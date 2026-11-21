@@ -36,7 +36,7 @@ from robot_core.service_watchdog import watchdog
 from robot_core import motion_text  # 底盘故障代码 → 给 App 看的中文
 from motion_client import MotionClient
 from manual_drive import ManualDriveLatch
-from heading_hold import HeadingHold, yaw_from_quaternion
+from heading_hold import HeadingHold, HoldConfig, yaw_from_quaternion
 import app_link
 import car_display
 import car_network
@@ -314,7 +314,9 @@ class WebBridgeNode(Node):
 
         self.manual_drive = ManualDriveLatch(MANUAL_HEARTBEAT_TIMEOUT_S, allow_pivot=CHASSIS.differential)
         # IMU 定向直行使用当前选源偏航角（不用 RTK）；旧车保持原话题。独立回调组运行 50 Hz。
-        self.straight = HeadingHold()
+        # 记住车自己的持续偏转，下一趟起步就带上（2026-11-21 起步往右偏 2–3°），存盘重启也在。
+        self.straight = HeadingHold(HoldConfig(learn_bias=True),
+                                    bias_path=os.environ.get('RK3588_STRAIGHT_BIAS', '~/rtk/straight_bias.json'))
         self._imu_source = None
         self._imu_pending = None
         self._imu_gate_stamp_ns = 0

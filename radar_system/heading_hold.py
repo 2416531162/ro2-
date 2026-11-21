@@ -20,6 +20,13 @@ kp 2.2、ki 1.0、kd 0.4 是在延迟 0.3–0.7 s、增益 0.9–1.2、偏转 ±
 （到 0.32 Hz）约 1.2°——那部分受 0.44 s 延迟所限，任何参数都压不到 0.5°。延迟 0.1–0.3 s 的底盘也稳。
 起步车速按 accel 斜坡升到 speed，减小两轮起步不同步甩出去的角度。
 
+起步带上学到的偏转（learn_bias，只有 IMU 直行开，2026-11-21）：Gen5 右轮比左轮慢约 2.8%、速度环也慢，
+不给修正就往右拐，匀速时积分稳在 +0.02–0.03 rad/s 才走直；可每次开始积分从 0 起、起步斜坡前半段又不累积，
+两趟实车起步都先往右偏 2–3°（最大 3.31° / 2.12°）。现在每趟全速稳住后的积分取平均记下来，下一趟积分直接
+从它开始；新一趟占 bias_weight，来回两趟的坡度互相抵掉。车两轮调成一样后学到的是 0，不起作用。记在
+bias_path（重启也在）。剩下的是右轮速度环慢半拍，起步斜坡同时由 0.5 放慢到 0.25 m/s²（用户定）。按这两趟
+拟合的两轮模型仿真，起步前 2 s 最大偏差：原来 1.95°，只带修正 1.1°，再放慢斜坡约 0.5°。
+
 哪些情况停车（这一次作业结束，要再点开始；再点开始按那时的偏航重新定目标）：
 - 开始时没有 IMU 航向（no_imu）、途中 IMU 超过 imu_stale_s 没更新（imu_stale）。调用方自己卡住（两次计算隔
   超过 stall_s，2026-09-30 实车 web 进程每隔几秒卡 0.2–0.4 s，IMU 其实一直 50 Hz）时 IMU 回调还压在队列里，
@@ -31,7 +38,9 @@ kp 2.2、ki 1.0、kd 0.4 是在延迟 0.3–0.7 s、增益 0.9–1.2、偏转 ±
 保证的是「IMU 读数」稳在目标 ±1° 内。IMU 本身的零偏漂移会让真实车头跟着偏同样的角度：
 2026-09-30 实车 HDA536T 静止 84 s 只漂了 0.02°（约 0.03°/分钟），开起来的漂移还没实测。
 """
+import json
 import math
+import os
 import threading
 import time
 from dataclasses import dataclass
@@ -57,13 +66,22 @@ class HoldConfig:
     i_max: float = 0.15             # 积分项上限，rad/s
     moving_ratio: float = 0.5       # 指令车速不到 speed 的这个比例（起步）、里程计不到指令的这个比例（卡住）不积分
     odom_stale_s: float = 0.3       # 里程计这么久没更新就不看它（只按起步斜坡判断）
-    accel: float = 0.5              # 起步车速斜坡，m/s²
+    accel: float = 0.25             # 起步车速斜坡，m/s²（2026-11-21 用户：0.5 → 0.25，右轮速度环慢、起步甩右少一半；
+                                    # 到 0.8 m/s 约 3.0 s、走约 1.2 m）
     min_speed: float = 0.05         # 起步第一帧的车速，m/s（0 会被底盘当成停车）
     imu_stale_s: float = 0.2        # IMU 这么久没更新就停
     stall_s: float = 0.1            # 两次计算隔这么久算调用方自己卡了（正常 20 ms 一次）
     imu_grace_s: float = 0.15       # 卡完给 IMU 回调追上的时间，这段时间 IMU 旧了先不停
     abort_deg: float = 5.0          # 偏差超过它就停
     tolerance_deg: float = 1.0      # 目标精度，只用于统计（线内时间占比）
+    learn_bias: bool = False        # 记住车自己的持续偏转、下一趟起步就带上（IMU 直行开；定点画线内环不开）
+    bias_settle_s: float = 1.0      # 到全速后先等这么久再开始平均积分（起步那一下不算）
+    bias_min_s: float = 3.0         # 全速平均够这么久这一趟才学（太短的不学）
+    bias_weight: float = 0.5        # 新一趟占的比例（第一次学直接用）
+
+
+# 这些原因停的那一趟不学：被推歪、IMU 出问题、底盘不收指令时积分不代表车自己的偏转
+NO_LEARN = ('deviation', 'no_imu', 'imu_stale', 'chassis')
 
 
 def wrap(a):
@@ -83,9 +101,15 @@ def yaw_from_quaternion(x, y, z, w):
 class HeadingHold:
     """一次一次的「直行」作业：run 是 app 每点一次开始换的编号，同一个 run 的指令接着开。线程安全。"""
 
-    def __init__(self, config=None, clock=time.monotonic):
+    def __init__(self, config=None, clock=time.monotonic, bias_path=None):
         self.cfg = config or HoldConfig()
         self.clock = clock
+        self.bias_path = bias_path
+        self.bias = 0.0             # 学到的积分（rad/s，与 HeadingControl.integral 同号：负 = 往左修）
+        self.bias_runs = 0          # 学过几趟
+        self._bias_sum = self._bias_s = 0.0
+        self._full_since = None     # 这一趟什么时候到的全速
+        self._load_bias()
         self._lock = threading.Lock()
         self._imu = None            # (收到时刻, 偏航 rad, 陀螺 z rad/s)
         self.run = None
@@ -197,7 +221,10 @@ class HeadingHold:
                 vx = min(c.speed, c.min_speed + c.accel * (now - self._started))
             else:
                 vx = max(0.0, float(vx))
-            wz = self.control.step(now, e, rate, sample_t=t_imu, moving=self._moving(now, vx), dt=dt)
+            moving = self._moving(now, vx)
+            wz = self.control.step(now, e, rate, sample_t=t_imu, moving=moving, dt=dt)
+            if c.learn_bias:
+                self._bias_sample(now, vx, moving, dt)
             self._max_err = max(self._max_err, abs(e))
             self._run_s += dt
             if abs(e) <= c.tolerance_deg * DEG:
@@ -206,9 +233,13 @@ class HeadingHold:
             return self._out
 
     def _begin(self, run, now):
+        if self.state == 'running':
+            self._learn('user')     # 没停就换了一趟：上一趟照常学
         self.run, self._started, self._last_step, self._grace = run, now, now, None
         self._err, self._max_err, self._in_tol_s, self._run_s = None, 0.0, 0.0, 0.0
-        self.control.reset(now=now)
+        self._bias_sum = self._bias_s = 0.0
+        self._full_since = None
+        self.control.reset(now=now, integral=self.bias if self.cfg.learn_bias else 0.0)
         self._out = (0.0, 0.0)
         imu = self._fresh_imu(now)
         if imu is None:
@@ -219,9 +250,61 @@ class HeadingHold:
             self.state, self.reason = 'running', None
 
     def _stop(self, reason):
+        if self.state == 'running':
+            self._learn(reason)
         self.state, self.reason = 'stopped', reason
         self._out = (0.0, 0.0)
         return self._out
+
+    def _bias_sample(self, now, vx, moving, dt):
+        """全速、走起来了、稳了 bias_settle_s 以后，积分按时间累加（停车时取平均）。"""
+        c = self.cfg
+        if not moving or vx < c.speed - 1e-6:
+            self._full_since = None
+            return
+        if self._full_since is None:
+            self._full_since = now
+        elif now - self._full_since >= c.bias_settle_s:
+            self._bias_sum += self.control.integral * dt
+            self._bias_s += dt
+
+    def _learn(self, reason):
+        c = self.cfg
+        if not c.learn_bias or reason in NO_LEARN or self._bias_s < c.bias_min_s:
+            return
+        mean = self._bias_sum / self._bias_s
+        w = 1.0 if self.bias_runs == 0 else c.bias_weight
+        self.bias = max(-c.i_max, min(c.i_max, (1.0 - w) * self.bias + w * mean))
+        self.bias_runs += 1
+        self._bias_sum = self._bias_s = 0.0
+        self._save_bias()
+
+    def _load_bias(self):
+        if not self.cfg.learn_bias or not self.bias_path:
+            return
+        try:
+            with open(os.path.expanduser(self.bias_path), encoding='utf-8') as f:
+                d = json.load(f)
+            bias, runs = float(d['integral']), int(d['runs'])
+        except (OSError, ValueError, KeyError, TypeError):
+            return                  # 没有、坏了：从 0 学起
+        if math.isfinite(bias) and runs > 0:
+            self.bias = max(-self.cfg.i_max, min(self.cfg.i_max, bias))
+            self.bias_runs = runs
+
+    def _save_bias(self):
+        if not self.bias_path:
+            return
+        path = os.path.expanduser(self.bias_path)
+        tmp = path + '.tmp'
+        try:
+            os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump({'integral': round(self.bias, 5), 'runs': self.bias_runs,
+                           'saved_at': time.strftime('%Y-%m-%d %H:%M:%S')}, f)
+            os.replace(tmp, path)
+        except OSError:
+            pass                    # 存不下只影响重启后的第一趟
 
     @property
     def running(self):
@@ -243,6 +326,8 @@ class HeadingHold:
             imu = self._fresh_imu(now)
             out = {'imu_ok': imu is not None,
                    'yaw_deg': None if imu is None else round(math.degrees(imu[1]), 2)}
+            if self.cfg.learn_bias:
+                out['start_wz'] = round(-self.bias, 4)     # 起步带上的修正角速度（左转为正），作业记录里查
             if self.run is None:
                 return dict(out, state='idle')
             deg = lambda a: None if a is None else round(math.degrees(a), 2)  # noqa: E731
