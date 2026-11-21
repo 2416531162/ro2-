@@ -1414,6 +1414,8 @@ class LineMission:
         pose = None if p is None else dict(
             x=round(p.x + dx, 3), y=round(p.y + dy, 3), yaw_deg=round(math.degrees(p.yaw), 2),
             **({'antenna_corrected_m': round(math.hypot(dx, dy), 3)} if shift is not None else {}),
+            # 融合改用副天线定位（主天线被污染或没固定）时标出来
+            **({'position_antenna': 'second'} if getattr(p, 'position_antenna', 'main') == 'second' else {}),
             speed=round(p.speed, 3), quality=p.quality, usable=p.usable_for_control,
             sigma_xy=round(p.sigma_xy, 4), sigma_yaw_deg=round(math.degrees(p.sigma_yaw), 3),
             reasons=list(p.reasons), rtk_trusted=bool(getattr(p, 'rtk_trusted', False)))

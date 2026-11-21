@@ -937,7 +937,7 @@ class PathTracker:
                 and (pair is None or self._imu_now - pair > first.fit_pair_settle_s))
 
     def _baseline_ok(self, fit=False):
-        """双天线基线合格（0.40–0.42，学开头换算用）；fit=True 按拟合用的宽范围（0.30–0.50，卫星纠偏用）。"""
+        """双天线基线合格（0.40–0.42，学开头换算用）；fit=True 按拟合用的宽范围（0.35–0.45，卫星纠偏用）。"""
         first = self.cfg.straight_imu_first
         bad = self._fit_bad_t if fit else self._baseline_bad_t
         return bad is None or self._imu_now is None or self._imu_now - bad > first.baseline_hold_s
@@ -1532,7 +1532,7 @@ class PathTracker:
             nx, ny = self._straight_nozzle
             h = rel + guide.beta
             measured = base_lat + (nx-cfg.track_x_m)*math.sin(h) + ny*(math.cos(h)-1.0)
-            # 卫星纠偏：拟合按用户定的可信规则（固定解 + 基线 0.30–0.50），观测器老办法仍按 0.40–0.42
+            # 卫星纠偏：拟合按用户定的可信规则（固定解 + 基线 0.35–0.45），观测器老办法仍按 0.40–0.42
             # 助跑冻结的是横偏积分，不是不许用可信位置拟合；否则起步锁住的角度误差一直推到线头。
             # 起喷前积分按设计冻结，正常融合校正也可冻结积分；二者都不应阻断可信位置拟合。
             # 所有直线助跑共用当前质量、时效及跳点检查，不能只给倒车接入放行。
@@ -1544,10 +1544,17 @@ class PathTracker:
                            else not st.integral_frozen)
             rtk_ok = position_ok and (self._baseline_ok(fit=True) and self._rtk_quality_ok() if first.rtk_fit
                                       else baseline_ok)
-            pick = self._pick_antenna(guide, heading, st.s, base_lat, measured) if first.rtk_fit else None
-            if pick is not None:
-                # 两根天线对不上、有一根和 IMU 推算对得上：用它，两天线的距离误差不再挡；接收机质量照常要合格
-                rtk_ok = position_ok and self._baseline_ok(fit=True) and self._receiver_quality_ok()
+            # 融合已经改用副天线定位（主天线被污染或没固定，gnss_fusion FusionConfig.secondary_*）：融合位置就是好的那根，
+            # 两天线距离误差、测向基线、主天线接收机质量都不挡，也不再另选天线
+            fused_second = first.rtk_fit and getattr(pose, 'position_antenna', 'main') == 'second'
+            pick = self._pick_antenna(guide, heading, st.s, base_lat, measured) if first.rtk_fit and not fused_second else None
+            if fused_second:
+                rtk_ok = position_ok
+            elif pick is not None:
+                # 两根天线对不上、有一根和 IMU 推算对得上：用它，两天线的距离误差、测向基线都不再挡（2026-11-21 用户：
+                # 「左卫星被污染了，右卫星其实还是好的，但是基线已经 0.3 m 了，我认为还能继续用」——基线出界正是因为另一根坏了，
+                # 测向照样不用、车头靠 IMU）；接收机质量照常要合格
+                rtk_ok = position_ok and self._receiver_quality_ok()
                 measured += pick[1]
             # 用副天线时，融合位置（跟着被干扰的主天线）比副天线多偏的那段沿线法向挪回去，报给 app（地图喷线、作业报告）
             self._antenna['shift'] = None if pick is None or pick[0] != 'second' else (

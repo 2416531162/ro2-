@@ -32,9 +32,9 @@ RTK_FLOAT = frozenset({'NARROW_FLOAT', 'L1_FLOAT', 'IONOFREE_FLOAT', 'WIDE_INT',
 HEADING_FIXED = frozenset({'L1_INT', 'NARROW_INT', 'WIDE_INT'})
 # 用户规则（2026-09-29）：测向是整周固定解、且接收机报的基线长度在这个范围内就算有效，
 # 不要求两根天线的位置也是 RTK 固定解。Gen5 两天线相距约 0.415 m；范围外（室内转发器约几毫米、
-# 模糊度固定错了的长度）不算。
-HEADING_BASELINE_MIN_M = 0.30
-HEADING_BASELINE_MAX_M = 0.50
+# 模糊度固定错了的长度）不算。2026-11-21 用户：0.30–0.50 m 收紧到 0.35–0.45 m。
+HEADING_BASELINE_MIN_M = 0.35
+HEADING_BASELINE_MAX_M = 0.45
 # 两根天线都是 RTK 固定解时，同一测量时刻两者平面坐标（东、北，不算高差）的实时距离照实上报
 # （最近 BASELINE_REF_WINDOW_S 秒的中位数，至少 BASELINE_REF_MIN_SAMPLES 组），只作显示，不参与判定。
 # 小于 MIN_BASELINE_M 说明两根天线收到的是同一个信号（室内转发器），不报。

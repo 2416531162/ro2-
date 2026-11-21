@@ -233,7 +233,7 @@ class ImuFirstConfig:
     # 只剩 0.0007°，不再改；本场 IMU 换算漂约 −0.37°/min。用户：「喷的轨迹偏移了卫星轨迹却没有修正」要解决，同时保持 IMU
     # 的直线度。拟合改成跟踪：修正量 c（真实喷头横偏 − IMU 推算）和角度 b 都允许按距离随机游走（fit_walk_*），角度跟得上
     # 慢漂；用到推算上的修正和角度再按距离限速（fit_rate_m / fit_beta_rate_deg），一个坏点拉不动车，真实偏移一直在纠。
-    # 卫星用不用：固定解 + 双天线基线在 [fit_min_baseline_m, fit_max_baseline_m]（用户定的可信规则 0.30–0.50 m，连续
+    # 卫星用不用：固定解 + 双天线基线在 [fit_min_baseline_m, fit_max_baseline_m]（用户定的可信规则 0.35–0.45 m，11-21 由 0.30–0.50 收紧，连续
     # baseline_bad_frames 帧出界才停），加上和 IMU 对不上的突然跳点不用；0.40–0.42 只管学开头换算
     # 修正量、角度本身的随机游走收小（漂移交给下面的漂移速度 r）：仿真今天的 101 m 线 IMU 不漂 / 漂 −0.4°/min 都是
     # p95 0.65 cm（游走 2 mm / 0.03° 时不漂 1.4 cm——卫星噪声被当成真变化）
@@ -273,8 +273,8 @@ class ImuFirstConfig:
     position_follow_confirm_m: float = 1.0
     position_follow_tau_m: float = 0.35
     position_follow_near_tau_m: float = 1.5
-    fit_min_baseline_m: float = 0.30
-    fit_max_baseline_m: float = 0.50
+    fit_min_baseline_m: float = 0.35
+    fit_max_baseline_m: float = 0.45
     # 跳点只挡短暂的：跳开后 jump_accept_s 内没回来、但新位置自己稳定（扣掉直线趋势后散布 ≤ rejoin_m），就认卫星，照常慢慢纠
     # （傍晚回放：原来跳一次就一直只靠 IMU，推算和卫星越拉越远）
     # 固定解一下跳出很远（> jump_accept_max_m）多半是整周解错了，不认，按 IMU 走

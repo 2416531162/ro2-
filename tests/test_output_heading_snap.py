@@ -58,12 +58,12 @@ class OutputHeadingSnap(unittest.TestCase):
         return rig
 
     def test_old_behaviour_reproduced_when_rule_not_met(self):
-        # 在喷、基线 0.47（卫星可信但不在 0.35–0.45）：仍按 1°/s 追，假转 20° 后差十几度
+        # 在喷、基线 0.47（不在 0.35–0.45，2026-11-21 起也不算卫星可信）：仍按 1°/s 追，假转 20° 后差十几度
         rig = self.ready(.8)
         rig.f.set_painting(True)
-        rig.step(.8, baseline=.47, n=3)
+        rig.step(.8, baseline=.47, n=15)
         p = rig.fake_turn(20., speed=.8, baseline=.47)
-        self.assertTrue(p.rtk_trusted)
+        self.assertFalse(p.rtk_trusted)
         self.assertGreater(gap_deg(p), 10.)
 
     def test_stationary_snaps_even_while_painting_flag_set(self):
@@ -104,9 +104,9 @@ class OutputHeadingSnap(unittest.TestCase):
     def test_baseline_outside_035_045_does_not_snap(self):
         rig = self.ready(.8)
         rig.f.set_painting(False)
-        rig.step(.8, baseline=.47, n=3)          # 0.30–0.50 仍算卫星可信，但不在 0.35–0.45
+        rig.step(.8, baseline=.47, n=15)         # 2026-11-21 起可信也是 0.35–0.45：0.47 超过 1 s 就不算可信
         p = rig.fake_turn(20., speed=.8, baseline=.47)
-        self.assertTrue(p.rtk_trusted)
+        self.assertFalse(p.rtk_trusted)
         self.assertGreater(gap_deg(p), 10.)
 
     def test_secondary_not_fixed_does_not_snap(self):

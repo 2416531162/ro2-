@@ -452,6 +452,9 @@ def load_fusion_config(gnss_fusion, path):
         overrides.setdefault('fix_jitter_k', 2.0)
         # 控制输出跟融合状态的平滑 0.25 → 0.10 s：横向纠偏少 0.15 s 滞后
         overrides.setdefault('output_position_tau_s', 0.10)
+        # 一根天线被污染就用另一根定位（2026-11-21 用户）：副天线在主天线右边，相距取 um982 的标称间距
+        from um982 import POSITION_BASELINE_NOMINAL_M
+        overrides.setdefault('secondary_baseline_m', POSITION_BASELINE_NOMINAL_M)
     return gnss_fusion.FusionConfig(**overrides)
 
 
@@ -462,6 +465,7 @@ def single_antenna_config(config):
     if not config.drive_differential:
         return None
     return dataclasses.replace(config, antenna_xy=SINGLE_ANTENNA_XY, tilt_compensation_enabled=False,
+                               secondary_baseline_m=0.0,    # 单天线没有副天线
                                course_init_distance_m=SINGLE_COURSE_INIT_M,
                                course_align_distance_m=SINGLE_ALIGN_M,
                                bias_initial_sigma_deg_s=SINGLE_BIAS_SIGMA_DEG_S,

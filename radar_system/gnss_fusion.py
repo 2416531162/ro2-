@@ -4,6 +4,7 @@
 标定统计也参与回放，避免延迟观测改变结果或重复累计样本。
 """
 import bisect
+import dataclasses
 import math
 from dataclasses import dataclass
 from wheel_scale import WheelScale
@@ -54,6 +55,8 @@ class GnssFix:
     sats: int
     position_variance_scale: float = 1.0  # 同历元相对基线可疑时只降位置权重，不否决固定解。
     inertial_only: bool = False         # 圆弧短时失去固定解：仅 IMU/轮速推算，不用浮点位置拉偏轨迹。
+    # 到达时最近一帧副天线固定解 (测量时刻, 本地东, 北, 解类型, σe, σn)；融合自己在 add_fix 里填，调用方不用管
+    secondary: tuple = None
 
 
 @dataclass(frozen=True)
@@ -184,6 +187,21 @@ class FusionConfig:
     # p95 1.3–1.4 cm（不受影响），靠楼 p95 5–9 cm，旧做法到 10 cm 才一刀切换推算，3–10 cm 时车跟着卫星晃。0 = 不降权
     dual_weight_m: float = 0.0
     dual_weight_window_s: float = 1.0
+    # 一根天线被污染就用另一根（2026-11-21 用户：「左卫星被污染了，右卫星其实还是好的……我认为还能继续用」）。
+    # 副天线在主天线的车体系 baseline_yaw_body_deg 方向、相距 secondary_baseline_m（0 = 副天线不进定位，旧车）。
+    # 每帧主天线固定解到时取 secondary_max_age_s 内最近一帧副天线固定解，两根各自和推算比：
+    # - 两根差 ≥ secondary_pick_pair_m，从两根最后一次对得上算起，副天线和纯推算（轮速 + IMU）对得上
+    #   （差 ≤ secondary_agree_m + 路程 1 %）、差主要出在主天线：这帧改用副天线（换算到主天线点），不按互检降权；
+    #   两根差回到 secondary_agree_m 以内换回主天线。两根差不到 secondary_pick_pair_m 分不出谁错，主天线慢慢漂开时
+    #   融合最多跟着偏到这么多再换；
+    # - 主天线不是固定解（浮点、没解）、副天线是：直接用副天线，不进推算维持。
+    # 两根的固定差（杠杆臂误差）在两根对得上时学（攒够 secondary_offset_samples 帧才开始换）。测向照旧按基线判，不受影响。
+    secondary_baseline_m: float = 0.0
+    secondary_pick_pair_m: float = 0.03
+    secondary_agree_m: float = 0.015
+    secondary_margin_m: float = 0.01
+    secondary_max_age_s: float = 0.15
+    secondary_offset_samples: int = 20
     # 推算维持后按 RTK 接回时，位置最快每秒挪这么多（平滑接回，线上不出折角；挪到差 BLEND_DONE_M 以内再照常更新，
     # 不确定度一直照常更新；时限见 BLEND_SPARE）。
     # 2026-10-01 实车靠楼：维持 2.8 s 后一步对齐跳了 8.7 cm。0 = 一步对齐（旧做法）
@@ -266,6 +284,7 @@ class FusionConfig:
             elif not math.isfinite(value):
                 raise ValueError(name + ' 必须是有限数值')
             elif name in ('yaw_scale_sigma', 'heading_sync_s', 'antenna_height_m', 'rtk_hold_s', 'dual_weight_m', 'fix_jitter_k',
+                          'secondary_baseline_m',
                           'rejoin_rate_mps', 'hold_wheel_scale_error', 'hold_slip_per_m', 'hold_slip_mps',
                           'hold_turn_slip_m_per_rad', 'hold_turn_scale_error',
                           'course_init_distance_m', 'course_refine_distance_m', 'course_align_distance_m'):
@@ -331,6 +350,8 @@ class FusedPose:
     single_antenna: bool = False
     # 卫星可信（见 TRUSTED_FRESH_S）：位置、航向以卫星为准，不报定位错误，任务层不再按推算预算 / 互检停车
     rtk_trusted: bool = False
+    # 最近一帧卫星位置用的哪根天线：'main' 主天线 / 'second' 主天线被污染或没固定、改用副天线（FusionConfig.secondary_*）
+    position_antenna: str = 'main'
 
 
 def _wrap(angle):
@@ -359,12 +380,13 @@ MISMATCH_IMU_RAD_S = 0.1
 MISMATCH_S = 0.2
 # 卫星可信（2026-10-05 用户规则：「只要 RTK 满足双固定，测向满足 0.3 到 0.5，就必须不能报任何定位错误」
 # 「即使没有轮速和 IMU 的数据，也可以靠 RTK 作业，轮速和 IMU 永远只是辅助」）：
-# 主天线固定解（NARROW_INT）、副天线固定解、双天线测向整周固定且基线 0.30–0.50 m，三样都在 TRUSTED_FRESH_S 内来过。
+# 主天线固定解（NARROW_INT）、副天线固定解、双天线测向整周固定且基线 0.35–0.45 m（2026-11-21 用户由 0.30–0.50 收紧），
+# 三样都在 TRUSTED_FRESH_S 内来过。
 # 这时位置、航向以卫星为准：双天线位置互检、推算位移互检、测向基线带、测向与 IMU 的一致性都不否决卫星，
 # 轮速、IMU 断了或对不上也不报定位错误（定位照常可用、等级报 RTK_FIXED）。代价：两根天线一起错（共模跳）抓不住。
 # 1.0 s 与 rtk_node 报「测向有效」、line_mission 认副天线固定的时限相同（10 Hz 输出、CAN 偶尔丢帧也不闪）
 TRUSTED_FRESH_S = 1.0
-TRUSTED_BASELINE_M = (0.30, 0.50)
+TRUSTED_BASELINE_M = (0.35, 0.45)
 # 控制输出航向直接对齐（continuous_output）。2026-10-10 用户：「大偏差立即对齐，双天线可信（两个天线都固定、
 # 基线 0.35–0.45 m）时，如果车停着、不在喷，或者差值超过 2°，控制用的车头角直接对齐双天线，不再每秒挪 1°」。
 # 10-10 实录：开始作业时控制输出的航向比融合差 58°（融合早已跟上双天线），按 output_heading_rate_deg_s 每秒追 1°
@@ -639,6 +661,13 @@ class _State:
         self.sat_yaw = 0.0
         self.sat_yaw_t = self.sat_rate_t = -math.inf
         self.sat_rate = 0.0
+        # 副天线定位（FusionConfig.secondary_*）：在不在用、两根的固定差（车体系前、左，m）及攒了几帧、用过几帧、最近用的时刻
+        self.ant2_active = False
+        self.ant2_offset = (0.0, 0.0)
+        self.ant2_n = 0
+        self.ant2_uses = 0
+        self.ant2_t = -math.inf
+        self.ant2_anchor = None   # 两根最后一次对得上时 (推算 x, y, 航向, 路程, 主天线点 x, y, 副天线换算点 x, y)
 
 
 class GnssFusion:
@@ -664,6 +693,7 @@ class GnssFusion:
         # 到达顺序上最近一帧主天线 (t, 解)、副天线 (t, 解)、测向 (t, 解, 基线 m)：判卫星可信用（见 TRUSTED_FRESH_S），
         # 结果跟样本一起存下，历史重放时不变
         self._seen_fix = self._seen_fix2 = self._seen_heading = None
+        self._fix2_latest = None        # 最近一帧副天线固定解（FusionConfig.secondary_*，见 GnssFix.secondary）
         # 任务层每拍告诉融合现在是否在喷（set_painting）：不在喷时控制输出航向直接对齐（见 OUTPUT_SNAP_BASELINE_M）
         self.painting = False
 
@@ -776,8 +806,13 @@ class GnssFusion:
             self._seen_fix2 = (s.t, s.sol if ok else 'NONE')
         if (self._frame is None or not all(math.isfinite(v) for v in (s.t, s.lat_deg, s.lon_deg))
                 or s.sol not in _FIXED):
+            if self._fix2_latest is not None and math.isfinite(s.t) and s.t >= self._fix2_latest[0]:
+                self._fix2_latest = None          # 副天线新来的一帧不是固定解：旧的那帧不再拿来定位
             return
-        self._dual.add_secondary(s.t, *self._frame.local(s.lat_deg, s.lon_deg))
+        x2, y2 = self._frame.local(s.lat_deg, s.lon_deg)
+        self._dual.add_secondary(s.t, x2, y2)
+        if all(math.isfinite(v) and v > 0 for v in (s.sigma_e, s.sigma_n)):
+            self._fix2_latest = (s.t, x2, y2, s.sol, s.sigma_e, s.sigma_n)
 
     def add_fix(self, s: GnssFix):
         if not math.isfinite(s.t):
@@ -796,6 +831,10 @@ class GnssFusion:
         self._seen_fix = (s.t, s.sol if valid else 'NONE')
         if self._frame is None and valid:
             self._frame = _Frame(s.lat_deg, s.lon_deg, s.height_m)
+        sec = self._fix2_latest
+        if (self.config.secondary_baseline_m > 0 and s.secondary is None and sec is not None
+                and abs(sec[0] - s.t) <= self.config.secondary_max_age_s):
+            s = dataclasses.replace(s, secondary=sec)     # 跟样本一起存下，历史重放时不变
         xy = self._frame.local(s.lat_deg, s.lon_deg) if valid else None
         if xy is not None and s.sol in _FIXED:
             # 互检偏差、卫星是否可信（到达时的）跟样本一起存下，历史重放时不变
@@ -1398,7 +1437,7 @@ class GnssFusion:
             s.heading_resets += 1
 
     def _adaptive_heading(self, sample, yaw, raw, variance, trusted):
-        """Gen5：有效测向都用（rtk_node 判有效：整周固定、基线 0.30–0.50 m），不拿 IMU 否决测向
+        """Gen5：有效测向都用（rtk_node 判有效：整周固定、基线 0.35–0.45 m），不拿 IMU 否决测向
         （2026-10-05 用户：「原来的检查必须删除，这种检查是不合理的」；IMU 只是辅助）。
         增益照常限幅：直行慢校、转弯或和推算差得多时快校；限幅通过放大 R 实现，转弯/接回时不把角度差学成 IMU 漂移率。
         """
@@ -1466,8 +1505,90 @@ class GnssFusion:
             return s.wheel_yaw
         return 0.
 
+    def _secondary_pick(self, sample, xy):
+        """主天线被污染（两根对不上、只有副天线和纯推算对得上）或没有固定解时，改用副天线：返回换成副天线的
+        (样本, xy)，xy 是换算到主天线点的位置；否则 None（照旧用主天线）。
+
+        谁对谁错不拿融合状态比（固定解噪声只按 2 mm 算，融合紧跟主天线，主天线慢慢漂开时两根和融合的差分不出来），
+        拿纯推算（轮速 + IMU，s.dr_x / dr_y）比：两根最后一次对得上时记下起点，之后各自走了多少和推算走了多少比，
+        允许 secondary_agree_m + 路程的 1 %（轮径比例误差）。两根对得上时学它们的固定差（杠杆臂误差）。"""
+        s, cfg = self._s, self.config
+        sec = sample.secondary
+        if (cfg.secondary_baseline_m <= 0 or not s.position_ready or not s.yaw_ready
+                or sec is None or sec[3] not in _FIXED):
+            s.ant2_active = False
+            return None
+        t2, x2, y2, sol2, se2, sn2 = sec
+        ax, ay, _ = self._lever()
+        b = self._baseline
+        bx, by = ax + cfg.secondary_baseline_m * math.cos(b), ay + cfg.secondary_baseline_m * math.sin(b)
+        cs, sn = math.cos(s.yaw), math.sin(s.yaw)
+        # 推算的副天线在它自己的测量时刻 t2 的位置（和主天线这帧差的那点时间按车速、转速退回去）
+        dt = sample.t - t2
+        v, w = s.speed * s.wheel_cal.applied, self._turn_rate()
+        yaw2 = s.yaw - w * dt
+        c2, s2 = math.cos(yaw2), math.sin(yaw2)
+        mid = s.yaw - 0.5 * w * dt
+        rx, ry = s.x - v * dt * math.cos(mid), s.y - v * dt * math.sin(mid)
+        e2x, e2y = x2 - (rx + c2*bx - s2*by), y2 - (ry + s2*bx + c2*by)          # 副天线减推算（世界系）
+        p1x, p1y = s.x + cs*ax - sn*ay, s.y + sn*ax + cs*ay                      # 推算的主天线点
+        ox, oy = s.ant2_offset
+        wx, wy = cs*ox - sn*oy, sn*ox + cs*oy
+        fixed1 = xy is not None and sample.sol in _FIXED
+        if fixed1:
+            raw_dx, raw_dy = e2x - (xy[0] - p1x), e2y - (xy[1] - p1y)            # 两根之差（扣固定差前）
+            if not s.ant2_active and math.hypot(raw_dx - wx, raw_dy - wy) < cfg.secondary_agree_m:
+                # 两根对得上：学固定差（车体系），前 secondary_offset_samples 帧按平均，之后很慢地低通（1 %/帧，10 Hz 约 10 s）：
+                # 杠杆臂误差是不变的，学快了会把一根天线慢慢漂开的那段当成固定差吃掉，就分不出来了
+                s.ant2_n += 1
+                k = max(1.0 / s.ant2_n, 0.01)
+                bxo, byo = cs*raw_dx + sn*raw_dy, -sn*raw_dx + cs*raw_dy
+                s.ant2_offset = ox, oy = (ox + k * (bxo - ox), oy + k * (byo - oy))
+                wx, wy = cs*ox - sn*oy, sn*ox + cs*oy
+        if s.ant2_n < cfg.secondary_offset_samples:
+            s.ant2_active = False
+            return None
+        m2x, m2y = p1x + e2x - wx, p1y + e2y - wy                                # 副天线换算到主天线点
+        if fixed1:
+            m1x, m1y = xy[0], xy[1]
+            pair = math.hypot(m1x - m2x, m1y - m2y)
+            if not s.ant2_active and pair < cfg.secondary_agree_m:
+                s.ant2_anchor = (s.dr_x, s.dr_y, s.yaw, s.odo, m1x, m1y, m2x, m2y)
+                return None
+            a = s.ant2_anchor
+            if a is None:
+                s.ant2_active = False
+                return None
+            # 主天线点从起点按纯推算该走到哪
+            ca, sa = math.cos(a[2]), math.sin(a[2])
+            ddx = s.dr_x - a[0] + (cs*ax - sn*ay) - (ca*ax - sa*ay)
+            ddy = s.dr_y - a[1] + (sn*ax + cs*ay) - (sa*ax + ca*ay)
+            d1 = math.hypot(m1x - a[4] - ddx, m1y - a[5] - ddy)
+            d2 = math.hypot(m2x - a[6] - ddx, m2y - a[7] - ddy)
+            allow = cfg.secondary_agree_m + 0.01 * abs(s.odo - a[3])
+            if s.ant2_active:
+                # 用着副天线：两根又对得上、或者反过来主天线和推算对得上而副天线对不上，才换回主天线
+                use = pair >= cfg.secondary_agree_m and not (d1 <= allow and d2 > d1 + cfg.secondary_margin_m)
+            else:
+                # 副天线和推算对得上，两根的差主要出在主天线（起点记下时主天线可能已经漂开一点，不要求它单独超限）
+                use = (pair >= cfg.secondary_pick_pair_m and d2 <= allow
+                       and d1 > d2 + cfg.secondary_margin_m and d1 - d2 >= 0.5 * pair)
+        else:
+            use = True                       # 主天线浮点 / 没解、副天线固定：用副天线
+        s.ant2_active = use
+        if not use:
+            return None
+        s.ant2_uses += 1
+        s.ant2_t = sample.t
+        trust = bool(xy[3]) if fixed1 and len(xy) > 3 else False
+        return (dataclasses.replace(sample, sol=sol2, sigma_e=se2, sigma_n=sn2, position_variance_scale=1.0),
+                (m2x, m2y, None, trust))
+
     def _fix(self, sample, xy):
         s, cfg = self._s, self.config
+        pick = self._secondary_pick(sample, xy)
+        if pick is not None:
+            sample, xy = pick
         trusted = xy is not None and sample.sol in _FIXED and len(xy) > 3 and bool(xy[3])
         self._mark_trust(sample.t, trusted)
         if sample.inertial_only and sample.sol not in _FIXED:
@@ -2035,7 +2156,7 @@ class GnssFusion:
                 reasons.append('gnss_alignment')
         trusted = self._trusted() and s.yaw_ready and s.position_ready
         if trusted:
-            # 用户规则（见 TRUSTED_FRESH_S）：双固定 + 测向基线 0.30–0.50 m 就以卫星为准，轮速、IMU 断了或对不上、
+            # 用户规则（见 TRUSTED_FRESH_S）：双固定 + 测向基线 0.35–0.45 m 就以卫星为准，轮速、IMU 断了或对不上、
             # 互检、推算预算都不算定位错误：照常可用，等级报固定解，不带任何原因
             quality, usable, reasons = 'RTK_FIXED', True, []
         return FusedPose(s.t, x, y, _wrap(yaw), s.doppler_speed if wheel_replaced else s.speed*s.wheel_cal.applied,
@@ -2054,7 +2175,8 @@ class GnssFusion:
                          s.hall_still if 0 <= s.t-s.wheel_t <= cfg.sensor_timeout_s else None,
                          (s.ground_speed <= .02) if 0 <= s.t-s.ground_t <= max(cfg.sensor_timeout_s,STATIONARY_DOPPLER_FRESH_S) else None,
                          s.motion_evidence, gnss_still_required=cfg.ground_speed_still,
-                         single_antenna=cfg.course_align_distance_m > 0, rtk_trusted=trusted)
+                         single_antenna=cfg.course_align_distance_m > 0, rtk_trusted=trusted,
+                         position_antenna='second' if s.ant2_active and s.t - s.ant2_t <= cfg.fixed_timeout_s else 'main')
 
     def antenna_lever(self):
         """现在用的 ANT1 水平杠杆臂（车体系前、左，m，含倾斜补偿）；line_mission 核对定位跳动时用同一个。"""
@@ -2142,5 +2264,7 @@ class GnssFusion:
             'position_resets': s.resets,
             'rtk_rejoins': s.rejoins,
             'dual_antenna': self._dual.status(),
+            'secondary_position': {'active': s.ant2_active, 'offset_m': [round(v, 4) for v in s.ant2_offset],
+                                   'samples': s.ant2_n, 'uses': s.ant2_uses},
             'history_samples': len(self._keys),
         }

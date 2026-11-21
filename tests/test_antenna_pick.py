@@ -89,7 +89,7 @@ class PickUnit(unittest.TestCase):
 class StraightWithDisturbedMain(unittest.TestCase):
     """直线上真跑 _straight_first：先 6 s 两根对得上，再 3 s 主天线被拉偏 5 cm、两天线差 8 cm。"""
 
-    def run_line(self, with_second):
+    def run_line(self, with_second, disturbed_baseline=.41):
         tr = runup.tracker()
         tr.runup_speed_mps = None                                   # 已过线头、正常喷线阶段（助跑另有开喷检查）
         g = tr._straight_guide
@@ -100,8 +100,8 @@ class StraightWithDisturbedMain(unittest.TestCase):
             s = 2.0 + .006 * i
             tr.st.s, tr.st.e, tr.st.heading_err = s, 0., 0.
             tr.sync(t, (t, 0., 0.))
-            tr.set_heading_baseline(t, .41)
             disturbed = i > 300
+            tr.set_heading_baseline(t, disturbed_baseline if disturbed else .41)
             tr.set_rtk_quality(t, .01, 28, .08 if disturbed else .01, True)
             x, y, yaw = tr.path.pose(s)
             if with_second and i % 10 == 0:                         # 副天线 5 Hz，一直是真位置
@@ -122,6 +122,18 @@ class StraightWithDisturbedMain(unittest.TestCase):
         self.assertGreater(sum(accepted) / len(accepted), .9)
         self.assertGreater(picks.count('second') / len(picks), .9)
         self.assertLess(max(abs(e) for e in es), .01)                 # 推算没被拉偏的主天线带走
+
+    def test_baseline_out_of_band_still_uses_good_antenna(self):
+        """2026-11-21 用户：一根天线被污染、测向基线掉到 0.30 m（出 0.35–0.45），另一根还和 IMU 对得上就照样用它纠偏。"""
+        accepted, picks, es = self.run_line(with_second=True, disturbed_baseline=.30)
+        self.assertGreater(sum(accepted) / len(accepted), .9)
+        self.assertGreater(picks.count('second') / len(picks), .9)
+        self.assertLess(max(abs(e) for e in es), .01)
+
+    def test_baseline_out_of_band_without_good_antenna_stops(self):
+        accepted, picks, es = self.run_line(with_second=False, disturbed_baseline=.30)
+        self.assertLess(sum(accepted) / len(accepted), .1)
+        self.assertEqual(set(picks), {None})
 
     def test_reported_position_follows_second_antenna(self):
         """报给 app 的位置（地图喷线、作业报告）：融合被主天线拉偏 5 cm，用副天线时挪回 5 cm。"""
