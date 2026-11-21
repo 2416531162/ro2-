@@ -112,7 +112,7 @@ class MotorState:
 # App「驱动器参数」（2026-11-16 用户：草地起步原地转推不动，要能在 App 里改驱动器）。只对 CAN 驱动器：
 # 都是控制指令，驱动器不回复、读不回来，车端记住发过什么，连上驱动器时、驱动器断电重启回话时重发。
 TUNING_FIELDS = ('max_current_a', 'config_table', 'accel_mps2', 'decel_mps2')
-TUNING_MAX_CURRENT_A = 20.0         # 用户 2026-11-16 定：闭环最大电流最多 20 A；oid.yaml 只能往下调
+TUNING_MAX_CURRENT_A = 40.0         # 用户 2026-11-21：闭环最大电流最多 40 A（驱动器现在支持；11-16 定的是 20 A）；oid.yaml 只能往下调
 TUNING_RANGES = {'max_current_a': (0.5, TUNING_MAX_CURRENT_A, 'A', '闭环最大电流'),
                  'accel_mps2': (0.2, 3.0, 'm/s²', '加速度'),
                  # 减速度也是急停、指令超时时驱动器自己刹车的斜坡，不许设得太软

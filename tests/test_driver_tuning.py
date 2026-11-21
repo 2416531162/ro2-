@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.join(ROOT, 'radar_system'))
 import app_link  # noqa: E402
 import oid_codec as oc  # noqa: E402
 import oid_driver  # noqa: E402
-from oid_link import CanLink, DriverTuning, OidChassis, WheelConfig  # noqa: E402
+from oid_link import TUNING_MAX_CURRENT_A, CanLink, DriverTuning, OidChassis, WheelConfig  # noqa: E402
 from oid_sim import SimOidBus  # noqa: E402
 
 
@@ -56,6 +56,14 @@ class Parse(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'max_current_limit_a'):
             DriverTuning.parse({'max_current_a': 5}, 0)         # 没设上限不许改
         DriverTuning.parse({'config_table': 2, 'accel_mps2': 1.0}, 0)   # 其他几项照常能改
+
+    def test_code_cap_is_40_a(self):
+        """用户 2026-11-21：驱动器现在支持 40 A，代码硬上限 20 → 40；oid.yaml 写再大也只到 40。"""
+        self.assertEqual(TUNING_MAX_CURRENT_A, 40.0)
+        self.assertEqual(DriverTuning.parse({'max_current_a': 40}, 40).max_current_centiamps(), 4000)
+        for limit in (40, 60):
+            with self.assertRaisesRegex(ValueError, '40'):
+                DriverTuning.parse({'max_current_a': 40.5}, limit)
 
 
 class Chassis(unittest.TestCase):
@@ -131,7 +139,7 @@ class Node(unittest.TestCase):
             os.makedirs(os.path.dirname(self.path))
             with open(self.path, 'w', encoding='utf-8') as f:
                 f.write(self.preset)
-        patch = mock.patch.dict(oid_driver.PARAMS, tuning_file=self.path, max_current_limit_a=20.0)
+        patch = mock.patch.dict(oid_driver.PARAMS, tuning_file=self.path, max_current_limit_a=40.0)
         patch.start()
         self.addCleanup(patch.stop)
         fixtures.TestGen5DriverSilence.setUp(self)
@@ -161,7 +169,7 @@ class NodeTune(Node):
         self.assertTrue(status['result']['ok'])
         self.assertTrue(status['sent'])
         self.assertEqual(status['values']['max_current_a'], 16.5)
-        self.assertEqual(status['limit_a'], 20.0)
+        self.assertEqual(status['limit_a'], 40.0)
 
     def test_moving_or_out_of_range_is_rejected_and_nothing_changes(self):
         self.step(4.0)
@@ -171,9 +179,9 @@ class NodeTune(Node):
         self.assertIn('停车', status['result']['message'])
         self.assertFalse(os.path.exists(self.path))
         self.step(3.0, command=(0.0, 0.0))
-        status = self.tune('t2', max_current_a=25.0)
+        status = self.tune('t2', max_current_a=40.5)
         self.assertFalse(status['result']['ok'])
-        self.assertIn('0.5–20', status['result']['message'])
+        self.assertIn('0.5–40', status['result']['message'])
         self.step(.1)
         self.assertFalse(frames(self.device, 0x14))
         self.assertFalse(os.path.exists(self.path))
