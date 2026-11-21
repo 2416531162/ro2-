@@ -52,21 +52,21 @@ def headings(sections, car_yaw):
 BESIDE = line_car(.3, .25, math.pi)
 
 
-BACK_ON = 1.5        # 打开时的回倒长度（2026-11-19 起默认）
+BACK_ON = 1.5        # 打开时的回倒长度
 
 
 class RunupPlan(unittest.TestCase):
-    def test_on_by_default(self):
-        # 2026-11-19 打开（10-11 草地 26 次进线 21 次转完直接起步扭 5–10°）：默认就是转正后顺线倒回 1.5 m 再起步
-        self.assertEqual(rp.RUNUP_BACK_M, 1.5)
+    def test_off_by_default_plan_unchanged(self):
+        # 2026-11-19 晚 用户：按「对准助跑起点开过去、转正直接起步」走，起步扭头交给控制
+        self.assertEqual(rp.RUNUP_BACK_M, 0.)
         secs, _ = rp.plan_current(LINE, BESIDE, .556, nozzle_x=NOZZLE)
-        *_, (d2, l2, t2), (d3, _, t3) = headings(secs, BESIDE[2])
+        *_, (d2, _, t2), (d3, _, _) = headings(secs, BESIDE[2])
         self.assertEqual((d2, d3), (-1, 1))
-        self.assertAlmostEqual(l2, rp.RUNUP_BACK_M)
-        self.assertLess(abs(t3), 1e-6)
+        self.assertGreater(abs(t2), 150.)          # 转过去倒到助跑起点，到了再转正就起步
 
+    @mock.patch.object(rp, 'RUNUP_BACK_M', BACK_ON)
     def test_after_finishing_the_same_line_backwards(self):
-        # 刚把同一条线反方向画完、停在线尾外：最后一下顺线倒回再起步，不在助跑起点原地转
+        # 打开回倒时：刚把同一条线反方向画完、停在线尾外，最后一下顺线倒回再起步，不在助跑起点原地转
         car = line_car(12.5, 0., 0.)
         spec = rp.RouteSpec(kind='path', points=((12., 0.), (0., 0.)), closed=False, cruise=.8)
         secs, _ = rp.plan_current(spec, car, .556, nozzle_x=NOZZLE)

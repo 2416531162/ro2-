@@ -67,8 +67,7 @@ class LineEntry(unittest.TestCase):
 
     def test_slightly_off_line_reverses_with_small_turns(self):
         m, _ = self.plan(line_car(-1., .3))
-        # 2026-11-19：到 G 还要转正，改成在 G 前方转正、最后一下顺线倒回 RUNUP_BACK_M 再起步
-        self.assertEqual(m[-2], ('倒', rp.RUNUP_BACK_M), m)
+        self.assertEqual(m[1][0], '倒', m)
         self.assertLess(max(pivots(m)), 45., m)
 
     def test_past_start_reverses_back(self):
@@ -106,10 +105,8 @@ class LineEntry(unittest.TestCase):
         car = (0., 0., 0.)
         spec = rp.RouteSpec(kind='path', points=((-1.0, 0.), (-6., 0.)), closed=False)
         sections, _ = rp.plan_current(spec, car, MIN_R, nozzle_x=NOZZLE)
-        m = moves(sections, car)
-        # 2026-11-19：到 G 要原地转时先到 G 前方 RUNUP_BACK_M 转正再顺线倒回；去转正点开过去还是倒过去按哪个转得少，倒得很短
-        self.assertEqual(m[-2], ('倒', rp.RUNUP_BACK_M), m)
-        self.assertLessEqual(sum(v[1] for v in m if isinstance(v, tuple) and v[0] == '倒'), rp.REVERSE_ENTRY_MAX_M + 1e-9, m)
+        m = approach(moves(sections, car))
+        self.assertNotIn('倒', [v[0] for v in m if isinstance(v, tuple)], m)
 
 
 class ReverseRunup(unittest.TestCase):
