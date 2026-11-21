@@ -30,8 +30,15 @@ class ChassisGeometry:
     # 此时 wheelbase / max_steer 不参与运动学，track_m 是两驱动轮的轮距
     drive: str = PROFILE["drive"]["type"]
     diff_min_radius_m: float = PROFILE["drive"]["min_radius_m"]     # 差速车跟踪圆弧的最小半径（内侧轮还有速度）
-    pivot_rate_rad_s: float = PROFILE["drive"]["pivot_rate_rad_s"]  # 原地转向最大角速度
+    pivot_rate_rad_s: float = PROFILE["drive"]["pivot_rate_rad_s"]  # 原地转向最大角速度（规划估时、场地规划限速、上报 app 用）
     pivot_accel_rad_s2: float = PROFILE["drive"]["pivot_accel_rad_s2"]
+    # 作业里跟踪器真正原地转的最高角速度（2026-11-21 用户「原地转不顺……那就不要低速，速度再提高点」）：Gen5 0.8 → 1.5 rad/s，
+    # 每个轮子 0.8×0.3375 = 0.27 m/s → 约 0.5 m/s。0.27 m/s 正在驱动器低速跑快区（11-19 架空：≤0.3 m/s 实际快 1.6–1.85×、
+    # 右驱 0.31–0.54 测速来回切；0.5 m/s 两轮 100%），11-21 实车 5 次约 170° 原地转实际转速峰值是命令的 1.65–2.3 倍、
+    # 匀速段 ±0.16–0.27 rad/s 忽快忽慢。只改作业原地转；规划估时、场地规划、手动摇杆、标定转圈仍按 pivot_rate_rad_s
+    job_pivot_rate_rad_s: float = PROFILE["drive"]["job_pivot_rate_rad_s"]
+    # 作业原地转收尾减速上限（rad/s²）：减速曲线仍按 pivot_accel 规划，实际允许降得这么快，转得快了也停得准（Gen5 2.0）
+    job_pivot_brake_rad_s2: float = PROFILE["drive"]["job_pivot_brake_rad_s2"]
 
     def __post_init__(self):
         if self.wheelbase_m <= 0:
@@ -42,7 +49,8 @@ class ChassisGeometry:
             raise ValueError("max_steer_rad 超出合理范围")
         if self.drive not in ("ackermann", "differential"):
             raise ValueError("drive 只能是 ackermann 或 differential")
-        if min(self.diff_min_radius_m, self.pivot_rate_rad_s, self.pivot_accel_rad_s2) <= 0:
+        if min(self.diff_min_radius_m, self.pivot_rate_rad_s, self.pivot_accel_rad_s2, self.job_pivot_rate_rad_s) <= 0 \
+                or self.job_pivot_brake_rad_s2 < self.pivot_accel_rad_s2:
             raise ValueError("差速底盘的最小半径、原地转向角速度和角加速度必须为正")
 
     @property

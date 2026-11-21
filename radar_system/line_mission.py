@@ -60,7 +60,7 @@ FIX2_MAX_AGE_S = 1.0        # 副天线固定解这么久内来过就算还固�
 # 因定位问题暂停后，定位连续可用这么久就自动接着走（操作员停止、控制权被切走照样结束，不会自动恢复）
 AUTO_RESUME_S = 1.0
 # 定位问题暂停（推算误差预算不足、定位不能用）时车速按这个减速度降到 0，角速度同比例降（不再按坏定位修方向），
-# 原地转按 geo.pivot_accel_rad_s2 降。2026-10-02 遮天线实测：指令一拍 0.8 → 0，驱动器按 3 m/s² 急刹，停住后两轮
+# 原地转按 geo.job_pivot_brake_rad_s2 降（Gen5 2026-11-21 起 2.0，旧车 = pivot_accel_rad_s2）。2026-10-02 遮天线实测：指令一拍 0.8 → 0，驱动器按 3 m/s² 急刹，停住后两轮
 # 反转溜回 9–11 cm、约 2 s 才稳，恢复起步又先往后 2–3 cm 再前冲；同一批里路线终点、手动松手（都是 1–2 s 的斜坡）
 # 停后最多 0.03 m/s。1.5 m/s² 与手动松手渐停相同：0.8 m/s 约 0.53 s、21 cm 停住；推算误差预算按 0.5 m/s² 预估停车，
 # 仍偏保守。
@@ -1301,7 +1301,8 @@ class LineMission:
 
     def _limit_decel(self, now, motion_mode, vx, wz, dt):
         """从上一拍发出的指令起，车速每拍最多降 SOFT_STOP_DECEL_MPS2·dt（见常数说明），曲率不变；原地转（车速≈0）的角速度
-        按 geo.pivot_accel_rad_s2 降。跟踪器暂停 / 中止 / 结束给的零、操作员暂停、限速突降都在这里变成渐停。
+        按 geo.job_pivot_brake_rad_s2 降（与跟踪器原地转收尾同一个上限；旧车等于 pivot_accel_rad_s2）。
+        跟踪器暂停 / 中止 / 结束给的零、操作员暂停、限速突降都在这里变成渐停。
         不在 NAVIGATION（急停、控制权被切走）时不管：仲裁和驱动器自己处理。一拍只做一次。"""
         if self._soft_at == now:
             return vx, wz
@@ -1319,7 +1320,7 @@ class LineMission:
                     vx = math.copysign(floor, pv)
                     wz = vx * k
             elif vx == 0.0 and abs(pv) < 1e-3:
-                floor = abs(pw) - self.geo.pivot_accel_rad_s2 * dt
+                floor = abs(pw) - self.geo.job_pivot_brake_rad_s2 * dt
                 if floor > 0.0 and (abs(wz) < floor - 1e-9 or wz * pw < 0.0):
                     wz = math.copysign(floor, pw)
         self._soft_prev = (now, vx, wz)
@@ -1473,7 +1474,10 @@ class LineMission:
         if not self.differential:
             return {}
         from paint_quality import offset_limit
-        return dict(pivot_rate=self.geo.pivot_rate_rad_s, pivot_accel=self.geo.pivot_accel_rad_s2, reverse_gain=1.0,
+        # 原地转按作业原地转速（robot_gen5.json job_pivot_rate_rad_s，2026-11-21 0.8 → 1.5 rad/s，轮速避开低速区），
+        # 收尾减速最多 job_pivot_brake_rad_s2（Gen5 2.0，规划仍按 pivot_accel 1.0，留余量停准）
+        return dict(pivot_rate=self.geo.job_pivot_rate_rad_s, pivot_accel=self.geo.pivot_accel_rad_s2,
+                    pivot_brake=self.geo.job_pivot_brake_rad_s2, reverse_gain=1.0,
                     reverse_mps=DIFF_REVERSE_MPS, settle_s=DIFF_SETTLE_S, paint_offset_limit_m=offset_limit(),
                     constant_straight_speed=True, constant_paint_speed=True, **({'reverse_runup': True} if route else {}))
 

@@ -2557,13 +2557,16 @@ class SectionTracker:
                  still_mps=0.02, settle_s=0.3, switch_timeout_s=5.0, pivot_rate=None, pivot_accel=1.0,
                  pivot_tol=math.radians(1.0), pivot_timeout_s=20.0, pivot_stop_tol=0.005,
                  pivot_min=math.radians(5.0), pivot_retries=2, pivot_floor=0.1, paint_offset_limit_m=None,
-                 constant_straight_speed=False, reverse_runup=False, constant_paint_speed=False):
+                 constant_straight_speed=False, reverse_runup=False, constant_paint_speed=False, pivot_brake=None):
         """pivot_rate 不为 None（差速车）：下一段起点车头方向与车差 pivot_min 以上时，停稳后原地转过去再开，
         起步时也一样；角速度不超过 pivot_rate、角加速度不超过 pivot_accel。阿克曼车为 None，不原地转。
         原地转仍按 pivot_tol 瞄准；转完差 pivot_min 以内不补转，直接慢速往前开，万向轮回正、车头由跟踪纠正
         （2026-09-30 实车：转完一停车头回弹约 1°，按 1° 补转时小指令推不动，反复补转卡住 27 s）。
         转完仍差 pivot_min 以上最多补转 pivot_retries 次，再不行按 pivot_timeout 中止。没转到位时角速度不低于
-        pivot_floor（rad/s，0.1 约轮子 33 erpm；实车 ±5–19 erpm 收尾磨 1.6 s，±14 erpm 补转推不动）。"""
+        pivot_floor（rad/s，0.1 约轮子 33 erpm；实车 ±5–19 erpm 收尾磨 1.6 s，±14 erpm 补转推不动）。
+        pivot_brake：收尾减速时角速度每秒最多降多少（rad/s²）；空 = 与 pivot_accel 相同。减速曲线仍按 pivot_accel 规划，
+        实际允许降得更快，预估差一点时有余量刹住、停得准（2026-11-21 Gen5 原地转 0.8 → 1.5 rad/s：刹车也只按 1.0 时
+        仿真 90°/170° 冲过 4–14° 还要反向补转；收尾允许 2.0 后最多冲过 0.3°、少转 1.2°，0.8 rad/s 时是 1.7° / 0.5°）。"""
         self.sections = list(sections)
         if type(constant_straight_speed) is not bool:
             raise ValueError('直线定速策略必须是布尔值')
@@ -2587,6 +2590,9 @@ class SectionTracker:
         self.pivot_rate, self.pivot_accel, self.pivot_tol = pivot_rate, pivot_accel, pivot_tol
         self.pivot_min, self.pivot_retries, self.pivot_floor = pivot_min, pivot_retries, pivot_floor
         self.pivot_timeout_s = pivot_timeout_s
+        if pivot_brake is not None and not (math.isfinite(pivot_brake) and pivot_brake >= pivot_accel):
+            raise ValueError('原地转向收尾减速不能小于角加速度')
+        self.pivot_brake = pivot_accel if pivot_brake is None else pivot_brake
         self.trackers = []
         for i, sec in enumerate(self.sections):
             reverse_straight = (sec.direction < 0 and self.geo.differential and config.straight_imu_enabled
@@ -3159,8 +3165,12 @@ class SectionTracker:
             if self._pivot_slowing:
                 magnitude = min(magnitude,abs(self._w))
             want = self._pivot_direction*magnitude
-        step = self.pivot_accel * dt
-        self._w += max(-step, min(step, want - self._w))
+        # 加速按 pivot_accel；往零减（收尾、刹车）最多按 pivot_brake
+        up, down = self.pivot_accel * dt, self.pivot_brake * dt
+        if abs(want) < abs(self._w) or want * self._w < 0:
+            self._w += max(-down, min(down, want - self._w))
+        else:
+            self._w += max(-up, min(up, want - self._w))
         if want == 0.0 and abs(self._w) < 1e-9:
             # 发出了零速不等于车停稳；保留目标，给回退恢复留在同一次尝试中。
             still = stationary(pose,self.still_mps,yaw_limit=.05) and abs(ahead)<=1e-4

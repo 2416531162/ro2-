@@ -23,6 +23,13 @@ def load_profile(path=None):
     if isinstance(profile, dict) and isinstance(profile.get('drive'), dict) and 'nozzle_right_m' not in profile['drive']:
         # 加水泵横向位置之前的现场配置：水泵按在车中线上读（与当时的行为相同）
         profile['drive']['nozzle_right_m'] = 0.0
+    if isinstance(profile, dict) and isinstance(profile.get('drive'), dict) and 'job_pivot_rate_rad_s' not in profile['drive'] \
+            and 'pivot_rate_rad_s' in profile['drive']:
+        # 加作业原地转速（2026-11-21）之前的现场配置：作业原地转照旧按 pivot_rate_rad_s
+        profile['drive']['job_pivot_rate_rad_s'] = profile['drive']['pivot_rate_rad_s']
+    if isinstance(profile, dict) and isinstance(profile.get('drive'), dict) and 'job_pivot_brake_rad_s2' not in profile['drive'] \
+            and 'pivot_accel_rad_s2' in profile['drive']:
+        profile['drive']['job_pivot_brake_rad_s2'] = profile['drive']['pivot_accel_rad_s2']
     if set(profile) != set(default) or profile.get('schema_version') != 1:
         raise ValueError('unsupported robot profile schema')
     for section, values in default.items():
@@ -61,9 +68,11 @@ def load_profile(path=None):
     drive = profile['drive']
     if drive['type'] not in DRIVE_TYPES:
         raise ValueError('drive.type must be one of ' + '/'.join(DRIVE_TYPES))
-    if min(drive['min_radius_m'], drive['pivot_rate_rad_s'], drive['pivot_accel_rad_s2']) <= 0 \
-            or drive['pivot_rate_rad_s'] > profile['driver']['max_yaw_rate_rad_s'] + 1e-9:
+    if min(drive['min_radius_m'], drive['pivot_rate_rad_s'], drive['pivot_accel_rad_s2'], drive['job_pivot_rate_rad_s']) <= 0 \
+            or max(drive['pivot_rate_rad_s'], drive['job_pivot_rate_rad_s']) > profile['driver']['max_yaw_rate_rad_s'] + 1e-9:
         raise ValueError('invalid drive limits')
+    if not drive['pivot_accel_rad_s2'] <= drive['job_pivot_brake_rad_s2'] <= 3.0:
+        raise ValueError('invalid pivot brake')
     if not 0 <= drive['nozzle_x_m'] < g['front_m']:
         raise ValueError('nozzle must be between the rear axle and the front of the body')
     if not abs(drive['nozzle_right_m']) <= 1.0:
