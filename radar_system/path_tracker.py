@@ -641,6 +641,7 @@ class PathTracker:
         self._imu_history = deque(maxlen=64)
         self._straight_imu_rejected = False
         self._straight_nozzle = (config.straight_nozzle_x_m, 0.0)
+        self._straight_raw = None       # 这拍 IMU 直线混合后、限幅前的转向；update 末尾和实际下发比，判断要不要抗积分饱和
         self._straight_core = HeadingControl(HeadingControlConfig(
             kp=config.straight_kp, ki=config.straight_ki, kd=config.straight_kd,
             delay_s=config.delay_s if config.straight_prediction_delay_s is None else config.straight_prediction_delay_s,
@@ -1189,6 +1190,7 @@ class PathTracker:
         """返回 (vx, wz)。pose 需有 x, y, yaw, speed, yaw_rate, usable_for_control。"""
         self._clock += dt
         self._advance_cruise(dt)
+        self._straight_raw = None
         steer = None
         if self.st.state == 'RUNNING' and pose.usable_for_control:
             steer = self._arc_first(pose, dt)
@@ -1221,6 +1223,10 @@ class PathTracker:
                 self._straight_status['final_wz'] = wz
         if self.st.state == 'RUNNING':
             self._check_paint_start(pose,dt,v)
+        if self._straight_raw is not None and (self._straight_weight > 0 or self._launch_weight > 0):
+            # 起步有界纠偏、助跑限幅、曲率上限把这拍转向又限了：内环积分不往被限的方向涨（HeadingControl.limited），
+            # 否则助跑攒下的假偏置带进线头（2026-11-22 原地转进线 151131：开喷时积分 0.068 rad/s → 线头 6.9 cm）
+            self._straight_core.limited(wz - self._straight_raw)
         self._sent.append((self._clock, v, wz))
         if (self._straight_weight > 0 or self._launch_weight > 0) and self._imu_now is not None:
             self._straight_core.record_sent(self._imu_now, wz)
@@ -1695,6 +1701,7 @@ class PathTracker:
         inner_w = self._straight_core.step(self._imu_now, error, gyro, sample_t=sample_t,
                                           moving=moving, target_rate=target_rate, dt=dt, record=False)
         output = legacy_w + max(self._straight_weight,self._launch_weight) * (inner_w-legacy_w)
+        self._straight_raw = output
         output = max(-self.kappa_max*speed, min(self.kappa_max*speed, output))
         if self._straight_weight >= 1.0:
             self._launch_weight = 0.0

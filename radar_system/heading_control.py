@@ -67,6 +67,7 @@ class HeadingControl:
         self.pred = None
         self.output = max(-self.cfg.max_wz, min(self.cfg.max_wz, output))
         self.pending = self.commanded = self.residual = self.horizon = 0.0
+        self.integral_step = 0.0    # 最近一拍 step 给积分加了多少（limited 撤回用）
 
     def record_sent(self, now, wz):
         """记录真正下发的指令；相同时刻用最终值覆盖，避免过渡计算值污染预估。"""
@@ -155,8 +156,11 @@ class HeadingControl:
         bias_term = 0.0 if c.direct_rate_damping else c.kd*self.drift_lp
         pred = base + horizon * (self.integral + bias_term)
         wz = target_rate - (c.kp * pred + self.integral) - c.kd * damping
+        self.integral_step = 0.0
         if abs(wz) < c.max_wz and moving:
+            before = self.integral
             self.integral = max(-c.i_max, min(c.i_max, self.integral + c.ki * pred * dt))
+            self.integral_step = self.integral - before
             pred = base + horizon * (self.integral + bias_term)
             wz = target_rate - (c.kp * pred + self.integral) - c.kd * damping
         self.pred = pred
@@ -165,6 +169,18 @@ class HeadingControl:
         if record and c.delay_s > 0:
             self.record_sent(now, self.output)
         return self.output
+
+    def limited(self, gap):
+        """调用方没照这拍输出下发、又限了幅（起步有界纠偏、助跑、曲率上限）：gap = 实际下发 − 本该下发（限幅前）。
+        这拍积分正往被限住的方向加就撤回（条件积分抗饱和）。限幅期间车转不过去，留下的航向误差不是积分该学的偏差；
+        2026-11-22 原地转进线：助跑里 50–80% 的拍子被起步限幅卡在 2°/s，积分涨到 0.07–0.11 rad/s，开喷后车被这股
+        假偏置往一边带 1.5 m，草地线头 6.9 cm。返回是否撤回。"""
+        self._finite(gap=gap)
+        if abs(gap) > 1e-6 and self.integral_step * gap > 0.0:      # 1e-6 rad/s 以内是混合的浮点误差，不算限幅
+            self.integral -= self.integral_step
+            self.integral_step = 0.0
+            return True
+        return False
 
     def status(self):
         return dict(integral=self.integral, pred=self.pred, drift_lp=self.drift_lp, output=self.output,
