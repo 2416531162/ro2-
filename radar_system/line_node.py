@@ -26,6 +26,7 @@ from sensor_msgs.msg import Imu
 from std_msgs.msg import String
 
 import runtime_config  # noqa: F401  服务直接运行本脚本时把仓库根目录加进 sys.path（line_tracker 要用 robot_core）
+import heading_mount
 from robot_core.config import CONTROL_DT
 from robot_core.service_watchdog import watchdog
 from line_mission import RTK_HOLD_S, LineMission
@@ -427,6 +428,8 @@ def load_fusion_config(gnss_fusion, path):
         if antenna is None or (len(antenna) == 2 and all(isinstance(v, (int, float)) and abs(v - h) < 1e-6
                                                          for v, h in zip(antenna, GEN5_ANTENNA_HAND))):
             overrides['antenna_xy'] = GEN5_ANTENNA_MEASURED
+        # 测向安装偏差：文件里是没标定过的 0（或没写）时用这台车实测的 +1.7°（heading_mount，2026-11-22 用户）
+        overrides['mount_offset_deg'] = heading_mount.mount_offset(overrides.get('mount_offset_deg'), True)
         # Gen5（HDA536T）：航向推算用 IMU 自己算的航向角（2026-09-28 用户要求）；原地转向转角大，
         # 按 3% 刻度误差加航向不确定度，测向按 20 ms 时间同步误差随转速降权。
         # IMU 始终提供连续转动；可信双天线慢校直行漂移，明显转弯后及时收敛。

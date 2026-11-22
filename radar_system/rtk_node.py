@@ -36,6 +36,7 @@ from std_msgs.msg import String
 from um982 import RTK_FIXED, RTK_FLOAT, NtripClient, Um982Stream
 from ntrip_config import NtripReload
 import runtime_config  # bootstraps the release root for direct script launches
+import heading_mount
 from robot_core.service_watchdog import watchdog
 from gnss_bridge import BT_CHANNEL, CAN_CHANNEL, TABLET_PORT, BluetoothSerialServer, CanSerialBridge, TabletSerialServer
 
@@ -104,14 +105,19 @@ def heading_imu(m, stamp, mount_offset_deg=0.0, baseline_yaw_body_deg=-90.0):
     return msg
 
 
-def load_heading_calibration(path=FUSION_CONFIG):
-    """从融合标定文件读安装偏差和基线方向；没有文件就用默认值。"""
+def load_heading_calibration(path=FUSION_CONFIG, differential=None):
+    """从融合标定文件读安装偏差和基线方向；没有文件就用默认值。安装偏差按 heading_mount 取（差速车 Gen5 文件里是
+    没标定过的 0 或没写时用实测的 +1.7°），和融合（line_node.load_fusion_config）一致。differential 为空时同融合：
+    文件里的 drive_differential，没写按共享底盘配置。"""
     try:
         with open(os.path.expanduser(path), encoding='utf-8') as fh:
             cfg = json.load(fh)
-        return float(cfg.get('mount_offset_deg', 0.0)), float(cfg.get('baseline_yaw_body_deg', -90.0))
     except FileNotFoundError:
-        return 0.0, -90.0
+        cfg = {}
+    if differential is None:
+        differential = cfg.get('drive_differential', runtime_config.PROFILE['drive']['type'] == 'differential')
+    return (heading_mount.mount_offset(cfg.get('mount_offset_deg'), bool(differential)),
+            float(cfg.get('baseline_yaw_body_deg', -90.0)))
 
 
 class RtkNode(Node):

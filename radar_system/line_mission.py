@@ -850,9 +850,11 @@ class LineMission:
                 x1,y1 = self.fusion.to_local(lat,lon)
                 primary(t1,x1,y1,sol in RTK_FIXED_SOLS,lever)
             if callable(secondary) and self._fix2 is not None and lever is not None:
-                # 副天线杠杆臂 = 主天线（含倾斜补偿）+ 测向基线（车体系方向 baseline_yaw_body_deg，长度取标称）
+                # 副天线杠杆臂 = 主天线（含倾斜补偿）+ 测向基线（车体系方向 baseline_yaw_body_deg − 安装偏差 mount_offset_deg，
+                # 同 gnss_fusion；长度取标称）
                 t2, x2, y2, fixed2, length = self._fix2
-                b = math.radians(getattr(self.fusion.config, 'baseline_yaw_body_deg', -90.0))
+                fc = self.fusion.config
+                b = math.radians(getattr(fc, 'baseline_yaw_body_deg', -90.0) - getattr(fc, 'mount_offset_deg', 0.0))
                 secondary(t2, x2, y2, fixed2, (lever[0] + length * math.cos(b), lever[1] + length * math.sin(b)))
             share = getattr(tracker, 'share_imu_alignment', None)
             if callable(share):

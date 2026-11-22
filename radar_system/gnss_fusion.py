@@ -188,7 +188,7 @@ class FusionConfig:
     dual_weight_m: float = 0.0
     dual_weight_window_s: float = 1.0
     # 一根天线被污染就用另一根（2026-11-21 用户：「左卫星被污染了，右卫星其实还是好的……我认为还能继续用」）。
-    # 副天线在主天线的车体系 baseline_yaw_body_deg 方向、相距 secondary_baseline_m（0 = 副天线不进定位，旧车）。
+    # 副天线在主天线的车体系 baseline_yaw_body_deg − mount_offset_deg 方向、相距 secondary_baseline_m（0 = 副天线不进定位，旧车）。
     # 每帧主天线固定解到时取 secondary_max_age_s 内最近一帧副天线固定解，两根各自和推算比：
     # - 两根差 ≥ secondary_pick_pair_m，从两根最后一次对得上算起，副天线和纯推算（轮速 + IMU）对得上
     #   （差 ≤ secondary_agree_m + 路程 1 %）、差主要出在主天线：这帧改用副天线（换算到主天线点），不按互检降权；
@@ -1520,7 +1520,9 @@ class GnssFusion:
             return None
         t2, x2, y2, sol2, se2, sn2 = sec
         ax, ay, _ = self._lever()
-        b = self._baseline
+        # 两根天线的连线在车体系的方向 = baseline_yaw_body − 安装偏差（车头 = 测向换算 + 安装偏差，连线本身没转；
+        # 2026-11-22 Gen5 补 +1.7° 后连线在 −91.7°，不扣的话副天线前后差 1.2 cm，快到两根对得上的门槛 1.5 cm）
+        b = self._baseline - self._mount
         bx, by = ax + cfg.secondary_baseline_m * math.cos(b), ay + cfg.secondary_baseline_m * math.sin(b)
         cs, sn = math.cos(s.yaw), math.sin(s.yaw)
         # 推算的副天线在它自己的测量时刻 t2 的位置（和主天线这帧差的那点时间按车速、转速退回去）
