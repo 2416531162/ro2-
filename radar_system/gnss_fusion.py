@@ -8,6 +8,7 @@ import dataclasses
 import math
 from dataclasses import dataclass
 from wheel_scale import WheelScale
+import user_rules as rules
 
 
 @dataclass(frozen=True)
@@ -168,7 +169,6 @@ class FusionConfig:
     # 卫星地速（多普勒）接管轮速：相邻两帧的速度变化上限、连续有效多久才用
     doppler_accel_limit_mps2: float = 2.0
     doppler_recovery_s: float = 0.2
-    doppler_correlation_s: float = 0.05
     # 任务层的喷头推算误差预算；Gen5 在 line_node 中开启，旧车保持原有时限行为。
     # 估计预算 = 协方差的若干 σ + 轮速比例/滑移等模型余量，不是经认证的真实误差上界。
     hold_budget_enabled: bool = False
@@ -197,9 +197,9 @@ class FusionConfig:
     # - 主天线不是固定解（浮点、没解）、副天线是：直接用副天线，不进推算维持。
     # 两根的固定差（杠杆臂误差）在两根对得上时学（攒够 secondary_offset_samples 帧才开始换）。测向照旧按基线判，不受影响。
     secondary_baseline_m: float = 0.0
-    secondary_pick_pair_m: float = 0.03
-    secondary_agree_m: float = 0.015
-    secondary_margin_m: float = 0.01
+    secondary_pick_pair_m: float = rules.ANTENNA_PICK_PAIR_M
+    secondary_agree_m: float = rules.ANTENNA_AGREE_M
+    secondary_margin_m: float = rules.ANTENNA_MARGIN_M
     secondary_max_age_s: float = 0.15
     secondary_offset_samples: int = 20
     # 推算维持后按 RTK 接回时，位置最快每秒挪这么多（平滑接回，线上不出折角；挪到差 BLEND_DONE_M 以内再照常更新，
@@ -227,7 +227,7 @@ class FusionConfig:
     sensor_timeout_s: float = 0.2
     # 轮速超过这么久没更新才算「轮速过期」（wheel_stale，定位不可控、停车）。2026-10-05 用户要求 1 s：CAN 250k 时右轮
     # 反馈会断 0.6 s 左右，驱动器又降到 10 Hz。只管这个判定；推算里旧轮速最多外推、IMU、静止检测等仍按 sensor_timeout_s
-    wheel_timeout_s: float = 1.0
+    wheel_timeout_s: float = rules.WHEEL_TIMEOUT_S
     fixed_timeout_s: float = 0.5
     max_diff_age_s: float = 5.0
     min_sats: int = 6
@@ -385,8 +385,8 @@ MISMATCH_S = 0.2
 # 这时位置、航向以卫星为准：双天线位置互检、推算位移互检、测向基线带、测向与 IMU 的一致性都不否决卫星，
 # 轮速、IMU 断了或对不上也不报定位错误（定位照常可用、等级报 RTK_FIXED）。代价：两根天线一起错（共模跳）抓不住。
 # 1.0 s 与 rtk_node 报「测向有效」、line_mission 认副天线固定的时限相同（10 Hz 输出、CAN 偶尔丢帧也不闪）
-TRUSTED_FRESH_S = 1.0
-TRUSTED_BASELINE_M = (0.35, 0.45)
+TRUSTED_FRESH_S = rules.RTK_TRUSTED_FRESH_S
+TRUSTED_BASELINE_M = rules.HEADING_BASELINE_M
 # 控制输出航向直接对齐（continuous_output）。2026-10-10 用户：「大偏差立即对齐，双天线可信（两个天线都固定、
 # 基线 0.35–0.45 m）时，如果车停着、不在喷，或者差值超过 2°，控制用的车头角直接对齐双天线，不再每秒挪 1°」。
 # 10-10 实录：开始作业时控制输出的航向比融合差 58°（融合早已跟上双天线），按 output_heading_rate_deg_s 每秒追 1°
@@ -394,8 +394,8 @@ TRUSTED_BASELINE_M = (0.35, 0.45)
 # 卫星可信（见上）且最近一帧测向基线在 OUTPUT_SNAP_BASELINE_M 内时：车停着、不在喷（任务层 set_painting），或输出与
 # 融合航向差超过 OUTPUT_SNAP_DEG，输出航向直接等于融合航向（以双天线为准，不带单帧测向的噪声）；
 # 只有在喷且差不到 OUTPUT_SNAP_DEG 时仍按 output_heading_rate_deg_s 平滑（线上不出折角）
-OUTPUT_SNAP_BASELINE_M = (0.35, 0.45)
-OUTPUT_SNAP_DEG = 2.0
+OUTPUT_SNAP_BASELINE_M = rules.HEADING_BASELINE_M
+OUTPUT_SNAP_DEG = rules.OUTPUT_SNAP_DEG
 # 可信时 pose() 最多往后外推这么久（轮速、IMU 都断了时滤波器只靠 10 Hz 的卫星往前走，加上转发延迟常超过 0.2 s）
 TRUSTED_EXTRAPOLATION_S = 0.5
 # 旧阿克曼兼容恢复；Gen5 用下方多源质量确认后平滑接回，不直接重定航向。
@@ -411,7 +411,7 @@ HEADING_BIAS_FAST_N = 6
 HEADING_BIAS_FAST_GAIN = 0.5
 # 双天线测向有效（刚收下过）时，航向不确定度到这么多都照常能开：这时的不确定度多半是原地转向、IMU 断了时按保守
 # 模型涨的，航向有测向拉着（与 line_mission 的 GYRO_HOLD_SIGMA_YAW_DEG 相同）
-HEADING_HOLD_SIGMA_DEG = 2.0
+HEADING_HOLD_SIGMA_DEG = rules.HEADING_HOLD_SIGMA_DEG
 # 互检偏差给 RTK 位置降权最多这么多倍（方差；标准差 10 倍）：再大就是判卫星错了、按推算维持那一档
 DUAL_WEIGHT_MAX = 100.0
 # 平滑接回挪到离 RTK 这么近就交回普通更新（剩下的按普通更新慢慢吸收）

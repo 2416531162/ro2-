@@ -35,6 +35,7 @@ app 端 RouteGeometry.kt 按同样的规则画预览，两边的一致性由 exp
 import math
 from motion_speeds import DEFAULT_PAINT_SPEED
 from dataclasses import dataclass, replace
+import user_rules as rules
 
 KINDS = ('path', 'points', 'circle')
 # 差速车连线路线的急弯怎么转（app 可选，存在路线里）：
@@ -43,7 +44,7 @@ KINDS = ('path', 'points', 'circle')
 TURNS = ('pivot', 'arc')
 # 差速车进线（开到助跑起点）的转法（2026-11-19 用户「可选圆弧还是原地」）：pivot 原地对准助跑起点开过去、转正直接起步（RUNUP_BACK_M = 0）；
 # arc 只往前按圆弧开上线、不停车，要填助跑起点车尾后方有多少空地（entry_space_m），不到 ENTRY_ARC_MIN_SPACE_M 不走圆弧
-ENTRY_TURNS = ('pivot', 'arc')
+ENTRY_TURNS = rules.ENTRY_TURNS
 ENTRY_SPACE_RANGE = (0.0, 50.0)
 MAX_POINTS = 400
 COVER_TOL_M = 0.05           # 缓弯直接圆弧转过去时，车身中心离拐角点最多这么远；更急的弯掉头补角
@@ -64,13 +65,13 @@ SOLO_CIRCLE_EXIT_M = 1.00
 # 2026-10-07 1 m → 2 m（用户：接入改聪明，但「线头不能差，要么对给助跑」）：仿真（Gen5 拟合底盘，R 1.5 / 3 m 顺逆 × 7 种摆位 ×
 # 16 种子）起喷后 0.5 m 内最大偏差中位 原来 8.2 mm → 就近接入 + 沿圆 1.5 m 6.7、+ 2 m 5.0；入弧那下的偏差要 1–2 m 才收回
 # 2026-10-09 2 m → 2.5 m（用户：「圆上多走 0.5 m 再喷」）：实录 9 个圆进圆的摆动要 3–5 m 才收完，起喷点平均偏 1.1 cm
-CIRCLE_RUN_IN_M = 2.50
+CIRCLE_RUN_IN_M = rules.CIRCLE_RUN_IN_M
 # 进圆过渡曲线（2026-10-09 用户：「进圆加一段过渡曲线」）：直线助跑和圆之间接一段 CIRCLE_TRANSITION_M 长、曲率从 0
 # 均匀增到圆曲率的过渡（CIRCLE_TRANSITION_STEPS 段等长圆弧，每段取段中点的曲率），接上圆后再沿圆走 CIRCLE_RUN_IN_M
 # 才喷。原来直线在切点一步跳到圆曲率，两轮转速一下变 ±7 %，驱动器速度环（实录：约 1 Hz、阻尼比 0.3–0.4，阶跃冲过头
 # 20–30 %）先少转后多转；过渡 1 m（0.5 m/s 约 2 s）比速度环晃一下慢，不再激起摆动。路线和前馈一起变缓，和 10-04
 # 试过的「只平滑前馈」不同。圆本身、起喷点、多喷和收尾都不变；直线助跑整体往圆外挪约 r·(L/r)²/24（R 2 m 约 1.7 cm）
-CIRCLE_TRANSITION_M = 1.00
+CIRCLE_TRANSITION_M = rules.CIRCLE_TRANSITION_M
 CIRCLE_TRANSITION_STEPS = 10
 CORNER_CLEAR_M = 0.05        # 急弯先把整车开出拐角（车尾也过了拐角这么远）再倒车
 CORNER_EXTRA_M = tuple(0.05 * i for i in range(21))     # 急弯倒车前可以再多往前开这么远（候选，找最短）
@@ -104,7 +105,7 @@ START_TIE_M = 0.05           # 离车差不多一样近（差这么多以内）�
 START_SNAP_M = 0.3           # 闭合连线离车最近处离拐角不到这么远就从拐角开始，不留一小截再拐
 TURN_RADIUS_RANGE = (1.0, 20.0)
 CIRCLE_RADIUS_RANGE = (0.5, 100.0)
-CRUISE_RANGE = (0.1, 1.0)
+CRUISE_RANGE = rules.CRUISE_RANGE
 
 
 @dataclass(frozen=True)
@@ -673,13 +674,13 @@ PIVOT_REVERSE_MIN_M = 1.20  # 旧后轴距离，兼容历史配置；新助跑�
 # 7 条到线头还在纠，开喷时车头差 0.6–2.4°；起步头 1 m 先稳再纠偏见 path_tracker launch_settle_*
 # 2026-10-11 用户：暂时 2.8 → 3.5（18:34 实录起步车头扭 5.6°，到线头喷头还偏 6 cm，被起喷门槛挡掉 0.72 m）
 # 2026-11-19 用户：3.5 → 2 m（「已经不是加助跑和开喷检查的问题，是根本就不会协调两个轮子控制进线」）
-RUN_UP_M = 2.00
+RUN_UP_M = rules.RUN_UP_M
 # 2026-11-22 用户：「就没有办法直接第一条就很好吗」→「做，先仿真」：重启后（任务层没有上一条线卫星拟合好的 IMU 换算，
 # line_cascade.ImuAlignment.remembered）第一条按双天线定开头换算，这台车测向误差随车头 ±1°（锁车头时最大 1.55°），
 # 2 m 助跑里基线常在 0.42 以上、换算学得晚（当时学开头换算按 0.40–0.42，11-22 用户改成 0.40–0.44），卫星轨迹也攒不够，误差带进线头（201657 线头 −3.3 cm、全线 4.9 cm）。
 # 这时第一条助跑加长到 FIRST_RUN_UP_M，助跑里按卫星轨迹把角度定下来再开喷；有记忆的线照旧 RUN_UP_M
 # （仿真：全部线都按 4 m 时后面几条线头反而变差）。线头后方要留够这么长的空地
-FIRST_RUN_UP_M = 4.00
+FIRST_RUN_UP_M = rules.FIRST_RUN_UP_M
 # 起步扭头（2026-10-11 实录 3 天 37 次直线起步）：起步前最后一下是原地转（一边轮子往前、一边往后），起步时要换向的那个
 # 轮子比另一个晚动 0.1–0.5 s（编码器不动，驱动器的事，暂时不能换），车头往它那边扭：只左轮换向 18 次中位 +4.7°、
 # 只右轮换向 12 次 −3.7°；两轮一起换向（直线倒车后）3 次、都不换向 4 次都在 2° 以内。所以要在助跑起点 G 原地转正时，
@@ -707,7 +708,7 @@ PULL_STRAIGHT_RAD = 1e-6     # 夹角小于这么多就当已经对齐，直接�
 # ARC_RUN_IN_M 处对正，再直线开到拐角接着压线。整条路线一段到底，不停车、不倒车。
 # 助跑与原地转的倒车助跑同一个起点（后轴在拐角后 nozzle_x + 0.9 = 1.2 m）：出圆弧时曲率从 1/R 跳到 0，
 # 执行延迟带来的车头误差在喷头到拐角前收掉
-ARC_RUN_OUT_M = 0.2
+ARC_RUN_OUT_M = rules.ARC_RUN_OUT_M
 ARC_RUN_IN_M = PIVOT_REVERSE_MIN_M - 0.30
 
 
@@ -1166,8 +1167,8 @@ def pivot_entry(first, car, nozzle_x=0.0, runup_m=None):
 # entry_space_m − ENTRY_ARC_MARGIN_M 以外（车本来就在更后面的照它自己的位置算）。空地填得越大能用的半径越大（自动从大往小试）。
 # 后方空地最少 2.5 m（2026-11-22 用户「后方空地默认就 2.5 m，不能再低」；原来 1.5 m。画完一条线在线尾掉头往回画，
 # 2.5 m 才放得下 R1.5，1.5–2.0 m 都只能原地转）；不到就照原地转进线。App 默认填 2.5、不许填更低（PivotRoute 同值）。
-ENTRY_ARC_MIN_SPACE_M = 2.5
-ENTRY_ARC_RADII = (3.0, 2.5, 2.0, 1.5)
+ENTRY_ARC_MIN_SPACE_M = rules.ENTRY_ARC_MIN_SPACE_M
+ENTRY_ARC_RADII = rules.ENTRY_ARC_RADII
 ENTRY_ARC_MARGIN_M = 0.1
 ENTRY_ARC_STEP_M = 0.05
 # 车头在后轴前 0.91 m：掉头进线时车头会扫到 G 后方，空地紧时圆弧接上线的位置往线头挪（少一点助跑），直线助跑至少留这么多

@@ -36,6 +36,7 @@ import control_trace
 from wheel_input import WheelInput
 from attitude_controls import AttitudeControls
 from imu_sources import ImuSources
+import user_rules as rules
 
 SELECT_RETRY_S = 0.5
 # 已取消的固定基线参数（天线间距改由两根天线固定解的平面实时距离核对）；旧版 fusion.json 里可能还有，读取时丢掉
@@ -43,7 +44,8 @@ SELECT_RETRY_S = 0.5
 OBSOLETE_FUSION_KEYS = ('baseline_m', 'baseline_tol_m', 'baseline_check',
                         'displacement_check_enabled', 'displacement_window_s', 'displacement_long_window_s',
                         'displacement_limit_m', 'displacement_confirm_s', 'heading_length_band_m',
-                        'dual_check_m', 'dual_check_rate_m', 'dual_check_n', 'dual_ok_m', 'dual_ok_s', 'dual_stale_s')
+                        'dual_check_m', 'dual_check_rate_m', 'dual_check_n', 'dual_ok_m', 'dual_ok_s', 'dual_stale_s',
+                        'doppler_correlation_s')  # 2026-11-22 清理：代码里没人读，车上文件写了也丢掉
 # Gen5 主天线（ANT1）相对后轴中点的杠杆臂，车体系 (前, 左) 米。车上 ~/rtk/fusion.json 里是 2026-09-29 手量的
 # GEN5_ANTENNA_HAND；2026-10-06 用 66 次原地转向（左右轮速对称、绕后轴中点转）里两根天线的固定解反推，ANT1 实际在
 # 前 0.235、左 0.197（ANT2 前 0.234、右 0.212，间距 0.409 对得上），两根都比手量的靠后约 0.5 cm、靠右约 1 cm。
@@ -52,11 +54,11 @@ GEN5_ANTENNA_HAND = (0.24, 0.2075)
 # 2026-11-19 用户：「改成用车的默认图纸，包括两个天线的位置」「就用图纸默认的参数」。天线支架图纸
 # Antennenhalterung innen 20240723-0040-A：两块安装板孔位中心相距 0.41 m、左右对称 → 左右各 0.205；
 # 支架在总装图是散件（Pos. 1 lose beilegen），前后位置图纸没给，沿用实测的前 0.235。上面 10-06 实测值留作对照。
-GEN5_ANTENNA_MEASURED = (0.235, 0.205)
+GEN5_ANTENNA_MEASURED = rules.GEN5_ANTENNA_XY
 # 单天线流动站（平板转来，um982.Um982Stream.antenna_mode = single）装在现在双天线的右天线（ANT2）位置
 # （2026-10-07 用户：右天线前 0.234 m、右 0.212 m，即上面 GEN5_ANTENNA_MEASURED 同一次反推的 ANT2）。车体系 (前, 左) 米。
 # 喷头参数按后轴中心存，换单天线照用
-SINGLE_ANTENNA_XY = (0.235, -0.205)   # 2026-11-19 改为图纸右天线位置（原实测 0.234, -0.212）
+SINGLE_ANTENNA_XY = rules.SINGLE_ANTENNA_XY  # 2026-11-19 改为图纸右天线位置（原实测 0.234, -0.212）
 # 单天线没有测向：车头 = IMU 航向角 + 偏移，偏移按卫星位移对 IMU + 轮程推算位移的夹角定、修（gnss_fusion._imu_course，
 # 2026-10-07 用户：「用 imu 的航向角做航向，偏移来修正」；原来按「走直」的轨迹回归定，全链路仿真里实车拟合底盘低速
 # 车身摆 ±1–4°/s，一次也定不出）。起步往前走 0.5 m 定第一次（用户 10-07 定；仿真车头误差中位 0.3°、最差 0.7°），
@@ -422,12 +424,13 @@ def load_fusion_config(gnss_fusion, path):
         overrides.pop(key, None)
     # 差速车（原地转向）按共享底盘配置；标定文件里明确写了的照用
     from runtime_config import PROFILE
+    import user_rules
     overrides.setdefault('drive_differential', PROFILE['drive']['type'] == 'differential')
     if overrides['drive_differential']:
         antenna = overrides.get('antenna_xy')
         if antenna is None or (len(antenna) == 2 and all(isinstance(v, (int, float)) and abs(v - h) < 1e-6
                                                          for v, h in zip(antenna, GEN5_ANTENNA_HAND))):
-            overrides['antenna_xy'] = GEN5_ANTENNA_MEASURED
+            overrides['antenna_xy'] = user_rules.GEN5_ANTENNA_XY
         # 测向安装偏差：文件里是没标定过的 0（或没写）时用这台车实测的 +1.7°（heading_mount，2026-11-22 用户）
         overrides['mount_offset_deg'] = heading_mount.mount_offset(overrides.get('mount_offset_deg'), True)
         # Gen5（HDA536T）：航向推算用 IMU 自己算的航向角（2026-09-28 用户要求）；原地转向转角大，
@@ -452,7 +455,7 @@ def load_fusion_config(gnss_fusion, path):
         overrides.setdefault('rtk_hold_s', RTK_LOST_PAINT_STOP_S + RTK_LOST_STOP_DELAY_S)
         overrides.setdefault('hold_budget_enabled', True)
         # 用户指定 500 ms：短时转发抖动不进入完整中断停车预算，与固定解超时窗口对齐。
-        overrides.setdefault('hold_watch_s', 0.5)
+        overrides.setdefault('hold_watch_s', user_rules.RTK_HOLD_WATCH_S)
         # 两根天线互检偏差超过 2 cm 就逐步少信卫星（空旷处 p95 1.4 cm 不受影响）；推算维持后每秒最多挪 4 cm 接回
         # （离线验证：靠楼那圈的卫星误差叠到空旷那圈上，横向偏差 p95 2.8 → 2.5 cm、最大 10.6 → 3.6 cm）
         overrides.setdefault('dual_weight_m', 0.02)

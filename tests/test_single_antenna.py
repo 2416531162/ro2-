@@ -271,6 +271,16 @@ class Car:
                 del self.hist[:-200]
 
 
+def route_ahead(m, car, d0, d1):
+    """沿此刻车头方向的一条直线路线（本地坐标），水泵正好在这条线的延长线上：从前方 d0 m 画到 d1 m。
+    2026-11-22 定点画线（A、B 点 + start）删了，这里的作业都改用路线 route_start。"""
+    c, s = math.cos(car.yaw), math.sin(car.yaw)
+    fx, fy = m.nozzle or (0.0, 0.0)            # 阿克曼车（这些测试的默认底盘）没有水泵，按车中线
+    ox, oy = car.x + c * fx - s * fy, car.y + s * fx + c * fy
+    pts = [list(m.fusion.to_local(*car.FRAME.geodetic(ox + d * c, oy + d * s))) for d in (d0, d1)]
+    return dict(kind='path', points=pts, closed=False, laps=1, cruise=0.8)
+
+
 def mission():
     dual, single = gen5_configs()
     fusion = gf.GnssFusion(dual)
@@ -331,13 +341,11 @@ class SingleAntennaMission(unittest.TestCase):
                 pose = fusion.pose(car.t)
                 self.assertLess(abs(math.degrees(gf._wrap(pose.yaw - car.yaw))), 1.0)
 
-    def test_line_start_orients_first_then_runs(self):
+    def test_route_start_orients_first_then_runs(self):
         m, fusion, _, _ = mission()
         car = Car(m, yaw_deg=40.0)
         car.run(1.0)
-        c, s = math.cos(car.yaw), math.sin(car.yaw)
-        m.points = {k: car.FRAME.geodetic(car.x + d * c, car.y + d * s) for k, d in (('A', 2.0), ('B', 8.0))}
-        ok, msg = m.command({'cmd': 'start'}, car.t)
+        ok, msg = m.command({'cmd': 'route_start', 'route': route_ahead(m, car, 6.0, 12.0)}, car.t)
         self.assertEqual((ok, m.phase), (True, 'ORIENTING'), msg)
         phases = ['ORIENTING']
         for _ in range(200):
@@ -380,7 +388,7 @@ class SingleAntennaMission(unittest.TestCase):
         m, fusion, _, _ = mission()
         car = Car(m)
         car.run(0.5)
-        self.assertFalse(m.command({'cmd': 'start'}, car.t)[0])
+        self.assertFalse(m.command({'cmd': 'start'}, car.t)[0])         # 定点画线删了：start 是未知指令
         self.assertFalse(m.command({'cmd': 'route_start'}, car.t)[0])
         self.assertEqual(m.phase, 'IDLE')
 
@@ -405,13 +413,12 @@ class SingleAntennaMission(unittest.TestCase):
 
 
 def running_line(yaw_deg=40.0):
-    """单天线定完车头、沿一条 40 m 的线跑起来（已过 A 点 2 m）。"""
+    """单天线定完车头、沿一条 40 m 的直线路线跑起来（已走过 4 m）。"""
     m, fusion, _, _ = mission()
     car = Car(m, yaw_deg=yaw_deg)
     car.run(1.0)
-    c, s = math.cos(car.yaw), math.sin(car.yaw)
-    m.points = {k: car.FRAME.geodetic(car.x + d * c, car.y + d * s) for k, d in (('A', 2.0), ('B', 40.0))}
-    assert m.command({'cmd': 'start'}, car.t)[0]
+    ok, msg = m.command({'cmd': 'route_start', 'route': route_ahead(m, car, 6.0, 46.0)}, car.t)
+    assert ok, msg
     for _ in range(400):
         car.run(0.05)
         if m.phase == 'RUNNING' and m.tracker.st.state == 'RUNNING' and car.odo > 4.0:

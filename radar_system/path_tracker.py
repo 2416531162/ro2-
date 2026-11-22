@@ -33,6 +33,7 @@ from dataclasses import dataclass, field, replace
 
 from robot_core.kinematics import ChassisGeometry
 from line_tracker import lateral_integral_allowed, position_observation_allowed
+import user_rules as rules
 from heading_control import HeadingControl, HeadingControlConfig
 from heading_hold import HoldConfig
 from paint_start import PaintStartGuard
@@ -170,7 +171,7 @@ LAUNCH_ACCEL_MPS2 = .5
 LAUNCH_JERK_MPS3 = 2.0
 # 作业中在线调速（2026-11-22 用户「支持实时变速，但是车端需要平滑变速」）：喷线中也立即开始变，按 S 形曲线
 # （加速度上限 0.15 m/s²、加加速度 0.3 m/s³）过渡，0.5→1.0 约 3.8 s / 2.9 m；线头仍先以 entry_stabilize_mps 起喷。
-LIVE_CRUISE_ACCEL_MPS2 = .15
+LIVE_CRUISE_ACCEL_MPS2 = rules.LIVE_CRUISE_ACCEL_MPS2
 LIVE_CRUISE_JERK_MPS3 = .3
 LAUNCH_HOLD_MAX_S = 3.0
 LAUNCH_HOLD_MAX_M = 1.0
@@ -252,23 +253,23 @@ class PathConfig:
     # 起步 3 s 摆动中位少约 25%、最大少 30–40%，线头 2 m 内最大偏差变化在 ±0.15 cm 内；限 1°/s 摆得更小，但起步
     # 车头已偏 5° 时线头差到 3 cm（修车头太慢），不用。0 为不用
     launch_settle_max_m: float = 0.0
-    launch_settle_min_m: float = 0.3
+    launch_settle_min_m: float = rules.LAUNCH_SETTLE_MIN_M
     launch_settle_rate_deg_s: float = 2.0
     launch_settle_calm_s: float = 0.3
-    launch_settle_max_deg_s: float = 2.0
+    launch_settle_max_deg_s: float = rules.LAUNCH_SETTLE_DEG_S
     launch_settle_mps: float = 0.35
     launch_settle_blend_s: float = 1.0
     # 起步偏差不能靠加长助跑消化：可信横偏/航向误差增大时逐步放宽纠偏，实际收稳后才交接速度。
-    launch_recover_max_deg_s: float = 4.0
+    launch_recover_max_deg_s: float = rules.LAUNCH_RECOVER_DEG_S
     launch_recover_accel_deg_s2: float = 20.0
     launch_release_e_m: float = .02
     launch_release_heading_deg: float = 1.5
     # 只在大偏差时再放宽（2026-11-22 用户「只在大偏差时放宽」）：草丛起步一侧轮子被拖住 0.2–0.4 s，车头扭 10–15°，
     # 4°/s 要 2–3 s 才扳回来。可信直线上车头偏 ≥ launch_big_heading_deg 或喷头横偏 ≥ launch_big_e_m 才从 4°/s
     # 往 launch_big_max_deg_s 放（到 1.5 倍门槛放满），偏差回到门槛以内就收回原来的 2–4°/s；平地正常起步偏不到这么大，不受影响。
-    launch_big_e_m: float = .05
-    launch_big_heading_deg: float = 5.0
-    launch_big_max_deg_s: float = 8.0
+    launch_big_e_m: float = rules.LAUNCH_BIG_E_M
+    launch_big_heading_deg: float = rules.LAUNCH_BIG_HEADING_DEG
+    launch_big_max_deg_s: float = rules.LAUNCH_BIG_DEG_S
     # Gen5前进长直线：快速IMU航向内环、慢喷头横偏外环；基础配置关闭以兼容旧车与纯几何调用方。
     straight_imu_enabled: bool = False
     straight_min_length_m: float = 6.0
@@ -277,12 +278,9 @@ class PathConfig:
     straight_blend_s: float = 0.8
     straight_outer_k_e: float = 0.6
     straight_outer_k_i: float = 0.05
-    straight_outer_tau_s: float = 0.5  # 旧路线外环参数保留兼容；A/B 控制律不再使用偏角低通。
     # 以下趋势试验参数保留配置兼容；共用的 A/B 控制律不使用趋势反馈。
     straight_outer_rate_gain: float = 0.0
-    straight_outer_rate_tau_s: float = 0.4
     straight_outer_rate_model_weight: float = 1.0
-    straight_integral_return_gate_mps: float = 0.0
     straight_outer_trend_min_speed_mps: float = 0.0
     straight_outer_i_boost: float = 0.0
     straight_outer_tau_scale: float = 1.0
@@ -295,7 +293,6 @@ class PathConfig:
     straight_drift_tc: float = 1.5
     straight_nozzle_x_m: float = 0.30
     straight_target_feedforward: bool = True
-    straight_target_rate_tau_s: float = 0.20
     straight_prediction_delay_s: float | None = None
     straight_outer_prediction_weight: float = 0.0
     straight_direct_rate_damping: bool = False
@@ -309,11 +306,11 @@ class PathConfig:
     # 普通助跑到线头照常渐入；倒车接入未收稳时继续原跟踪，基线不可信时保留原有交接。
     # 2026-10-06 实车：A/B 从助跑 0.15 m 就接管（偏角上限 3°、目标 3°/s），起步偏 2–5 cm、车头 4° 时横偏先涨到 5–8 cm，
     # 线头喷头偏 3.2–5.5 cm（5 趟 3 趟停喷）；10-05 旧交接（0.6 m 后、|e|<5 cm、|车头|<3°）25 趟线头中位 0.84、最大 2.6 cm
-    runup_release_e_m: float = 0.02
-    runup_release_heading_deg: float = 3.0
+    runup_release_e_m: float = rules.RUNUP_RELEASE_E_M
+    runup_release_heading_deg: float = rules.RUNUP_RELEASE_HEADING_DEG
     # 接入、转场（不喷）离正式路线（喷线起点）这么近以内不按转场速度：按刹车曲线降到画线速度，准备接入正式路线
     # （2026-10-07 用户：「离点很远也要提速到 1.5，转场和接入都在 3 米内就不要 1.5，要准备接入正式路线，要稳」）
-    approach_zone_m: float = 3.0
+    approach_zone_m: float = rules.APPROACH_ZONE_M
     # 长直线 IMU 为主、卫星辅助（line_cascade.ImuFirstConfig，2026-10-06 用户）；None 用原 A/B 控制律
     straight_imu_first: ImuFirstConfig | None = None
     # 画圆（整圆那一段）也 IMU 为主（2026-10-06 晚用户：起点终点交接错开 1–2 cm，选「画圆也 IMU 为主」）：原路径跟踪的
@@ -382,9 +379,9 @@ class PathConfig:
                      'launch_release_e_m', 'launch_release_heading_deg',
                      'launch_big_e_m', 'launch_big_heading_deg', 'launch_big_max_deg_s',
                      'turn_decel_mps2', 'turn_jerk_mps3', 'straight_min_length_m', 'straight_blend_s',
-                     'straight_outer_k_e', 'straight_outer_tau_s', 'straight_bias_max_deg', 'straight_offset_tau_s',
-                     'straight_target_rate_deg_s', 'straight_kp', 'straight_drift_tc', 'straight_target_rate_tau_s',
-                     'straight_outer_rate_tau_s', 'straight_outer_tau_scale',
+                     'straight_outer_k_e', 'straight_bias_max_deg', 'straight_offset_tau_s',
+                     'straight_target_rate_deg_s', 'straight_kp', 'straight_drift_tc',
+                     'straight_outer_tau_scale',
                      'runup_release_e_m', 'runup_release_heading_deg', 'arc_s_rate_m', 'arc_s_tau_m', 'arc_scale_tau_m',
                      'arc_heading_tau_s', 'arc_pull_m', 'arc_pull_rate_m', 'arc_rtk_pull_m',
                      'arc_rtk_pull_rate_m', 'arc_rtk_pair_max_m', 'arc_rtk_settle_s', 'arc_rtk_fresh_s',
@@ -396,7 +393,7 @@ class PathConfig:
             if not math.isfinite(getattr(self, name)) or getattr(self, name) <= 0:
                 raise ValueError(name + ' 必须是有限正数')
         for name in ('straight_settle_m', 'straight_min_speed_mps', 'straight_outer_k_i', 'straight_ki', 'straight_kd', 'straight_outer_rate_gain',
-                     'straight_integral_return_gate_mps', 'straight_outer_trend_min_speed_mps',
+                     'straight_outer_trend_min_speed_mps',
                      'straight_outer_i_boost', 'approach_zone_m'):
             if not math.isfinite(getattr(self, name)) or getattr(self, name) < 0:
                 raise ValueError(name + ' 必须是有限非负数')
@@ -485,7 +482,7 @@ def differential_config(config=PathConfig()):
     # 积分 0.4、外环低通 1.0 s：真喷头 p95 0.8 m/s 0.76–0.80 → 0.42–0.48 cm（原控制 0.44–0.58），车身小摆与现双环相同
     # （最差模型 +6%）；测向偏 2° 时 4.2 → 1.2 cm。外环低通再短、比例再大，小摆就回来了
     ab = CascadeConfig()
-    return replace(config, delay_s=0.30, steer_gain=1.0, ki_per_m2=2.0, lat_accel_mps2=0.20, arc_speed_mps=PAINT_ARC_SPEED_MPS, start_creep_mps=0.1, start_hold_m=0.6, launch_settle_max_m=1.0,
+    return replace(config, delay_s=0.30, steer_gain=1.0, ki_per_m2=2.0, lat_accel_mps2=0.20, arc_speed_mps=PAINT_ARC_SPEED_MPS, start_creep_mps=0.1, start_hold_m=rules.START_HOLD_M, launch_settle_max_m=rules.LAUNCH_SETTLE_MAX_M,
                    reverse_creep_m=0.5, reverse_creep_mps=0.15, reverse_section_creep_m=0.15, stop_delay_s=None,
                    ff_shape_ratio=0.27, ff_shape_gap_s=0.48, ff_shape_kappa_max=1.2,
                    # 2026-10-06：已验证常速顺时针完整圆的入圆收益；低速与其他圆/圆弧沿用原前馈。
@@ -511,7 +508,7 @@ def differential_config(config=PathConfig()):
                    straight_imu_first=ImuFirstConfig(rtk_trim=False, rtk_fit=True), arc_imu_first=True, arc_partial_imu_first=True)
 
 
-DIFF_REVERSE_MPS = 0.5      # 差速车倒车段限速（SectionTracker reverse_mps；阿克曼车 0.3）
+DIFF_REVERSE_MPS = rules.DIFF_REVERSE_MPS  # 差速车倒车段限速（SectionTracker reverse_mps；阿克曼车 0.3）
 # 普通路线倒车接入后的助跑（SectionTracker reverse_runup）：倒完车往前起步，万向轮要整个翻过来（175° → 5° 在头 0.25 m 里），
 # 倒车停在助跑起点的横偏也比往前开过去大（4–5 vs 2–3 mm）。2026-10-07 用户：车在点后面直接倒一点，但「线头不能差」，
 # 「2.5 m 没必要，1.5 能不能一样的效果」。仿真（Gen5 拟合底盘，10 种摆位 × 48 种子，起喷后 0.5 m 内最大偏差 中位/p90/最大）：
@@ -519,7 +516,7 @@ DIFF_REVERSE_MPS = 0.5      # 差速车倒车段限速（SectionTracker reverse_
 #   助跑 0.4–0.5 m/s 3.4–3.5（差）；多倒 1 m 助跑 2.5 m 2.96/5.2/8.1；
 #   助跑仍 1.5 m、起步锁车头 0.6 → 1.0 m（start_hold_m）2.25/4.4/7.9（起喷后 2 m 内中位 4.05 → 3.57），每种摆位中位、最大都不比原来大；
 #   1.2 m 再好一点但只给 IMU 直行留 0.3 m 交接，没用。倒车前后差 1.5° 就原地转正几乎没用，没要。
-REVERSE_HOLD_M = 1.0
+REVERSE_HOLD_M = rules.REVERSE_HOLD_M
 DIFF_SETTLE_S = 0.2         # 差速车段尾停稳要持续多久才换段（SectionTracker settle_s；阿克曼车 0.3）
 
 
@@ -2602,7 +2599,7 @@ class SectionTracker:
     def __init__(self, sections, config=PathConfig(), geometry=None, *, reverse_mps=0.3, reverse_gain=0.90,
                  still_mps=0.02, settle_s=0.3, switch_timeout_s=5.0, pivot_rate=None, pivot_accel=1.0,
                  pivot_tol=math.radians(1.0), pivot_timeout_s=20.0, pivot_stop_tol=0.005,
-                 pivot_min=math.radians(5.0), pivot_retries=2, pivot_floor=0.1, paint_offset_limit_m=None,
+                 pivot_min=math.radians(rules.PIVOT_MIN_DEG), pivot_retries=2, pivot_floor=0.1, paint_offset_limit_m=None,
                  constant_straight_speed=False, reverse_runup=False, constant_paint_speed=False, pivot_brake=None):
         """pivot_rate 不为 None（差速车）：下一段起点车头方向与车差 pivot_min 以上时，停稳后原地转过去再开，
         起步时也一样；角速度不超过 pivot_rate、角加速度不超过 pivot_accel。阿克曼车为 None，不原地转。
@@ -2719,14 +2716,14 @@ class SectionTracker:
                     and getattr(sec,'field_role',None)=='paint' and mark>0):
                 # 10-05 用户定助跑 0.5 m/s、正常不低于 0.3；10-06 晚用户：「起步的助跑是允许降速的，在进入的直线的
                 # 时候必须直」→ 0.3（仿真线头 2 m 弯中位 0.55 → 0.37–0.53 cm，到线头仍 0.8 m/s，每次起步多约 0.5 s）
-                tracker.runup_speed_mps=.3
+                tracker.runup_speed_mps=rules.RUNUP_SPEED_MPS
                 if tracker.path._piece(mark).straight:
-                    tracker.runup_start_mps=.35
-                    tracker.entry_stabilize_mps=.5
+                    tracker.runup_start_mps=rules.RUNUP_START_MPS
+                    tracker.entry_stabilize_mps=rules.ENTRY_STABILIZE_MPS
                     tracker.cfg=replace(tracker.cfg,accel_mps2=min(tracker.cfg.accel_mps2,.20))
                 else:
                     # 10-08 用户：圆前切线助跑由 0.3 提到 0.35 m/s，入圆仍平滑接到圆弧速度。
-                    tracker.runup_speed_mps=.35
+                    tracker.runup_speed_mps=rules.CIRCLE_RUNUP_MPS
                 from route_plan import RUN_UP_M
                 # 重启后第一条加长的助跑（route_plan.FIRST_RUN_UP_M，规划时记在段上）整段都按助跑速度走
                 tracker.runup_distance_m=getattr(sec,'runup_m',None) or RUN_UP_M

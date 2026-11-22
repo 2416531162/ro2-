@@ -1,15 +1,16 @@
 """作业速度默认值及分段上限；弯道、倒车、定位接管仍按各自更低的限速。"""
-DEFAULT_PAINT_SPEED = 0.8
-DEFAULT_TRANSIT_SPEED = 1.5
+import user_rules as rules
+DEFAULT_PAINT_SPEED = rules.PAINT_SPEED_MPS
+DEFAULT_TRANSIT_SPEED = rules.TRANSIT_SPEED_MPS
 MAX_SECTION_SPEED = 1.5
 # 正常前进转场/掉头的弯道速度（转场弯、圆弧掉头、圆弧进线，不喷）；弯前平滑降速。2026-11-22 用户「圆弧转弯现在太慢了……
 # 车速提到0.45」：0.35 → 0.45（原来 R 1.5 m 实车只走 0.39，圆弧进线 9 m 弧要 23 s）
-TURN_SPEED_MPS = .45
+TURN_SPEED_MPS = rules.TURN_SPEED_MPS
 SHORT_RUNUP_MPS = .35  # 短直线助跑限速（_short_runup_here），原来借用 TURN_SPEED_MPS 0.35，弯道提速时不跟着变
-PAINT_ARC_SPEED_MPS = .5  # 画圆和画弧线独立定速，不归入普通转场过弯。
+PAINT_ARC_SPEED_MPS = rules.PAINT_ARC_SPEED_MPS  # 画圆和画弧线独立定速，不归入普通转场过弯。
 # 差速车轮子最低速度（10-08 用户「这个轮子最低不要低于0.3最好是」）：R 1 m 转场弧 0.35 m/s 时内侧轮要 0.20 m/s，
 # 实际跑到 0.28（驱动器低速读数不准），车只转出 79 %、偏 12–17 cm。转场弧按内侧轮不低于它提速（不超过横向加速度）
-WHEEL_MIN_MPS = .3
+WHEEL_MIN_MPS = rules.WHEEL_MIN_MPS
 
 
 def transit_bend_speed(kappa, track_m, lat_accel_mps2, base=TURN_SPEED_MPS):

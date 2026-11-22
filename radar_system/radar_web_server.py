@@ -540,10 +540,6 @@ class WebBridgeNode(Node):
     def line_command(self, cmd):
         """app 的 line 指令 -> /line/command；结果由 line_node 写进 /line/status 的 last_result。"""
         payload = {'cmd': cmd['action'], 'id': cmd.get('id')}
-        if 'point' in cmd:
-            payload['point'] = cmd['point']
-        if 'cruise' in cmd:
-            payload['cruise'] = cmd['cruise']
         self.pub_line.publish(String(data=json.dumps(payload)))
 
     def route_command(self, cmd):

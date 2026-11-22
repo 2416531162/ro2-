@@ -20,6 +20,7 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass
+import user_rules as rules
 
 GPS_WEEK_S = 604800.0
 
@@ -33,8 +34,8 @@ HEADING_FIXED = frozenset({'L1_INT', 'NARROW_INT', 'WIDE_INT'})
 # 用户规则（2026-09-29）：测向是整周固定解、且接收机报的基线长度在这个范围内就算有效，
 # 不要求两根天线的位置也是 RTK 固定解。Gen5 两天线相距约 0.415 m；范围外（室内转发器约几毫米、
 # 模糊度固定错了的长度）不算。2026-11-21 用户：0.30–0.50 m 收紧到 0.35–0.45 m。
-HEADING_BASELINE_MIN_M = 0.35
-HEADING_BASELINE_MAX_M = 0.45
+HEADING_BASELINE_MIN_M = rules.HEADING_BASELINE_M[0]
+HEADING_BASELINE_MAX_M = rules.HEADING_BASELINE_M[1]
 # 两根天线都是 RTK 固定解时，同一测量时刻两者平面坐标（东、北，不算高差）的实时距离照实上报
 # （最近 BASELINE_REF_WINDOW_S 秒的中位数，至少 BASELINE_REF_MIN_SAMPLES 组），只作显示，不参与判定。
 # 小于 MIN_BASELINE_M 说明两根天线收到的是同一个信号（室内转发器），不报。
@@ -333,7 +334,7 @@ INS_SIGMA_OTHER_M = 3.0
 
 # 用户规则（2026-10-07）：单天线 PDOP 小于 3 才可信，3 及以上一律不用（先定 2，同日改 3）。PDOP 取 $GNGSA
 # （1 Hz，几条 GSA 是同一个组合解的 DOP），收到后 PDOP_FRESH_S 内有效；没有 PDOP（接收机没出 GSA、断了）也算不可信
-INS_MAX_PDOP = 3.0
+INS_MAX_PDOP = rules.INS_MAX_PDOP
 PDOP_FRESH_S = 2.0
 
 

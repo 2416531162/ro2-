@@ -10,7 +10,6 @@
 - UDP 48620 发现广播
 
     python3 radar_system/tools/app_demo_server.py            # 真机与电脑同一 WiFi
-    python3 radar_system/tools/app_demo_server.py --line-demo  # 预设一条 7 m 直线,车在 A 点后方 2.5 m
     python3 radar_system/tools/app_demo_server.py --route-demo # 预设连线矩形并开始跑,浏览器看 /display
     python3 radar_system/tools/app_demo_server.py --gen5       # Gen5 差速底盘:两台模拟的欧艾迪驱动器,能原地转
     # 安卓模拟器里连 10.0.2.2:8088
@@ -135,13 +134,6 @@ class DemoCar:
         self.line_result = None
         self.imu_yaw0 = None    # 演示 IMU 偏航的零点：第一次出状态时的车头方向
 
-    def preset_line(self, length=7.0):
-        """--line-demo:A 在原点、B 在正前方,车放在 A 后 2.5 m(助跑)、左偏 25 cm、车头偏 6°。"""
-        f = self.mission.fusion
-        self.mission.points = {'A': f.to_geodetic(0.0, 0.0), 'B': f.to_geodetic(length, 0.0)}
-        car = self.sim.car
-        car.x, car.y, car.yaw = -2.5, 0.25, math.radians(6.0)
-
     def preset_route(self):
         """--route-demo：一个 9 × 5 m 的连线矩形（四个直角都要开出去倒车掉头），车在起点后方，直接开始跑。"""
         car = self.sim.car
@@ -262,9 +254,6 @@ class DemoCar:
     def line_command(self, cmd):
         with self.lock:
             payload = {'cmd': cmd['action'], 'id': cmd.get('id')}
-            for k in ('point', 'cruise'):
-                if k in cmd:
-                    payload[k] = cmd[k]
             ok, message = self.mission.command(payload, self.sim.t)
             self.line_result = dict(ok=ok, message=message, id=cmd.get('id'), cmd=cmd['action'])
 
@@ -567,7 +556,6 @@ def main():
     global CAR
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--port', type=int, default=8088)
-    p.add_argument('--line-demo', action='store_true', help='预设一条 7 m 直线,车停在 A 点后方')
     p.add_argument('--route-demo', action='store_true', help='预设一个连线矩形并直接开始跑（看车载屏幕 /display）')
     p.add_argument('--gen5', action='store_true', help='Gen5 差速底盘（两台模拟的欧艾迪单路驱动器，能原地转）')
     p.add_argument('--jobs-dir', help='作业记录目录（默认在临时目录里造几条演示用的）')
@@ -581,8 +569,6 @@ def main():
         os.makedirs(DEMO_JOBS_DIR, exist_ok=True)
         demo_jobs(DEMO_JOBS_DIR)
     CAR = DemoCar(gen5=args.gen5)
-    if args.line_demo:
-        CAR.preset_line()
     if args.route_demo:
         CAR.preset_route()
     NETWORK.start()

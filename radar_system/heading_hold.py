@@ -46,6 +46,7 @@ import time
 from dataclasses import dataclass
 
 from heading_control import HeadingControl, HeadingControlConfig
+import user_rules as rules
 
 DEG = math.pi / 180.0
 
@@ -56,7 +57,7 @@ REASONS = ('user', 'no_imu', 'imu_stale', 'deviation', 'command_timeout', 'estop
 
 @dataclass(frozen=True)
 class HoldConfig:
-    speed: float = 0.8              # 固定车速，m/s（用户定的：2026-09-30 下午由 0.4 提到 0.8）
+    speed: float = rules.STRAIGHT_HOLD_SPEED_MPS  # 固定车速，m/s（用户定的：2026-09-30 下午由 0.4 提到 0.8）
     kp: float = 2.2                 # 预估偏差 → 角速度，1/s
     ki: float = 1.0                 # 积分，1/s²；消掉两轮不一致、万向轮带来的持续偏转
     kd: float = 0.4                 # 预估偏差变化率（陀螺 − delay_s 前的指令）→ 角速度，s
@@ -66,13 +67,13 @@ class HoldConfig:
     i_max: float = 0.15             # 积分项上限，rad/s
     moving_ratio: float = 0.5       # 指令车速不到 speed 的这个比例（起步）、里程计不到指令的这个比例（卡住）不积分
     odom_stale_s: float = 0.3       # 里程计这么久没更新就不看它（只按起步斜坡判断）
-    accel: float = 0.25             # 起步车速斜坡，m/s²（2026-11-21 用户：0.5 → 0.25，右轮速度环慢、起步甩右少一半；
+    accel: float = rules.STRAIGHT_HOLD_ACCEL_MPS2  # 起步车速斜坡，m/s²（2026-11-21 用户：0.5 → 0.25，右轮速度环慢、起步甩右少一半；
                                     # 到 0.8 m/s 约 3.0 s、走约 1.2 m）
     min_speed: float = 0.05         # 起步第一帧的车速，m/s（0 会被底盘当成停车）
     imu_stale_s: float = 0.2        # IMU 这么久没更新就停
     stall_s: float = 0.1            # 两次计算隔这么久算调用方自己卡了（正常 20 ms 一次）
     imu_grace_s: float = 0.15       # 卡完给 IMU 回调追上的时间，这段时间 IMU 旧了先不停
-    abort_deg: float = 5.0          # 偏差超过它就停
+    abort_deg: float = rules.STRAIGHT_HOLD_ABORT_DEG  # 偏差超过它就停
     tolerance_deg: float = 1.0      # 目标精度，只用于统计（线内时间占比）
     learn_bias: bool = False        # 记住车自己的持续偏转、下一趟起步就带上（IMU 直行开；定点画线内环不开）
     bias_settle_s: float = 1.0      # 到全速后先等这么久再开始平均积分（起步那一下不算）

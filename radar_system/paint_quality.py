@@ -3,23 +3,24 @@ from robot_core.standstill import moving
 import math
 import os
 import route_plan as rp
+import user_rules as rules
 
 # Gen5 没有固定解（浮点、单点、平板中转断流）时按 IMU + 轮速推算接着走、接着喷；满 RTK_LOST_PAINT_STOP_S 先停喷，
 # 再走 RTK_LOST_STOP_DELAY_S 才停车（融合 rtk_hold_s = 两者之和，line_node 设），恢复后自动继续
 # （2026-10-07 用户：「8 秒内没有一个可用的卫星坐标就停止，停喷也有讲究，先停喷 1 秒，再停止」）
-RTK_LOST_PAINT_STOP_S = 8.0
-RTK_LOST_STOP_DELAY_S = 1.0
+RTK_LOST_PAINT_STOP_S = rules.RTK_LOST_PAINT_STOP_S
+RTK_LOST_STOP_DELAY_S = rules.RTK_LOST_STOP_DELAY_S
 
 DEFAULT_OFFSET_M=.03
 # 起喷门槛（2026-10-10 用户：「如果起喷是差 5cm 以上，必须停喷」）：每个喷线区间第一次开喷时，喷头离设计线
 # 不到这么多才开；没到就先不喷、车照走，偏差回到门槛内再开。开喷后中途偏差仍只报警不停喷（10-08「起点必须喷」）。
 # 10-10 实录 16:05:30：接入开偏 43 cm，助跑 2.5 m 只拉回到 23 cm 就开喷，线头斜着喷了约 8 m
-PAINT_START_MAX_OFFSET_M=.05
+PAINT_START_MAX_OFFSET_M=rules.PAINT_START_MAX_OFFSET_M
 
 
 # 弧（不是整圆）喷到终点前这么远就停：10-08 罚球弧两端落在禁区线上，弧尾越过横线一截（按每拍路程到终点才停 + 关泵余水）。
 # 用户：「可以少喷点，横线喷 10 cm 宽能盖住」。直线线尾、整圆（过交点多喷 0.2 m）不变
-ARC_END_EARLY_M = 0.05
+ARC_END_EARLY_M = rules.ARC_END_EARLY_M
 
 
 def arc_end_early(section, start, end):

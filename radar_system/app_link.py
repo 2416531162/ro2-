@@ -168,7 +168,8 @@ def client_frame(opcode, payload, mask=b'\x01\x02\x03\x04', fin=True):
 # =============================================================================
 
 SPEED_TIERS = ('low', 'med', 'high')
-LINE_ACTIONS = ('mark', 'start', 'stop', 'clear')
+# line 只剩 stop（停止任何任务）；A→B 定点画线的 mark / start / clear 2026-11-22 删了（App 不发）
+LINE_ACTIONS = ('stop',)
 # orient：单天线定车头（车往前直走约半米，按行驶轨迹定出车头后停下，line_mission._begin_orient）
 ROUTE_ACTIONS = ('set', 'start', 'start_current', 'clear', 'pause', 'preview', 'resume', 'rework', 'field_start', 'imu_hold', 'end', 'speed',
                  'orient')
@@ -292,13 +293,6 @@ def parse_command(text):
         if action not in LINE_ACTIONS:
             raise CommandError('line.action 必须是 ' + '/'.join(LINE_ACTIONS))
         out['action'] = action
-        if action == 'mark':
-            point = str(msg.get('point', '')).upper()
-            if point not in ('A', 'B'):
-                raise CommandError('line.point 必须是 A 或 B')
-            out['point'] = point
-        if action == 'start' and 'cruise' in msg:
-            out['cruise'] = _finite(msg['cruise'], 'cruise', 0.05, 1.0)
     elif kind == 'route':
         action = msg.get('action')
         if action not in ROUTE_ACTIONS:
@@ -605,7 +599,7 @@ def line_telemetry(line, now):
         **({'imu_hold_test': ln['imu_hold_test']} if ln.get('imu_hold_test') is not None else {}),
         **({'imu_sources': ln['imu_sources']} if isinstance(ln.get('imu_sources'),dict) else {}),
         'cruise': _num(ln.get('cruise')), 'motion_mode': ln.get('motion_mode'),
-        'points': ln.get('points') or {},
+        'points': {},       # 原来是 A、B 点；定点画线删了，留空对象，遥测格式不变
         'pose': None if not pose else {
             'x': _num(pose.get('x'), 3), 'y': _num(pose.get('y'), 3), 'yaw_deg': _num(pose.get('yaw_deg'), 2),
             'speed': _num(pose.get('speed')), 'quality': pose.get('quality'), 'usable': bool(pose.get('usable')),

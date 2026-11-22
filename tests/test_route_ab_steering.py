@@ -1,4 +1,6 @@
-"""Compare route steering with the existing A/B controller; all checks are offline."""
+"""Route straight steering (A/B control law inside PathTracker); all checks are offline.
+
+2026-11-22: the standalone A/B tracker (ImuLineTracker) was deleted, so the test that used it as the reference is gone."""
 import math
 import sys
 import unittest
@@ -8,8 +10,6 @@ from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / 'radar_system'), str(ROOT)]
-from line_cascade import CascadeConfig, ImuLineTracker
-from line_tracker import lateral_integral_allowed
 from path_tracker import Path as Route, PathConfig, PathTracker, differential_config, wrap
 from robot_core.kinematics import ChassisGeometry
 
@@ -35,49 +35,6 @@ def route(path=None, enabled=True, law='imu_first'):
 
 
 class RouteABSteering(unittest.TestCase):
-    def test_steady_route_matches_ab_with_rotations_sample_age_and_frozen_integral(self):
-        # Real A/B wrapper is the reference, including its own coordinate transforms and PID history.
-        for angle in (0., math.pi / 2, math.pi - .01, -math.pi + .01):
-            with self.subTest(angle=angle):
-                c, s = math.cos(angle), math.sin(angle)
-                tr = route(Route((0., 0., angle), [(30., 0.)]), law='ab')
-                ab = ImuLineTracker(CascadeConfig(nozzle_x_m=NX, nozzle_y_m=NY,
-                                   track_x_m=NX, track_y_m=NY), GEO)
-                a = (NX*c-NY*s, NX*s+NY*c)
-                ab.set_line(a, (a[0]+30*c, a[1]+30*s))
-                p = pose(2*c, 2*s, angle)
-                tr.sync(0., (0., angle, 0.)); ab.sync(0., (0., angle, 0.))
-                self.assertTrue(tr.start(p)); self.assertTrue(ab.start(p))
-                # Isolate shared steady steering from the route's intentional entry blend.
-                tr._straight_weight = 1.
-                tr._straight_piece = tr.path.pieces[0]
-                tr._straight_offset, tr._straight_offset_n = 0., 1
-                tr._straight_target = angle
-                tr._straight_core.reset(now=0.)
-                for i in range(1, 181):
-                    t = i*DT
-                    age = .005 if i % 2 else .015
-                    gy = 0. if i == 1 else math.radians(.12)*math.cos(t)
-                    raw = angle if i == 1 else wrap(angle + math.radians(.12)*math.sin(t))
-                    yaw = wrap(raw + gy*age)
-                    along = 2.+.8*(t-DT)
-                    across = 0. if i == 1 else .008*math.sin(t*2.)
-                    p = pose(along*c-across*s, along*s+across*c, yaw,
-                             .6 if i % 2 else 1.2, gy, frozen=70 <= i < 110)
-                    imu = (t-age, raw, gy)
-                    tr.sync(t, imu); ab.sync(t, imu)
-                    tr._clock = t; tr.st.s = along
-                    tr.st.integral_frozen = not lateral_integral_allowed(p)
-                    v_ab, w_ab = ab.update(p, DT)
-                    w_route = tr._straight_control(p, DT, .8, .123)
-                    tr._sent.append((t, .8, w_route))
-                    tr._straight_core.record_sent(t, w_route)
-                    self.assertAlmostEqual(v_ab, .8, places=12)
-                    self.assertAlmostEqual(w_route, w_ab, places=10)
-                    self.assertAlmostEqual(tr._straight_target, ab._target, places=10)
-                    self.assertAlmostEqual(tr._straight_status['outer_e'], ab.st.e, places=10)
-                    self.assertAlmostEqual(tr._straight_integral, -ab.cfg.k_i*ab.st.integral, places=10)
-
     def test_route_speed_and_task_state_remain_with_path_controller(self):
         a, b = route(), route(enabled=False)
         a.constant_straight_speed = b.constant_straight_speed = True

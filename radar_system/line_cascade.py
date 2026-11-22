@@ -1,35 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""差速车（Gen5）定点画线（A→B 直线）：IMU 航向保持做内环 + RTK 横偏修正做外环。纯计算，不依赖 ROS。
+"""差速车（Gen5）直线控制用的配置和算法块，路线 / 场地作业的直线、圆弧（path_tracker.PathTracker）在用。纯计算，不依赖 ROS。
 
-为什么不用 LineTracker：它按曲率控制、只往前外推 0.1 s；Gen5 底盘转向晚约 0.44 s（2026-09-30 实测：陀螺 ≈
-0.44 s 前的角速度指令 × 1.02–1.06），0.8 m/s 时来回大摆（仿真喷头横偏 95% 约 25 cm）。IMU 直行
-（heading_hold.HeadingHold，带 Smith 预估）实车 0.8 m/s 车头稳在目标 ±0.8° 内，这里直接拿它当内环。
+    CascadeConfig       直线内外环参数（IMU 航向保持内环 + 喷头横偏外环），differential_config 从这里取
+    ImuFirstConfig      直线 IMU 为主、卫星拟合慢慢修（rtk_fit）的全部参数；用户定的门槛在 user_rules
+    ImuFirstGuide       上面那套的实现：开头换算、拟合、跳点、天线挑选、侧滑、草地
+    ImuAlignment        线与线之间带着 IMU → 地面方向的换算
+    learn_heading_offset / lateral_heading_step / imu_first_target 等   路线直线每拍调用的计算
 
-外环（每个控制周期，用 RTK 融合位姿）：
-    e  = 喷头 / 水泵（车体系前 nozzle_x_m、左 nozzle_y_m）相对 A→B 线的横偏，线左为正
-    δ  = −atan(k_e·e) − k_i·∫e ds，限幅 ±max_bias_deg        目标航向偏置：偏左就朝右偏一点开回来
-    ∫e ds 只在前进、|e| < integ_band_m 时累积，并限幅（积分项贡献不超过 integ_max_deg）
-坐标换算（内环在 IMU 自己的偏航系里跑：HDA536T 上电为 0，会慢慢漂）：
-    偏移 = 融合航向 − IMU 偏航，低通（时间常数 offset_tau_s；刚开始按样本平均，攒够一个时间常数后按低通）
-    目标 = 线方向 − 偏移 + δ（IMU 系）；偏移的残差（IMU 漂移跟不上、双天线安装残差）由外环积分吃掉
-    起步 / 继续时目标从当时的 IMU 偏航出发，按 turn_rate_deg_s 限速转到上式：内环偏离目标超过 5° 就停车，
-    不能一步跳过去。还没转到位（差 align_deg 以上）时车速不超过 align_radius_m × turn_rate，边慢慢走边转。
-车速（规则同 LineTracker）：起步斜坡、横偏超过 slow_offset_m 降速、离 B 按减速度刹停。底盘车速也晚约 0.4 s，
-离 B 的剩余距离扣掉已发出、还没执行的车速指令走的路（speed_delay_s），免得冲过 B。
-
-s（沿线距离）、起止和起步检查按记 A、B 用的同一个点（track_x_m、track_y_m），横偏 e 按喷头量。差速车 LineMission
-把两者都设成水泵（可以在侧面，2026-10-02 用户：作业都要让水泵走直线），A、B 也按水泵记。
-参考航向：
-    参考航向 = IMU 偏航 + 偏移，偏移 = 融合航向 − IMU 偏航，一直照学（低通）。喷头位置、车头误差都按参考航向算：
-    融合用自己的航向从天线倒推后轴中心，所以先按融合航向还原出天线位置，再用参考航向推回后轴和喷头。
-    2026-10-05 起不再判「航向跳变」：融合航向（以卫星测向为准）和 IMU 推的参考差得再多也不停、不冻结偏移，
-    IMU 只是辅助（用户：「原来的检查必须删除，这种检查是不合理的」）。每次开始 / 继续时参考差超过 jump_deg 就直接重定偏移。
-    位置质量退化或正在接回绝对位置时，外环积分冻结，原有积分与横偏比例纠正继续工作。
-    起步转完那一刻偏移从头重新平均：起步转弯时 IMU 的刻度误差（转 30°、误差 2% 就差 0.6°）不带进来。
-停车 / 中止与 LineTracker 相同：定位不可用 → PAUSED；|e| > 0.5 m 或车头偏 > 45° → ABORTED(off_line)；
-内环自己停车映射成中止：IMU 偏离目标超过 5°（imu_deviation：被推歪、IMU 重启归零、方向装反）、
-IMU 中断（imu_stale）；开始时没有 IMU 航向不能起步（no_imu）。
+2026-11-22 删掉了 A→B 定点画线的控制器 ImuLineTracker（App 早就不发记点、开始；路线、场地作业不用它）。
+为什么用 IMU 航向内环而不是按曲率跟线：Gen5 底盘转向晚约 0.44 s（2026-09-30 实测），按曲率跟 0.8 m/s 来回大摆；
+IMU 直行（heading_hold.HeadingHold，带 Smith 预估）实车 0.8 m/s 车头稳在目标 ±0.8° 内。
 
 参数来源：内环现参数（kp 2.2 / ki 1.0 / kd 0.4，延迟 0.44 s）与 ±3° 是在 09-30 实测底盘模型上仿真挑的
 （tests/test_line_cascade.py）；内环换成更温和的参数反而变差。外环 2026-10-02 由 k_e 0.6 / k_i 0.05 改为 0.8 / 0.3
@@ -38,14 +19,13 @@ IMU 中断（imu_stale）；开始时没有 IMU 航向不能起步（no_imu）�
 k_e 1.3 / k_i 0.4（路线长直线外环那组）精度只好 0.05 cm，但底盘延迟到 0.5 s 就会因内环偏离 5° 中止，0.8 / 0.3
 到 0.5 s 仍不中止（实测延迟 0.28–0.44 s）。停车瞄准 B 本身（end_aim_m），车速延迟按 10-01 实测 0.33 s 预估。
 """
-import dataclasses
 import math
 from collections import deque
 from dataclasses import dataclass, field
 
-from heading_hold import HeadingHold, HoldConfig
-from line_tracker import LineState, lateral_integral_allowed, wrap
-from robot_core.kinematics import ChassisGeometry
+from heading_hold import HoldConfig
+from line_tracker import wrap
+import user_rules as rules
 
 DEG = math.pi / 180.0
 
@@ -66,7 +46,7 @@ REASON_TEXT = {
 @dataclass(frozen=True)
 class CascadeConfig:
     cruise_mps: float = 0.8
-    # 以下几项与 LineConfig 同名同义，LineMission 从 LineConfig 抄过来（SHARED_FIELDS）
+    # 以下几项与 LineConfig 同名同义（原来 A→B 定点画线从 LineConfig 抄，2026-11-22 删了）
     accel_mps2: float = 0.5
     decel_mps2: float = 0.5
     min_mps: float = 0.06            # 终点前的蠕行速度，保证真的走到 B
@@ -102,12 +82,6 @@ class CascadeConfig:
                                      # 四分位 0.29–0.37；09-30 估的 0.40 s 偏大，加上按 B 前 stop_tol 停，水泵平均停在 B 前约 4 cm）
     end_aim_m: float = 0.0           # 水泵停车瞄准 B 后多少米（0 = 正好停在 B；以前按 B 前 stop_tol_m 停，系统性少画 2 cm）
     hold: HoldConfig = field(default_factory=HoldConfig)    # 内环参数（与 IMU 直行相同）
-
-
-# 与 LineConfig 同名、按同一规则用的字段：LineMission 建差速车定点画线时从当前 LineConfig 抄
-SHARED_FIELDS = ('accel_mps2', 'decel_mps2', 'min_mps', 'track_x_m', 'start_max_offset_m', 'start_max_heading_rad',
-                 'start_before_a_m', 'abort_offset_m', 'abort_heading_rad', 'slow_offset_m', 'stop_tol_m',
-                 'min_line_m')
 
 
 def learn_heading_offset(offset, count, difference, dt, tau):
@@ -165,24 +139,24 @@ class ImuFirstConfig:
     # 喷头横偏（推算）在这以内不往回拉：助跑、线头段、不在喷时用 deadband_m（照旧 2 mm），画线时线头段之后按 paint_deadband_m
     # （和 k_e 一样在 head_blend_m 内过渡，见 paint_deadband）。11-21 用户「去死区」：2 mm 让平地整条线停在 +0.2–0.3 cm
     # 不回 0。线头段不去：起步模型（test_launch_settle）里线头也去掉死区时线头中位 0.37 → 0.50 cm（线头不能变差，用户规矩）
-    deadband_m: float = 0.002
-    paint_deadband_m: float = 0.0
+    deadband_m: float = rules.DEADBAND_M
+    paint_deadband_m: float = rules.PAINT_DEADBAND_M
     # 画线时（线头之后）往回拉：横偏 → 车头偏置 k_e（1/m），车头最多偏 max_bias_deg。10-08 用户「慢慢修」：原来 0.8 / 1°，
     # 10-06 23:47 那条 37.8 m 线 22–24 m 推算偏右 1 cm 多，车头目标 2 m 内转 +0.55°，3 m 横挪约 2.5 cm，地上看得见一个弯；
     # 卫星那几米读大了约 1 cm，又冲到左边。改成 0.4 / 0.3°，1.5–2 cm 的偏差 4–6 m 内平缓收回。
     # 11-21 用户「去死区 + k_e 0.8」：草地中途侧滑拉不回（偏差 0.5–1 cm、最大 2–2.5 cm），改 0.8 / 0.6°。
     # 仿真（0.36 s 延迟车模型 + 卫星噪声 + 草地侧滑）：草地平均 0.89→0.70 cm、p95 1.9→1.5，平地 0.24→0.19；
     # 代价是卫星读偏 1 cm 持续 3 m 时线跟着多偏（最大 0.76→0.91 cm）
-    k_e: float = 0.8
-    max_bias_deg: float = 0.6
+    k_e: float = rules.K_E
+    max_bias_deg: float = rules.MAX_BIAS_DEG
     rate_deg_s: float = 1.0          # 上线以后目标车头每秒最多改这么多（原 A/B 3°/s）
     target_accel_deg_s2: float = 4.0  # RTK 拟合模式的目标角加速度；及时响应，同时避免拟合点更新时突变
     # 线头段：这条直线开喷处（线头 / 弯道出口 / 暂停后继续处）后 head_m 内仍按原来的 head_k_e / head_max_bias_deg
     # （线头精度不能变差，用户规矩），再 head_blend_m 内线性过渡到上面的 k_e / max_bias_deg；不在喷（转场段、停喷后的收尾）一直按原来的
-    head_k_e: float = 0.8
-    head_max_bias_deg: float = 1.0
-    head_m: float = 3.0
-    head_blend_m: float = 2.0
+    head_k_e: float = rules.HEAD_K_E
+    head_max_bias_deg: float = rules.HEAD_MAX_BIAS_DEG
+    head_m: float = rules.HEAD_M
+    head_blend_m: float = rules.HEAD_BLEND_M
     jump_m: float = 0.02             # 卫星横偏和推算差超过它：卫星跳了，不用
     rejoin_m: float = 0.01           # 差回到这以内……
     rejoin_s: float = 1.0            # ……持续这么久才重新用卫星
@@ -201,18 +175,18 @@ class ImuFirstConfig:
     # 只按 IMU 走（照常喷，同卫星跳点）
     # 2026-11-22 用户：「学开头换算还是按 0.40–0.44」（原 0.42：这台车基线中位 0.418、σ 0.0035，23–51 % 的帧 > 0.42，
     # 开头换算常学得晚）。rtk_fit 开着时卫星纠偏另按 fit_min/max_baseline_m，这一对只管学开头换算（直线、圆弧）
-    min_baseline_m: float = 0.40
-    max_baseline_m: float = 0.44
-    baseline_hold_s: float = 1.0
+    min_baseline_m: float = rules.START_LEARN_BASELINE_M[0]
+    max_baseline_m: float = rules.START_LEARN_BASELINE_M[1]
+    baseline_hold_s: float = rules.START_LEARN_HOLD_S
     # 连续这么多帧测向出界才冻结（10-06 傍晚实车：基线中位 0.412 m，零星一两帧 0.395–0.399 / 0.420–0.432，每帧冻 1 s
     # 冻掉直线上中位 37%、开头 57–72%；零星出界那段卫星横偏去趋势 std 0.46 cm，和基线正常 0.41 cm 差不多，连续出界尾巴
     # 1.44 cm（95%）明显差）。3：冻结中位 37% → 14%，下午那种连续掉到 0.32–0.38 m 照样第三帧（约 0.4 s）就冻
-    baseline_bad_frames: int = 3
+    baseline_bad_frames: int = rules.BASELINE_BAD_FRAMES
     # 一条线开头基线就不对、偏移学不到：这段已攒够 offset_min_samples 个就用它，否则借上一条线对好的角度（偏移 + β）
     # 先开，基线正常了再按卫星轨迹纠（用户 10-06 定的；原地掉头 180° 后 IMU 与地面方向的差会变 0.3–0.5°）。
     # 借的不能超过 borrow_max_age_s，和此刻融合航向 − IMU 偏航差不能超过 borrow_max_gap_deg（挡 IMU 重启归零）
-    borrow_max_age_s: float = 600.0
-    borrow_max_gap_deg: float = 10.0
+    borrow_max_age_s: float = rules.BORROW_MAX_AGE_S
+    borrow_max_gap_deg: float = rules.BORROW_MAX_GAP_DEG
     # 2026-10-06 晚用户：「直接靠 imu 画线，卫星只看啥时候停水泵，不考虑 imu 偏移」。False：IMU 接管以后卫星不再修正
     # 横偏、不估 β，喷头横偏只按 IMU 航向 × 走过的路推算；IMU → 线方向的换算只用接管前双天线测向学的偏移
     # （学不到时同样借上一条线的）。接管前（助跑、弯道出来那段本来就由卫星开）卫星照常定横偏，β 不估。
@@ -256,7 +230,7 @@ class ImuFirstConfig:
     fit_walk_r_deg: float = 0.0003     # 漂移速度随机游走，°/m/√m
     fit_max_rate_deg: float = 0.05    # 漂移速度上限，°/m
     # 推算上的修正每走 1 m 最多变这么多，m。10-08 用户：每 0.8 m 最多 1.5 cm（原来每 1 m 1 cm）
-    fit_rate_m: float = 0.015 / 0.8
+    fit_rate_m: float = rules.FIT_RATE_M
     fit_beta_rate_deg: float = 0.15   # 用到目标车头上的角度每走 1 m 最多变这么多，°
     # 前 fit_start_m（推算开始算，含助跑）角度每米最多变 fit_start_beta_rate_deg：10-07 上午起步换算差 0.9°，拟合早就看出来了，
     # 按 0.15°/m 用了 6 m 才用上，线头后 2 m 偏到 2.8 cm。拟合点攒够 fit_start_points_m 以后才放快（一两个点定不了角度）
@@ -277,18 +251,18 @@ class ImuFirstConfig:
     # （10-07 上午 14–17 m 卫星和拟合差 1.1–1.6 cm 持续 3 m 不动）：卫星点和拟合连续 persist_m 都在同一边差超过 persist_e_m，
     # 增加位置修正量的不确定度让拟合跟上；不把一个位置台阶直接当成角度误差。
     # 角度仍由连续沿程观测学习，推算上按 fit_rate_m / 角度限速拉回。
-    persist_m: float = 1.0
-    persist_e_m: float = 0.01
+    persist_m: float = rules.PERSIST_M
+    persist_e_m: float = rules.PERSIST_E_M
     # 2a018383：角度拟合很稳，位置却落后可信卫星 1.6 cm；只放开一次位置协方差仍会再次落后。
     # 喷线后，可信观测连续同侧超过 1 cm 达 1 m，单独启用横偏跟随：IMU + 已学角度预测，卫星按
     # 距离平滑校正位置。角度/侧滑继续由原拟合学习，不把位置差当成转角；修正仍限 fit_rate_m。
     # 回到线附近后放慢位置跟随，避免追逐毫米级卫星往复噪声；卫星不可信时只预测，不撤销已确认的位置。
-    position_follow_min_e_m: float = 0.01
-    position_follow_confirm_m: float = 1.0
+    position_follow_min_e_m: float = rules.PERSIST_E_M
+    position_follow_confirm_m: float = rules.PERSIST_M
     position_follow_tau_m: float = 0.35
     position_follow_near_tau_m: float = 1.5
-    fit_min_baseline_m: float = 0.35
-    fit_max_baseline_m: float = 0.45
+    fit_min_baseline_m: float = rules.HEADING_BASELINE_M[0]
+    fit_max_baseline_m: float = rules.HEADING_BASELINE_M[1]
     # 跳点只挡短暂的：跳开后 jump_accept_s 内没回来、但新位置自己稳定（扣掉直线趋势后散布 ≤ rejoin_m），就认卫星，照常慢慢纠
     # （傍晚回放：原来跳一次就一直只靠 IMU，推算和卫星越拉越远）
     # 固定解一下跳出很远（> jump_accept_max_m）多半是整周解错了，不认，按 IMU 走
@@ -298,51 +272,51 @@ class ImuFirstConfig:
     # 纯 IMU 直行：卫星横偏几米内来回 15–22 cm，车头（IMU、双天线）稳在零点几度——卫星在跳。那块 vs 正常路段：接收机
     # σ = hypot(σn, σe) > 2.5 cm 98% vs 0%；两天线位置距离误差 > 3 cm 48% vs 0%；卫星 < 18 颗 46% vs 0%。连续
     # fit_quality_frames 帧不合格就停用，之后连续合格 fit_settle_s 才再用
-    fit_max_sigma_m: float = 0.025
+    fit_max_sigma_m: float = rules.FIT_MAX_SIGMA_M
     # 两天线距离误差 3 → 5 cm、超限后恢复 2 → 0.5 s（10-07 用户定）：10-07 上午 25 m 线 17.7–22.7 m 误差零星 3.3–3.9 cm，
     # σ 1.8–1.9 cm、22–23 颗、基线 0.41 都正常，3 cm 一超就停、再等 2 s，5 m 没用卫星，偏了 3 cm 没纠。
     # 10-06 那块坏区靠 σ > 2.5 cm（98%）照样挡住
-    fit_max_pair_m: float = 0.05
-    fit_pair_settle_s: float = 0.5
+    fit_max_pair_m: float = rules.FIT_MAX_PAIR_M
+    fit_pair_settle_s: float = rules.FIT_PAIR_SETTLE_S
     # 卫星数（主天线）：用户 10-06 晚定 20；10-08 用户改：低于 17 才不信。17–19 颗只在 σ ≤ fit_low_sats_max_sigma_m、
     # 两天线距离误差 < fit_low_sats_max_pair_m、固定解时照常信（10-06 16:32 那趟靠楼一侧主天线掉到 17–19 颗，σ ≤ 2.0 cm、
     # 两天线误差 ≤ 2.9 cm、一直固定解，卫星本来是好的，被 20 颗挡掉 18–26 m 没纠，按 IMU 偏了 2.5 cm）
-    fit_min_sats: int = 17
-    fit_full_sats: int = 20
-    fit_low_sats_max_sigma_m: float = 0.027    # 10-08 下午用户 2.0 → 2.7 cm：10-06 22:08 那条线 8–14 m 17–19 颗、σ 2.2–2.4 cm，
+    fit_min_sats: int = rules.SATS_MIN
+    fit_full_sats: int = rules.SATS_FULL
+    fit_low_sats_max_sigma_m: float = rules.LOW_SATS_MAX_SIGMA_M  # 10-08 下午用户 2.0 → 2.7 cm：10-06 22:08 那条线 8–14 m 17–19 颗、σ 2.2–2.4 cm，
                                                 # 卫星报的往右 2.7 cm 和地上实际一致，被 2.0 挡掉只按 IMU 走偏了
-    fit_low_sats_max_pair_m: float = 0.03
+    fit_low_sats_max_pair_m: float = rules.LOW_SATS_MAX_PAIR_M
     # 两根天线对不上（位置距离误差 ≥ antenna_pick_pair_m）时，用和 IMU 推算对得上的那根（10-08 用户）。10-06 22:08 那条线
     # 15–20 m 主天线被干扰往左 5–9 cm、两天线差到 9–10 cm，副天线和 IMU 都说车没偏（地上实际也没偏）。
     # 副天线横偏 − 主天线横偏 在两根对得上时慢慢学成固定差（antenna_offset_samples 帧以上才算学好），用副天线时扣掉；
     # 一根和推算差 ≤ antenna_agree_m、另一根差超过 antenna_agree_m + antenna_margin_m 才选，不然照旧（≥ 20 颗且误差
     # ≤ fit_max_pair_m 用主天线，否则不用卫星）
-    antenna_pick_pair_m: float = 0.03
-    antenna_agree_m: float = 0.015
-    antenna_margin_m: float = 0.01
+    antenna_pick_pair_m: float = rules.ANTENNA_PICK_PAIR_M
+    antenna_agree_m: float = rules.ANTENNA_AGREE_M
+    antenna_margin_m: float = rules.ANTENNA_MARGIN_M
     antenna_offset_samples: int = 10
     antenna_fresh_s: float = 0.5
     # 助跑段（线头之前，还没喷，10-08 用户）：线头偏 0.5–2.1 cm（助跑起点就偏 1–3 cm，锁车头 1 m 后只剩 ~1.7 m 往回拉，
     # 按 k_e 0.8 / 1° 每米只拉回 ~55%；推算还在「慢慢修」，16:29 线头车以为 0.8 cm、卫星 2.1 cm）。助跑段推算直接往卫星靠
     # （每走 runup_rtk_tau_m 靠拢 63%，卫星可用且没判跳才靠），往回拉按 runup_k_e / runup_max_bias_deg，目标车头最快
     # runup_rate_deg_s、角加速度 runup_target_accel_deg_s2；横偏收小车头偏置跟着收，线头处短距离交接后恢复喷线策略。
-    runup_rtk_tau_m: float = 0.3
-    runup_k_e: float = 2.0
-    runup_max_bias_deg: float = 2.0
-    runup_rate_deg_s: float = 3.0
+    runup_rtk_tau_m: float = rules.RUNUP_RTK_TAU_M
+    runup_k_e: float = rules.RUNUP_K_E
+    runup_max_bias_deg: float = rules.RUNUP_MAX_BIAS_DEG
+    runup_rate_deg_s: float = rules.RUNUP_RATE_DEG_S
     runup_target_accel_deg_s2: float = 8.0
     # 到线头不能同时撤掉位置对齐和纠偏力度；在最初半米连续交给喷线控制。
     # 不改变路径、助跑长度或开关喷边界。
     runup_blend_m: float = 0.5
-    fit_quality_frames: int = 2
-    fit_settle_s: float = 2.0
+    fit_quality_frames: int = rules.FIT_QUALITY_FRAMES
+    fit_settle_s: float = rules.FIT_SETTLE_S
     # 侧坡侧滑（2026-10-11 用户「加 2、3」）：车在侧坡上往坡下溜，轨迹方向 − 车头 ≈ crab × 横滚（10-11 下午 2° 侧坡 12 条
     # 线全部按方向翻号，西→东 +0.10..+0.57°、东→西 −0.14..−0.60°，拟合 −0.16）；IMU 管车头、看不到。原来全靠拟合的角度 b
     # 慢慢学（还把上一条线反方向的侧滑带到下一条线开头）。现在拟合多一个量 k（侧滑 / 横滚），卫星轨迹和 IMU 推算的差由 b 和
     # k × ∫横滚 一起解释（卫星实时量侧滑），目标车头再减 k × 此刻横滚（坡一变就补）；k 带到下一条线。
     # 横滚用扣掉水平零点的（平地 ≈ 0），低通 crab_roll_tau_s（颠簸不进转向），超过 crab_max_roll_deg 或断了不补
     crab_enabled: bool = True
-    crab_prior: float = -0.16
+    crab_prior: float = rules.CRAB_PRIOR
     crab_prior_sigma: float = 0.10
     crab_walk: float = 0.002           # k 每米随机游走，/√m
     crab_max: float = 0.4
@@ -351,10 +325,10 @@ class ImuFirstConfig:
     crab_roll_fresh_s: float = 0.3
     # 画线时往回拉加强（2026-10-11 用户）：卫星可信时喷头横偏同一边持续超过 boost_e_m 走满 boost_persist_m，车头最多偏
     # max_bias_deg 放到 boost_max_bias_deg；回到 boost_release_e_m 以内或卫星不可信恢复
-    boost_e_m: float = 0.01
+    boost_e_m: float = rules.PERSIST_E_M
     boost_release_e_m: float = 0.005
-    boost_persist_m: float = 1.0
-    boost_max_bias_deg: float = 0.6
+    boost_persist_m: float = rules.PERSIST_M
+    boost_max_bias_deg: float = rules.BOOST_MAX_BIAS_DEG
     # 草地模式（2026-11-21 用户「做草地模式」）：草地上车会侧滑，「IMU 车头 → 实际走向」的角度几米就变 0.2° 左右；
     # 拟合按 fit_walk_b_deg（0.005°/√m，平地这个角几乎不变）学得太慢。直线上按走过的路取最近 grass_window_m 的两轮
     # 电机电流（|A| 平均）中位数，≥ grass_on_a 算草地、≤ grass_off_a 才回平地（11-21 实录喷线 2 m 中位：平地最高 4.3 A、
@@ -366,9 +340,9 @@ class ImuFirstConfig:
     # 电流读数断了 grass_current_fresh_s 清空回平地。回放 11-21 六趟：草地线线头后 78–100% 认成草地，平地 0%
     grass_enabled: bool = True
     grass_window_m: float = 2.0
-    grass_on_a: float = 5.0
-    grass_off_a: float = 4.0
-    grass_min_speed_mps: float = 0.4
+    grass_on_a: float = rules.GRASS_ON_A
+    grass_off_a: float = rules.GRASS_OFF_A
+    grass_min_speed_mps: float = rules.GRASS_MIN_SPEED_MPS
     grass_current_fresh_s: float = 0.5
     grass_fit_walk_b_deg: float = 0.1
 
@@ -1264,253 +1238,3 @@ def imu_first_target(cfg, guide, target, line_yaw, dt, align_rate_deg_s, align_d
     left = abs(wrap(desired - target))
     aligned = aligned or left <= 1e-6
     return target, bias, not aligned and left > align_deg * DEG, aligned
-
-
-class ImuLineTracker:
-    """接口与 LineTracker 相同（set_line / check_start / start / stop / update / status、st），另加 sync：
-    每个控制周期（和起步检查前）由 LineMission 给此刻的单调时钟和最近一帧 IMU (t, 偏航 rad, 陀螺 z rad/s)。"""
-
-    def __init__(self, config=CascadeConfig(), geometry=None):
-        self.cfg = config
-        self.speed_limit_mps = None
-        self.geo = geometry or ChassisGeometry()
-        # 内环的 speed 只用来判断「车走起来了没有」（指令车速不到一半不积分），按巡航速度算
-        self.hold_cfg = dataclasses.replace(config.hold, speed=config.cruise_mps)
-        self.hold = HeadingHold(self.hold_cfg)
-        self.a = self.b = None
-        self.st = LineState()
-        self._now = None
-        self._imu = None
-        self._lever = None           # 融合用的主天线杠杆臂（车体系前、左，m），mission 每周期给
-        self._diff = None            # 融合航向 − 参考航向，rad
-        self._settled_since = None   # 这次起步什么时候对准、加速完（那一刻偏移从头重新平均）
-        self._run = 0                # 每次起步 / 继续换一个，内环按新的一次作业重新开始
-        self._offset = None          # 融合航向 − IMU 偏航（低通），rad
-        self._offset_n = 0
-        self._target = None          # 发给内环的目标（IMU 系，限速后），rad
-        self._bias = 0.0             # δ，rad
-        self._aligning = False
-        self._wz = 0.0
-        self._last_s = None
-        self._v_prev = 0.0
-        self._v_sent = deque()       # 发出的 (时刻, 车速)，每个值一直作用到下一条；只留预估要用的
-        self._sum2 = self._n = 0.0
-        self._max = 0.0
-
-    # ---- 输入 ----
-    def sync(self, now, imu, lever=None):
-        """此刻的时钟、最近一帧 IMU（没有时 None）、融合正在用的主天线杠杆臂（没有时 None：位置不改算）。"""
-        self._now = float(now)
-        self._lever = lever
-        if imu is not None and imu != self._imu:
-            self._imu = imu
-            self.hold.on_imu(imu[1], imu[2], now=imu[0])
-
-    def _imu_now(self):
-        """(IMU 偏航按陀螺推到此刻, 陀螺)；IMU 太旧或没有时 None。"""
-        imu, now = self._imu, self._now
-        if imu is None or now is None:
-            return None
-        age = now - imu[0]
-        if not 0.0 <= age <= self.hold_cfg.imu_stale_s:
-            return None
-        return wrap(imu[1] + imu[2] * age), imu[2]
-
-    def _reference(self, pose):
-        """参考航向（ENU）= IMU 偏航 + 偏移，顺手记下融合航向与它的差；还没有偏移或 IMU 太旧时 None。"""
-        imu = self._imu_now()
-        if imu is None or self._offset is None:
-            self._diff = None
-            return None
-        ref = wrap(imu[0] + self._offset)
-        self._diff = wrap(pose.yaw - ref)
-        return ref
-
-    def _position(self, pose, heading):
-        """后轴中心按 heading 改算：融合位置 + R(融合航向)·杠杆臂 = 天线位置，再减 R(heading)·杠杆臂。"""
-        if self._lever is None or heading == pose.yaw:
-            return pose.x, pose.y
-        ax, ay = self._lever
-        cf, sf, cr, sr = math.cos(pose.yaw), math.sin(pose.yaw), math.cos(heading), math.sin(heading)
-        return (pose.x + (cf - cr) * ax - (sf - sr) * ay, pose.y + (sf - sr) * ax + (cf - cr) * ay)
-
-    # ---- 任务 ----
-    def set_line(self, a, b):
-        dx, dy = b[0] - a[0], b[1] - a[1]
-        length = math.hypot(dx, dy)
-        if length < self.cfg.min_line_m:
-            raise ValueError('A、B 两点太近（%.2f m）' % length)
-        self.a, self.b = tuple(a), tuple(b)
-        self.u = (dx / length, dy / length)
-        self.n = (-self.u[1], self.u[0])
-        self.line_yaw = math.atan2(dy, dx)
-        self.st = LineState(length=length)
-
-    def _along_across(self, x, y, yaw, forward, left=0.0):
-        c, si = math.cos(yaw), math.sin(yaw)
-        px, py = x + forward * c - left * si, y + forward * si + left * c
-        rx, ry = px - self.a[0], py - self.a[1]
-        return rx * self.u[0] + ry * self.u[1], rx * self.n[0] + ry * self.n[1]
-
-    def geometry_of(self, x, y, yaw):
-        """(喷头横偏, 车头误差, 记点那个点的沿线距离)。"""
-        _, e = self._along_across(x, y, yaw, self.cfg.nozzle_x_m, self.cfg.nozzle_y_m)
-        s, _ = self._along_across(x, y, yaw, self.cfg.track_x_m, self.cfg.track_y_m)
-        return e, wrap(yaw - self.line_yaw), s
-
-    def check_start(self, pose):
-        """能否从当前位姿开始；返回 (可以, 原因)。条件同 LineTracker，另要有新鲜的 IMU 航向。"""
-        if self.a is None:
-            return False, 'no_line'
-        if not pose.usable_for_control:
-            return False, 'pose_unusable'
-        e, he, s = self.geometry_of(pose.x, pose.y, pose.yaw)
-        if abs(e) > self.cfg.start_max_offset_m:
-            return False, 'too_far_from_line'
-        if abs(he) > self.cfg.start_max_heading_rad:
-            return False, 'heading_not_aligned'
-        if s < -self.cfg.start_before_a_m:
-            return False, 'too_far_behind_a'
-        if s > self.st.length - 0.5:
-            return False, 'already_past_b'
-        if self._imu_now() is None:
-            return False, 'no_imu'
-        return True, ''
-
-    def start(self, pose, integral=None):
-        """开始或在暂停后继续；integral 不给时沿用当前值。内环重新开始，目标从此刻的 IMU 偏航出发。"""
-        ok, why = self.check_start(pose)
-        if not ok:
-            if self.st.state != 'PAUSED':
-                self.st.state = 'IDLE'
-            self.st.reason = why
-            return False
-        self.st.state, self.st.reason = 'RUNNING', ''
-        if integral is not None:
-            self.st.integral = integral
-        imu_yaw, _ = self._imu_now()
-        # 参考航向（IMU + 偏移）离融合航向超过 jump_deg：IMU 只是辅助，按融合航向（卫星）重定偏移
-        if self._offset is None or abs(wrap(pose.yaw - imu_yaw - self._offset)) > self.cfg.jump_deg * DEG:
-            self._offset, self._offset_n = wrap(pose.yaw - imu_yaw), 1
-        self._target = imu_yaw
-        self._settled_since = None
-        self._run += 1
-        self._last_s = None
-        self._v_prev = max(0.0, pose.speed)
-        self._v_sent.clear()
-        self._sum2 = self._n = self._max = 0.0
-        return True
-
-    def stop(self, reason='operator'):
-        if self.st.state in ('RUNNING', 'PAUSED'):
-            self.st.state, self.st.reason = 'ABORTED', reason
-        self.hold.end('user')
-        return self._halt()
-
-    def _halt(self, state=None, reason=None):
-        if state is not None:
-            self.st.state, self.st.reason = state, reason
-        self.st.v_cmd, self._v_prev, self._wz = 0.0, 0.0, 0.0
-        if self._now is not None:
-            self._v_sent.append((self._now, 0.0))
-        return 0.0, 0.0
-
-    def _pending_m(self, now):
-        """已经发出、底盘还没执行（speed_delay_s 内）的车速指令还要走的路，m。"""
-        t0, sent = now - self.cfg.speed_delay_s, self._v_sent
-        while len(sent) > 1 and sent[1][0] <= t0:
-            sent.popleft()
-        total = 0.0
-        for i, (ts, v) in enumerate(sent):
-            te = sent[i + 1][0] if i + 1 < len(sent) else now
-            if te > t0:
-                total += v * (te - max(ts, t0))
-        return total
-
-    # ---- 每个控制周期 ----
-    def update(self, pose, dt):
-        """返回 (vx, wz)。pose 需有 x, y, yaw, speed, usable_for_control；调用前先 sync。"""
-        st, cfg = self.st, self.cfg
-        if st.state not in ('RUNNING', 'PAUSED'):
-            st.v_cmd = 0.0
-            return 0.0, 0.0
-        st.integral_frozen = not lateral_integral_allowed(pose)
-        if not pose.usable_for_control:
-            # 定位不可用：立即停，恢复后由操作员（或 LineMission 的自动继续）重新开始
-            self.hold.end('pose')
-            return self._halt('PAUSED', 'pose_unusable')
-        ref = self._reference(pose)
-        if st.state == 'PAUSED':
-            st.reason = 'pose_recovered_waiting_operator'
-            return self._halt()
-        now = self._now
-
-        # 偏移 = 融合航向 − IMU 偏航（同一时刻）：一直照学，先按样本平均，攒够一个时间常数后按低通
-        if ref is not None:
-            self._offset, self._offset_n, correction = learn_heading_offset(
-                self._offset, self._offset_n, self._diff, dt, cfg.offset_tau_s)
-            ref = wrap(ref + correction)
-        heading = pose.yaw if ref is None else ref
-        x, y = self._position(pose, heading)
-        e, he, s = self.geometry_of(x, y, heading)
-        st.e, st.heading_err, st.s = e, he, s
-        if abs(e) > cfg.abort_offset_m or abs(he) > cfg.abort_heading_rad:
-            self.hold.end('off_line')
-            return self._halt('ABORTED', 'off_line')
-        remaining = st.length + cfg.end_aim_m - s - self._pending_m(now)
-        if remaining <= 0.0:
-            self.hold.end('user')
-            return self._halt('DONE', '')
-
-        # 积分只在前进且贴近直线时累积，并限幅
-        ds = 0.0 if self._last_s is None else max(0.0, s - self._last_s)
-        self._last_s = s
-        st.integral, self._bias, self._target, self._aligning = lateral_heading_step(
-            cfg, e, ds, st.integral, self._target, self.line_yaw, self._offset, dt, st.integral_frozen)
-
-        # 车速：巡航、偏差降速、终点前按减速度刹停、对准时慢走、起步斜坡
-        v = cfg.cruise_mps
-        if abs(e) > cfg.slow_offset_m:
-            v *= max(0.4, 1.0 - (abs(e) - cfg.slow_offset_m) / 0.3)
-        v = min(v, max(cfg.min_mps, math.sqrt(2.0 * cfg.decel_mps2 * max(0.0, remaining))))
-        if self._aligning:
-            v = min(v, max(cfg.min_mps, cfg.align_radius_m * cfg.turn_rate_deg_s * DEG))
-        ramping = v > self._v_prev + cfg.accel_mps2 * dt
-        v = min(v, self._v_prev + cfg.accel_mps2 * dt)
-        if self.speed_limit_mps is not None:
-            v = min(v, max(0.0, self.speed_limit_mps))
-        if self._settled_since is None and not self._aligning and not ramping:
-            # 起步转完、加速完：偏移从这里重新平均（起步转弯里 IMU 刻度误差攒下的差不带进来）
-            self._settled_since = now
-            self._offset_n = 0
-
-        self.hold.on_odom(pose.speed, now=now)
-        _, wz = self.hold.step(self._run, now, target=self._target, vx=v)
-        if self.hold.state != 'running':
-            reason = 'imu_deviation' if self.hold.reason == 'deviation' else (self.hold.reason or 'imu_stale')
-            return self._halt('ABORTED', reason)
-        self._v_prev = st.v_cmd = v
-        self._wz = wz
-        self._v_sent.append((now, v))
-        st.kappa = wz / v if v >= 0.05 else 0.0
-
-        if s >= 0.0:
-            self._n += 1
-            self._sum2 += e * e
-            self._max = max(self._max, abs(e))
-            st.stats = dict(rms_m=math.sqrt(self._sum2 / self._n), max_m=self._max, samples=int(self._n))
-        return v, wz
-
-    def status(self):
-        st = self.st
-        deg = lambda a: None if a is None else round(math.degrees(a), 3)  # noqa: E731
-        imu = self._imu_now()
-        hold_err = None if imu is None or self._target is None else wrap(imu[0] - self._target)
-        # 键与 LineTracker 相同（app 不用改）；hold 是内外环的中间量，作业记录里用来查问题
-        return dict(state=st.state, reason=st.reason, e=st.e, heading_err_deg=math.degrees(st.heading_err),
-                    s=st.s, length=st.length, v_cmd=st.v_cmd, kappa=st.kappa, integral=st.integral,
-                    trim_kappa=None, stats=dict(st.stats), integral_frozen=st.integral_frozen,
-                    hold=dict(target_deg=deg(self._target), offset_deg=deg(self._offset), bias_deg=deg(self._bias),
-                              integ_bias_deg=deg(-self.cfg.k_i * st.integral), error_deg=deg(hold_err),
-                              aligning=self._aligning, wz=round(self._wz, 4), state=self.hold.state,
-                              reason=self.hold.reason, heading_diff_deg=deg(self._diff)))
