@@ -608,6 +608,7 @@ class PathTracker:
         self.approach_to_m = None       # 正式路线（喷线起点）在本段的路程处（可在段尾之后）；None 不管（见 approach_zone_m）
         self.approach_mps = None        # 离它 approach_zone_m 以内最多这么快（画线速度）
         self.runup_distance_m = 0.
+        self.first_line_runup = False   # 重启后第一条加长的助跑（route_plan.FIRST_RUN_UP_M）：这条线按没有记忆处理
         self.paint_start_guard = None
         self._paint_start_beta_history = deque(maxlen=2048)
         self.reverse_runup = False
@@ -986,7 +987,7 @@ class PathTracker:
                 and (pair is None or self._imu_now - pair > first.fit_pair_settle_s))
 
     def _baseline_ok(self, fit=False):
-        """双天线基线合格（0.40–0.42，学开头换算用）；fit=True 按拟合用的宽范围（0.35–0.45，卫星纠偏用）。"""
+        """双天线基线合格（0.40–0.44，学开头换算用，用户 11-22 定）；fit=True 按拟合用的宽范围（0.35–0.45，卫星纠偏用）。"""
         first = self.cfg.straight_imu_first
         bad = self._fit_bad_t if fit else self._baseline_bad_t
         return bad is None or self._imu_now is None or self._imu_now - bad > first.baseline_hold_s
@@ -1475,7 +1476,11 @@ class PathTracker:
         return output
 
     def _runup_position_trusted(self, pose):
-        """助跑拟合比沿线拟合更严格：位置、测向均新鲜，当前帧也必须合格。"""
+        """助跑拟合比沿线拟合更严格：位置、测向均新鲜，当前帧也必须合格。
+
+        基线按卫星可信的范围（fit_min_baseline_m–fit_max_baseline_m，用户定的 0.35–0.45），0.40–0.44 只管学开头换算
+        （2026-11-22：Gen5 基线中位 0.418、σ 0.0035，23–51 % 的帧 > 0.42，原来按 0.40–0.42 助跑里卫星一半时间被挡，
+        起步锁住的角度误差 1.5° 一直带进线头：201657 线头 −3.3 cm、全线 4.9 cm）。"""
         if not position_observation_allowed(pose):return False
         first = self.cfg.straight_imu_first
         if getattr(pose, 'single_antenna', False):
@@ -1495,7 +1500,7 @@ class PathTracker:
                 or self._imu_now is None or self._quality_frame_t is None or self._baseline_frame_t is None
                 or not 0.0 <= self._imu_now - self._quality_frame_t <= 0.5
                 or not 0.0 <= self._imu_now - self._baseline_frame_t <= 0.5
-                or self._baseline_bad_n or not self._baseline_ok() or not self._rtk_quality_ok()
+                or self._fit_bad_n or not self._baseline_ok(fit=True) or not self._rtk_quality_ok()
                 or self._quality is None):
             return False
         sigma, sats, pair, fixed = self._quality
@@ -1551,6 +1556,10 @@ class PathTracker:
                       if self.paint_from_m>0. else 0.)
         baseline_ok = self._baseline_ok()
         if guide.token is None and align is not None:
+            # 重启后第一条（规划时没有记忆、加长了助跑）：助跑里按卫星轨迹定角度（ImuFirstGuide.no_memory）。只按规划时定的，
+            # 不再看此刻有没有记忆：接入那段直线（助跑起点退后以后常有好几米）自己会拟合好、记进记忆，但那是按双天线开头的
+            # 短距离拟合（2026-11-22 仿真：按它算有记忆，第一条线头最差 1.35 → 1.58 cm、全线最差 2.15 → 3.01 cm）
+            guide.no_memory = self.first_line_runup
             guide.token = align.begin_line()            # 新的一条线：上一条线拟合好的换算定下来，可带过来
         was_locked = guide.locked
         if not guide.locked and baseline_ok:
@@ -1602,7 +1611,7 @@ class PathTracker:
             nx, ny = self._straight_nozzle
             h = rel + guide.beta
             measured = base_lat + (nx-cfg.track_x_m)*math.sin(h) + ny*(math.cos(h)-1.0)
-            # 卫星纠偏：拟合按用户定的可信规则（固定解 + 基线 0.35–0.45），观测器老办法仍按 0.40–0.42
+            # 卫星纠偏：拟合按用户定的可信规则（固定解 + 基线 0.35–0.45），观测器老办法仍按 min/max_baseline_m（0.40–0.44）
             # 助跑冻结的是横偏积分，不是不许用可信位置拟合；否则起步锁住的角度误差一直推到线头。
             # 起喷前积分按设计冻结，正常融合校正也可冻结积分；二者都不应阻断可信位置拟合。
             # 所有直线助跑共用当前质量、时效及跳点检查，不能只给倒车接入放行。
@@ -2719,7 +2728,9 @@ class SectionTracker:
                     # 10-08 用户：圆前切线助跑由 0.3 提到 0.35 m/s，入圆仍平滑接到圆弧速度。
                     tracker.runup_speed_mps=.35
                 from route_plan import RUN_UP_M
-                tracker.runup_distance_m=RUN_UP_M
+                # 重启后第一条加长的助跑（route_plan.FIRST_RUN_UP_M，规划时记在段上）整段都按助跑速度走
+                tracker.runup_distance_m=getattr(sec,'runup_m',None) or RUN_UP_M
+                tracker.first_line_runup=getattr(sec,'runup_m',None) is not None
                 if self.reverse_runup and 0 < i == self._first_paint and self.sections[i-1].direction < 0:
                     # 倒车接入后的助跑：保留起步锁车头距离，航向收至 1° 后才交接（横偏仍用原门槛）。
                     tracker.reverse_runup = True

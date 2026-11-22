@@ -199,8 +199,10 @@ class ImuFirstConfig:
     # 0.32–0.38 m（标称 0.41），测向和 IMU 来回差 7–12°，跑的是 8411c884（还没有基线门槛）：卫星修正跟着纠，横偏来回 7.6–9.3 cm。用户又定：高于 0.42 m
     # 同样处理。基线不在 [min_baseline_m, max_baseline_m]（或刚出过、baseline_hold_s 内）：卫星修正全部冻结、偏移不学，
     # 只按 IMU 走（照常喷，同卫星跳点）
+    # 2026-11-22 用户：「学开头换算还是按 0.40–0.44」（原 0.42：这台车基线中位 0.418、σ 0.0035，23–51 % 的帧 > 0.42，
+    # 开头换算常学得晚）。rtk_fit 开着时卫星纠偏另按 fit_min/max_baseline_m，这一对只管学开头换算（直线、圆弧）
     min_baseline_m: float = 0.40
-    max_baseline_m: float = 0.42
+    max_baseline_m: float = 0.44
     baseline_hold_s: float = 1.0
     # 连续这么多帧测向出界才冻结（10-06 傍晚实车：基线中位 0.412 m，零星一两帧 0.395–0.399 / 0.420–0.432，每帧冻 1 s
     # 冻掉直线上中位 37%、开头 57–72%；零星出界那段卫星横偏去趋势 std 0.46 cm，和基线正常 0.41 cm 差不多，连续出界尾巴
@@ -241,7 +243,7 @@ class ImuFirstConfig:
     # 的直线度。拟合改成跟踪：修正量 c（真实喷头横偏 − IMU 推算）和角度 b 都允许按距离随机游走（fit_walk_*），角度跟得上
     # 慢漂；用到推算上的修正和角度再按距离限速（fit_rate_m / fit_beta_rate_deg），一个坏点拉不动车，真实偏移一直在纠。
     # 卫星用不用：固定解 + 双天线基线在 [fit_min_baseline_m, fit_max_baseline_m]（用户定的可信规则 0.35–0.45 m，11-21 由 0.30–0.50 收紧，连续
-    # baseline_bad_frames 帧出界才停），加上和 IMU 对不上的突然跳点不用；0.40–0.42 只管学开头换算
+    # baseline_bad_frames 帧出界才停），加上和 IMU 对不上的突然跳点不用；0.40–0.44 只管学开头换算
     # 修正量、角度本身的随机游走收小（漂移交给下面的漂移速度 r）：仿真今天的 101 m 线 IMU 不漂 / 漂 −0.4°/min 都是
     # p95 0.65 cm（游走 2 mm / 0.03° 时不漂 1.4 cm——卫星噪声被当成真变化）
     fit_walk_c_m: float = 0.0005      # 修正量随机游走，m/√m
@@ -261,6 +263,11 @@ class ImuFirstConfig:
     fit_start_m: float = 6.0
     fit_start_beta_rate_deg: float = 0.5
     fit_start_points_m: float = 1.0
+    # 没有记忆的线（ImuFirstGuide.no_memory：路线作业重启后第一条）助跑里（还没开喷，不管直线度）拟合点攒够 fit_start_points_m 以后，
+    # 角度每米最多变 fit_runup_beta_rate_deg：2026-11-22 仿真，这时开头按双天线定、测向误差 ±1.5°，拟合在助跑里已经看出角度，
+    # 按 0.5°/m 到线头才用上 0.1–0.6°；放到 2°/m 线头 0.3 m 内最差 1.16 → 0.81 cm（测向偏 +1.5°）。
+    # 有记忆的线不放（仿真：放了后面几条线头中位 0.29 → 0.37 cm，开头本来就准，助跑那点卫星噪声反倒用进去）
+    fit_runup_beta_rate_deg: float = 2.0
     # 拟合起点（第一拍的卫星横偏）那一拍卫星不可信、第一个可信点和「起点 + 角度先验」的预测差超过 fit_anchor_sigma 倍标准差：
     # 起点错了，这一点重新当起点（见 ImuFirstGuide._fit_anchor）。10-07 仿真（遮挡较多 100 m）：暂停后重开那拍在多路径区、
     # 起点错 10 cm，第一个可信点把它算成角度错 2.3°，车斜着开出去。不一概重定：倒车助跑里第一拍常被判不可信但其实是准的，
@@ -374,7 +381,7 @@ class ImuFirstConfig:
                      'fit_low_sats_max_sigma_m', 'fit_low_sats_max_pair_m',
                      'antenna_pick_pair_m', 'antenna_agree_m', 'antenna_margin_m', 'antenna_fresh_s',
                      'runup_rtk_tau_m', 'runup_k_e', 'runup_max_bias_deg', 'runup_rate_deg_s', 'runup_target_accel_deg_s2', 'runup_blend_m',
-                     'fit_prior_rate_deg', 'fit_walk_r_deg', 'fit_max_rate_deg', 'fit_start_beta_rate_deg',
+                     'fit_prior_rate_deg', 'fit_walk_r_deg', 'fit_max_rate_deg', 'fit_start_beta_rate_deg', 'fit_runup_beta_rate_deg',
                      'persist_m', 'persist_e_m', 'position_follow_min_e_m', 'position_follow_confirm_m',
                      'position_follow_tau_m', 'position_follow_near_tau_m', 'fit_anchor_sigma', 'target_accel_deg_s2',
                      'head_k_e', 'head_max_bias_deg', 'crab_prior_sigma', 'crab_max', 'crab_roll_tau_s',
@@ -440,6 +447,8 @@ class ImuFirstGuide:
         self.imu_only_s = 0.0
         self._agree_s = 0.0
         self.fast = True
+        self._runup = False          # 这一拍在助跑里（调用方给的 fast，不含推算开始 fast_m）
+        self.no_memory = False       # 这条线开头没有上一条线拟合好的换算（重启后第一条，调用方按规划设，见 route_plan.FIRST_RUN_UP_M）
         self._rel = None
         self._travel = 0.0
         self.fit_points = 0          # rtk_fit：已拟合的点数
@@ -558,6 +567,7 @@ class ImuFirstGuide:
         没有为空（不补侧滑）。返回喷头横偏估计。"""
         cfg = self.cfg
         self.fast = fast or self._travel < cfg.fast_m
+        self._runup = bool(fast)
         if cfg.rtk_fit:
             return self._fit_update(measured, rel, distance, dt, nozzle, rtk_ok, roll)
         if not cfg.rtk_trim and steering:
@@ -656,12 +666,18 @@ class ImuFirstGuide:
         return True
 
     def pull_to(self, measured, fraction):
-        """助跑段（还没喷）：推算横偏按 fraction（0–1）直接往卫星横偏 measured 靠；拟合的修正量一起挪，开喷时接着用。"""
+        """助跑段（还没喷）：推算横偏按 fraction（0–1）直接往卫星横偏 measured 靠；拟合的修正量一起挪，开喷时接着用。
+
+        没有记忆的线（no_memory）卡尔曼状态 x 不挪，只按卫星点更新：2026-11-22 仿真，每拍把 x 的修正量 c 也往卫星拉，
+        起步换算角度错 1.8° 时卫星和推算按距离拉开的差全被这里当位置吃掉，助跑 2 m 拟合角度只学到 0.6°（拉开 5.6 cm），
+        线头 −3.3 cm 的那种第一条就是这样；不挪以后走 1.2 m 就学到 1.6°（真值 1.8°）。有记忆的线开头换算本来就准，
+        照旧一起挪（仿真：也不挪时后面几条线头中位 0.29 → 0.37 cm）。"""
         if self.e is None or self._fit is None or not math.isfinite(measured):
             return
         d = max(0.0, min(1.0, fraction)) * (measured - self.e)
         self._fit['c'] += d
-        self._fit['x'][0] += d
+        if not self.no_memory:
+            self._fit['x'][0] += d
         self.e += d
         if self._position_e is not None:
             self._position_e += d
@@ -757,8 +773,12 @@ class ImuFirstGuide:
         # 用到车头上的角度（β 和补的侧滑）带来的横移照常补（IMU 推算不含）；只有额外的纠正按 fit_rate_m 限速
         f['c'] += (f['b'] + self.crab) * step
         f['c'] += max(-cfg.fit_rate_m * step, min(cfg.fit_rate_m * step, c_now - f['c']))
-        start = u < cfg.fit_start_m and self.fit_points * cfg.fit_bin_m >= cfg.fit_start_points_m - 1e-9
-        db = (cfg.fit_start_beta_rate_deg if start else cfg.fit_beta_rate_deg) * DEG * step
+        enough = self.fit_points * cfg.fit_bin_m >= cfg.fit_start_points_m - 1e-9
+        start = u < cfg.fit_start_m and enough
+        rate = cfg.fit_start_beta_rate_deg if start else cfg.fit_beta_rate_deg
+        if self._runup and enough and self.no_memory:
+            rate = max(rate, cfg.fit_runup_beta_rate_deg)   # 没有记忆：助跑里不喷，角度按卫星轨迹尽快用上
+        db = rate * DEG * step
         f['b'] += max(-db, min(db, b_now - f['b']))
         self.beta = math.asin(max(-lim, min(lim, f['b'])))
         self.fit_e = base + f['c']
@@ -998,6 +1018,14 @@ class ImuAlignment:
     def t(self):
         o = self.pending or self.obs
         return None if o is None else o[0]
+
+    def remembered(self):
+        """有没有能带到下一条线开头的换算：最近一条线经卫星拟合好（不是只借来的）、离最近一帧 IMU 不超过 max_age_s、
+        IMU 没断过。重启后第一条没有（route_plan.FIRST_RUN_UP_M）。"""
+        o = self.pending or self.obs
+        t = self._imu_t
+        return (o is not None and o[3] is not None and t is not None and math.isfinite(t)
+                and 0.0 <= t - o[0] <= self.cfg.max_age_s)
 
     def feed_imu(self, t, yaw):
         if not (math.isfinite(t) and math.isfinite(yaw)):

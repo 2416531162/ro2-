@@ -973,12 +973,21 @@ class LineMission:
         car = (pose.x + k * math.cos(pose.yaw), pose.y + k * math.sin(pose.yaw), pose.yaw)
         info = {}
         sections, entry_m = planner(spec, car, self.min_route_radius, body=self.body, nozzle_x=planner_nozzle,
-                                    info=info)
+                                    info=info, runup_m=self._route_runup_m(planner_nozzle))
         from live_cruise import label_sections
         label_sections(sections,entry_m,cruise)
         cfg = dataclasses.replace(self.path_cfg, cruise_mps=cruise, track_x_m=k)
         tracker = SectionTracker(sections, cfg, self.geo, **self.section_options(route=True))
         return sections, entry_m, tracker, info
+
+    def _route_runup_m(self, planner_nozzle):
+        """路线作业的助跑长度：差速车直线 IMU 为主 + 卫星拟合，任务层还没有上一条线拟合好的换算（重启后第一条、
+        隔了 max_age_s 以上）→ route_plan.FIRST_RUN_UP_M；其余 None（RUN_UP_M）。"""
+        first = getattr(self.path_cfg, 'straight_imu_first', None)
+        if (planner_nozzle is None or not getattr(self.path_cfg, 'straight_imu_enabled', False) or first is None
+                or not first.rtk_fit or self._imu_alignment.remembered()):
+            return None
+        return route_plan.FIRST_RUN_UP_M
 
     def _reentry_allowed(self, past_m=0.0):
         """接入时偏离能不能就近重新接入：普通路线任务（不是场地、补画）、还没开喷、没超过 REENTRY_MAX 次。
