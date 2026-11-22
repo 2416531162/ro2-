@@ -26,7 +26,7 @@
 from robot_core.standstill import stationary
 import math
 from types import SimpleNamespace
-from motion_speeds import MAX_SECTION_SPEED, TURN_SPEED_MPS, PAINT_ARC_SPEED_MPS, transit_bend_speed
+from motion_speeds import MAX_SECTION_SPEED, TURN_SPEED_MPS, SHORT_RUNUP_MPS, PAINT_ARC_SPEED_MPS, transit_bend_speed
 from robot_core.config import CONTROL_DT
 from collections import deque
 from dataclasses import dataclass, field, replace
@@ -2442,7 +2442,7 @@ class PathTracker:
             v=min(v,start_speed+a*max(0.,v-start_speed))
         # 弯前规划必须在喷线定速之后执行，助跑、正式喷线、转场均不能覆盖它。
         short_runup=self._short_runup_here(s_now)
-        if short_runup:v=min(v,TURN_SPEED_MPS)
+        if short_runup:v=min(v,SHORT_RUNUP_MPS)
         requested=v
         curve_limit=self._curve_speed(s,max(v,abs(pose.speed)))
         current_piece=self.path._piece(max(0.,min(self.path.length,s_now)))

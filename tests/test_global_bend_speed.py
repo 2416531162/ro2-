@@ -77,7 +77,8 @@ class GlobalBendSpeed(unittest.TestCase):
   for paint in (False,True):
    for k in (-1.,-.2,.2,1.):
     sec=Section(1,Route((0.,0.,0.),[(8.,k)]))
-    self.assertEqual(speed_for(sec,cfg,paint=paint),PAINT_ARC_SPEED_MPS if paint else TURN_SPEED_MPS)
+    # 转场弯 0.45（2026-11-22）：R 1 m 再受横向加速度 0.2 限到 0.447
+    self.assertAlmostEqual(speed_for(sec,cfg,paint=paint),PAINT_ARC_SPEED_MPS if paint else min(TURN_SPEED_MPS,math.sqrt(cfg.lateral_accel/abs(k))))
   sec=Section(1,Route((0.,0.,0.),[(8.,0.)]))
   self.assertEqual(speed_for(sec,cfg,paint=True),1.)
 

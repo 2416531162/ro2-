@@ -36,8 +36,9 @@ class TransitArcSpeed(unittest.TestCase):
                 self.assertGreaterEqual(self.inner(radius), WHEEL_MIN_MPS - 1e-9)
 
     def test_tight_arc_capped_by_lateral_accel(self):
-        v = target(1.0)                                         # 内侧轮 0.3 要 0.453 m/s，横向加速度限 0.20 → 0.447
-        self.assertAlmostEqual(v, math.sqrt(.20), places=3)
+        # 2026-11-22 弯道速度 0.35 → 0.45：R 1 m 内侧轮 0.3 要 0.453、横向加速度限 0.447，都不到 base 0.45 → 0.45
+        v = target(1.0)
+        self.assertAlmostEqual(v, TURN_SPEED_MPS, places=6)
         self.assertGreater(self.inner(1.0), .29)
 
     def test_wide_arc_unchanged(self):
