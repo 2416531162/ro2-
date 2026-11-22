@@ -61,17 +61,17 @@ class PaintSpeedInvariant(unittest.TestCase):
    v,_=tr.update(at(tr,s,PAINT_ARC_SPEED_MPS),DT)
    self.assertAlmostEqual(v,PAINT_ARC_SPEED_MPS);self.assertTrue(tr.paint_speed_ready)
 
- def test_online_speed_change_waits_until_paint_is_off(self):
+ def test_online_speed_change_starts_smoothly_while_painting(self):
+  # 2026-11-22 用户「支持实时变速，但是车端需要平滑变速」：喷线中也立即开始变（原来等停喷），每拍只变一点
   tr=strict([section([(12.,0.)],1.,10.)]).trackers[0]
   self.assertTrue(tr.start(at(tr,4.)))
   self.assertAlmostEqual(tr.update(at(tr,4.),DT)[0],.8)
   tr.set_cruise(.4)
-  for s in (4.2,8.,9.99):
-   self.assertAlmostEqual(tr.update(at(tr,s),DT)[0],.8)
+  s=v=.8;s=4.;last=.8
+  for _ in range(20):
+   s+=v*DT;v,_=tr.update(at(tr,s,v),DT)
+   self.assertLess(v,last+1e-9);self.assertLess(last-v,.15*DT+1e-9);last=v
    self.assertTrue(tr.paint_speed_ready)
-  tr.update(at(tr,10.2),DT)
-  self.assertFalse(tr.paint_speed_ready)
-  v,_=tr.update(at(tr,10.3),DT)
   self.assertLess(v,.8)
 
  def test_offset_does_not_reduce_paint_speed(self):

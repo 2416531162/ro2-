@@ -168,6 +168,10 @@ def figure8(radius, *, lead_in=2.0, lead_out=1.5, start=(0.0, 0.0, 0.0)):
 # 静止直线起步：共同提速参考与相对 IMU 稳向；只在绝对方向尚未接管时使用。
 LAUNCH_ACCEL_MPS2 = .5
 LAUNCH_JERK_MPS3 = 2.0
+# 作业中在线调速（2026-11-22 用户「支持实时变速，但是车端需要平滑变速」）：喷线中也立即开始变，按 S 形曲线
+# （加速度上限 0.15 m/s²、加加速度 0.3 m/s³）过渡，0.5→1.0 约 3.8 s / 2.9 m；线头仍先以 entry_stabilize_mps 起喷。
+LIVE_CRUISE_ACCEL_MPS2 = .15
+LIVE_CRUISE_JERK_MPS3 = .3
 LAUNCH_HOLD_MAX_S = 3.0
 LAUNCH_HOLD_MAX_M = 1.0
 LAUNCH_HEADING_LIMIT_RAD = math.radians(2.0)
@@ -574,6 +578,8 @@ class PathTracker:
         self.path = Path(path.pose(0.),pieces,name=path.name) if len(pieces)<len(path.pieces) else path
         self.speed_limit_mps = None
         self._cruise_target = None
+        self._cruise_accel = 0.
+        self._cruise_moved = False
         self.continuation = None
         self.predecessor = None
         self._preview_path = None
@@ -1106,7 +1112,8 @@ class PathTracker:
         return None
 
     def _planned_paint_speed(self, a, b):
-        cruise=self.cfg.cruise_mps if self._cruise_target is None else self._cruise_target
+        # 在线调速时 cfg.cruise_mps 本身就是平滑过渡中的值（喷线中途也跟着变），不再直接用目标值
+        cruise=self.cfg.cruise_mps
         curved=any(not p.straight and p.s0<b-1e-8 and p.s0+p.length>a+1e-8 for p in self.path.pieces)
         # 同一笔若有直弯混合，进入该笔前已选好能够全程保持的速度，不到弯前临时压低。
         return self.cfg.arc_speed_mps if curved and self.cfg.arc_speed_mps is not None else cruise
@@ -1158,15 +1165,25 @@ class PathTracker:
         else:
             self.cfg=replace(self.cfg,cruise_mps=speed)
             self._cruise_target=None
+            self._cruise_accel=0.
 
     def _advance_cruise(self,dt):
-        if self._cruise_target is None or self.st.state!='RUNNING':return
-        if self._active_paint_window(self.st.s) is not None:return
-        delta=self._cruise_target-self.cfg.cruise_mps
-        rate=self.cfg.accel_mps2 if delta>0 else self.cfg.decel_mps2
-        value=self.cfg.cruise_mps+max(-rate*max(0.,dt),min(rate*max(0.,dt),delta))
+        """在线调速：巡航值按 S 形曲线走向目标（加速度、加加速度都限幅，靠近目标时加速度先收回零），喷线中也照走。"""
+        self._cruise_moved=False
+        if self._cruise_target is None or self.st.state!='RUNNING' or dt<=0:return
+        gap=self._cruise_target-self.cfg.cruise_mps
+        jerk,top=LIVE_CRUISE_JERK_MPS3,LIVE_CRUISE_ACCEL_MPS2
+        direction=1. if gap>=0. else -1.
+        taper=max(0.,math.sqrt((jerk*dt)**2+2*jerk*abs(gap))-jerk*dt)
+        wanted=direction*min(top,taper)
+        accel=max(self._cruise_accel-jerk*dt,min(self._cruise_accel+jerk*dt,wanted))
+        value=self.cfg.cruise_mps+accel*dt
+        if abs(self._cruise_target-value)<1e-6 or (value-self._cruise_target)*direction>0. and accel*direction>0.:
+            value,accel=self._cruise_target,0.
+            self._cruise_target=None
+        self._cruise_accel=accel
+        self._cruise_moved=abs(value-self.cfg.cruise_mps)>0.
         self.cfg=replace(self.cfg,cruise_mps=value)
-        if abs(value-self._cruise_target)<1e-9:self._cruise_target=None
 
     def update(self, pose, dt):
         """返回 (vx, wz)。pose 需有 x, y, yaw, speed, yaw_rate, usable_for_control。"""
@@ -2261,7 +2278,8 @@ class PathTracker:
         self._prepare_entry_window(s_now,paint_window)
         if paint_window is not None:
             key,a,b=paint_window
-            if self._paint_speed_key!=(key,a,b):
+            if self._paint_speed_key!=(key,a,b) or self._cruise_moved:
+                # 进笔时定下这一笔的速度；在线调速时随平滑过渡的巡航值一起变（画圆/弧线仍是固定圆弧速度）
                 self._paint_speed_key=(key,a,b)
                 self._paint_speed_latched=self._planned_paint_speed(a,b)
             self.paint_target_mps=self._entry_paint_target(s_now,self._paint_speed_latched)
@@ -2809,6 +2827,10 @@ class SectionTracker:
                 return False
             nxt._v_prev,nxt._accel_prev=tr._v_prev,tr._accel_prev
             nxt._curve_speed_active=tr._curve_speed_active
+            if tr._cruise_target is not None and abs(nxt.cfg.cruise_mps-tr._cruise_target)<1e-9:
+                # 在线调速还没过渡完就连续进下一段：接着过渡，不在分界上一拍跳到目标
+                nxt.cfg=replace(nxt.cfg,cruise_mps=tr.cfg.cruise_mps)
+                nxt._cruise_target,nxt._cruise_accel=tr._cruise_target,tr._cruise_accel
             # 已按下一笔作业速度连续直行时无需重新降速；从 0.5 圆弧接入更快直线仍须稳行 1 m。
             # 不能仅因“连续衔接”就跳过下一条直线的接入稳定阶段。
             if (nxt._entry_speed_active and tr._v_prev>=
