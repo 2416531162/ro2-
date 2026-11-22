@@ -124,6 +124,21 @@ class SpeedTrimTest(unittest.TestCase):
         plain.step(0.0, 0.1, 0.0)
         self.assertEqual(plain.link.cmds[-1], target)
 
+    def test_disabled_still_measures(self):
+        """修正关着：下发 = 目标、不学，但照样按位置算真实轮速（/oid/trace 的 erpm_true）。"""
+        trim = SpeedTrim(W, enabled=False)
+        plant = Plant(lambda c: c * 1.6)
+        _, actual, cmd = plant.run(trim, 0.15, 5.0, 0.0)
+        e = int(round(0.15 * PER))
+        self.assertEqual(cmd, {1: e, 2: e})
+        self.assertAlmostEqual(actual, 0.15 * 1.6, delta=0.01)
+        self.assertEqual(trim.learned, 0)
+        self.assertEqual(trim.gains[1], [g for _, g in DEFAULT_TABLE])
+        st = trim.status()
+        self.assertFalse(st['enabled'])
+        for m in (0, 1):
+            self.assertAlmostEqual(st['measured_erpm'][m], e * 1.6, delta=e * 1.6 * 0.03)
+
 
 class TableMigrationTest(unittest.TestCase):
     def test_old_table_resampled_onto_new_nodes(self):

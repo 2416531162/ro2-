@@ -360,8 +360,12 @@ class OidDriver(wd.WheeltecDriver):
         self.tuning_supported = confirmed and set(wheel_buses(self.params).values()) == {'can'}
         self.tuning, self.tuning_error = self.load_tuning()
         # 重连时沿用同一个对象：学到的增益不丢
-        self.speed_trim = (SpeedTrim(self.wheels, path=os.path.expanduser(str(gp('speed_trim_file') or '')))
-                           if bool(gp('speed_trim')) and self.wheels.configured else None)
+        # 修正关着（speed_trim: false）也建一个不修正的：照样按位置算真实轮速给 /oid/trace 的 erpm_true，
+        # 下发 = 目标、不学、不读不写表文件（2026-11-22 用户「改，补回记录」）
+        trim_on = bool(gp('speed_trim'))
+        self.speed_trim = (SpeedTrim(self.wheels, enabled=trim_on,
+                                     path=os.path.expanduser(str(gp('speed_trim_file') or '')) if trim_on else '')
+                           if self.wheels.configured else None)
         self.tune_pending = None            # 已保存、等 IO 线程发给驱动器的指令 id
         self.tune_result = None             # 最近一次修改的结果 {id, ok, message}，ok=None 为正在下发
         self.legacy_commands = False
@@ -874,7 +878,7 @@ class OidDriver(wd.WheeltecDriver):
 
     def publish_trace(self, t, now):
         """/oid/trace：t（单调时钟，与 /line/trace、/gnss/raw 同一时钟）、v_cmd / w_cmd（限速后发给底盘的）、
-        erpm_sent / erpm_read（左、右）、erpm_target（低速修正前的目标）/ erpm_true（位置算的真实转速，修正打开才有）、wheels_mps（读回换算的左右轮速）、v / w（里程计）、
+        erpm_sent / erpm_read（左、右）、erpm_target（低速修正前的目标）/ erpm_true（位置算的真实转速，修正关着也有）、wheels_mps（读回换算的左右轮速）、v / w（里程计）、
         pos_cdeg（左、右驱动器读回的电机轴位置，0.01°，累计值，驱动器方向；轮毂电机直驱即轮子转角，
         用来看车身摆动是否跟轮子每转一圈锁相）。负载（左、右，驱动器方向，读数超过 LOAD_MAX_AGE_S 没更新写 null）：
         motor_a 电机电流 A、bus_a 母线电流 A、duty 占空比原始值、temp_c 驱动器温度 ℃；CAN 那台只查电机电流，
