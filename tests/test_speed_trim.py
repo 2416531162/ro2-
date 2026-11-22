@@ -154,3 +154,48 @@ class TableMigrationTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class CommonLookupTest(unittest.TestCase):
+    """2026-11-19 用户「改成同一个增益」：两轮按平均速度查表，跟线的小转向不被台阶放大（04:28 倒车 0.35 m/s 左右摆）。"""
+
+    def send(self, left_mps, right_mps):
+        trim = SpeedTrim(W, tau_s=1e9)
+        st = {1: MotorState(), 2: MotorState()}
+        e = {1: int(round(left_mps * PER)), 2: int(round(right_mps * PER))}
+        return e, trim.apply(0.0, e, st)
+
+    def test_small_steer_on_the_step_not_amplified(self):
+        # 04:28 那一下：倒车 0.35 m/s，两轮目标约 0.33 / 0.37
+        e, out = self.send(-0.37, -0.33)
+        want = e[2] - e[1]
+        got = out[2] - out[1]
+        self.assertAlmostEqual(got / want, 1.0, delta=0.05)      # 改之前约 3 倍
+        self.assertAlmostEqual(out[1] / e[1], out[2] / e[2], delta=0.01)   # 同一个增益
+
+    def test_equal_speeds_same_as_table(self):
+        for v in (0.1, 0.3, 0.33, 0.5):
+            with self.subTest(v=v):
+                trim = SpeedTrim(W, tau_s=1e9)
+                e, out = self.send(v, v)
+                self.assertAlmostEqual(out[1], e[1] * trim.gain(1, v), delta=1)
+
+    def test_arc_wheels_far_apart_keep_own_speed(self):
+        # 圆弧内轮 0.1、外轮 0.5：内轮仍是低速增益（约 0.55），外轮仍约 1.0，不被平均成 0.3 的增益
+        e, out = self.send(0.1, 0.5)
+        self.assertAlmostEqual(out[1] / e[1], 0.55, delta=0.02)
+        self.assertAlmostEqual(out[2] / e[2], 1.0, delta=0.02)
+
+    def test_lookup_continuous(self):
+        prev = None
+        for k in range(0, 41):
+            d = k * 0.005
+            look = SpeedTrim.lookup_mps({1: 0.35 - d, 2: 0.35 + d})
+            if prev:
+                self.assertLess(abs(look[1] - prev[1]), 0.006)
+                self.assertLess(abs(look[2] - prev[2]), 0.006)
+            prev = look
+
+    def test_pivot_both_same(self):
+        e, out = self.send(-0.3, 0.3)
+        self.assertEqual(out[1], -out[2])

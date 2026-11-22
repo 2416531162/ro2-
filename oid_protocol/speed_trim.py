@@ -26,6 +26,11 @@ DEFAULT_TABLE = ((0.05, 0.55), (0.1, 0.55), (0.2, 0.55), (0.25, 0.55), (0.3, 0.5
 GAIN_MIN, GAIN_MAX = 0.35, 1.3
 MIN_LEARN_MPS = 0.04        # 太慢的位置分辨率不够（霍尔一格就是好几个百分点），不学
 MAX_STEP = 0.05             # 每次学习增益最多改 5%（对数）
+# 两轮同一查表速度（2026-11-19 用户「改成同一个增益」）：04:28 自动倒车 0.35 m/s 两轮目标 0.33 / 0.37 各查各的，
+# 正好跨在 0.30→0.35 的台阶两边，一点点转向被放大成两轮差约 1.9 倍（实际车头转速约指令 3 倍），车头 ±5–10° 来回摆。
+# 改成两轮都按两轮平均速度查表：差速在 ±COMMON_BAND_MPS 以内（跟线、直行纠偏）两轮用平均速度这一处的增益，转向不再被放大；
+# 差得多（圆弧内外轮、原地转）各自离平均速度超出的部分照旧按自己的速度查，速度一直连续变化不跳。
+COMMON_BAND_MPS = 0.05
 
 
 def _interp(nodes, gains, x):
@@ -112,6 +117,16 @@ class SpeedTrim:
         g = self.gains[motor]
         return g[i] * (1 - f) + g[i + 1] * f
 
+    @staticmethod
+    def lookup_mps(target_mps):
+        """两轮目标轮速（m/s，带符号）→ 各轮查增益表用的速度：两轮都在转时以两轮平均速度为准，
+        自己偏离平均超出 COMMON_BAND_MPS 的部分才按自己的速度（见 COMMON_BAND_MPS）。"""
+        a = {m: abs(v) for m, v in target_mps.items()}
+        if any(v == 0 for v in a.values()):
+            return a
+        mean = sum(a.values()) / len(a)
+        return {m: v - max(-COMMON_BAND_MPS, min(COMMON_BAND_MPS, v - mean)) for m, v in a.items()}
+
     # ---- 每周期 ----
     def _measure(self, now, motor, state):
         if state.t_position is None or state.position_cdeg is None:
@@ -140,6 +155,7 @@ class SpeedTrim:
         per = self.wheels.erpm_per_mps()
         limit = int(round(self.wheels.max_wheel_mps * per))
         out = {}
+        look = self.lookup_mps({m: int(target[m]) / per for m in (1, 2)})
         for m in (1, 2):
             e = int(target[m])
             got = self._measure(now, m, states[m]) if m in states else None
@@ -157,14 +173,14 @@ class SpeedTrim:
                     and now - self.steady_since[m] >= self.settle_s and got[0] * e > 0):
                 err = math.log(abs(got[0]) / abs(e))           # >0 = 实际比目标快
                 step = max(-MAX_STEP, min(MAX_STEP, -err * dt / self.tau_s))
-                i, f = self._locate(abs(mps))
+                i, f = self._locate(look[m])
                 g = self.gains[m]
                 for k, wk in ((i, 1 - f), (i + 1, f)):
                     if wk > 0:
                         g[k] = min(GAIN_MAX, max(GAIN_MIN, g[k] * math.exp(step * wk)))
                 self.learned += 1
                 self._dirty = True
-            cmd = int(round(e * self.gain(m, mps)))
+            cmd = int(round(e * self.gain(m, look[m])))
             if cmd == 0:
                 cmd = 1 if e > 0 else -1
             out[m] = max(-limit, min(limit, cmd))
