@@ -263,6 +263,12 @@ class PathConfig:
     launch_recover_accel_deg_s2: float = 20.0
     launch_release_e_m: float = .02
     launch_release_heading_deg: float = 1.5
+    # 只在大偏差时再放宽（2026-11-22 用户「只在大偏差时放宽」）：草丛起步一侧轮子被拖住 0.2–0.4 s，车头扭 10–15°，
+    # 4°/s 要 2–3 s 才扳回来。可信直线上车头偏 ≥ launch_big_heading_deg 或喷头横偏 ≥ launch_big_e_m 才从 4°/s
+    # 往 launch_big_max_deg_s 放（到 1.5 倍门槛放满），偏差回到门槛以内就收回原来的 2–4°/s；平地正常起步偏不到这么大，不受影响。
+    launch_big_e_m: float = .05
+    launch_big_heading_deg: float = 5.0
+    launch_big_max_deg_s: float = 8.0
     # Gen5前进长直线：快速IMU航向内环、慢喷头横偏外环；基础配置关闭以兼容旧车与纯几何调用方。
     straight_imu_enabled: bool = False
     straight_min_length_m: float = 6.0
@@ -374,6 +380,7 @@ class PathConfig:
                 raise ValueError(name + ' 必须是布尔值')
         for name in ('launch_recover_max_deg_s', 'launch_recover_accel_deg_s2',
                      'launch_release_e_m', 'launch_release_heading_deg',
+                     'launch_big_e_m', 'launch_big_heading_deg', 'launch_big_max_deg_s',
                      'turn_decel_mps2', 'turn_jerk_mps3', 'straight_min_length_m', 'straight_blend_s',
                      'straight_outer_k_e', 'straight_outer_tau_s', 'straight_bias_max_deg', 'straight_offset_tau_s',
                      'straight_target_rate_deg_s', 'straight_kp', 'straight_drift_tc', 'straight_target_rate_tau_s',
@@ -1264,6 +1271,11 @@ class PathTracker:
         need=max(abs(e)/cfg.launch_release_e_m,abs(math.degrees(he))/cfg.launch_release_heading_deg)
         weight=max(0.,min(1.,(need-1.)/2.)) if trusted and straight else 0.
         cap=cfg.launch_settle_max_deg_s+weight*max(0.,cfg.launch_recover_max_deg_s-cfg.launch_settle_max_deg_s)
+        big=max(abs(e)/cfg.launch_big_e_m,abs(math.degrees(he))/cfg.launch_big_heading_deg)
+        wide=max(0.,min(1.,(big-1.)/.5)) if trusted and straight else 0.
+        S['wide']=wide
+        if wide>0.:
+            cap=max(cap,cfg.launch_recover_max_deg_s+wide*max(0.,cfg.launch_big_max_deg_s-cfg.launch_recover_max_deg_s))
         step=cfg.launch_recover_accel_deg_s2*max(0.,dt)
         S['limit_deg_s']+=max(-step,min(step,cap-S['limit_deg_s']))
         # 判断实际响应是否跟上正在执行的指令；直线还须位置/航向合格，不能只因轮速同步就放行。
