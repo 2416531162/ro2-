@@ -257,6 +257,11 @@ class FusionConfig:
     heading_bias_gain: float = 0.15
     heading_bias_step_deg: float = 0.2
     heading_bias_max_deg: float = 2.0
+    # 学测向偏差时两根天线位置互检偏差（最近 dual_weight_window_s 内的最大值）的上限，m。原来借用位置降权的
+    # dual_weight_m（2 cm）：2026-11-23 实车 30 分钟互检偏差中位 2.5 cm、只有 29% 的时间 ≤2 cm，4 m 一段凑不齐，
+    # 一次没学（测向实际只偏 0.7°、却按 1.7° 补，开头方向系统性偏约 1°）。比的是 4 m 位移的方向，两根天线之间
+    # 基本不变的 2–3 cm 差抵消掉；只把明显被污染（多路径）的段挡在外面。位置降权照旧按 dual_weight_m
+    heading_bias_dev_max_m: float = 0.05
 
     def __post_init__(self):
         if self.yaw_input not in ('rate', 'angle'):
@@ -1726,7 +1731,7 @@ class GnssFusion:
     def _learn_heading_bias(self, sample, xy):
         """测向偏差在线学习（见 FusionConfig.heading_bias_learning）：每帧可用的固定解调一次。"""
         s, cfg = self._s, self.config
-        weak = cfg.dual_weight_m > 0 and len(xy) > 2 and xy[2] is not None and xy[2] > cfg.dual_weight_m
+        weak = len(xy) > 2 and xy[2] is not None and xy[2] > cfg.heading_bias_dev_max_m
         if (not cfg.heading_bias_learning or not s.yaw_ready or not self._has_heading() or s.imu_mismatch
                 or s.outlier_since is not None or s.blending or weak):
             s.bias_window = None
