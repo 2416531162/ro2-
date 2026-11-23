@@ -12,9 +12,9 @@ import user_rules as rules
 GEN5_MOUNT_OFFSET_DEG = rules.GEN5_MOUNT_OFFSET_DEG
 
 
-def mount_offset(value, differential):
-    """标定文件里的 mount_offset_deg（没写为 None）→ 实际用的，度。差速车（Gen5）文件里是 0 或没写时用
+def mount_offset(value):
+    """标定文件里的 mount_offset_deg（没写为 None）→ 实际用的，度。文件里是 0 或没写时用
     GEN5_MOUNT_OFFSET_DEG；写了别的值照用（以后人工标定过的值优先）。车上的文件不改，回滚版本即恢复。"""
-    if differential and (value is None or value == 0):
+    if value is None or value == 0:
         return GEN5_MOUNT_OFFSET_DEG
     return 0.0 if value is None else float(value)

@@ -77,7 +77,7 @@ SUMMARY_TOPICS = ('/line/status', '/gnss/status', '/motion/status', '/oid/status
 def context_files():
     """每段开始时拷进 context/segNN/ 的配置文件（不存在的跳过）。"""
     home = os.path.expanduser('~')
-    return [os.environ.get('RK3588_ROBOT_CONFIG', os.path.join(RELEASE_ROOT, 'robot_core', 'robot.json')),
+    return [os.environ.get('RK3588_ROBOT_CONFIG', os.path.join(RELEASE_ROOT, 'robot_core', 'robot_gen5.json')),
             os.path.join(RELEASE_ROOT, 'oid_protocol', 'oid.yaml'),
             os.path.join(RELEASE_ROOT, 'rion_protocol', 'sch16t.yaml'),
             os.path.join(home, 'rtk', 'fusion.json'),

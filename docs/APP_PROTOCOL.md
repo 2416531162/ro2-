@@ -75,7 +75,7 @@ Gen5 行驶中的路线任务可以发送 `{"type":"route","action":"imu_hold","
 
 ## 下行
 
-`hello`：`v`、`name`、`session`、`car`（`front_m`/`rear_m`/`half_width_m`/`wheelbase_m`/`track_m`/`max_steer_deg`/`min_turn_radius_m`/`drive`（`ackermann` 前轮转向，`differential` 两后轮差速、能原地转，此时 `min_turn_radius_m` 是跟踪圆弧的最小半径、没有前轮转角）/`nozzle_x_m`、`nozzle_right_m` 水泵（喷头）在后轴前、车中线右多少米，车体系原点后轴中心、x 前 y 左；差速车所有作业都按它压线，app 的「对准点」优先）、`speed_tiers`（手动三档 m/s）、`straight`（IMU 定向直行：`speed_mps` 固定车速 0.8、`tolerance_deg` 目标精度 1、`abort_deg` 偏差超过就停车 5；旧车端没有这一项，app 不显示直行）、`network`（车热点：`hotspot_ssid`、`hotspot_psk`、`hotspot_ip`；车上没有 WiFi 网卡或旧车端为 null，app 不显示「车的网络」切换）。
+`hello`：`v`、`name`、`session`、`car`（`front_m`/`rear_m`/`half_width_m`/`wheelbase_m`/`track_m`/`max_steer_deg`/`min_turn_radius_m`/`drive`（车端现在只发 `differential`：两后轮差速、能原地转，`min_turn_radius_m` 是跟踪圆弧的最小半径、没有前轮转角；`ackermann` 前轮转向是 2026-11-23 删掉的旧车，App 仍认）/`nozzle_x_m`、`nozzle_right_m` 水泵（喷头）在后轴前、车中线右多少米，车体系原点后轴中心、x 前 y 左；差速车所有作业都按它压线，app 的「对准点」优先）、`speed_tiers`（手动三档 m/s）、`straight`（IMU 定向直行：`speed_mps` 固定车速 0.8、`tolerance_deg` 目标精度 1、`abort_deg` 偏差超过就停车 5；旧车端没有这一项，app 不显示直行）、`network`（车热点：`hotspot_ssid`、`hotspot_psk`、`hotspot_ip`；车上没有 WiFi 网卡或旧车端为 null，app 不显示「车的网络」切换）。
 
 `tel`（10 Hz）：
 

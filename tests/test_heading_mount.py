@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Gen5 测向安装偏差 +1.7°（2026-11-22 用户「那就补偿这1.7度」，heading_mount）：
 
-- 车上 fusion.json 写的是没标定过的 0（或没写、没文件）时，融合和 rtk_node 都用 +1.7°；写了别的值照用；旧底盘不变；
+- 车上 fusion.json 写的是没标定过的 0（或没写、没文件）时，融合和 rtk_node 都用 +1.7°；写了别的值照用；
   车上的文件不改。
 - 两根天线的连线在车体系是 baseline_yaw_body − 安装偏差：补了 1.7° 以后副天线（右天线）照样和主天线对得上、
   主天线被污染时照样换右天线定位。
@@ -37,7 +37,6 @@ import runtime_config  # noqa: E402
 from test_secondary_position import ANT, BASE, config, lateral_cm  # noqa: E402
 
 DIFF = dict(runtime_config.PROFILE, drive=dict(runtime_config.PROFILE.get('drive') or {}, type='differential'))
-ACK = dict(runtime_config.PROFILE, drive=dict(runtime_config.PROFILE.get('drive') or {}, type='ackermann'))
 CAR = dict(antenna_xy=[0.24, 0.2075], baseline_yaw_body_deg=-90.0, mount_offset_deg=0.0,
            antenna_height_m=0.53, gnss_hold_speed_mps=0.45, tilt_compensation_enabled=True)   # 车上现在的文件
 MOUNT = heading_mount.GEN5_MOUNT_OFFSET_DEG
@@ -54,13 +53,10 @@ def write(tmp, data):
 class Rule(unittest.TestCase):
     def test_value(self):
         self.assertEqual(MOUNT, 1.7)
-        self.assertEqual(heading_mount.mount_offset(0.0, True), 1.7)
-        self.assertEqual(heading_mount.mount_offset(None, True), 1.7)
-        self.assertEqual(heading_mount.mount_offset(0.5, True), 0.5)       # 人工标定过的值优先
-        self.assertEqual(heading_mount.mount_offset(-1.2, True), -1.2)
-        self.assertEqual(heading_mount.mount_offset(0.0, False), 0.0)      # 旧底盘不变
-        self.assertEqual(heading_mount.mount_offset(None, False), 0.0)
-        self.assertEqual(heading_mount.mount_offset(0.8, False), 0.8)
+        self.assertEqual(heading_mount.mount_offset(0.0), 1.7)
+        self.assertEqual(heading_mount.mount_offset(None), 1.7)
+        self.assertEqual(heading_mount.mount_offset(0.5), 0.5)       # 人工标定过的值优先
+        self.assertEqual(heading_mount.mount_offset(-1.2), -1.2)
 
 
 class FusionConfig(unittest.TestCase):
@@ -86,8 +82,9 @@ class FusionConfig(unittest.TestCase):
     def test_other_value_kept(self):
         self.assertEqual(self.load(dict(CAR, mount_offset_deg=0.9))[0].mount_offset_deg, 0.9)
 
-    def test_old_chassis_unchanged(self):
-        self.assertEqual(self.load(CAR, ACK)[0].mount_offset_deg, 0.0)
+    def test_old_drive_key_in_file_ignored(self):
+        # 删阿克曼车前文件里可能写过的 drive_differential（OBSOLETE_FUSION_KEYS）：丢掉，照样 +1.7°
+        self.assertEqual(self.load(dict(CAR, drive_differential=False))[0].mount_offset_deg, 1.7)
 
     def test_fusion_heading_compensated(self):
         # 测向 181.7°（连线往后转了 1.7°）：融合给出的车头是真车头 0
@@ -109,19 +106,15 @@ class FusionConfig(unittest.TestCase):
 
 
 class RtkNodeHeading(unittest.TestCase):
-    def load(self, data, profile=DIFF, differential=None):
+    def load(self, data):
         with tempfile.TemporaryDirectory() as tmp:
-            path = write(tmp, data)
-            with mock.patch.object(runtime_config, 'PROFILE', profile):
-                return rtk_node.load_heading_calibration(path, differential)
+            return rtk_node.load_heading_calibration(write(tmp, data))
 
     def test_same_rule_as_fusion(self):
         self.assertEqual(self.load(CAR), (1.7, -90.0))
         self.assertEqual(self.load(None), (1.7, -90.0))
         self.assertEqual(self.load(dict(CAR, mount_offset_deg=0.9)), (0.9, -90.0))
-        self.assertEqual(self.load(CAR, ACK), (0.0, -90.0))
-        self.assertEqual(self.load(dict(CAR, drive_differential=False)), (0.0, -90.0))
-        self.assertEqual(self.load(CAR, ACK, differential=True), (1.7, -90.0))
+        self.assertEqual(self.load(dict(CAR, drive_differential=False)), (1.7, -90.0))   # 删掉的旧键不管
 
     def test_recorded_heading_matches_fusion(self):
         # /gnss/heading 和状态里的车头：测向 181.7° → 真车头 0

@@ -13,8 +13,7 @@ sys.path[:0] = [str(ROOT / 'radar_system'), str(ROOT)]
 import route_plan as rp
 from path_tracker import PathConfig, SectionTracker, differential_config
 from robot_core.kinematics import ChassisGeometry
-from line_mission import LineMission
-from line_tracker import LineConfig, LineTracker
+from line_mission import IdleTracker, LineMission
 from test_continuous_field_arcs import GEO, drive, pose
 
 
@@ -47,7 +46,7 @@ class CustomCurveRunOut(unittest.TestCase):
                         fusion = SimpleNamespace(pose=lambda _: pose(*car),
                             to_geodetic=lambda x, y: (30.+y*1e-5, 120.+x*1e-5),
                             to_local=lambda lat, lon: ((lon-120.)/1e-5, (lat-30.)/1e-5))
-                        mission = LineMission(fusion, SimpleNamespace(), LineTracker(LineConfig(), GEO),
+                        mission = LineMission(fusion, SimpleNamespace(), IdleTracker(GEO),
                             route_path=str(Path(folder) / 'route.json'), nozzle_x=nozzle)
                         ok, message = mission.command(dict(cmd='route_start_current',
                             route=spec.to_dict(digits=12), nozzle=dict(forward=nozzle[0], right=-nozzle[1])), 0.)

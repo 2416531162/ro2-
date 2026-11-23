@@ -10,13 +10,11 @@ import time
 
 
 class ManualDriveLatch:
-    def __init__(self, timeout_s=0.75, allow_pivot=False):
-        """allow_pivot：差速车（Gen5）车速 0、角速度不为 0 是原地转，照样是运动指令；
-        阿克曼车不走就不能转，车速 0 时把角速度也清掉。"""
+    def __init__(self, timeout_s=0.75):
+        """Gen5 差速车：车速 0、角速度不为 0 是原地转，照样是运动指令。"""
         if timeout_s <= 0:
             raise ValueError("timeout_s must be positive")
         self.timeout_s = float(timeout_s)
-        self.allow_pivot = bool(allow_pivot)
         self._lock = threading.Lock()
         self._vx = 0.0
         self._wz = 0.0
@@ -34,7 +32,7 @@ class ManualDriveLatch:
         """
         if client_id is None or seq is None:
             return True
-        moving = abs(float(vx)) > 1e-4 or (self.allow_pivot and abs(float(wz)) > 1e-4)
+        moving = abs(float(vx)) > 1e-4 or abs(float(wz)) > 1e-4
         with self._lock:
             last = self._last_seq.get(client_id)
             if last is not None and seq <= last:
@@ -47,7 +45,7 @@ class ManualDriveLatch:
     def set(self, vx, wz, now=None, hold=None):
         """hold：IMU 定向直行的作业编号，这时 vx 是直行车速、方向由 heading_hold 按 IMU 算；停车时清掉。"""
         vx, wz = float(vx), float(wz)
-        if abs(vx) < 1e-4 and (not self.allow_pivot or abs(wz) < 1e-4):
+        if abs(vx) < 1e-4 and abs(wz) < 1e-4:
             vx, wz = 0.0, 0.0
         moving = abs(vx) > 1e-4 or abs(wz) > 1e-4
         stamp = time.monotonic() if now is None else float(now)

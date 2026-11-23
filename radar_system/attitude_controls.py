@@ -186,11 +186,9 @@ class AttitudeControls:
         fresh = (attitude is not None and 0 <= now - attitude[0] <= .2
                  and all(math.isfinite(v) for v in attitude[1:3]))
         has_yaw = fresh and len(attitude) >= 4 and type(attitude[3]) in (int, float) and math.isfinite(attitude[3])
-        diff_ok = getattr(self.mission, 'differential', True) is not False
         # blocked 管坡度开关、zero_blocked 管 IMU 旋转标定；单天线只挡坡度开关（标定存的零点双天线照用）
         single = getattr(self.mission, 'antenna_mode', 'dual') == 'single'
         zero_blocked = (blocked
-                        or (None if diff_ok else '当前底盘不支持原地旋转标定')
                         or (None if fresh else '等待新鲜 IMU 姿态数据')
                         or (None if has_yaw else '等待 IMU 航向数据'))
         return dict(blocked=SINGLE_TILT_BLOCKED if single else blocked,

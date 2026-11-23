@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """安卓 app 演示/联调服务器:不需要车、不需要 ROS。
 
-仿真一辆车(阿克曼底盘模型,--gen5 时是两台模拟的欧艾迪驱动器),按 docs/APP_PROTOCOL.md 提供与车端相同的接口:
+仿真一辆 Gen5 差速车(两台模拟的欧艾迪驱动器,能原地转),按 docs/APP_PROTOCOL.md 提供与车端相同的接口:
 
 - ``ws://本机:8088/ws``         hello + 10Hz 遥测;摇杆、IMU 直行、急停、复位、RTK 定点画线、路线、场地作业
 - ``/display``                   车载屏幕只读页面
@@ -11,10 +11,10 @@
 
     python3 radar_system/tools/app_demo_server.py            # 真机与电脑同一 WiFi
     python3 radar_system/tools/app_demo_server.py --route-demo # 预设连线矩形并开始跑,浏览器看 /display
-    python3 radar_system/tools/app_demo_server.py --gen5       # Gen5 差速底盘:两台模拟的欧艾迪驱动器,能原地转
     # 安卓模拟器里连 10.0.2.2:8088
 
-定点画线、路线用真实的 LineMission/LineTracker/PathTracker;定位是仿真车真值加厘米级噪声,始终当作 RTK 固定解。
+路线用真实的 LineMission/PathTracker;定位是仿真车真值加厘米级噪声,始终当作 RTK 固定解。
+2026-11-23 删了阿克曼车:原来默认的阿克曼底盘模型删了,--gen5 留着(已是默认,写不写都一样)。
 地图原点在房间原点,路线只存在内存里(车端存 ~/rtk/route.json)。仿真只用于界面联调。
 """
 import argparse
@@ -36,16 +36,11 @@ sys.path.insert(0, os.path.dirname(HERE))
 sys.path.insert(0, os.path.dirname(os.path.dirname(HERE)))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(HERE)), 'oid_protocol'))
-if '--gen5' in sys.argv:
-    # Gen5 差速底盘:共享配置换成 robot_gen5.json(要在导入 runtime_config 之前),车用两台模拟驱动器开
-    os.environ.setdefault('RK3588_ROBOT_CONFIG',
-                          os.path.join(os.path.dirname(os.path.dirname(HERE)), 'robot_core', 'robot_gen5.json'))
 
 import app_link  # noqa: E402
 import car_display  # noqa: E402
 import car_network  # noqa: E402
 import job_files  # noqa: E402
-from line_sim import Chassis  # noqa: E402
 from runtime_config import PROFILE, profile_hash  # noqa: E402
 from robot_core.config import CONTROL_DT  # noqa: E402
 from robot_core.kinematics import ChassisGeometry  # noqa: E402
@@ -113,12 +108,9 @@ class DemoFusion:
 class DemoCar:
     """仿真车 + 与 MotionAuthority 同样语义的模式:IDLE/MANUAL/NAVIGATION/ESTOP。"""
 
-    def __init__(self, gen5=False):
-        if gen5:
-            from oid_sim import OidSimCar
-            chassis = OidSimCar()       # 下发指令经真的 CanLink 编成 CAN 帧,两台模拟驱动器转出轮速
-        else:
-            chassis = Chassis()
+    def __init__(self):
+        from oid_sim import OidSimCar
+        chassis = OidSimCar()       # 下发指令经真的 CanLink 编成 CAN 帧,两台模拟驱动器转出轮速
         self.sim = DemoSim(chassis)
         self.sim.control_hook = self._control
         self.lock = threading.RLock()
@@ -135,7 +127,7 @@ class DemoCar:
         self.imu_yaw0 = None    # 演示 IMU 偏航的零点：第一次出状态时的车头方向
 
     def preset_route(self):
-        """--route-demo：一个 9 × 5 m 的连线矩形（四个直角都要开出去倒车掉头），车在起点后方，直接开始跑。"""
+        """--route-demo：一个 9 × 5 m 的连线矩形（四个直角原地转向），车在起点后方，直接开始跑。"""
         car = self.sim.car
         car.x, car.y, car.yaw = -5.5, -2.0, 0.0
         route = dict(kind='path', points=[[-3.0, -2.0], [6.0, -2.0], [6.0, 3.0], [-3.0, 3.0]], closed=True,
@@ -557,7 +549,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--port', type=int, default=8088)
     p.add_argument('--route-demo', action='store_true', help='预设一个连线矩形并直接开始跑（看车载屏幕 /display）')
-    p.add_argument('--gen5', action='store_true', help='Gen5 差速底盘（两台模拟的欧艾迪单路驱动器，能原地转）')
+    p.add_argument('--gen5', action='store_true', help='（已是默认）Gen5 差速底盘，两台模拟的欧艾迪单路驱动器')
     p.add_argument('--jobs-dir', help='作业记录目录（默认在临时目录里造几条演示用的）')
     args = p.parse_args()
     global DEMO_JOBS_DIR
@@ -568,7 +560,7 @@ def main():
         DEMO_JOBS_DIR = os.path.join(tempfile.gettempdir(), 'rk3588-demo-jobs')
         os.makedirs(DEMO_JOBS_DIR, exist_ok=True)
         demo_jobs(DEMO_JOBS_DIR)
-    CAR = DemoCar(gen5=args.gen5)
+    CAR = DemoCar()
     if args.route_demo:
         CAR.preset_route()
     NETWORK.start()

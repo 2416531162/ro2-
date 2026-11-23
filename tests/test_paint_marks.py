@@ -12,8 +12,7 @@ import control_trace
 import route_plan as rp
 from path_tracker import Path as RoutePath, PathConfig, Section, SectionTracker
 from robot_core.kinematics import ChassisGeometry
-from line_tracker import LineConfig, LineTracker
-from line_mission import LineMission
+from line_mission import IdleTracker, LineMission
 from route_operations import PAINT_MARKS_KEEP
 
 DT = .02
@@ -37,7 +36,7 @@ class Fusion:
 def mission():
     """10.4 m 直线，1.0–10.0 m 是刷线段（段内路程按后轴算）。"""
     fusion = Fusion()
-    m = LineMission(fusion, NS(), tracker=LineTracker(LineConfig(), GEO), path_config=CFG)
+    m = LineMission(fusion, NS(), tracker=IdleTracker(GEO), path_config=CFG)
     sec = Section(1, RoutePath((0., 0., 0.), [(10.4, 0.)]))
     sec.field_role, sec.paint_from_m, sec.paint_to_m, sec.cruise_mps = 'paint', 1., 10., .8
     m.tracker = SectionTracker([sec], CFG, GEO, constant_straight_speed=True)

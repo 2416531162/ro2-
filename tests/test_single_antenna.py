@@ -469,7 +469,10 @@ class PdopTruthfulStatus(unittest.TestCase):
         self.assertEqual((m.phase, m.tracker.st.state), ('RUNNING', 'RUNNING'))
         self.assertNotIn('PDOP', m.message)
         self.assertNotEqual(m.pose.reasons[:1], ('pdop_high',))
-        self.assertGreater(car.v, 0.5)
+        self.assertGreater(car.v, 0.3)
+        # Gen5：恢复后先按降级限速走一阵（DegradedSpeedLimiter），再回到路线巡航 0.8（原来按阿克曼车配置 5 s 就过 0.5）
+        car.run(5.0)
+        self.assertGreater(car.v, 0.75)
 
     def test_missing_pdop_is_named(self):
         m, car = running_line()

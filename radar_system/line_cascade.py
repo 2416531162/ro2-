@@ -284,7 +284,8 @@ class ImuFirstConfig:
     fit_min_sats: int = rules.SATS_MIN
     fit_full_sats: int = rules.SATS_FULL
     fit_low_sats_max_sigma_m: float = rules.LOW_SATS_MAX_SIGMA_M  # 10-08 下午用户 2.0 → 2.7 cm：10-06 22:08 那条线 8–14 m 17–19 颗、σ 2.2–2.4 cm，
-                                                # 卫星报的往右 2.7 cm 和地上实际一致，被 2.0 挡掉只按 IMU 走偏了
+                                                # 卫星报的往右 2.7 cm 和地上实际一致，被 2.0 挡掉只按 IMU 走偏了；
+                                                # 11-22 用户收到 2.5（星少不能比 ≥20 颗松），那条线 2.2–2.4 cm 照样能用
     fit_low_sats_max_pair_m: float = rules.LOW_SATS_MAX_PAIR_M
     # 两根天线对不上（位置距离误差 ≥ antenna_pick_pair_m）时，用和 IMU 推算对得上的那根（10-08 用户）。10-06 22:08 那条线
     # 15–20 m 主天线被干扰往左 5–9 cm、两天线差到 9–10 cm，副天线和 IMU 都说车没偏（地上实际也没偏）。
@@ -422,7 +423,7 @@ class ImuFirstGuide:
         self._agree_s = 0.0
         self.fast = True
         self._runup = False          # 这一拍在助跑里（调用方给的 fast，不含推算开始 fast_m）
-        self.no_memory = False       # 这条线开头没有上一条线拟合好的换算（重启后第一条，调用方按规划设，见 route_plan.FIRST_RUN_UP_M）
+        self.no_memory = False       # 这条线开头没有上一条线拟合好的换算（重启后第一条，调用方按规划设，见 route_plan first_line）
         self._rel = None
         self._travel = 0.0
         self.fit_points = 0          # rtk_fit：已拟合的点数
@@ -995,7 +996,7 @@ class ImuAlignment:
 
     def remembered(self):
         """有没有能带到下一条线开头的换算：最近一条线经卫星拟合好（不是只借来的）、离最近一帧 IMU 不超过 max_age_s、
-        IMU 没断过。重启后第一条没有（route_plan.FIRST_RUN_UP_M）。"""
+        IMU 没断过。重启后第一条没有（LineMission.first_line_no_memory）。"""
         o = self.pending or self.obs
         t = self._imu_t
         return (o is not None and o[3] is not None and t is not None and math.isfinite(t)

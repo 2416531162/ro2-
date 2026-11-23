@@ -14,8 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / 'radar_system'), str(ROOT)]
 import line_mission as lm
 import route_plan as rp
-from line_mission import LineMission
-from line_tracker import LineConfig, LineTracker
+from line_mission import IdleTracker, LineMission
 from path_tracker import PathConfig, differential_config
 from robot_core.kinematics import ChassisGeometry
 
@@ -50,7 +49,7 @@ class Car:
 
 def mission(car, folder):
     cfg = replace(differential_config(PathConfig(cruise_mps=.8)), straight_imu_enabled=False)
-    m = LineMission(car, SimpleNamespace(), LineTracker(LineConfig(), GEO), route_path=str(Path(folder) / 'route.json'),
+    m = LineMission(car, SimpleNamespace(), IdleTracker(GEO), route_path=str(Path(folder) / 'route.json'),
                     path_config=cfg, nozzle_x=NOZZLE)
     ok, message = m.command(dict(cmd='route_start_current', route=ROUTE.to_dict(digits=12),
                                  nozzle=dict(forward=NOZZLE[0], right=-NOZZLE[1])), 0.)

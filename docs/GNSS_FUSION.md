@@ -27,6 +27,7 @@
 | 任务层推算误差预算停车 / 限速 | `_hold_budget`，`rtk_hold_budget_*`、`paint_budget_exceeded`、`transit_budget_slow` |
 | 起步 / 继续前的卫星确认 | `_rtk_unconfirmed`，`rtk_not_confirmed` |
 | 定点画线的「航向跳变」 | `line_cascade` 的 `heading_jump`：偏移一直照学，开始时差超过 `jump_deg` 直接重定 |
+| 阿克曼车（2026-11-23 用户「删阿克曼底盘的代码」） | `drive_differential` 开关（车上文件写了也丢掉）、测向连续被拒 0.5 s 硬重定（`REANCHOR_*`、`heading_reset`）、按满舵算的陀螺上限分支 |
 
 `line_node.OBSOLETE_FUSION_KEYS` 列了删掉的参数，车上 `~/rtk/fusion.json` 里还写着这些参数时会被丢掉，照常启动。
 
@@ -157,7 +158,7 @@
 `line_node.load_fusion_config()` 为 Gen5 默认开启 `continuous_output=True`。全局滤波仍是四状态
 `[x, y, yaw, bias]`：IMU 持续预测转动、轮速持续预测位移，RTK 位置与双天线测向分别校准。
 另保存连续的后轴控制输出；控制器使用 `FusedPose.x/y/yaw`，绝对校正按经过的时间逐渐进入它。
-旧阿克曼默认不开连续输出，仍直接输出全局滤波状态。
+`FusionConfig` 的默认值不开连续输出（直接输出全局滤波状态），只有测试和仿真这么用。
 
 `FusedPose.correction_xy=(global_x-control_x, global_y-control_y)`，
 `correction_yaw=wrap(global_yaw-control_yaw)`，分别使用米与弧度。它们是**尚未应用的实际坐标差**，
@@ -297,7 +298,7 @@ abs(gyro_z - bias) <= abs(speed * wheel_scale) * tan(max_steer_rad) / wheelbase_
                       + radians(gyro_margin_deg_s)
 ```
 
-这是保守的阿克曼上限，未减去轮距带来的曲率限制，因此允许真实满舵快速转向。
+另加里程计角速度的 1.5 倍（原地转也有）；`yaw_input='angle'` 时再加量化误差，并且不低于 `angle_rate_floor_deg_s`。
 被拒绝的样本保留上一有效角速度，也不参与零偏更新和插值；静止的 -3.8°/s 单点会被排除。
 航向角参考时间仍更新以便下一帧接续增量，但 `imu_valid_t` 只由有效运动输入更新。
 重复坏帧不能刷新 IMU 有效性、压低缺失期间的不确定度或阻止有效 GNSS 接管。
@@ -311,7 +312,7 @@ abs(gyro_z - bias) <= abs(speed * wheel_scale) * tan(max_steer_rad) / wheelbase_
 
 ## Gen5：航向推算用 IMU 航向角（2026-09-28）
 
-Gen5（`drive_differential`）上，`line_node` 默认设 `yaw_input='angle'`：两次测向之间转了多少，按 HDA536T 自己算的航向角的增量算，不再积分陀螺 z 轴角速度。旧车仍是 `'rate'`。`fusion.json` 里写了这些键就以文件为准。
+Gen5 上，`line_node` 默认设 `yaw_input='angle'`：两次测向之间转了多少，按 IMU 自己算的航向角的增量算，不再积分陀螺 z 轴角速度（`FusionConfig` 的默认值仍是 `'rate'`，测试用）。`fusion.json` 里写了这些键就以文件为准。
 
 - **绝对参考由可信测向提供**：IMU 航向角上电为 0；其增量持续预测，双天线长期校准参考偏移及慢漂。
   IMU 也在有效测向期间工作，漂移状态不等于原始陀螺零偏。
@@ -377,10 +378,10 @@ Gen5（`drive_differential`）上，`line_node` 默认设 `yaw_input='angle'`：
   待校准差另进入喷头预算，不能只凭这项随机 σ 放宽控制许可。
 - **测试**：`tests/test_imu_yaw_fusion.py`、`tests/test_fusion_quality_regression.py`。
 
-旧阿克曼兼容路径仍保留 `REANCHOR_S=0.5 s`、测向跨度不超过 0.5°、低于 3°/s 时的硬重定，
-并提示 `heading_reset`。这是旧车规则，不能用它描述当前 Gen5。
 
 ## 卫星质量、喷头预算与连续输出恢复（2026-10-02）
+
+> **2026-11-22 已删**：下面说的任务层推算误差预算（`evaluate_hold`、`hold_budget_enabled`、`hold_*` 预算参数、`rtk_hold_pending`）从没接进任务层，已连同参数删掉。现在固定解断了只看 `rtk_hold_s`（Gen5 9 s：满 8 s 停喷、再走 1 s 停车）；`hold_watch_s` 0.5 s 仍在，管「多久算断了」后的推算方式。
 
 Gen5 新增任务层推算误差预算（`radar_system/rtk_hold_budget.py`）：`line_node` 默认开启 `hold_budget_enabled`。
 5 秒仅为可信固定解中断时的绝对上限（2026-10-02 由 8 秒调整）；控制还检查喷头当前误差及下发停车后停稳时的预计误差，可能更早停车。

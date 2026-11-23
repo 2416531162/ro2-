@@ -45,7 +45,11 @@ OBSOLETE_FUSION_KEYS = ('baseline_m', 'baseline_tol_m', 'baseline_check',
                         'displacement_check_enabled', 'displacement_window_s', 'displacement_long_window_s',
                         'displacement_limit_m', 'displacement_confirm_s', 'heading_length_band_m',
                         'dual_check_m', 'dual_check_rate_m', 'dual_check_n', 'dual_ok_m', 'dual_ok_s', 'dual_stale_s',
-                        'doppler_correlation_s')  # 2026-11-22 清理：代码里没人读，车上文件写了也丢掉
+                        'doppler_correlation_s',
+                        'hold_budget_enabled', 'hold_lateral_limit_m', 'hold_along_limit_m', 'hold_sigma_multiplier',
+                        'hold_slip_per_m', 'hold_slip_mps', 'hold_turn_slip_m_per_rad', 'hold_turn_scale_error',
+                        'hold_slow_ratio',  # 2026-11-22 清理：代码里没人读（hold_* 是没接上的推算预算），车上文件写了也丢掉
+                        'drive_differential')  # 2026-11-23 删了阿克曼车：只剩差速车，开关不要了
 # Gen5 主天线（ANT1）相对后轴中点的杠杆臂，车体系 (前, 左) 米。车上 ~/rtk/fusion.json 里是 2026-09-29 手量的
 # GEN5_ANTENNA_HAND；2026-10-06 用 66 次原地转向（左右轮速对称、绕后轴中点转）里两根天线的固定解反推，ANT1 实际在
 # 前 0.235、左 0.197（ANT2 前 0.234、右 0.212，间距 0.409 对得上），两根都比手量的靠后约 0.5 cm、靠右约 1 cm。
@@ -114,16 +118,13 @@ class LineNode(Node):
         # 两轮电机电流（驱动器 /oid/trace 的 motor_a）：直线草地识别（line_cascade.ImuFirstConfig.grass_*）
         self.create_subscription(String, '/oid/trace', self.on_oid_trace, 50)
         self.attitude_controls = AttitudeControls(mission, fusion_path)
-        supported = bool(getattr(mission,'differential',False))
-        source_path = os.path.join(os.path.dirname(fusion_path),'imu_source.json') if supported and fusion_path else None
-        self.imu_sources = ImuSources(supported,source_path)
+        source_path = os.path.join(os.path.dirname(fusion_path),'imu_source.json') if fusion_path else None
+        self.imu_sources = ImuSources(source_path)
         self._imu_switch_at = -math.inf
         self._imu_switch_stamp_ns = 0
         self._imu762_version = -1
-        self._imu762_reader = None
-        if supported:
-            from rion_protocol.imu762_stream import Imu762Stream
-            self._imu762_reader = Imu762Stream(clock)
+        from rion_protocol.imu762_stream import Imu762Stream
+        self._imu762_reader = Imu762Stream(clock)
         self.attitude_controls.select_imu_source(self.imu_sources.active)
         self.last_result = None
         self._select_at = None
@@ -270,11 +271,10 @@ class LineNode(Node):
         a = self._attitude
         if a is None or not 0.0 <= self.clock() - a[0] <= ATTITUDE_MAX_AGE_S:
             return None
-        # imu 组件跟着底盘选：差速车（Gen5）是 HDA536T 驱动发的传感器姿态，旧车是 imu_filter_madgwick
+        # Gen5 是 IMU 驱动发的传感器姿态（imu_sources 选的那一路）
         roll, pitch = self.mission.fusion.tilt_angles(math.radians(a[1]), math.radians(a[2]))
         return {'roll_deg': round(math.degrees(roll), 2), 'pitch_deg': round(math.degrees(pitch), 2), 'yaw_deg': round(a[3], 2),
-                'source': getattr(getattr(self,'imu_sources',None),'active','hda536t')
-                          if getattr(self.mission,'differential',False) else 'imu_madgwick'}
+                'source': getattr(getattr(self,'imu_sources',None),'active','hda536t')}
 
     def on_odom(self, msg):
         v, wz = msg.twist.twist.linear.x, msg.twist.twist.angular.z
@@ -422,70 +422,64 @@ def load_fusion_config(gnss_fusion, path):
             overrides = {k: tuple(v) if isinstance(v, list) else v for k, v in json.load(fh).items()}
     for key in OBSOLETE_FUSION_KEYS:
         overrides.pop(key, None)
-    # 差速车（原地转向）按共享底盘配置；标定文件里明确写了的照用
-    from runtime_config import PROFILE
+    # Gen5 差速车的默认值；标定文件里明确写了的照用
     import user_rules
-    overrides.setdefault('drive_differential', PROFILE['drive']['type'] == 'differential')
-    if overrides['drive_differential']:
-        antenna = overrides.get('antenna_xy')
-        if antenna is None or (len(antenna) == 2 and all(isinstance(v, (int, float)) and abs(v - h) < 1e-6
-                                                         for v, h in zip(antenna, GEN5_ANTENNA_HAND))):
-            overrides['antenna_xy'] = user_rules.GEN5_ANTENNA_XY
-        # 测向安装偏差：文件里是没标定过的 0（或没写）时用这台车实测的 +1.7°（heading_mount，2026-11-22 用户）
-        overrides['mount_offset_deg'] = heading_mount.mount_offset(overrides.get('mount_offset_deg'), True)
-        # Gen5（HDA536T）：航向推算用 IMU 自己算的航向角（2026-09-28 用户要求）；原地转向转角大，
-        # 按 3% 刻度误差加航向不确定度，测向按 20 ms 时间同步误差随转速降权。
-        # IMU 始终提供连续转动；可信双天线慢校直行漂移，明显转弯后及时收敛。
-        overrides.setdefault('yaw_input', 'angle')
-        overrides.setdefault('continuous_output', True)
-        overrides.setdefault('wheel_increment_enabled', True)
-        overrides.setdefault('sensor_failover_enabled', True)
-        overrides.setdefault('wheel_scale_auto', True)
-        overrides.setdefault('heading_sync_s', 0.02)
-        # IMU 航向权重加大（2026-10-01 用户：「imu 的航向角还是非常稳的」「imu 的权重可以加大」）：航向过程噪声
-        # 0.1 → 0.03°/√s，直走、画圆时测向的抖动、跳动多被 IMU 压住（实测空旷处 3 圈 1078°，IMU 航向角与双天线测向
-        # 只差 0.4°）；测向先检查转动增量一致性，可信观测连续校准，稳定本身不触发航向硬重定。
-        # 转角刻度不确定度保持 3%：慢慢画圆时 IMU 刻度很准，原地转（0.8 rad/s）却不是——当天 6 次测向可信的原地转，
-        # IMU 与测向差 0.05%–1.3%（最多 2.2°）。曾改成 0.5%：转完 0–2 s 融合航向与测向之差 p95 矩形 0.33 → 0.59°、
-        # 另一次 0.55 → 1.78°（转完要 1–2 s 才跟回测向）；3% 时 0.45 / 0.67°，直走的抖动照样少
-        overrides.setdefault('yaw_scale_sigma', 0.03)
-        overrides.setdefault('yaw_walk_deg_sqrt_s', 0.03)
-        # 卫星位置不可信（双天线位置互检不过）或固定解中断（平板中转断流、浮点、单点）时只靠 IMU + 轮速推算走、不降速
-        # （2026-10-06 晚用户：「即使浮点都可以靠 imu 继续」）；满 8 s 先停喷、再走 1 s 停车（10-07 用户），恢复固定解后接回
-        overrides.setdefault('rtk_hold_s', RTK_LOST_PAINT_STOP_S + RTK_LOST_STOP_DELAY_S)
-        overrides.setdefault('hold_budget_enabled', True)
-        # 用户指定 500 ms：短时转发抖动不进入完整中断停车预算，与固定解超时窗口对齐。
-        overrides.setdefault('hold_watch_s', user_rules.RTK_HOLD_WATCH_S)
-        # 两根天线互检偏差超过 2 cm 就逐步少信卫星（空旷处 p95 1.4 cm 不受影响）；推算维持后每秒最多挪 4 cm 接回
-        # （离线验证：靠楼那圈的卫星误差叠到空旷那圈上，横向偏差 p95 2.8 → 2.5 cm、最大 10.6 → 3.6 cm）
-        overrides.setdefault('dual_weight_m', 0.02)
-        overrides.setdefault('rejoin_rate_mps', 0.04)
-        # 2026-10-02 用户：「修复融合算法，让误差更小」。全链路仿真（车上代码 + 按 10-02 实车校准的底盘与传感器）里，
-        # 水泵横偏主要来自融合横向位置跟 RTK 跟得太慢：航向有一点误差，推算就把位置带偏一截（测向偏 1° 整条线约偏 1.1 cm）。
-        # 在线学双天线测向的固定偏差并扣掉
-        overrides.setdefault('heading_bias_learning', True)
-        # RTK 固定解按逐帧抖动（约 1–2 mm）给观测噪声，不按接收机报的绝对精度 8 mm：RTK 正常时横向位置紧跟 RTK，
-        # 航向误差就几乎不影响水泵横向位置（水泵与主天线前后对齐）；RTK 断了时推算误差怎么涨不变（推算维持照旧 5 s）。
-        # 离群的固定解相对更离群，软门限降权更狠（仿真：两天线一起横跳 8 cm 1 s，水泵最大横偏 2.66 → 2.19 cm）
-        overrides.setdefault('fix_floor_m', 0.002)
-        overrides.setdefault('fix_sigma_scale', 0.25)
-        # 但按实时估的 RTK 抖动（相邻两帧固定解相对推算的跳动）不小于它的 2 倍：靠楼多路径时自动少信 RTK
-        # （真实回放 10-01 11:42 靠楼：固定 2 mm 时位置每 50 ms 额外跳动最大 1.8 cm，自适应后 0.97 cm，原融合 0.64 cm）
-        overrides.setdefault('fix_jitter_k', 2.0)
-        # 控制输出跟融合状态的平滑 0.25 → 0.10 s：横向纠偏少 0.15 s 滞后
-        overrides.setdefault('output_position_tau_s', 0.10)
-        # 一根天线被污染就用另一根定位（2026-11-21 用户）：副天线在主天线右边，相距取 um982 的标称间距
-        from um982 import POSITION_BASELINE_NOMINAL_M
-        overrides.setdefault('secondary_baseline_m', POSITION_BASELINE_NOMINAL_M)
+    antenna = overrides.get('antenna_xy')
+    if antenna is None or (len(antenna) == 2 and all(isinstance(v, (int, float)) and abs(v - h) < 1e-6
+                                                     for v, h in zip(antenna, GEN5_ANTENNA_HAND))):
+        overrides['antenna_xy'] = user_rules.GEN5_ANTENNA_XY
+    # 测向安装偏差：文件里是没标定过的 0（或没写）时用这台车实测的 +1.7°（heading_mount，2026-11-22 用户）
+    overrides['mount_offset_deg'] = heading_mount.mount_offset(overrides.get('mount_offset_deg'))
+    # Gen5（HDA536T）：航向推算用 IMU 自己算的航向角（2026-09-28 用户要求）；原地转向转角大，
+    # 按 3% 刻度误差加航向不确定度，测向按 20 ms 时间同步误差随转速降权。
+    # IMU 始终提供连续转动；可信双天线慢校直行漂移，明显转弯后及时收敛。
+    overrides.setdefault('yaw_input', 'angle')
+    overrides.setdefault('continuous_output', True)
+    overrides.setdefault('wheel_increment_enabled', True)
+    overrides.setdefault('sensor_failover_enabled', True)
+    overrides.setdefault('wheel_scale_auto', True)
+    overrides.setdefault('heading_sync_s', 0.02)
+    # IMU 航向权重加大（2026-10-01 用户：「imu 的航向角还是非常稳的」「imu 的权重可以加大」）：航向过程噪声
+    # 0.1 → 0.03°/√s，直走、画圆时测向的抖动、跳动多被 IMU 压住（实测空旷处 3 圈 1078°，IMU 航向角与双天线测向
+    # 只差 0.4°）；测向先检查转动增量一致性，可信观测连续校准，稳定本身不触发航向硬重定。
+    # 转角刻度不确定度保持 3%：慢慢画圆时 IMU 刻度很准，原地转（0.8 rad/s）却不是——当天 6 次测向可信的原地转，
+    # IMU 与测向差 0.05%–1.3%（最多 2.2°）。曾改成 0.5%：转完 0–2 s 融合航向与测向之差 p95 矩形 0.33 → 0.59°、
+    # 另一次 0.55 → 1.78°（转完要 1–2 s 才跟回测向）；3% 时 0.45 / 0.67°，直走的抖动照样少
+    overrides.setdefault('yaw_scale_sigma', 0.03)
+    overrides.setdefault('yaw_walk_deg_sqrt_s', 0.03)
+    # 卫星位置不可信（双天线位置互检不过）或固定解中断（平板中转断流、浮点、单点）时只靠 IMU + 轮速推算走、不降速
+    # （2026-10-06 晚用户：「即使浮点都可以靠 imu 继续」）；满 8 s 先停喷、再走 1 s 停车（10-07 用户），恢复固定解后接回
+    overrides.setdefault('rtk_hold_s', RTK_LOST_PAINT_STOP_S + RTK_LOST_STOP_DELAY_S)
+    # 用户指定 500 ms：固定解这么久没更新才按断了推算（和固定解超时 fixed_timeout_s 一样长）
+    overrides.setdefault('hold_watch_s', user_rules.RTK_HOLD_WATCH_S)
+    # 两根天线互检偏差超过 2 cm 就逐步少信卫星（空旷处 p95 1.4 cm 不受影响）；推算维持后每秒最多挪 4 cm 接回
+    # （离线验证：靠楼那圈的卫星误差叠到空旷那圈上，横向偏差 p95 2.8 → 2.5 cm、最大 10.6 → 3.6 cm）
+    overrides.setdefault('dual_weight_m', 0.02)
+    overrides.setdefault('rejoin_rate_mps', 0.04)
+    # 2026-10-02 用户：「修复融合算法，让误差更小」。全链路仿真（车上代码 + 按 10-02 实车校准的底盘与传感器）里，
+    # 水泵横偏主要来自融合横向位置跟 RTK 跟得太慢：航向有一点误差，推算就把位置带偏一截（测向偏 1° 整条线约偏 1.1 cm）。
+    # 在线学双天线测向的固定偏差并扣掉
+    overrides.setdefault('heading_bias_learning', True)
+    # RTK 固定解按逐帧抖动（约 1–2 mm）给观测噪声，不按接收机报的绝对精度 8 mm：RTK 正常时横向位置紧跟 RTK，
+    # 航向误差就几乎不影响水泵横向位置（水泵与主天线前后对齐）；RTK 断了时推算误差怎么涨不变（推算维持照旧 5 s）。
+    # 离群的固定解相对更离群，软门限降权更狠（仿真：两天线一起横跳 8 cm 1 s，水泵最大横偏 2.66 → 2.19 cm）
+    overrides.setdefault('fix_floor_m', 0.002)
+    overrides.setdefault('fix_sigma_scale', 0.25)
+    # 但按实时估的 RTK 抖动（相邻两帧固定解相对推算的跳动）不小于它的 2 倍：靠楼多路径时自动少信 RTK
+    # （真实回放 10-01 11:42 靠楼：固定 2 mm 时位置每 50 ms 额外跳动最大 1.8 cm，自适应后 0.97 cm，原融合 0.64 cm）
+    overrides.setdefault('fix_jitter_k', 2.0)
+    # 控制输出跟融合状态的平滑 0.25 → 0.10 s：横向纠偏少 0.15 s 滞后
+    overrides.setdefault('output_position_tau_s', 0.10)
+    # 一根天线被污染就用另一根定位（2026-11-21 用户）：副天线在主天线右边，相距取 um982 的标称间距
+    from um982 import POSITION_BASELINE_NOMINAL_M
+    overrides.setdefault('secondary_baseline_m', POSITION_BASELINE_NOMINAL_M)
     return gnss_fusion.FusionConfig(**overrides)
 
 
 def single_antenna_config(config):
-    """双天线配置 → 单天线配置：杠杆臂换成右天线位置，按行驶轨迹定车头。差速车（Gen5）才有；别的车返回 None。
+    """双天线配置 → 单天线配置：杠杆臂换成右天线位置，按行驶轨迹定车头。
     单天线接收机的 $INS.NAVI 已经是它自己按杆长做完倾斜补偿的坐标（2026-10-07 用户：「输出的是倾斜后的补偿坐标，
     只需要告诉他杆长」，杆长在接收机上设），车端不再补，免得补两次；车头照旧用 IMU 航向角 + 行驶轨迹修正的偏移。"""
-    if not config.drive_differential:
-        return None
     return dataclasses.replace(config, antenna_xy=SINGLE_ANTENNA_XY, tilt_compensation_enabled=False,
                                secondary_baseline_m=0.0,    # 单天线没有副天线
                                course_init_distance_m=SINGLE_COURSE_INIT_M,

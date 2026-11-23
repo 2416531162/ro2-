@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""直线卫星纠偏的卫星数门槛（2026-10-08 用户）：低于 17 颗不信；17–19 颗只要 σ ≤ 2.7 cm（上午定 2.0，下午改 2.7）、
+"""直线卫星纠偏的卫星数门槛（2026-10-08 用户）：低于 17 颗不信；17–19 颗只要 σ ≤ 2.5 cm（上午定 2.0，下午改 2.7；11-22 用户收到 2.5，和 20 颗以上一样）、
 两天线位置对得上（< 3 cm）、固定解就照常信；20 颗以上照旧（σ ≤ 2.5 cm，两天线 ≤ 5 cm 单独数）。
 
 10-06 16:32 那趟（路线作业 83db1b28）：往东北开，靠楼一侧的主天线掉到 17–19 颗，σ ≤ 2.0 cm、两天线 ≤ 2.9 cm、一直固定解，
@@ -33,7 +33,7 @@ class SatsBand(unittest.TestCase):
     def test_floor_and_band_in_config(self):
         first = tracker().cfg.straight_imu_first
         self.assertEqual((first.fit_min_sats, first.fit_full_sats), (17, 20))
-        self.assertEqual((first.fit_low_sats_max_sigma_m, first.fit_low_sats_max_pair_m), (.027, .03))
+        self.assertEqual((first.fit_low_sats_max_sigma_m, first.fit_low_sats_max_pair_m), (.025, .03))
 
     def test_1632_frames_are_trusted(self):
         tr = tracker()
@@ -43,7 +43,7 @@ class SatsBand(unittest.TestCase):
         self.assertTrue(tr._rtk_quality_ok())
 
     def test_band_needs_all_three(self):
-        for bad in ((.028, 18, .01, True),           # σ 超 2.7 cm
+        for bad in ((.026, 18, .01, True),           # σ 超 2.5 cm
                     (.015, 18, .03, True),           # 两天线差到 3 cm
                     (.015, 18, None, True),          # 这帧没有两天线对比，证明不了
                     (.015, 18, .01, False),          # 不是固定解
@@ -56,10 +56,19 @@ class SatsBand(unittest.TestCase):
     def test_2208_frames_are_trusted(self):
         """10-06 22:08 那条线 8–14 m：17–19 颗、σ 2.2–2.4 cm、两天线 ≤ 2.4 cm、固定解（卫星是对的，2.0 时被挡）。"""
         tr = tracker()
-        t = self.feed(tr, [(.022, 18, .02, True), (.024, 17, .024, True), (.026, 19, .015, True)] * 20)
+        t = self.feed(tr, [(.022, 18, .02, True), (.024, 17, .024, True), (.025, 19, .015, True)] * 20)
         self.assertIsNone(tr._quality_bad_t)
         tr.sync(t, (t, 0., 0.))
         self.assertTrue(tr._rtk_quality_ok())
+
+    def test_fewer_sats_never_looser_sigma(self):
+        """11-22 用户「17–19 颗也收到 2.5」：同一个 σ，19 颗和 20 颗结论一样（星少不能比星多松）。"""
+        for sigma, ok in ((.025, True), (.026, False)):
+            for sats in (17, 19, 20):
+                with self.subTest(sigma=sigma, sats=sats):
+                    tr = tracker()
+                    self.feed(tr, [(sigma, sats, .01, True)] * 2)
+                    self.assertEqual(tr._quality_bad_t is None, ok)
 
     def test_below_17_never_trusted(self):
         tr = tracker()

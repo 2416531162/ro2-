@@ -675,12 +675,6 @@ PIVOT_REVERSE_MIN_M = 1.20  # 旧后轴距离，兼容历史配置；新助跑�
 # 2026-10-11 用户：暂时 2.8 → 3.5（18:34 实录起步车头扭 5.6°，到线头喷头还偏 6 cm，被起喷门槛挡掉 0.72 m）
 # 2026-11-19 用户：3.5 → 2 m（「已经不是加助跑和开喷检查的问题，是根本就不会协调两个轮子控制进线」）
 RUN_UP_M = rules.RUN_UP_M
-# 2026-11-22 用户：「就没有办法直接第一条就很好吗」→「做，先仿真」：重启后（任务层没有上一条线卫星拟合好的 IMU 换算，
-# line_cascade.ImuAlignment.remembered）第一条按双天线定开头换算，这台车测向误差随车头 ±1°（锁车头时最大 1.55°），
-# 2 m 助跑里基线常在 0.42 以上、换算学得晚（当时学开头换算按 0.40–0.42，11-22 用户改成 0.40–0.44），卫星轨迹也攒不够，误差带进线头（201657 线头 −3.3 cm、全线 4.9 cm）。
-# 这时第一条助跑加长到 FIRST_RUN_UP_M，助跑里按卫星轨迹把角度定下来再开喷；有记忆的线照旧 RUN_UP_M
-# （仿真：全部线都按 4 m 时后面几条线头反而变差）。线头后方要留够这么长的空地
-FIRST_RUN_UP_M = rules.FIRST_RUN_UP_M
 # 起步扭头（2026-10-11 实录 3 天 37 次直线起步）：起步前最后一下是原地转（一边轮子往前、一边往后），起步时要换向的那个
 # 轮子比另一个晚动 0.1–0.5 s（编码器不动，驱动器的事，暂时不能换），车头往它那边扭：只左轮换向 18 次中位 +4.7°、
 # 只右轮换向 12 次 −3.7°；两轮一起换向（直线倒车后）3 次、都不换向 4 次都在 2° 以内。所以要在助跑起点 G 原地转正时，
@@ -1055,21 +1049,15 @@ def _pivot_route_sections(spec, radius, nozzle_x):
     return _pivot_cover(path_points(spec), radius, nozzle_x, spec.turn_radius if spec.turn == 'arc' else None)
 
 
-def _reverse_max(run):
-    """接入时最多倒多远：REVERSE_ENTRY_MAX_M，助跑比 RUN_UP_M 长多少就多倒多少（FIRST_RUN_UP_M：车停在线头后面不远时
-    照样直接往后倒到助跑起点，不掉头开过去再掉头回来，2026-10-07 用户「车在点后面时直接往后倒一点就行」）。"""
-    return REVERSE_ENTRY_MAX_M + max(0.0, run - RUN_UP_M)
-
-
-def _via_runup(first, car, direction, runup_m=None):
-    """车开到助跑起点 G（第一段起点沿反方向退 RUN_UP_M，给了 runup_m 按它）：direction 1 车头对着 G 开过去，-1 车尾对着 G 倒过去；
+def _via_runup(first, car, direction):
+    """车开到助跑起点 G（第一段起点沿反方向退 RUN_UP_M）：direction 1 车头对着 G 开过去，-1 车尾对着 G 倒过去；
     到 G 后原地转到第一段方向，往前助跑 RUN_UP_M 接第一段（倒车后的助跑起步锁车头更长，见 path_tracker.REVERSE_HOLD_M）。
     到 G 要原地转（差 RUNUP_BACK_TURN_RAD 以上）时改成开到 G 前方 RUNUP_BACK_M 处转正、再直线倒回 G 起步，
     起步时两轮一起换向、不单边扭头（见 RUNUP_BACK_M）。
     车离 G（或转正点）不到 ON_LINE_M 就不开这段，由跟踪器当横偏纠正（路线本身不跟着车偏）。返回 (分段, 接入路程米)。"""
     _, (x0, y0, h0), pieces = first
     x, y, yaw = car
-    run = RUN_UP_M if runup_m is None else runup_m
+    run = RUN_UP_M
     gx, gy = _offset((x0, y0), h0, -run)
     back = 0.0
     if math.hypot(gx - x, gy - y) >= ON_LINE_M:
@@ -1086,8 +1074,8 @@ def _via_runup(first, car, direction, runup_m=None):
         to_p = math.atan2(py - y, px - x)
         if back > 0.0:
             # 转正点 P 之后还要原地转正，开过去还是倒过去只看哪个原地转得少（车在 G 与 P 之间时不掉头去倒）；
-            # 倒车（连同转正后倒回的 back）不超过 REVERSE_ENTRY_MAX_M（助跑加长了跟着放，见 _reverse_max）
-            direction = 1 if abs(wrap(to_p - yaw)) <= math.pi / 2 or dist + back > _reverse_max(run) + 1e-9 else -1
+            # 倒车（连同转正后倒回的 back）不超过 REVERSE_ENTRY_MAX_M
+            direction = 1 if abs(wrap(to_p - yaw)) <= math.pi / 2 or dist + back > REVERSE_ENTRY_MAX_M + 1e-9 else -1
         out.pivot(wrap(to_p + (0.0 if direction > 0 else math.pi) - yaw))
         out.add(direction, dist, 0.0)
         moved = dist
@@ -1130,8 +1118,8 @@ def _turned(sections, car_yaw):
     return total
 
 
-def pivot_entry(first, car, nozzle_x=0.0, runup_m=None):
-    """差速车当前位姿（后轴中点）→ 路线第一段的接入：(接入后的分段, 接入路程米)。runup_m：助跑长度，空 = RUN_UP_M。
+def pivot_entry(first, car, nozzle_x=0.0):
+    """差速车当前位姿（后轴中点）→ 路线第一段的接入：(接入后的分段, 接入路程米)。
 
     车已在第一段延长线上（横偏 ON_LINE_M 以内）、在助跑起点后方：车头不对先原地转正，直线开过去，中间不停。
     喷头离起点不到 NEAR_START_M：倒车助跑（runup_entry）。否则开到第一段起点后方 RUN_UP_M 处（助跑起点 G）、
@@ -1140,25 +1128,24 @@ def pivot_entry(first, car, nozzle_x=0.0, runup_m=None):
     """
     _, (x0, y0, h0), pieces = first
     x, y, yaw = car
-    run = RUN_UP_M if runup_m is None else runup_m
     along = (x - x0) * math.cos(h0) + (y - y0) * math.sin(h0)
     side = -(x - x0) * math.sin(h0) + (y - y0) * math.cos(h0)
-    if along <= -run + 1e-9 and abs(side) <= ON_LINE_M:
+    if along <= -RUN_UP_M + 1e-9 and abs(side) <= ON_LINE_M:
         out = _PivotSections(_offset((x0, y0), h0, along) + (h0,))
         out.add(1, -along, 0.0)
         for length, k in pieces:
             out.add(1, length, k)
         return out.out, -along
-    if along > -run and math.hypot(along,side) <= NEAR_START_M:
-        return runup_entry(first, car, nozzle_x, runup_m)
+    if along > -RUN_UP_M and math.hypot(along,side) <= NEAR_START_M:
+        return runup_entry(first, car, nozzle_x)
     bare = (first[0], first[1], [])
-    back = _via_runup(bare, car, -1, runup_m)[0]
+    back = _via_runup(bare, car, -1)[0]
     turned_back = _turned(back, yaw)
     # 直线倒到 G 一下都不用原地转（最后一下本来就是顺线倒车）：直接倒，不再先开到转正点（RUNUP_BACK_M）绕一下
-    if sum(sum(v for v, _ in p) for d, _, p in back if d < 0) <= _reverse_max(run) + 1e-9 and \
-            (turned_back < 1e-9 or turned_back + REVERSE_ENTRY_TURN_SAVE_RAD <= _turned(_via_runup(bare, car, 1, runup_m)[0], yaw) + 1e-9):
-        return _via_runup(first, car, -1, runup_m)
-    return _via_runup(first, car, 1, runup_m)
+    if sum(sum(v for v, _ in p) for d, _, p in back if d < 0) <= REVERSE_ENTRY_MAX_M + 1e-9 and \
+            (turned_back < 1e-9 or turned_back + REVERSE_ENTRY_TURN_SAVE_RAD <= _turned(_via_runup(bare, car, 1)[0], yaw) + 1e-9):
+        return _via_runup(first, car, -1)
+    return _via_runup(first, car, 1)
 
 
 # 圆弧进线（ENTRY_TURNS arc）：只往前、按 Dubins 最短路开到助跑起点 G 时车头已顺线，接着助跑，中间不停车不原地转
@@ -1195,13 +1182,13 @@ def _body_min_along(x, y, yaw, body, h0, x0, y0):
     return best
 
 
-def arc_entry(first, car, space_m, body=None, runup_m=None):
-    """圆弧进线：(分段, 接入路程米)；后方空地不够任何半径用时返回 None（调用方照原地转进线）。runup_m 同 pivot_entry。"""
+def arc_entry(first, car, space_m, body=None):
+    """圆弧进线：(分段, 接入路程米)；后方空地不够任何半径用时返回 None（调用方照原地转进线）。"""
     if space_m < ENTRY_ARC_MIN_SPACE_M - 1e-9:
         return None
     body = body or _default_body()
     _, (x0, y0, h0), pieces = first
-    run = RUN_UP_M if runup_m is None else runup_m
+    run = RUN_UP_M
     gx, gy = _offset((x0, y0), h0, -run)
     goal = (gx, gy, h0)
     limit = min(_body_min_along(gx, gy, h0, body, h0, x0, y0) - (space_m - ENTRY_ARC_MARGIN_M),
@@ -1235,8 +1222,8 @@ def arc_entry(first, car, space_m, body=None, runup_m=None):
     return None
 
 
-def runup_entry(first, car, nozzle_x, runup_m=None):
-    """差速车喷头已在路线起点附近（NEAR_START_M 以内）→ 第一段的接入：(接入后的分段, 接入路程米)。runup_m 同 pivot_entry。
+def runup_entry(first, car, nozzle_x):
+    """差速车喷头已在路线起点附近（NEAR_START_M 以内）→ 第一段的接入：(接入后的分段, 接入路程米)。
 
     助跑起点 G = 第一段后轴起点沿反方向退 RUN_UP_M；此时喷头距实际线头正好 2.5 m，车头朝
     第一段方向。车在 G 前方（顺第一段方向量）就原地转到车尾对着 G、倒过去；
@@ -1245,13 +1232,13 @@ def runup_entry(first, car, nozzle_x, runup_m=None):
     车已压在第一段延长线上、离起点至少助跑那么远：直接开过去（同 pivot_entry）。
     """
     _, (x0, y0, h0), pieces = first
-    run = RUN_UP_M if runup_m is None else runup_m  # 喷头到线头的真实助跑距离，不再减去喷头前伸量。
+    run = RUN_UP_M  # 喷头到线头的真实助跑距离，不再减去喷头前伸量。
     x, y, yaw = car
     along = (x - x0) * math.cos(h0) + (y - y0) * math.sin(h0)
     side = -(x - x0) * math.sin(h0) + (y - y0) * math.cos(h0)
     if along <= -run + 1e-9 and abs(side) <= ON_LINE_M and abs(wrap(yaw - h0)) <= math.radians(ON_LINE_DEG):
-        return pivot_entry(first, car, nozzle_x, runup_m)
-    return _via_runup(first, car, -1 if along + run > 0.0 else 1, runup_m)
+        return pivot_entry(first, car, nozzle_x)
+    return _via_runup(first, car, -1 if along + run > 0.0 else 1)
 
 # ---- 路线本身（不含接入段）----
 
@@ -1642,13 +1629,15 @@ def _planned_sections(entry, route, name):
 
 
 def plan_current(spec, car_pose, min_radius, *, body=None, max_entry_m=MAX_ENTRY_M, nozzle_x=None, info=None,
-                 runup_m=None):
+                 first_line=False):
     """开始作业：从离车最近的地方开始、跑完整条路线（见 start_from_nearest）。返回 ([path_tracker.Section, …], 接入路程米)。
 
     差速车（nozzle_x 不为 None）：喷头离起点不到 NEAR_START_M 就倒车助跑进线（runup_entry），更远按 pivot_entry
     开到起点前 ENTRY_LEAD_M 对正；阿克曼车同 plan（Reeds-Shepp / Dubins 接入）。原始图纸不变。
     info 给一个 dict 时填进 arc_turns：差速车连线路线圆弧掉头的急弯数（其余为 0）。
-    runup_m：差速车连线路线的助跑长度（见 FIRST_RUN_UP_M），空 = RUN_UP_M；圆不变。
+    first_line：任务层没有上一条线拟合好的 IMU 换算（重启后第一条，LineMission.first_line_no_memory）；差速车连线路线
+    在第一条（接上助跑的那段）记 first_line，跟踪器按没有记忆拟合（path_tracker SectionTracker）。只是标记，助跑照常 RUN_UP_M
+    （2026-11-23 用户：「不能靠加长助跑解决问题」，原来的第一条 4 m 删掉）；圆不变。
     """
     from path_tracker import Path, Section
     run = start_from_nearest(spec, car_pose, min_radius, body=body, nozzle_x=nozzle_x)
@@ -1667,14 +1656,13 @@ def plan_current(spec, car_pose, min_radius, *, body=None, max_entry_m=MAX_ENTRY
     else:
         start, loop = loop_pieces(run, min_radius)
         route = [(1, start, loop)]
-    runup = runup_m if run.kind == 'path' else None
     if run.kind != 'circle':
         entry_fn, run_in = _entry_fn(route[0], car_pose, nozzle_x), 0.0
-    entry, entry_m = entry_fn(route[0], car_pose, nozzle_x, runup)
+    entry, entry_m = entry_fn(route[0], car_pose, nozzle_x)
     arc = None
     # 圆弧进线；原地方式本来就一下都不用原地转（顺线直倒 / 直开进来，两轮同时换向）时照用它，更短
     if run.kind == 'path' and run.entry_turn == 'arc' and _turned(entry, car_pose[2]) > 1e-9:
-        arc = arc_entry(route[0], car_pose, run.entry_space_m, body, runup)
+        arc = arc_entry(route[0], car_pose, run.entry_space_m, body)
     if info is not None:
         info['entry_turn'] = 'arc' if arc is not None else 'pivot'
     if arc is not None:
@@ -1682,17 +1670,17 @@ def plan_current(spec, car_pose, min_radius, *, body=None, max_entry_m=MAX_ENTRY
     if entry_m > max_entry_m:
         raise ValueError('车离路线太远（接入路线 %.0f m，最多 %.0f m），请先把车开近些' % (entry_m, max_entry_m))
     sections = _planned_sections(entry, route, 'route_'+run.kind+'_')
-    if runup is not None:
-        sections[len(entry) - 1].runup_m = runup     # 跟踪器按它定助跑慢走那段（path_tracker SectionTracker）
+    if first_line and run.kind == 'path':
+        sections[len(entry) - 1].first_line = True
     return (_circle_paint_end(sections, run) if run.kind == 'circle' else sections), entry_m + run_in
 
 
-def plan(spec, car_pose, min_radius, *, body=None, max_entry_m=MAX_ENTRY_M, nozzle_x=None, info=None, runup_m=None):
+def plan(spec, car_pose, min_radius, *, body=None, max_entry_m=MAX_ENTRY_M, nozzle_x=None, info=None, first_line=False):
     """整条要跑的路径：从车当前位姿接入 + 路线本身。返回 ([path_tracker.Section, …], 接入路程米)。
 
     路点折线和圆只有一段（前进）；连线路线按 cover_route 分成前进、倒车交替的若干段，body 见 cover_route。
     nozzle_x 不为 None 是差速车：连线路线按 pivot_cover 喷头压线、急弯原地转向（路线选了圆弧掉头时圆弧绕过去），
-    接入用 pivot_entry；段与段之间车头方向不同的地方由 SectionTracker 原地转过去。info、runup_m 同 plan_current。
+    接入用 pivot_entry；段与段之间车头方向不同的地方由 SectionTracker 原地转过去。info、first_line 同 plan_current。
     """
     from path_tracker import Path, Section   # path_tracker 依赖 robot_core；只在真要建路径时导入
     if info is not None:
@@ -1704,7 +1692,7 @@ def plan(spec, car_pose, min_radius, *, body=None, max_entry_m=MAX_ENTRY_M, nozz
             route, corners = _pivot_route_sections(spec, min_radius, nozzle_x)
             if info is not None and spec.turn == 'arc':
                 info['arc_turns'] = corners
-            entry, entry_m = pivot_entry(route[0], car_pose, nozzle_x, runup_m)
+            entry, entry_m = pivot_entry(route[0], car_pose, nozzle_x)
         elif body is None:
             raise ValueError('连线路线要知道车身尺寸（body）才能算车身中心压线')
         else:
@@ -1713,8 +1701,8 @@ def plan(spec, car_pose, min_radius, *, body=None, max_entry_m=MAX_ENTRY_M, nozz
         if entry_m > max_entry_m:
             raise ValueError('车离路线起点太远（接入路线 %.0f m，最多 %.0f m），请先把车开近些' % (entry_m, max_entry_m))
         sections = _planned_sections(entry, route, 'route_path_')
-        if nozzle_x is not None and runup_m is not None:
-            sections[len(entry) - 1].runup_m = runup_m
+        if nozzle_x is not None and first_line:
+            sections[len(entry) - 1].first_line = True
         return sections, entry_m
     if spec.kind == 'circle' and nozzle_x is not None:
         # 差速车：喷头画圆，接入原地转向对准、直线开过去（与连线路线同一套）

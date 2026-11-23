@@ -1,9 +1,10 @@
-"""重启后第一条（任务层没有上一条线卫星拟合好的 IMU 换算）助跑加长到 route_plan.FIRST_RUN_UP_M，助跑里按卫星轨迹定角度
-（2026-11-22 用户「就没有办法直接第一条就很好吗」→「做，先仿真」）：
+"""重启后第一条（任务层没有上一条线卫星拟合好的 IMU 换算）助跑里按卫星轨迹定角度
+（2026-11-22 用户「就没有办法直接第一条就很好吗」→「做，先仿真」；11-23 用户「不能靠加长助跑解决问题」：
+原来第一条加长到 4 m 的助跑删掉，助跑照常 RUN_UP_M）：
 
-- 规划：给了 runup_m 的连线路线，助跑起点退到线头后 runup_m，段上记下 runup_m，跟踪器整段按助跑速度走；圆不变；
-- 任务层：差速车直线 IMU 为主 + 卫星拟合、ImuAlignment 没有记忆 → FIRST_RUN_UP_M，有记忆 → 照旧；
-- 拟合（只在规划出的这条第一条上，ImuFirstGuide.no_memory）：助跑把推算往卫星拉时不动卡尔曼状态（角度差不被当成位置吃掉）；
+- 规划：给了 first_line 的连线路线，接入、助跑和不给时一模一样，只在接上助跑的第一条段上记 first_line；圆不记；
+- 任务层：差速车直线 IMU 为主 + 卫星拟合、ImuAlignment 没有记忆 → 开始作业规划给 first_line，有记忆 → 不给；
+- 拟合（只在记了 first_line 的这条上，ImuFirstGuide.no_memory）：助跑把推算往卫星拉时不动卡尔曼状态（角度差不被当成位置吃掉）；
   助跑里角度按 fit_runup_beta_rate_deg 用上。有记忆的线照旧。"""
 from dataclasses import replace
 import math
@@ -17,8 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / 'radar_system'), str(ROOT), str(ROOT / 'tests')]
 import route_plan as rp
 from line_cascade import ImuAlignment, ImuFirstConfig, ImuFirstGuide
-from line_mission import LineMission
-from line_tracker import LineConfig, LineTracker
+from line_mission import IdleTracker, LineMission
 from live_cruise import label_sections
 from path_tracker import PathConfig, SectionTracker, differential_config
 from robot_core.kinematics import ChassisGeometry
@@ -38,50 +38,62 @@ def paint_section(sections):
     raise AssertionError('没有助跑段')
 
 
-class Planning(unittest.TestCase):
-    def test_longer_runup_moves_start_back(self):
-        short, _ = rp.plan_current(LINE, FAR, MIN_R, nozzle_x=NOZZLE)
-        long, _ = rp.plan_current(LINE, FAR, MIN_R, nozzle_x=NOZZLE, runup_m=rp.FIRST_RUN_UP_M)
-        a, b = paint_section(short), paint_section(long)
-        self.assertIsNone(getattr(a, 'runup_m', None))
-        self.assertEqual(b.runup_m, rp.FIRST_RUN_UP_M)
-        head_a = a.path.pose(rp.RUN_UP_M)
-        head_b = b.path.pose(rp.FIRST_RUN_UP_M)
-        for u, v in zip(head_a, head_b):                       # 同一个线头
-            self.assertAlmostEqual(u, v, places=6)
-        ga, gb = a.path.pose(0.), b.path.pose(0.)
-        self.assertAlmostEqual(math.dist(ga[:2], gb[:2]), rp.FIRST_RUN_UP_M - rp.RUN_UP_M, places=6)
-        self.assertAlmostEqual(gb[1], head_b[1], places=6)     # 助跑起点仍在线的延长线上
-        self.assertAlmostEqual(gb[2], head_b[2], places=6)
+def geometry(sections):
+    return [(sec.direction, tuple(round(v, 9) for v in sec.path.pose(0.)),
+             tuple((round(p.length, 9), round(p.kappa, 9)) for p in sec.path.pieces)) for sec in sections]
 
-    def test_near_start_reverse_runup_uses_length(self):
-        car = rp.axle_for((-.8, 0.), 0., *NOZZLE) + (0.,)        # 喷头在线头后 0.8 m：倒车助跑
-        long, _ = rp.plan_current(LINE, car, MIN_R, nozzle_x=NOZZLE, runup_m=rp.FIRST_RUN_UP_M)
-        reverse = [sec for sec in long if sec.direction < 0]
-        # 直接往后倒到 4 m 外的助跑起点（3.2 m，超过原来接入最多倒 3 m 也倒），不掉头开过去再掉头回来
+
+class Planning(unittest.TestCase):
+    CARS = (FAR, rp.axle_for((-.8, 0.), 0., *NOZZLE) + (0.,), (-6., .05, 0.), (14., 1., math.pi))
+
+    def test_first_line_only_marks_the_section(self):
+        # 接入、助跑长度都不变（不加长助跑）：只在接上助跑的第一条段上记 first_line
+        for car in self.CARS:
+            with self.subTest(car=car):
+                a, ea = rp.plan_current(LINE, car, MIN_R, nozzle_x=NOZZLE)
+                b, eb = rp.plan_current(LINE, car, MIN_R, nozzle_x=NOZZLE, first_line=True)
+                self.assertEqual(geometry(a), geometry(b))
+                self.assertAlmostEqual(ea, eb)
+                self.assertFalse(any(getattr(sec, 'first_line', False) for sec in a))
+                self.assertEqual([getattr(sec, 'first_line', False) for sec in b],
+                                 [sec is paint_section(b) for sec in b])
+                self.assertFalse(any(hasattr(sec, 'runup_m') for sec in b))
+
+    def test_runup_stays_run_up_m(self):
+        sections, _ = rp.plan_current(LINE, FAR, MIN_R, nozzle_x=NOZZLE, first_line=True)
+        sec = paint_section(sections)
+        head = sec.path.pose(rp.RUN_UP_M)
+        self.assertAlmostEqual(head[0] - sec.path.pose(0.)[0], rp.RUN_UP_M, places=6)
+        self.assertFalse(hasattr(rp, 'FIRST_RUN_UP_M'))
+        car = rp.axle_for((-.8, 0.), 0., *NOZZLE) + (0.,)       # 喷头在线头后 0.8 m：照旧倒 1.2 m 到助跑起点
+        reverse = [s for s in rp.plan_current(LINE, car, MIN_R, nozzle_x=NOZZLE, first_line=True)[0] if s.direction < 0]
         self.assertEqual(len(reverse), 1)
-        self.assertAlmostEqual(reverse[0].path.length, rp.FIRST_RUN_UP_M - .8, places=6)
-        self.assertEqual([sec.direction for sec in long], [-1, 1])
-        start = paint_section(long).path.pose(0.)
-        head = paint_section(long).path.pose(rp.FIRST_RUN_UP_M)
-        self.assertAlmostEqual(head[0] - start[0], rp.FIRST_RUN_UP_M, places=6)
+        self.assertAlmostEqual(reverse[0].path.length, rp.RUN_UP_M - .8, places=6)
+
+    def test_plan_marks_too(self):
+        a, _ = rp.plan(LINE, FAR, MIN_R, nozzle_x=NOZZLE)
+        b, _ = rp.plan(LINE, FAR, MIN_R, nozzle_x=NOZZLE, first_line=True)
+        self.assertEqual(geometry(a), geometry(b))
+        self.assertTrue(paint_section(b).first_line)
 
     def test_circle_unchanged(self):
         circle = rp.RouteSpec(kind='circle', center=(0., 0.), radius=3., cruise=.6)
         a, ea = rp.plan_current(circle, FAR, MIN_R, nozzle_x=NOZZLE)
-        b, eb = rp.plan_current(circle, FAR, MIN_R, nozzle_x=NOZZLE, runup_m=rp.FIRST_RUN_UP_M)
+        b, eb = rp.plan_current(circle, FAR, MIN_R, nozzle_x=NOZZLE, first_line=True)
         self.assertAlmostEqual(ea, eb)
-        self.assertFalse(any(getattr(sec, 'runup_m', None) for sec in b))
+        self.assertEqual(geometry(a), geometry(b))
+        self.assertFalse(any(getattr(sec, 'first_line', False) for sec in b))
 
-    def test_tracker_slow_zone_follows_section(self):
-        for runup in (None, rp.FIRST_RUN_UP_M):
-            sections, entry = rp.plan_current(LINE, FAR, MIN_R, nozzle_x=NOZZLE, runup_m=runup)
+    def test_tracker_reads_the_mark(self):
+        for flag in (False, True):
+            sections, entry = rp.plan_current(LINE, FAR, MIN_R, nozzle_x=NOZZLE, first_line=flag)
             label_sections(sections, entry, .8)
             route = SectionTracker(sections, differential_config(PathConfig(cruise_mps=.8)), GEO,
                                    constant_straight_speed=True)
             tr = route.trackers[sections.index(paint_section(sections))]
-            self.assertEqual(tr.runup_distance_m, runup or rp.RUN_UP_M)
-            self.assertEqual(tr.first_line_runup, runup is not None)
+            self.assertEqual(tr.runup_distance_m, rp.RUN_UP_M)
+            self.assertEqual(tr.first_line, flag)
+            self.assertFalse(any(t.first_line for t in route.trackers if t is not tr))
 
 
 class Memory(unittest.TestCase):
@@ -113,23 +125,34 @@ class Memory(unittest.TestCase):
             a.feed_imu(t, 0.)
         self.assertFalse(a.remembered())
 
-    def test_mission_picks_runup(self):
+    def test_mission_flags_first_line(self):
         car = SimpleNamespace(to_geodetic=lambda x, y: (30. + y * 1e-5, 120. + x * 1e-5),
                               to_local=lambda lat, lon: ((lon - 120.) / 1e-5, (lat - 30.) / 1e-5))
+        pose = SimpleNamespace(x=FAR[0], y=FAR[1], yaw=FAR[2])
+        nozzle = dict(forward=NOZZLE[0], right=-NOZZLE[1])
+
+        def planned(m):
+            sections, _, tracker, _ = m._plan_route(LINE, pose, rp.plan_current, nozzle, .8)
+            first = paint_section(sections)
+            self.assertEqual(rp.RUN_UP_M, tracker.trackers[sections.index(first)].runup_distance_m)
+            return getattr(first, 'first_line', False), tracker.trackers[sections.index(first)].first_line
         with tempfile.TemporaryDirectory() as folder:
-            m = LineMission(car, SimpleNamespace(), LineTracker(LineConfig(), GEO),
+            m = LineMission(car, SimpleNamespace(), IdleTracker(GEO),
                             route_path=str(Path(folder) / 'route.json'),
                             path_config=differential_config(PathConfig(cruise_mps=.8)), nozzle_x=NOZZLE)
-            self.assertEqual(m._route_runup_m(NOZZLE), rp.FIRST_RUN_UP_M)
-            self.assertIsNone(m._route_runup_m(None))                   # 不按喷头压线（阿克曼）不变
+            self.assertTrue(m.first_line_no_memory())
+            self.assertEqual(planned(m), (True, True))
             a = m._imu_alignment
             a.feed_imu(5., 0.)
             a.update_line(a.begin_line(), 5., .01, math.radians(.05))
             a.feed_imu(5.05, 0.)
-            self.assertIsNone(m._route_runup_m(NOZZLE))
+            self.assertFalse(m.first_line_no_memory())
+            self.assertEqual(planned(m), (False, False))
             m.path_cfg = replace(m.path_cfg, straight_imu_enabled=False)  # 不用 IMU 为主：没有记忆这回事
             a.obs = a.pending = None
-            self.assertIsNone(m._route_runup_m(NOZZLE))
+            self.assertFalse(m.first_line_no_memory())
+            self.assertFalse(planned(m)[0])
+            self.assertNotIn('first_run_in', m.status()['route_limits'])
 
 
 def guide(no_memory=True):
@@ -177,7 +200,7 @@ class TrackerSetsMemory(unittest.TestCase):
     def run_line(self, first_line, remembered):
         from test_reverse_runup_handoff import fused, tracker
         tr = tracker()
-        tr.first_line_runup = first_line
+        tr.first_line = first_line
         a = ImuAlignment()
         a.feed_imu(.9, 0.)
         if remembered:

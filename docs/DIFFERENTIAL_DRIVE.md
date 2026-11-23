@@ -11,7 +11,7 @@
 
 ## 启用
 
-`robot_core/robot_gen5.json` 是 Gen5 的完整配置。车上在 `/etc/rk3588/runtime.env` 写 `RK3588_ROBOT_CONFIG=<发布目录>/robot_core/robot_gen5.json`（或复制到 `/etc/rk3588/robot.json`），然后整套重启。
+`robot_core/robot_gen5.json` 是 Gen5 的完整配置，也是默认配置（2026-11-23 删了阿克曼车和它的 `robot.json`）。车上 `/etc/rk3588/runtime.env` 里的 `RK3588_ROBOT_CONFIG` 可以指到别的文件（同样的键），改了整套重启。
 
 几何取自 Gen5 CAD：后轴前 0.911 m、后 0.604 m、半宽 0.39 m、轮距 0.675 m。万向轮转轴在后轴前 0.724 m，只填在 `wheelbase_m` 里，差速运动学不用它。雷达和相机的安装位置沿用旧车数值，还没按新车量。
 
@@ -19,7 +19,7 @@
 
 | 键 | Gen5 | 含义 |
 | --- | --- | --- |
-| `type` | `differential` | 旧车 `ackermann`。没有这一段的旧现场配置按 `ackermann` 读 |
+| `type` | `differential` | 只支持 `differential`（2026-11-23 删了 `ackermann`） |
 | `min_radius_m` | 0.5 | 跟踪圆弧的最小半径（内侧轮还有速度）；路线缓弯半径 = 它 / 0.9 |
 | `pivot_rate_rad_s` | 0.8 | 原地转向最大角速度，不能超过 `driver.max_yaw_rate_rad_s` |
 | `pivot_accel_rad_s2` | 1.0 | 原地转向角加速度 |
@@ -100,7 +100,7 @@
    - `differential_config`：执行延迟先按 0.1 s，下发曲率不再除以旧车的转向增益（0.96 / 0.90）。
 5. **定位**（`gnss_fusion`）：
    - 融合的定位点仍是后轴中点，正好是原地转向的中心。
-   - `FusionConfig.drive_differential`（`line_node` 按共享配置设）：陀螺合理上限按轮速里程计的角速度算；原地转时车速为 0 也不算静止，不拿来估陀螺零偏。
+   - 融合按差速车算（原来是 `FusionConfig.drive_differential` 开关，2026-11-23 删了阿克曼车后没有这个开关了）：陀螺合理上限按轮速里程计的角速度算；原地转时车速为 0 也不算静止，不拿来估陀螺零偏。
    - 不改这一项，原地转时陀螺会被当成尖峰全部丢掉，航向对不上，定位变成不可用，车停住。有测试专门检查这一点。
 
 ## 仿真结果

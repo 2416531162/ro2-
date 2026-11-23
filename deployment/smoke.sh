@@ -8,7 +8,7 @@ RELEASE="$(cd -- "${1:?用法: smoke.sh <发布目录> [组件...]}" && pwd)"
 shift
 source "$RELEASE/radar_system/ros_env.sh"
 set -u
-export RK3588_ROBOT_CONFIG="${RK3588_ROBOT_CONFIG:-$RELEASE/robot_core/robot.json}"
+export RK3588_ROBOT_CONFIG="${RK3588_ROBOT_CONFIG:-$RELEASE/robot_core/robot_gen5.json}"
 if [ "${ROS_DOMAIN_ID:-0}" = 97 ]; then export ROS_DOMAIN_ID=98; else export ROS_DOMAIN_ID=97; fi
 export ROS_LOCALHOST_ONLY=1
 exec timeout 60 "$RK3588_PYTHON" -u "$RELEASE/deployment/smoke_nodes.py" "$@"

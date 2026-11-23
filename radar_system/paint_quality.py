@@ -47,7 +47,7 @@ def nozzle(m, record):
     """作业快照优先，路线与场地使用各自保存的喷头杆臂。"""
     cfg=(record.get('field_context') if record.get('field_plan') else record.get('route_nozzle')) or {}
     f,l=cfg.get('forward'),-(cfg.get('right') or 0.)
-    # 旧阿克曼任务没有喷头配置，交给原有 paint_nozzle_invalid 保护，不让状态查询抛异常。
+    # 任务里没记喷头配置时用共享配置的水泵；都没有交给原有 paint_nozzle_invalid 保护，不让状态查询抛异常。
     return (m.nozzle or (None,None)) if f is None else (f,l)
 
 
@@ -67,7 +67,7 @@ def segment_distance(point,a,b):
 
 def continuous_arc(m, section, tracker):
     """仅 Gen5 前进圆弧作业使用持续喷涂，转场是否喷仍由 phase 决定。"""
-    return bool(getattr(m,'differential',False) and section.direction>0
+    return bool(section.direction>0
                 and callable(getattr(tracker,'constant_arc_speed_here',None))
                 and tracker.constant_arc_speed_here())
 
@@ -132,7 +132,7 @@ def status(m,record,phase,section,tracker):
         else:
             # 当前实际执行的刷线段：按车身参考路径变换到喷头轨迹，禁止错配另一条交叉线。
             from path_tracker import paint_window
-            _,start,end=paint_window(section,tracker.st.s,tail_extra=.05 if getattr(m,'differential',False) and section.paint_to_m is not None else 0.)
+            _,start,end=paint_window(section,tracker.st.s,tail_extra=.05 if section.paint_to_m is not None else 0.)
             hint=min(end,max(start,tracker.st.s))
             reach=math.hypot(f,l)+1.0
             lo,hi=max(start,hint-reach),min(end,hint+reach)

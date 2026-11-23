@@ -20,7 +20,6 @@ class FieldPlanService:
         if not 0<=age<=1.5 or not pose.get('usable'):raise ValueError('请等待新鲜、可用的 RTK 定位')
         if line.get('phase')!='IDLE' or line.get('motion_mode')!='IDLE':raise ValueError('请先停稳并结束当前作业')
         if abs(pose.get('speed',1))>.02:raise ValueError('车辆还在移动')
-        if limits.get('drive')!='differential':raise ValueError('内场优先规划需要差速底盘')
         if request.get('origin')!=line.get('origin'):raise ValueError('地图原点已改变，请重新定位图纸')
         nozzle=request.get('nozzle')
         if not isinstance(nozzle,list) or len(nozzle)!=2:raise ValueError('缺少已配置的喷头位置')

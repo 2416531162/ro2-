@@ -121,7 +121,7 @@ class SmoothRunup(unittest.TestCase):
             tr._straight_first(p,DT,.3,0.,tr.path.pieces[0],0.,0.)
         self.assertGreater(g.fit_points,0)
         self.assertTrue(tr.st.integral_frozen)
-        for reasons in (('rtk_rejoin',),('position_outlier',),('rtk_hold_pending',)):
+        for reasons in (('rtk_rejoin',),('position_outlier',),('rtk_hold',)):
             p.reasons=reasons
             self.assertFalse(tr._runup_position_trusted(p))
 

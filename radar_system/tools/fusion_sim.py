@@ -1,4 +1,5 @@
-"""可复现的离线传感器仿真；阿克曼真值不使用融合模块的预测器。"""
+"""可复现的离线传感器仿真；真值按分段（车速 + 角速度）积分，不用融合模块的预测器。
+2026-11-23 删了阿克曼车：分段原来给前轮转角（按阿克曼几何换角速度），改成直接给角速度 yaw_rate（rad/s）。"""
 import heapq
 import math
 from dataclasses import dataclass
@@ -13,7 +14,7 @@ from gnss_fusion import (DualHeading, FusionConfig, GnssFix, GnssFusion,
 class Segment:
     duration: float
     speed: float
-    steer: float = 0.0
+    yaw_rate: float = 0.0           # rad/s，左转为正；车速为 0 时就是原地转
 
 
 @dataclass(frozen=True)
@@ -52,10 +53,7 @@ class FusionSimulation:
 
     @staticmethod
     def _rate(segment):
-        if abs(segment.steer) < 1e-12 or segment.speed == 0:
-            return 0.
-        radius = .52 / math.tan(abs(segment.steer)) + .60 / 2
-        return segment.speed / radius * (1 if segment.steer > 0 else -1)
+        return segment.yaw_rate
 
     def truth(self, t):
         x = y = 0.

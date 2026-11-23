@@ -94,9 +94,8 @@ class FusionConfig:
     mount_offset_deg: float = 0.0
     wheelbase_m: float = 0.52
     max_steer_rad: float = 0.35
-    # 差速车（Gen5）：角速度来自左右轮速差，车速为 0 也能原地转；陀螺合理范围按里程计角速度算，
-    # 原地转向不算静止（不拿来估陀螺零偏）。阿克曼车按车速和满舵算（wheelbase_m、max_steer_rad）
-    drive_differential: bool = False
+    # Gen5 差速车：角速度来自左右轮速差，车速为 0 也能原地转；陀螺合理范围按里程计角速度算，
+    # 原地转向不算静止（不拿来估陀螺零偏）。2026-11-23 删了阿克曼车，drive_differential 开关一起删（OBSOLETE_FUSION_KEYS）
     # 两次测向之间转了多少：'rate' 积分陀螺 z 轴角速度（旧车）；'angle' 用 IMU 自己算的航向角的增量
     # （Gen5 的 HDA536T，2026-09-28 用户要求）。两种都只管转了多少，朝哪由双天线定：融合航向 = IMU 航向角 +
     # 双天线不断校准的偏移，零偏状态就是这个偏移的漂移率。
@@ -169,19 +168,11 @@ class FusionConfig:
     # 卫星地速（多普勒）接管轮速：相邻两帧的速度变化上限、连续有效多久才用
     doppler_accel_limit_mps2: float = 2.0
     doppler_recovery_s: float = 0.2
-    # 任务层的喷头推算误差预算；Gen5 在 line_node 中开启，旧车保持原有时限行为。
-    # 估计预算 = 协方差的若干 σ + 轮速比例/滑移等模型余量，不是经认证的真实误差上界。
-    hold_budget_enabled: bool = False
-    hold_watch_s: float = 0.5  # 用户指定：固定解更新间隔达到 500 ms 才进入完整中断预算。
-    hold_lateral_limit_m: float = 0.03
-    hold_along_limit_m: float = 0.10
-    hold_sigma_multiplier: float = 2.0
-    hold_wheel_scale_error: float = 0.02
-    hold_slip_per_m: float = 0.002
-    hold_slip_mps: float = 0.001
-    hold_turn_slip_m_per_rad: float = 0.01
-    hold_turn_scale_error: float = 0.03
-    hold_slow_ratio: float = 0.65
+    # 固定解这么久没更新就按「断了」推算（用户指定 500 ms）：轮速位置噪声换成断线模式、接回按 rejoin_rate_mps 限速、
+    # 不再用卫星地速顶替轮速。原来按它起算的任务层推算误差预算（喷头横向 3 cm / 沿线 10 cm 停车、hold_* 那一组）
+    # 从没接进任务层，2026-11-22 删了（车上文件写了也丢掉，见 line_node.OBSOLETE_FUSION_KEYS）
+    hold_watch_s: float = 0.5
+    hold_wheel_scale_error: float = 0.02   # 轮速刻度自动标定的误差余量（WheelScale）
     # 按两根天线位置互检的偏差逐步少信 RTK 位置、多靠 IMU + 轮速：最近 dual_weight_window_s 内互检偏差的最大值 d 超过
     # dual_weight_m 时，固定解位置方差乘 (d / dual_weight_m)²（最多 DUAL_WEIGHT_MAX 倍）。2026-10-01 实车：空旷处偏差
     # p95 1.3–1.4 cm（不受影响），靠楼 p95 5–9 cm，旧做法到 10 cm 才一刀切换推算，3–10 cm 时车跟着卫星晃。0 = 不降权
@@ -273,7 +264,7 @@ class FusionConfig:
         for name, value in self.__dict__.items():
             if name == 'yaw_input':
                 continue
-            if name in ('hold_budget_enabled', 'continuous_output', 'heading_bias_learning', 'wheel_increment_enabled',
+            if name in ('continuous_output', 'heading_bias_learning', 'wheel_increment_enabled',
                         'wheel_scale_auto', 'sensor_failover_enabled', 'tilt_compensation_enabled', 'ground_speed_still'):
                 if type(value) is not bool:
                     raise ValueError(name + ' 必须是布尔值')
@@ -285,12 +276,11 @@ class FusionConfig:
                 raise ValueError(name + ' 必须是有限数值')
             elif name in ('yaw_scale_sigma', 'heading_sync_s', 'antenna_height_m', 'rtk_hold_s', 'dual_weight_m', 'fix_jitter_k',
                           'secondary_baseline_m',
-                          'rejoin_rate_mps', 'hold_wheel_scale_error', 'hold_slip_per_m', 'hold_slip_mps',
-                          'hold_turn_slip_m_per_rad', 'hold_turn_scale_error',
+                          'rejoin_rate_mps', 'hold_wheel_scale_error',
                           'course_init_distance_m', 'course_refine_distance_m', 'course_align_distance_m'):
                 if value < 0:
                     raise ValueError(name + ' 不能为负')
-            elif name not in ('baseline_yaw_body_deg', 'mount_offset_deg', 'drive_differential') and value <= 0:
+            elif name not in ('baseline_yaw_body_deg', 'mount_offset_deg') and value <= 0:
                 raise ValueError(name + ' 必须为正')
         if not 0 < self.max_steer_rad < math.pi / 2:
             raise ValueError('max_steer_rad 必须在 (0, pi/2) 内')
@@ -300,12 +290,8 @@ class FusionConfig:
             raise ValueError('max_tilt_deg 不能超过 45°')
         if not isinstance(self.history_max_samples, int) or self.history_max_samples < 10:
             raise ValueError('history_max_samples 必须是至少 10 的整数')
-        if not 0 < self.hold_slow_ratio < 1:
-            raise ValueError('hold_slow_ratio 必须在 0 与 1 之间')
-        if max(self.hold_wheel_scale_error, self.hold_turn_scale_error) > 1:
+        if self.hold_wheel_scale_error > 1:
             raise ValueError('推算比例误差必须是 0–1 的比例')
-        if self.hold_budget_enabled and self.hold_watch_s > self.fixed_timeout_s:
-            raise ValueError('hold_watch_s 不能大于 fixed_timeout_s')
 
 
 @dataclass(frozen=True)
@@ -398,10 +384,6 @@ OUTPUT_SNAP_BASELINE_M = rules.HEADING_BASELINE_M
 OUTPUT_SNAP_DEG = rules.OUTPUT_SNAP_DEG
 # 可信时 pose() 最多往后外推这么久（轮速、IMU 都断了时滤波器只靠 10 Hz 的卫星往前走，加上转发延迟常超过 0.2 s）
 TRUSTED_EXTRAPOLATION_S = 0.5
-# 旧阿克曼兼容恢复；Gen5 用下方多源质量确认后平滑接回，不直接重定航向。
-REANCHOR_S = 0.5
-REANCHOR_SPREAD_DEG = 0.5
-REANCHOR_RATE_DEG_S = 3.0
 # 测向和推算差得多、按测向快校之后，这么久内仍按转弯的时间常数快校
 HEADING_RECOVERY_S = 1.0
 # 测向偏差学习：一段里转过这么多（度）就重新开始（转弯时轮速刻度误差会带进方向）；推算 / RTK 位移长度比在这范围外不用
@@ -603,10 +585,6 @@ class _State:
         self.imu_yaw = None                 # 上一帧 IMU 航向角（yaw_input = 'angle'）
         self.mismatch_since = None          # 差速车：IMU 转向与轮速里程计相反从什么时候开始
         self.imu_mismatch = False           # 确认相反后一直为真，IMU 不再用
-        self.rej_since = None               # 测向连续被拒从什么时候开始；rej_ref 第一帧，rej_lo/hi 之后相对它的范围
-        self.rej_ref = self.rej_lo = self.rej_hi = 0.0
-        self.heading_reset_t = -math.inf
-        self.heading_resets = 0
         self.roll = self.pitch = 0.0        # 最近一帧 IMU 姿态（倾斜补偿），tilt_t 是它的时刻
         self.tilt_t = -math.inf
         # 推算维持（rtk_hold_s > 0）：最近一次按 RTK 对齐接回的时刻、次数
@@ -984,8 +962,8 @@ class GnssFusion:
             fraction = (s.t+dg/2-s.imu_t)/(future_gyro.t-s.imu_t)
             w += (future_gyro.gyro_z-s.gyro)*max(0., min(1., fraction))
         angle = w * dg
-        # IMU 断了或不再用：差速车用轮速里程计的角速度接着推（原地转时也有），航向照样由双天线定；阿克曼车不推
-        do = max(0., wheel_dv - dg) if cfg.drive_differential else 0.
+        # IMU 断了或不再用：用轮速里程计的角速度接着推（原地转时也有），航向照样由双天线定
+        do = max(0., wheel_dv - dg)
         angle += s.wheel_yaw * do
         if dg < dt and self._trusted():
             # 卫星可信、IMU 断着：IMU 和轮速里程计都没管到的那段按相邻测向算的转速推（最多推到最近测向后 heading_timeout_s）
@@ -1017,10 +995,10 @@ class GnssFusion:
         qv = (max(cfg.wheel_noise_mps, s.wheel_sigma) * dv) ** 2
         if cfg.sensor_failover_enabled and s.wheel_source == 'encoder' and min(wheel_dv, dg) >= dt:
             # 区间编码器给出已走距离及其误差；不再额外叠加“未知速度积分”的各向同性位置随机游走。
-            # 轮径比例与滑移仍由任务预算单独累计，转向误差仍由协方差传播。
+            # 轮径比例与滑移不在这里加（原打算由任务层推算预算累计，那套预算没接上、11-22 已删），转向误差仍由协方差传播。
             if s.t-s.fixed_t >= cfg.hold_watch_s:
                 qv = max(cfg.wheel_noise_mps, s.wheel_sigma)**2 * cfg.wheel_sample_period_s * dv
-                # 侧向的轮胎滑移已有任务预算按路程/转角累计；此处仅传播随机残差。
+                # 侧向的轮胎滑移不在这里加（见上），此处仅传播随机残差。
                 # 航向误差通过 P 的位置-航向交叉项进入横向，不再用转速重复放大位置白噪声。
                 qc = min(q, cfg.cross_walk_m_sqrt_s**2 * dt)
                 q = max(qc, qv)
@@ -1151,8 +1129,8 @@ class GnssFusion:
         still = (sample.hall_still is True and (not cfg.ground_speed_still
                  or 0 <= sample.t-s.ground_t <= max(cfg.sensor_timeout_s,STATIONARY_DOPPLER_FRESH_S) and s.ground_speed <= .02)
                  ) if s.motion_evidence else abs(sample.speed) <= cfg.stationary_speed_mps
-        if cfg.drive_differential:          # 差速车原地转时车速为 0，但在转
-            still = still and abs(sample.yaw_rate) <= math.radians(cfg.gyro_margin_deg_s)
+        # 原地转时车速为 0，但在转
+        still = still and abs(sample.yaw_rate) <= math.radians(cfg.gyro_margin_deg_s)
         if still:
             if s.stationary_since is None:
                 s.stationary_since = sample.t
@@ -1175,21 +1153,17 @@ class GnssFusion:
     def _gyro_bound(self, speed, wheel_yaw, dt=None):
         """陀螺读数（去零偏）的合理上限，超过的算尖峰不用。
 
-        阿克曼车：当前车速下满舵的角速度。差速车：里程计角速度的 1.5 倍（原地转也有），再加上行驶中路面颠簸、
-        打滑带来的转动（按车速，量级与阿克曼车满舵相同）。两种都再加 gyro_margin_deg_s。
+        里程计角速度的 1.5 倍（原地转也有），再加上行驶中路面颠簸、打滑带来的转动（按车速，量级取 wheelbase_m、
+        max_steer_rad 算的满舵转速，沿用原来的数），再加 gyro_margin_deg_s。
         """
         cfg = self.config
         v = abs(speed * self._s.wheel_cal.applied)
-        if cfg.drive_differential:
-            bound = 1.5 * abs(wheel_yaw) + v * math.tan(cfg.max_steer_rad) / cfg.wheelbase_m
-        else:
-            bound = v * math.tan(cfg.max_steer_rad) / cfg.wheelbase_m
+        bound = 1.5 * abs(wheel_yaw) + v * math.tan(cfg.max_steer_rad) / cfg.wheelbase_m
         if cfg.yaw_input == 'angle' and dt is not None and dt > 0:
             # 相邻两帧航向角之差的量化误差（一个分辨率）
             bound += math.radians(cfg.yaw_resolution_deg) / dt
-            if cfg.drive_differential:
-                # 差速车低速转动时里程计读小，不能拿它卡 IMU 航向角：车身转得到的转速都收
-                bound = max(bound, math.radians(cfg.angle_rate_floor_deg_s))
+            # 低速转动时里程计读小，不能拿它卡 IMU 航向角：车身转得到的转速都收
+            bound = max(bound, math.radians(cfg.angle_rate_floor_deg_s))
         return bound + math.radians(cfg.gyro_margin_deg_s)
 
     def _yaw_rate(self, sample):
@@ -1246,8 +1220,6 @@ class GnssFusion:
         """差速车：轮速里程计的角速度可靠（原地转时也有），IMU 的转向与它持续相反（装反、坐标换算错）：
         之后不再用 IMU，航向不确定度放大，下一帧测向直接接管。只看明显在转的时候，停车、慢转不判。"""
         s, cfg = self._s, self.config
-        if not cfg.drive_differential:
-            return
         if s.wheel_source != 'legacy':
             return  # 轮子打滑也会与 IMU 不一致，不能据此永久判 IMU 装反。
         if (fresh_wheel and abs(s.wheel_yaw) >= MISMATCH_WHEEL_RAD_S and abs(rate) >= MISMATCH_IMU_RAD_S
@@ -1411,30 +1383,7 @@ class GnssFusion:
         rate = self._turn_rate()
         var = math.radians(max(cfg.heading_floor_deg, sample.sigma_heading_deg)) ** 2 + (rate * cfg.heading_sync_s) ** 2
         yaw = _wrap(raw + self._mount - s.heading_bias)
-        if cfg.drive_differential:
-            self._adaptive_heading(sample, yaw, raw, var, trusted)
-            return
-        if self._yaw_observation(yaw, var):
-            s.heading_t, s.heading_ok, s.raw_yaw, s.raw_heading_var = sample.t, True, raw, var
-            s.rej_since = None
-            return
-        s.heading_rejected += 1
-        # 稳定的测向必须信：连续被拒、彼此一致、车转得不快，就是推算的航向错了，按测向重定（不停车）
-        if s.rej_since is None:
-            s.rej_since, s.rej_ref, s.rej_lo, s.rej_hi = sample.t, yaw, 0., 0.
-            return
-        d = _wrap(yaw - s.rej_ref)
-        s.rej_lo, s.rej_hi = min(s.rej_lo, d), max(s.rej_hi, d)
-        if s.rej_hi - s.rej_lo > math.radians(REANCHOR_SPREAD_DEG):
-            s.rej_since, s.rej_ref, s.rej_lo, s.rej_hi = sample.t, yaw, 0., 0.     # 测向自己在跳：不算稳定，重新数
-            return
-        if sample.t - s.rej_since >= REANCHOR_S and abs(rate) < math.radians(REANCHOR_RATE_DEG_S):
-            s.yaw = yaw
-            p = s.p
-            s.p = (p[0], p[1], 0., p[3], p[4], 0., p[6], var, 0., p[9])
-            s.heading_t, s.heading_ok, s.raw_yaw, s.raw_heading_var = sample.t, True, raw, var
-            s.heading_reset_t, s.rej_since = sample.t, None
-            s.heading_resets += 1
+        self._adaptive_heading(sample, yaw, raw, var, trusted)
 
     def _adaptive_heading(self, sample, yaw, raw, variance, trusted):
         """Gen5：有效测向都用（rtk_node 判有效：整周固定、基线 0.35–0.45 m），不拿 IMU 否决测向
@@ -1465,7 +1414,6 @@ class GnssFusion:
             p = s.p
             s.p = (p[0], p[1], 0., p[3], p[4], 0., p[6], variance, 0., p[9])
             s.heading_t, s.heading_ok, s.raw_yaw, s.raw_heading_var = sample.t, True, raw, variance
-            s.rej_since = None
             return
         if not s.yaw_ready:
             self._yaw_observation(yaw, variance)
@@ -1494,14 +1442,13 @@ class GnssFusion:
                        and abs(residual) <= math.radians(0.3))
         self._yaw_observation(yaw, variance, gate=False, update_bias=learn_drift)
         s.heading_t, s.heading_ok, s.raw_yaw, s.raw_heading_var = sample.t, True, raw, variance
-        s.rej_since = None
 
     def _turn_rate(self):
         """现在转得多快（rad/s）：IMU 能用就用 IMU，否则差速车用轮速里程计，都没有为 0。"""
         s, cfg = self._s, self.config
         if not s.imu_mismatch and s.t - s.imu_valid_t <= cfg.sensor_timeout_s:
             return s.gyro - s.bias
-        if cfg.drive_differential and s.t - s.wheel_t <= cfg.sensor_timeout_s:
+        if s.t - s.wheel_t <= cfg.sensor_timeout_s:
             return s.wheel_yaw
         return 0.
 
@@ -1813,7 +1760,7 @@ class GnssFusion:
 
     def _position_course(self, sample, xy):
         s, cfg = self._s, self.config
-        if cfg.drive_differential and (s.outlier_since is not None
+        if (s.outlier_since is not None
                 or (cfg.dual_weight_m > 0 and len(xy) > 2 and xy[2] is not None and xy[2] > cfg.dual_weight_m)):
             s.align = None
             self._end_segment()
@@ -1855,7 +1802,7 @@ class GnssFusion:
             # 回归窗口有重叠，不能按每个 RTK 帧把它当独立观测注入。
             var = max(math.radians(.2)**2, 4*(sigma_sum/n)/max(voo, 1e-12))
             first = not s.yaw_ready
-            if self._yaw_observation(angle, var, update_bias=not cfg.drive_differential):
+            if self._yaw_observation(angle, var, update_bias=False):
                 s.course_t = s.t
                 if first:
                     # 第一次定下车头（单天线起步）：之前推算按错的车头走，位置被拖偏几厘米、要 2 s 才被固定解拉回；
@@ -2034,7 +1981,7 @@ class GnssFusion:
             s.vel_c += math.cos(offset)
             s.vel_s += math.sin(offset)
             s.vel_var_sum += var+s.raw_heading_var
-        elif self._yaw_observation(angle, var, update_bias=not cfg.drive_differential):
+        elif self._yaw_observation(angle, var, update_bias=False):
             s.course_t = sample.t
 
     def pose(self, t: float) -> FusedPose | None:
@@ -2079,10 +2026,8 @@ class GnssFusion:
         if cfg.rtk_hold_s > 0:
             # 多久没有固定解（单点、浮点、转发断流）不超过 rtk_hold_s 照常能开（位置靠轮速 + IMU 航向推算，
             # 航向保持断开时的方向），超过才不可控、原地停，恢复后自动继续（见 FusionConfig.rtk_hold_s；
-            # 2026-10-05 用户再次确认：「最多维持 5 秒，5 秒内没恢复正常，停车」）
+            # Gen5 由 line_node 设 9 s = 满 8 s 停喷 + 再走 1 s 停车，10-06 / 10-07 用户，原来是 5 s）
             since = s.t - s.fixed_t
-            if cfg.hold_budget_enabled and cfg.hold_watch_s <= since < cfg.fixed_timeout_s:
-                reasons.append('rtk_hold_pending')
             if since >= cfg.fixed_timeout_s - 1e-9:
                 if since <= cfg.rtk_hold_s + 1e-9:
                     holding = True
@@ -2124,8 +2069,6 @@ class GnssFusion:
             reasons.append('imu_stale')
         if imu_down and not self._has_heading():
             usable = False
-        if s.t - s.heading_reset_t <= cfg.reset_hold_s:
-            reasons.append('heading_reset')         # 刚按测向重定了航向，只提示，不停车
         if cfg.tilt_compensation_enabled and cfg.antenna_height_m > 0 and self._lever()[2] is not None:
             reasons.append('tilt_uncompensated')    # 填了天线高度但这会儿没做倾斜补偿：只提示，不停车
         wheel_replaced = self._wheel_replacement()

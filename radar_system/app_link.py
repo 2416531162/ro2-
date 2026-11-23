@@ -421,36 +421,19 @@ def parse_command(text):
 STICK_DEADBAND = 0.02
 
 
-def resolve_stick(throttle, steer, tier, tiers_mps, reverse_scale, geometry):
-    """摇杆 (-1..1, -1..1) + 速度档 -> (vx, wz, 实际前轮转角度数)。
-
-    速度上限、倒车折扣、舵角限位全部由车端按共享配置换算,手机只报比例;
-    角速度按当前车速从转角反算,换档不改变转弯半径(与网页方向键同一规则)。
-    """
-    from robot_core.kinematics import yaw_from_steer
-    throttle = max(-1.0, min(1.0, float(throttle)))
-    steer = max(-1.0, min(1.0, float(steer)))
-    if getattr(geometry, 'differential', False):
-        return _differential_stick(throttle, steer, tier, tiers_mps, reverse_scale, geometry)
-    if abs(throttle) < STICK_DEADBAND:
-        return 0.0, 0.0, 0.0
-    base = tiers_mps.get(tier, tiers_mps['med'])
-    vx = throttle * base * (reverse_scale if throttle < 0 else 1.0)
-    steer_rad = steer * geometry.max_steer_rad
-    wz = yaw_from_steer(vx, steer_rad, geometry)
-    return round(vx, 4), round(wz, 4), round(math.degrees(steer_rad), 1)
-
-
 # 手动摇杆打满时原地转的角速度（rad/s）：与路线原地转（车型配置 pivot_rate_rad_s）分开，路线原地转再调时手动手感不变
 MANUAL_PIVOT_RATE_RAD_S = 0.8
 
 
-def _differential_stick(throttle, steer, tier, tiers_mps, reverse_scale, geometry):
-    """差速车（两后轮差速、前面万向轮）：摇杆打横就原地转，没有前轮转角（返回 0°）。
+def resolve_stick(throttle, steer, tier, tiers_mps, reverse_scale, geometry):
+    """摇杆 (-1..1, -1..1) + 速度档 -> (vx, wz, 前轮转角度数)。Gen5 差速车（两后轮差速、前面万向轮）：
+    摇杆打横就原地转，没有前轮转角（返回 0°）。速度上限、倒车折扣由车端按共享配置换算，手机只报比例。
 
     角速度上限 = 手动原地转角速度（不超过车型的原地转向角速度）× 本档车速 / 最快档车速，慢档转得也慢；前进时同一比例的角速度，
-    车速越快弯越大。倒车时往左打是车尾往左（与旧车、方向盘一样的手感），所以角速度反号。
+    车速越快弯越大。倒车时往左打是车尾往左（与方向盘一样的手感），所以角速度反号。
     """
+    throttle = max(-1.0, min(1.0, float(throttle)))
+    steer = max(-1.0, min(1.0, float(steer)))
     moving = abs(throttle) >= STICK_DEADBAND
     if not moving and abs(steer) < STICK_DEADBAND:
         return 0.0, 0.0, 0.0
@@ -474,15 +457,13 @@ def _num(value, digits=2):
 
 def build_hello(profile, *, name, session=None, network=None):
     g, drive = profile['geometry'], profile['drive']
-    tan = math.tan(g['max_steer_rad'])
-    differential = drive['type'] == 'differential'
     return {
         'type': 'hello', 'v': PROTOCOL_VERSION, 'name': name, 'session': session,
         'car': {
             'front_m': g['front_m'], 'rear_m': g['rear_m'], 'half_width_m': g['half_width_m'],
             'wheelbase_m': g['wheelbase_m'], 'track_m': g['track_m'],
             'max_steer_deg': round(math.degrees(g['max_steer_rad']), 1),
-            'min_turn_radius_m': round(drive['min_radius_m'] if differential else g['wheelbase_m'] / tan + 0.5 * g['track_m'], 3),
+            'min_turn_radius_m': round(drive['min_radius_m'], 3),
             # 差速车能原地转，没有前轮转角；nozzle_x_m / nozzle_right_m 是水泵（差速车作业的压线点）在后轴前、车中线右多少米
             'drive': drive['type'], 'nozzle_x_m': drive['nozzle_x_m'], 'nozzle_right_m': drive.get('nozzle_right_m', 0.0),
         },
@@ -720,7 +701,7 @@ def build_telemetry(snap, *, now, seq):
                    'reason': motion.get('reason'),
                    'faults': motion.get('health_faults') or [],
                    'waiting_stationary': bool(motion.get('waiting_stationary')),
-                   # RTK 路线/直线（NAVIGATION）是否经过雷达防撞（旧阿克曼车的底盘防撞层）；Gen5 / 旧版驱动为 None
+                   # RTK 路线（NAVIGATION）是否经过雷达防撞（协议保留；Gen5 驱动没有防撞层，为 None）
                    'nav_lidar': (wt.get('guard') or {}).get('navigation_uses_lidar')},
         'drive': {'speed': _num(vel[0]), 'yaw_rate': _num(vel[2]),
                   'manual': bool(manual.get('active')),

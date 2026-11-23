@@ -176,8 +176,6 @@ def run_one(request, seed, record, emit, publish=None, source=None):
     else:
         control_fusion = fusion
     mission = LineMission(control_fusion, gnss_fusion)
-    if not mission.differential:
-        raise ValueError('车端配置不是 Gen5 差速底盘')
     if legacy:
         src.inputs = mission
         step_sensors = lambda t: src.step(t, car)

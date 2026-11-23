@@ -20,8 +20,7 @@ sys.path[:0] = [str(ROOT / 'radar_system'), str(ROOT), str(ROOT / 'tests')]
 import line_mission as lm
 import paint_quality
 import route_plan as rp
-from line_mission import LineMission
-from line_tracker import LineConfig, LineTracker
+from line_mission import IdleTracker, LineMission
 from path_tracker import PathConfig, differential_config
 from test_offline_reentry import DT, GEO, NOZZLE, Car, mission, run
 from types import SimpleNamespace
@@ -201,7 +200,7 @@ class RedoRunup(unittest.TestCase):
         spec = rp.RouteSpec(kind='path', points=((0., 0.), (6., 0.), (6., 5.)), closed=False, cruise=.8)
         car = Car(*line_car(-6., 2., 0.))
         cfg = replace(differential_config(PathConfig(cruise_mps=.8)), straight_imu_enabled=False)
-        m = LineMission(car, SimpleNamespace(), LineTracker(LineConfig(), GEO),
+        m = LineMission(car, SimpleNamespace(), IdleTracker(GEO),
                         route_path=str(Path(self.folder.name) / 'route.json'), path_config=cfg, nozzle_x=NOZZLE)
         ok, message = m.command(dict(cmd='route_start_current', route=spec.to_dict(digits=12),
                                      nozzle=dict(forward=NOZZLE[0], right=-NOZZLE[1])), 0.)

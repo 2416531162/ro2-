@@ -189,7 +189,7 @@ def elements(spec, radius):
 def rework_sections(spec, element, start, end, radius, body, track_x=0.0, nozzle=None):
     """补画图纸上第 element 条线 / 圆的 [start, end] 米。nozzle 不为 None（差速车，水泵在车体系 (前, 左)，可以在侧面）：
     让水泵正好压过这一段——连线的一条边后轴与边平行、按水泵横移；圆按水泵算后轴的圆（route_plan.circle_axle_radius），
-    圆的 s 从图纸圆的起点（最南点或 start_angle）顺着画的方向量。阿克曼车按车身中心。"""
+    圆的 s 从图纸圆的起点（最南点或 start_angle）顺着画的方向量。nozzle 为 None（场地作业）按车身中心。"""
     choices = elements(spec, radius)
     if isinstance(element, bool) or not isinstance(element, int) or not 0 <= element < len(choices):
         raise ValueError('补画线段不存在，请重新选择')
@@ -281,8 +281,9 @@ class RouteOperations:
         return signature(self.m.route.to_dict(digits=9)) if self.m.route else None
 
     def profile(self):
+        # line_track_x：原阿克曼直线控制点（恒为 0），留在签名里，升级前存的任务照样能续
         return signature(dict(body=self.m.body, radius=self.m.min_route_radius,
-                              track_x=self.m.path_cfg.track_x_m, line_track_x=self.m.line_cfg.track_x_m))
+                              track_x=self.m.path_cfg.track_x_m, line_track_x=0.0))
 
     def field_profile(self, record):
         """原图纸与喷头设置属于任务快照；几何参数改变后须重新规划；已验证的在线调速会更新速度签名。"""
@@ -489,9 +490,9 @@ class RouteOperations:
         r['cursor_m'] = min(r['total_m'], max(r['cursor_m'], progress))
         r['updated_at'] = time.time()
         if self.m.phase=='RUNNING' and isinstance(self.m.tracker,SectionTracker):
-            continuous_circle=(self.m.differential and self.m.route is not None and self.m.route.kind=='circle'
+            continuous_circle=(self.m.route is not None and self.m.route.kind=='circle'
                                and self.m.path_cfg.arc_speed_mps is not None)
-            if 'circle_spray' not in r and self.m.differential and self.m.route is not None and self.m.route.kind=='circle' and not continuous_circle:
+            if 'circle_spray' not in r and self.m.route is not None and self.m.route.kind=='circle' and not continuous_circle:
                 sections=self.decode(r)
                 circle_spray_repair.initialise(r,self.m,sections,painting_start(sections))
             paint=self.paint_status()
@@ -545,7 +546,7 @@ class RouteOperations:
         t=self.m.tracker
         sec=t.sections[t.index]
         # 新规划越线后才截止，区间选择须保留这一小段，否则越线时会跳到下一喷线区间。
-        extra=.05 if self.m.differential and sec.paint_to_m is not None else 0.
+        extra=.05 if sec.paint_to_m is not None else 0.
         return paint_window(sec,t.trackers[t.index].st.s,tail_extra=extra)
 
     def _paint_key(self):
@@ -553,9 +554,9 @@ class RouteOperations:
         return (t,t.index,self._paint_window()[0])
 
     def _paint_tail_section(self):
-        """只接管 Gen5 前进直线段尾；场地直线同用，圆、尾弧、倒车和旧底盘保持原语义。"""
+        """只接管前进直线段尾；场地直线同用，圆、尾弧、倒车保持原语义。"""
         t=self.m.tracker;r=self.record
-        if not r or not self.m.differential or not isinstance(t,SectionTracker):return None
+        if not r or not isinstance(t,SectionTracker):return None
         if not r.get('field_plan') and self.m.route is not None and self.m.route.kind=='circle':return None
         sec=t.sections[t.index];tr=t.trackers[t.index]
         _,start,end=self._paint_window()
@@ -572,7 +573,7 @@ class RouteOperations:
 
     def _arc_nozzle_start(self, sec, tr, start, end, early):
         """非整圆弧线头附近按喷头越过起点截面放行，None 表示沿用原规则。"""
-        if (not self.m.differential or sec.direction!=1 or early<=0.
+        if (sec.direction!=1 or early<=0.
                 or not paint_quality.continuous_arc(self.m,sec,tr)):
             return None
         piece=sec.path._piece(start+1e-9)
@@ -655,7 +656,7 @@ class RouteOperations:
         if late_cutoff:leading=not start<=tr.st.s<end+.05
         coast=tail is not None and self._paint_tail_active()
         closed=self._paint_tail_key==self._paint_key() and self._paint_tail_closed
-        phase=role=='paint' and (sec.direction>0 or not self.m.differential) and not leading and (not t.switching or coast) and self.m.phase=='RUNNING'
+        phase=role=='paint' and sec.direction>0 and not leading and (not t.switching or coast) and self.m.phase=='RUNNING'
         phase=phase and not (tail is not None and closed)
         current=paint_quality.status(self.m,r,phase and (t.st.state=='RUNNING' or coast),sec,tr)
         if phase and tail is not None:
@@ -811,7 +812,6 @@ class RouteOperations:
         if token and token==self.last_token:return '该场地规划已开始'
         if self.m.phase!='IDLE' or self.held:raise ValueError('请先结束当前任务')
         p=self.ready(now)
-        if not self.m.differential:raise ValueError('场地规划需要差速底盘')
         if not 0<=now-value.get('created_at',-1e9)<=60:raise ValueError('规划已过期，请重新计算')
         if value.get('origin')!=self.m._origin() or value.get('route_rev')!=self.m.route_rev:
             raise ValueError('地图或车辆路线已变化，请重新规划')
@@ -912,18 +912,17 @@ class RouteOperations:
                     raise ValueError('车辆没有路线')
                 route_nozzle = self.rework_nozzle(cmd, r)
                 rest, label = rework_sections(self.m._route_local(), cmd.get('element'), cmd.get('from_m'),
-                                             cmd.get('to_m'), self.m.min_route_radius, self.m.body, self.m.line_cfg.track_x_m,
+                                             cmd.get('to_m'), self.m.min_route_radius, self.m.body, 0.0,
                                              nozzle=(route_nozzle['forward'], -route_nozzle['right']) if route_nozzle else None)
             base = 0.0
             label += ' · %.2f–%.2f m' % (cmd['from_m'], cmd['to_m'])
         else:
             raise ValueError('未知预览操作')
-        k = 0.0 if (r or {}).get('field_plan') else self.m.line_cfg.track_x_m
-        car = (p.x + k * math.cos(p.yaw), p.y + k * math.sin(p.yaw), p.yaw)
+        car = (p.x, p.y, p.yaw)
         if (r or {}).get('field_plan'):
             route_nozzle = None
         elif operation=='resume':
-            # 普通差速路线续作业沿用原任务喷头，和开始作业用同一套接入；不能退回阿克曼倒车连接。
+            # 普通路线续作业沿用原任务喷头，和开始作业用同一套接入。
             route_nozzle=self.rework_nozzle({},r)
         outside = None
         target = context = None
@@ -1013,9 +1012,7 @@ class RouteOperations:
 
     def rework_nozzle(self, cmd, record):
         """连线路线 / 圆补画用的水泵 {forward, right}：补画指令带的 app 对准点，没带用原任务记的，再没有用共享配置的
-        水泵；阿克曼车 None（按车身中心）。"""
-        if not self.m.differential:
-            return None
+        水泵。"""
         for v in (cmd.get('nozzle'), (record or {}).get('route_nozzle')):
             if isinstance(v, dict) and all(isinstance(v.get(k), (int, float)) and not isinstance(v.get(k), bool)
                                            and math.isfinite(v[k]) for k in ('forward', 'right')):
@@ -1044,7 +1041,7 @@ class RouteOperations:
             raise ValueError('请先核对接入和剩余路线的外场范围')
         from dataclasses import replace
         cruise=(r or {}).get('cruise',self.m.route.cruise if self.m.route else DEFAULT_PAINT_SPEED)
-        track_x=0.0 if (r or {}).get('field_plan') else self.m.line_cfg.track_x_m
+        track_x=0.0
         # tail 已保留原接入/助跑的 transit 和 paint_from；继续作业不能把这部分重标成已上线。
         # 新补画、以及缺少旧分段标记的任务仍按预览接入边界初始化。
         preserve_paint_roles = operation == 'resume' and all(

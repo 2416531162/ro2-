@@ -34,8 +34,6 @@ SCH16T ──CAN─► sch16t_imu ──/imu/data────────┼─�
 | 任务 | 入口 | 控制器 | 说明 |
 | --- | --- | --- | --- |
 | 路线（连线、圆）、场地作业（球场） | `line_mission` 的 route、`route_operations.py` | `path_tracker.SectionTracker` / `PathTracker` | 规划 `route_plan.py`（差速车：缓弯喷头拖后轴、急弯原地转 + 倒 1.2 m、往前 0.15 m/s 慢走 0.5 m 再加速 0.4 m 助跑）、场地 `field_planner.py`。曲率前馈 + 执行延迟 0.30 s 预估（段尾停车同；配驱动器速度环 Kp 2.7 / Ki 45）；原地转向差 5° 以上才转；起步慢走 0.3 m（倒车段 0.15 m、倒车 0.5 m/s）、起步 0.6 m 内锁车头 |
-| 定点画线 A→B（差速车） | `line_mission` 的 start | `line_cascade.ImuLineTracker` | IMU 航向内环（`heading_hold.HeadingHold`）+ 连续融合喷嘴横偏外环；定位差时冻结横偏积分，暂停由融合许可与喷头停车预算决定 |
-| 定点画线 A→B（旧阿克曼车） | 同上 | `line_tracker.LineTracker` | 旧车用 |
 | 手动页「IMU 直行」 | `radar_web_server` | `heading_hold.HeadingHold` | 只用 IMU，不用 RTK |
 
 差速车参数集中在 `path_tracker.differential_config()`（执行延迟 0.30 s，与驱动器速度环参数配套、弯道横向加速度 0.20 m/s²、起步慢走 / 锁车头）；原地转向 0.8 rad/s、1.0 rad/s²（`robot_core/robot_gen5.json` 的 `drive`。2026-10-01 试过 1.0、2.0：驱动器速度环滞后约 0.4 s 后冲过头到下发的 2–3 倍，车实际转到 1.94 rad/s、顿住回弹，转完离线 5 cm，退回）。
@@ -53,7 +51,7 @@ Gen5 默认值由 `line_node.load_fusion_config()` 补齐，车上 `fusion.json`
 - **航向校准**：报告精度下限 0.1°，计同步误差与 0.25 s 观测相关性，通过增大观测方差限制 KF 增益。
   直行增益时间常数 2 s，明显转弯、转后约 1 s、有证据的恢复或 IMU 失效时为 0.15 s；转弯判据独立为 3°/s。
   Gen5 不再因测向稳定 0.5 s 就硬重定；突变必须结合 IMU 转角、合格位移航迹或 IMU 失效证据。
-  老阿克曼仍保留原 0.5 s 稳定硬重定路径。转角刻度余量按整段相关转角累计，不能因采样更密而消失。
+  转角刻度余量按整段相关转角累计，不能因采样更密而消失。
 - **有效 IMU 与漂移**：只有通过尖峰检查的运动输入刷新 `imu_valid_t`；更新角度参考不等于输入有效。
   IMU 失效时仍可用双天线校准和差速轮速预测。`angle` bias 是内算航向漂移率，`rate` bias 才是原始陀螺零偏；
   转弯、角度重接、连续输出尚未对齐及恢复冻结窗口不学习漂移，Gen5 航迹/BESTVEL 也不把角度偏差学成 bias。
@@ -63,7 +61,7 @@ Gen5 默认值由 `line_node.load_fusion_config()` 补齐，车上 `fusion.json`
 - **连续校正**：常态位置时间常数 0.25 s；输出航向时间常数 0.20 s、校正限速 1°/s。
   掉线恢复时沿车头/横向校正各限 4 cm/s，待应用位置差小于 1 cm 后返回常态平滑。
   大于 0.3 m 的恢复位置矛盾先标记重定位、停车，轮速确认停稳后才直接对齐输出；行驶中不一步追过去。
-- **失联与停车预算**：可信固定解中断 0.15 s 后开始完整预算，0.5 s 后报告 `rtk_hold`，5 s 只是兜底上限，
+- **失联与停车预算**（2026-11-22：这套预算没接上，已删，见 GNSS_FUSION.md）：可信固定解中断 0.15 s 后开始完整预算，0.5 s 后报告 `rtk_hold`，5 s 只是兜底上限，
   不保证能走满。`rtk_hold_budget.py` 将全局协方差按全局航向投影到实际喷头，另加精确杆臂旋转后的待应用校正；
   停车距离还计未消除航向差的横向影响，覆盖已发指令、执行延迟及制动。预算达 65% 限速，预计停稳越界或将超时则提前暂停。
   固定解恢复但仍有校正时继续记账，只预测当前随机误差与校正运动余量，不延续旧 5 s 倒计时或假设整个制动过程失联。
@@ -81,7 +79,7 @@ Gen5 默认值由 `line_node.load_fusion_config()` 补齐，车上 `fusion.json`
 
 | 内容 | 位置 | 进发布包 |
 | --- | --- | --- |
-| 车型、几何、手动档、驱动类型 | `robot_core/robot_gen5.json`（`RK3588_ROBOT_CONFIG` 指定），旧车 `robot.json`；读取校验 `robot_core/config.py` | 是 |
+| 车型、几何、手动档、驱动类型 | `robot_core/robot_gen5.json`（默认；`RK3588_ROBOT_CONFIG` 可指定），只支持 `drive.type = differential`；读取校验 `robot_core/config.py` | 是 |
 | 电机驱动器（总线、极对数 20、轮半径 0.194 m、加减速） | `oid_protocol/oid.yaml` | 是 |
 | IMU | `rion_protocol/sch16t.yaml` | 是 |
 | 跟踪参数（差速车） | `radar_system/path_tracker.py` 的 `differential_config()` | 是（代码） |

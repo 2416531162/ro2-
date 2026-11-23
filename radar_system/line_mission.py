@@ -7,8 +7,9 @@
     route_start       可带 route（先保存再开始）：从车当前位姿规划接入段 → 申请 NAVIGATION → 跑完停在终点
     route_clear       删除路线
 stop 停止任何任务（App 的 line.stop）；到终点、偏离、定位丢失、控制权被抢走也会停。
-每趟记录一份 CSV。阿克曼旧车路线起步用存下的舵机零位（积分，旧版定点画线学的，见 _load_integral）。
+每趟记录一份 CSV。
 2026-11-22 删掉了 A→B 定点画线（mark / clear / start，App 早就不发）；没跑过路线时 task 仍报 'line'（App 只认 'route'）。
+2026-11-23 删掉了阿克曼旧车（用户「删阿克曼底盘的代码」）：只剩 Gen5 差速车，开机还没跑路线时用 IdleTracker 占位。
 """
 import csv
 import dataclasses
@@ -17,10 +18,11 @@ import math
 import os
 import time
 from collections import deque
+from dataclasses import dataclass, field
+from types import SimpleNamespace
 
 import route_plan
 from line_cascade import REASON_TEXT, ImuAlignment
-from line_tracker import LineConfig, LineTracker
 from path_tracker import DIFF_REVERSE_MPS, DIFF_SETTLE_S, PathConfig, SectionTracker, differential_config
 from route_operations import RouteOperations
 from rtk_hold_budget import DegradedSpeedLimiter
@@ -28,6 +30,7 @@ from paint_quality import RTK_LOST_PAINT_STOP_S
 from um982 import INS_MAX_PDOP
 from gnss_latency import GnssLatencyEstimator
 from robot_core.config import CONTROL_DT, PROFILE
+from robot_core.kinematics import ChassisGeometry
 import user_rules as rules
 
 SELECT_TIMEOUT_S = 3.0
@@ -48,7 +51,7 @@ BLOCKING_REASONS = ('pdop_high', 'pdop_missing', 'heading_uninitialized', 'imu_s
                     'position_uncertain')
 PDOP_REASONS = ('pdop_high', 'pdop_missing')
 # PDOP 不合格时由它带出来的原因（融合只看到没有解）：报原因时不再列出，免得把「PDOP 太大」说成「固定解中断」
-PDOP_CONSEQUENCES = ('rtk_fixed_timeout', 'rtk_hold', 'rtk_hold_pending', 'fix_unavailable')
+PDOP_CONSEQUENCES = ('rtk_fixed_timeout', 'rtk_hold', 'fix_unavailable')
 # 测向浮点（无效）时航向只靠陀螺和行驶轨迹维持，融合的航向不确定度一过 0.5° 就判不可控制。
 # 主、副天线都是固定解（位置可信）时放宽到这么多照样走，原因里加 gyro_hold（2026-09-27 用户要求：
 # 走着走着测向变浮点不能停，要靠 IMU 维持）
@@ -118,7 +121,7 @@ REENTRY_REASONS = ('off_line', 'paint_start_off_line')
 RESUME_FAILED_NOTICE = '定位已恢复，但不能自动接着走：%s；请停止后重新开始'
 # 定位降级（没有有效测向、传感器接管）时限速。2026-10-05 起「起步前卫星确认」「定位与卫星差太多停车」
 # 「推算误差预算停车」都已删掉（用户：「原来的检查必须删除，这种检查是不合理的」）；2026-10-06 晚起没有固定解
-# （rtk_hold_pending / rtk_hold）也不降速（用户：「去掉 5 秒停车，也不降速」）
+# （rtk_hold）也不降速（用户：「去掉 5 秒停车，也不降速」）
 DEGRADED_MOTION_REASONS = ('heading_uninitialized', 'heading_unavailable', 'gyro_only', 'gyro_hold',
                            'wheel_hold', 'imu_hold', 'imu_hold_test')
 
@@ -133,7 +136,7 @@ ORIENT_STOP_WAIT_S = 3.0    # 定出车头后最多等这么久停稳（轮速�
 ORIENT_MESSAGE = '单天线：往前直走一点定车头'
 # 定车头时位置要是固定解、传感器都在：除了航向本身没定带出来的几项，有这些原因就不走 / 停下
 ORIENT_BLOCKING = ('pdop_high', 'pdop_missing', 'imu_stale', 'imu_mismatch', 'wheel_stale', 'wheel_motion_conflict',
-                   'rtk_fixed_timeout', 'position_reset', 'rtk_hold', 'rtk_hold_pending', 'rtk_float', 'fix_unavailable',
+                   'rtk_fixed_timeout', 'position_reset', 'rtk_hold', 'rtk_float', 'fix_unavailable',
                    'position_uninitialized', 'position_outlier')
 ANTENNA_TEXT = {'single': '单天线', 'dual': '双天线'}
 # 卫星定位的固定延迟（接收机内部、平板转发路上的固定那段）由 gnss_latency 在线估：每次从停稳起步，卫星位移和轮程 + IMU
@@ -141,6 +144,52 @@ ANTENNA_TEXT = {'single': '单天线', 'dual': '双天线'}
 # （um982.GnssClock 已按接收机出解 20 ms 算过）。只往前挪：时间戳反而偏晚（负的）不补
 GNSS_LATENCY_INITIAL_S = 0.0
 GNSS_KINDS = ('fix', 'fix2', 'heading', 'vel')
+
+IDLE_CRUISE_MPS = 0.5   # 开机还没跑过路线时报的 cruise（原阿克曼 LineConfig 的默认值，App 遥测不变）
+
+
+@dataclass
+class IdleState:
+    state: str = 'IDLE'
+    reason: str = ''
+    e: float = 0.0
+    heading_err: float = 0.0
+    s: float = 0.0
+    length: float = 0.0
+    v_cmd: float = 0.0
+    kappa: float = 0.0
+    integral: float = 0.0
+    stats: dict = field(default_factory=dict)
+    integral_frozen: bool = False
+
+
+class IdleTracker:
+    """开机后、跑第一条路线前的占位跟踪器：不出车，只报空闲状态（字段与路线跟踪器相同）。
+    geometry 不给时取共享底盘配置（Gen5）；开始作业时换成 path_tracker.SectionTracker。"""
+
+    def __init__(self, geometry=None):
+        self.cfg = SimpleNamespace(cruise_mps=IDLE_CRUISE_MPS)
+        self.geo = geometry or ChassisGeometry()
+        self.st = IdleState()
+        self.speed_limit_mps = None
+
+    def start(self, pose, integral=None, **_):
+        self.st.state, self.st.reason = 'IDLE', 'no_line'
+        return False
+
+    def stop(self, reason='operator'):
+        self.st.v_cmd = 0.0
+        return 0.0, 0.0
+
+    def update(self, pose, dt):
+        self.st.v_cmd = 0.0
+        return 0.0, 0.0
+
+    def status(self):
+        st = self.st
+        return dict(state=st.state, reason=st.reason, e=st.e, heading_err_deg=math.degrees(st.heading_err),
+                    s=st.s, length=st.length, v_cmd=st.v_cmd, kappa=st.kappa, integral=st.integral,
+                    trim_kappa=0.0, stats=dict(st.stats), integral_frozen=st.integral_frozen)
 
 
 def pose_problem(pose):
@@ -166,7 +215,7 @@ class LineMission:
         """fusion 实现 docs 里约定的 GnssFusion 接口；samples 提供 ImuSample 等输入类型（通常就是 gnss_fusion 模块）。
 
         body = (后轴中心到车头, 到车尾, 半宽) 米，连线路线按车身中心压线；默认取共享底盘配置。
-        差速车（tracker.geo.differential，Gen5）所有作业都按水泵（喷头）压线，急弯停车原地转向。nozzle_x：水泵在
+        Gen5 差速车所有作业都按水泵（喷头）压线，急弯停车原地转向。tracker 默认 IdleTracker（共享底盘配置）。nozzle_x：水泵在
         后轴前多少米，或 (前, 左) 米（水泵可以在侧面）；默认取共享配置 drive.nozzle_x_m、drive.nozzle_right_m
         （2026-10-02 用户：定点位置就是水泵位置，作业都要让水泵走在线上）。app 开始作业带的「对准点」优先。
         single_config：单天线流动站的融合配置（杠杆臂是右天线位置，见 line_node.single_antenna_config）；
@@ -182,8 +231,8 @@ class LineMission:
         self._latency_saved = self._load_latency()
         self._latency = GnssLatencyEstimator(self._latency_saved.get('dual', GNSS_LATENCY_INITIAL_S))
         self._pdop = None               # 最近一帧单天线定位的 (时刻, PDOP 或 None, 合格否)，App 显示真实原因用
-        self.tracker = tracker or LineTracker(LineConfig())
-        self.line_cfg, self.geo = self.tracker.cfg, self.tracker.geo
+        self.tracker = tracker or IdleTracker()
+        self.geo = self.tracker.geo
         self.path_cfg = path_config or PathConfig()
         # 路线曲率最多用到底盘最大曲率的 kappa_margin，剩下的留给纠偏（与 PathTracker 的检查一致）
         self.min_route_radius = self.geo.min_turn_radius_m / self.path_cfg.kappa_margin
@@ -192,16 +241,14 @@ class LineMission:
             g = PROFILE['geometry']
             body = (g['front_m'], g['rear_m'], g['half_width_m'])
         self.body = tuple(float(v) for v in body)
-        self.differential = bool(getattr(self.geo, 'differential', False))
-        if self.differential:
-            if path_config is None:
-                self.path_cfg = differential_config(self.path_cfg)
-            if nozzle_x is None:
-                from runtime_config import PROFILE
-                nozzle_x = (PROFILE['drive']['nozzle_x_m'], -PROFILE['drive'].get('nozzle_right_m', 0.0))
+        if path_config is None:
+            self.path_cfg = differential_config(self.path_cfg)
+        if nozzle_x is None:
+            from runtime_config import PROFILE
+            nozzle_x = (PROFILE['drive']['nozzle_x_m'], -PROFILE['drive'].get('nozzle_right_m', 0.0))
         # 水泵在车体系的 (前, 左)；nozzle_x 是它在后轴前多少米（route_limits 照旧报这一项）
-        self.nozzle = route_plan.nozzle_point(nozzle_x) if self.differential else None
-        self.nozzle_x = self.nozzle[0] if self.differential else None
+        self.nozzle = route_plan.nozzle_point(nozzle_x)
+        self.nozzle_x = self.nozzle[0]
         self.state_path, self.log_dir, self.route_path = state_path, log_dir, route_path
         self.task = 'line'              # 当前（或最近一次）任务：route；还没跑过报 'line'（遥测原样，App 只认 'route'）
         self.route = None               # route_plan.RouteSpec，路点存经纬度
@@ -239,7 +286,6 @@ class LineMission:
         self._imu_hold_gnss_after = -math.inf  # 测试区间的迟到 GNSS 永远不回放。
         self.release_pending = False    # 任务结束后要把 NAVIGATION 交还给仲裁
         self._log = self._log_file = None
-        self.integral0 = self._load_integral()
         self._load_route()
         self.last_motion_mode = None
         self.operations = RouteOperations(self)
@@ -604,7 +650,7 @@ class LineMission:
 
     def _imu_hold_supported(self):
         cfg = getattr(self.fusion, 'config', None)
-        return self.differential and getattr(cfg, 'yaw_input', None) == 'angle' and getattr(cfg, 'rtk_hold_s', 0) >= RTK_HOLD_S
+        return getattr(cfg, 'yaw_input', None) == 'angle' and getattr(cfg, 'rtk_hold_s', 0) >= RTK_HOLD_S
 
     def _start_imu_hold_test(self, cmd, now):
         if not self._imu_hold_supported():
@@ -704,8 +750,6 @@ class LineMission:
     def _stable_speed_limit(self, now, pose, dt):
         """IMU 接管期间保持一致的低速策略，预算更严仍立即收紧，安全停车不被迟滞。"""
         requested = self._hold_speed_limit
-        if not self.differential:
-            return requested
         if self._constant_straight_speed() or self._constant_arc_speed():
             # 正常速度由路径规划统一处理（含弯前平滑降速），不叠加信号降级或恢复限速。
             # 不改定位许可；真正不可控仍明确给零速，不能绕过暂停/故障保护。
@@ -848,17 +892,15 @@ class LineMission:
         if problem:
             return False, problem
         nozzle = cmd.get('nozzle')
-        if nozzle is not None and not (self.differential and isinstance(nozzle, dict)
+        if nozzle is not None and not (isinstance(nozzle, dict)
                                        and all(isinstance(nozzle.get(key), (int, float)) and math.isfinite(nozzle[key])
                                                for key in ('forward', 'right'))):
-            return False, '喷头位置无效' if self.differential else '这台车不按喷头压线'
+            return False, '喷头位置无效'
         # 差速车按水泵压线：app 给了「对准点」就用它，不给用共享配置的水泵；都记进任务（续画、补画照用）
         if nozzle:
             route_nozzle = dict(forward=float(nozzle['forward']), right=float(nozzle['right']))
-        elif self.differential:
-            route_nozzle = dict(forward=self.nozzle[0], right=-self.nozzle[1])
         else:
-            route_nozzle = None
+            route_nozzle = dict(forward=self.nozzle[0], right=-self.nozzle[1])
         planner = route_plan.plan_current if cmd.get('cmd') == 'route_start_current' else route_plan.plan
         try:
             spec = self._route_local()
@@ -875,13 +917,11 @@ class LineMission:
         self.tracker, self.task, self.cruise = tracker, 'route', spec.cruise
         self.phase, self.select_since = 'SELECTING', now
         self._reentry = None
-        turns = '，换向 %d 次' % tracker.cusps if tracker.cusps else ''
-        if self.differential:
-            # 倒车几段（每段前后各换向一次，tracker.reversals 是换向次数）
-            reverses = sum(1 for sec in sections if sec.direction < 0)
-            turns = ('，原地转向 %d 次' % tracker.pivots if tracker.pivots else '') + \
-                    ('，圆弧掉头 %d 次' % info['arc_turns'] if info.get('arc_turns') else '') + \
-                    ('，倒车 %d 次' % reverses if reverses else '')
+        # 倒车几段（每段前后各换向一次，tracker.reversals 是换向次数）
+        reverses = sum(1 for sec in sections if sec.direction < 0)
+        turns = ('，原地转向 %d 次' % tracker.pivots if tracker.pivots else '') + \
+                ('，圆弧掉头 %d 次' % info['arc_turns'] if info.get('arc_turns') else '') + \
+                ('，倒车 %d 次' % reverses if reverses else '')
         self.message = '申请控制权（接入 %.1f m，全程 %.1f m%s）' % (entry_m, tracker.length, turns)
         return True, self.message
 
@@ -889,25 +929,23 @@ class LineMission:
         """从当前位姿规划接入 + 整条路线，建好跟踪器：(sections, entry_m, tracker, info)。规划不了抛 ValueError。
         开始作业和接入时偏离后的重新接入共用。"""
         planner_nozzle = (route_nozzle['forward'], -route_nozzle['right']) if route_nozzle else None
-        k = self.line_cfg.track_x_m     # 与直线相同：控制点（默认后轴中心）压在路线上
-        car = (pose.x + k * math.cos(pose.yaw), pose.y + k * math.sin(pose.yaw), pose.yaw)
+        car = (pose.x, pose.y, pose.yaw)    # 规划从后轴中心起（压线的是水泵，见 planner_nozzle）
         info = {}
         sections, entry_m = planner(spec, car, self.min_route_radius, body=self.body, nozzle_x=planner_nozzle,
-                                    info=info, runup_m=self._route_runup_m(planner_nozzle))
+                                    info=info, first_line=planner_nozzle is not None and self.first_line_no_memory())
         from live_cruise import label_sections
         label_sections(sections,entry_m,cruise)
-        cfg = dataclasses.replace(self.path_cfg, cruise_mps=cruise, track_x_m=k)
+        cfg = dataclasses.replace(self.path_cfg, cruise_mps=cruise, track_x_m=0.0)
         tracker = SectionTracker(sections, cfg, self.geo, **self.section_options(route=True))
         return sections, entry_m, tracker, info
 
-    def _route_runup_m(self, planner_nozzle):
-        """路线作业的助跑长度：差速车直线 IMU 为主 + 卫星拟合，任务层还没有上一条线拟合好的换算（重启后第一条、
-        隔了 max_age_s 以上）→ route_plan.FIRST_RUN_UP_M；其余 None（RUN_UP_M）。"""
+    def first_line_no_memory(self):
+        """这次作业的第一条直线按没有记忆拟合吗：直线 IMU 为主 + 卫星拟合，任务层还没有上一条线拟合好的换算（重启后第一条、
+        隔了 max_age_s 以上、IMU 断过）。开始作业、接入偏离后重新接入时规划记在第一条段上（route_plan first_line）；
+        助跑长度不变（2026-11-23 用户「不能靠加长助跑解决问题」，原来的第一条 4 m 删掉）。"""
         first = getattr(self.path_cfg, 'straight_imu_first', None)
-        if (planner_nozzle is None or not getattr(self.path_cfg, 'straight_imu_enabled', False) or first is None
-                or not first.rtk_fit or self._imu_alignment.remembered()):
-            return None
-        return route_plan.FIRST_RUN_UP_M
+        return bool(getattr(self.path_cfg, 'straight_imu_enabled', False) and first is not None
+                    and first.rtk_fit and not self._imu_alignment.remembered())
 
     def _reentry_allowed(self, past_m=0.0):
         """接入时偏离能不能就近重新接入：普通路线任务（不是场地、补画）、还没开喷、没超过 REENTRY_MAX 次。
@@ -1137,7 +1175,7 @@ class LineMission:
             if motion_mode == 'NAVIGATION':
                 # 申请控制权期间卫星也可能失效；真正下发起步指令前再确认一次。
                 problem = pose_problem(pose)
-                if problem or not self.tracker.start(pose, integral=self._start_integral()):
+                if problem or not self.tracker.start(pose, integral=0.0):
                     why = problem or self.tracker.st.reason
                     self._finish('起步检查未通过：%s' % REASON_TEXT.get(why, why))
                     return 0.0, 0.0, None
@@ -1266,17 +1304,13 @@ class LineMission:
         if now - self._usable_since < AUTO_RESUME_S - 1e-9:
             return
         why = self.tracker.st.reason
-        preserve=(self.task=='route' and self.differential and isinstance(self.tracker,SectionTracker))
+        preserve=(self.task=='route' and isinstance(self.tracker,SectionTracker))
         options={'preserve_startup':True} if preserve else {}
         if self.tracker.start(pose,**options):
             self.message = '定位恢复，自动继续'
             self._usable_since = self._resume_failed = None
         else:
             self._usable_since, self._resume_failed = now, self.tracker.st.reason
-
-    def _start_integral(self):
-        """直线学到的舵机零位（积分，LineConfig 的单位）。路线控制器积分增益不同，按相同的零位曲率换算过去。"""
-        return self.integral0 * self.line_cfg.ki_per_m2 / self.tracker.cfg.ki_per_m2
 
     def _finish(self, message, state=None):
         try:
@@ -1320,14 +1354,6 @@ class LineMission:
             self._log_file.close()
         self._log = self._log_file = None
 
-    def _load_integral(self):
-        try:
-            with open(self.state_path, encoding='utf-8') as fh:
-                value = float(json.load(fh)['integral'])
-            return value if math.isfinite(value) else 0.0
-        except (TypeError, OSError, ValueError, KeyError):
-            return 0.0
-
     def status(self):
         p = self.pose
         # 直线修偏在用副天线（主天线被干扰）时，报给 app 的位置按副天线挪回去，地图喷线和作业报告不出现假偏差
@@ -1365,12 +1391,12 @@ class LineMission:
                                                  # 差速车（能原地转）按水泵压线：nozzle_x 水泵在后轴前多少米，
                                                  # nozzle_right 在车中线右多少米（共享配置；app 开始作业带的对准点优先）
                                                  drive=self.geo.drive, nozzle_x=self.nozzle_x,
-                                                 nozzle_right=-self.nozzle[1] if self.differential else None,
+                                                 nozzle_right=-self.nozzle[1],
                                                  # 开始作业可以带 app 的「对准点」nozzle {forward, right}（喷头可以在侧面），
                                                  # 连线路线、圆按它压线；旧车端不认，app 看这一项再发
-                                                 route_nozzle=True if self.differential else None,
+                                                 route_nozzle=True,
                                                  # 差速车连线路线急弯可选的转法（路线的 turn 字段；圆弧掉头按 turn_radius 绕）
-                                                 turns=list(route_plan.TURNS) if self.differential else None,
+                                                 turns=list(route_plan.TURNS),
                                                  pivot_rate=self.geo.pivot_rate_rad_s,
                                                  pivot_accel=self.geo.pivot_accel_rad_s2,
                                                  accel=self.path_cfg.accel_mps2,
@@ -1383,8 +1409,6 @@ class LineMission:
         """SectionTracker 按底盘的额外参数：差速车原地转向、倒车曲率照走（没有转向机构转不够），倒车段限速、
         段尾停稳时间按差速车（拐角提速，见 path_tracker.differential_config）。route：普通路线（开始作业、续画、补画，
         不是场地作业），倒车接入后的助跑起步锁车头更长（path_tracker.REVERSE_HOLD_M）。"""
-        if not self.differential:
-            return {}
         from paint_quality import offset_limit
         # 原地转按作业原地转速（robot_gen5.json job_pivot_rate_rad_s，2026-11-21 0.8 → 1.5 rad/s，轮速避开低速区），
         # 收尾减速最多 job_pivot_brake_rad_s2（Gen5 2.0，规划仍按 pivot_accel 1.0，留余量停准）

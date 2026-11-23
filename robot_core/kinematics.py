@@ -1,10 +1,8 @@
-"""Shared symmetric Ackermann steering convention used by the existing chassis.
+"""Gen5 差速底盘几何（robot_gen5.json）：两后轮差速、前面自由万向轮，能原地转。
 
-The Gen5 chassis is differential (drive.type = differential): ChassisGeometry.differential
-tells callers that the car can turn in place and has no steering angle.
-
-All callers use the same wheelbase/track model; firmware validation remains a
-hardware acceptance item. SI body yaw is derived from speed and steering.
+2026-11-23 用户「删阿克曼底盘的代码」：ChassisGeometry 只接受 drive = differential。
+yaw_from_steer / steer_from_yaw 还给车上网页控制台的方向键（按方向盘角度换算角速度）和
+Wheeltec 驱动基类用，max_yaw_at_speed 给驱动基类用（驱动层另行处理）。
 """
 import math
 from dataclasses import dataclass
@@ -15,19 +13,15 @@ def clamp(value, low, high):
 
 @dataclass
 class ChassisGeometry:
-    """轮趣阿克曼底盘几何参数。
+    """Gen5 差速底盘几何参数（共享配置 robot_gen5.json）。
 
-    沿用项目的对称半轮距补偿模型：
-    radius = wheelbase / tan(abs(steer)) + track / 2。
-    参考固件记录见 wheeltec_protocol/PROTOCOL.md；实际左右轮定义及
-    正反向约定仍须结合当前底盘固件验证，不能仅凭此模型推定已验证。
+    track_m 是两驱动轮的轮距；wheelbase_m / max_steer_rad 不参与差速运动学，只给网页方向键的
+    方向盘角度换算和融合的陀螺合理上限用。
     """
-    # 以下为实测值 (2026-09-16),不是估算。改之前先量车。
-    wheelbase_m: float = PROFILE["geometry"]["wheelbase_m"]    # AxleSpacing 前后轴距 (前轮轴心 -> 后轮轴心)
-    track_m: float = PROFILE["geometry"]["track_m"]    # WheelSpacing 左右轮距 (轮中心距)
-    max_steer_rad: float = PROFILE["geometry"]["max_steer_rad"]    # ★ 舵机物理限位,标称 20°,尚未实测确认
-    # 驱动方式（robot.json 的 drive 段）。differential：两后轮差速、前面自由万向轮，能原地转；
-    # 此时 wheelbase / max_steer 不参与运动学，track_m 是两驱动轮的轮距
+    wheelbase_m: float = PROFILE["geometry"]["wheelbase_m"]
+    track_m: float = PROFILE["geometry"]["track_m"]    # 两驱动轮的轮距（轮中心距）
+    max_steer_rad: float = PROFILE["geometry"]["max_steer_rad"]
+    # 驱动方式（robot_gen5.json 的 drive 段），只有 differential
     drive: str = PROFILE["drive"]["type"]
     diff_min_radius_m: float = PROFILE["drive"]["min_radius_m"]     # 差速车跟踪圆弧的最小半径（内侧轮还有速度）
     pivot_rate_rad_s: float = PROFILE["drive"]["pivot_rate_rad_s"]  # 原地转向最大角速度（规划估时、场地规划限速、上报 app 用）
@@ -47,23 +41,21 @@ class ChassisGeometry:
             raise ValueError("track_m 不能为负")
         if not 0 < self.max_steer_rad < math.pi / 2:
             raise ValueError("max_steer_rad 超出合理范围")
-        if self.drive not in ("ackermann", "differential"):
-            raise ValueError("drive 只能是 ackermann 或 differential")
+        if self.drive != "differential":
+            raise ValueError("drive 只能是 differential（阿克曼车 2026-11-23 删了）")
         if min(self.diff_min_radius_m, self.pivot_rate_rad_s, self.pivot_accel_rad_s2, self.job_pivot_rate_rad_s) <= 0 \
                 or self.job_pivot_brake_rad_s2 < self.pivot_accel_rad_s2:
             raise ValueError("差速底盘的最小半径、原地转向角速度和角加速度必须为正")
 
     @property
     def differential(self):
-        """两轮差速（能原地转）。"""
-        return self.drive == "differential"
+        """两轮差速（能原地转）：恒为 True。只剩 Wheeltec/OID 驱动还在读，驱动层清理时一起删。"""
+        return True
 
     @property
     def min_turn_radius_m(self):
-        """满舵时的转弯半径；差速车是跟踪圆弧的最小半径（原地转向另算）。"""
-        if self.differential:
-            return self.diff_min_radius_m
-        return self.wheelbase_m / math.tan(self.max_steer_rad) + 0.5 * self.track_m
+        """跟踪圆弧的最小半径（原地转向另算）。"""
+        return self.diff_min_radius_m
 
 
 def differential_wheels(vx, wz, track_m):

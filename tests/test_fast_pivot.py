@@ -64,9 +64,7 @@ class Profile(unittest.TestCase):
         self.assertEqual((p['drive']['pivot_accel_rad_s2'], p['drive']['job_pivot_brake_rad_s2']), (1., 2.))
         self.assertGreaterEqual(p['driver']['max_yaw_rate_rad_s'], 1.5)     # 驱动层不再把 1.5 卡回 1.0
 
-    def test_old_car_and_old_site_config_unchanged(self):
-        p = config.load_profile(ROOT / 'robot_core' / 'robot.json')
-        self.assertEqual((p['drive']['job_pivot_rate_rad_s'], p['drive']['job_pivot_brake_rad_s2']), (.8, 1.))
+    def test_old_site_config_unchanged(self):
         raw = json.loads((ROOT / 'robot_core' / 'robot_gen5.json').read_text())
         for key in ('job_pivot_rate_rad_s', 'job_pivot_brake_rad_s2'):
             del raw['drive'][key]

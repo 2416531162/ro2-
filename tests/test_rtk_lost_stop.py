@@ -18,7 +18,7 @@ HOLD_S = paint_quality.RTK_LOST_PAINT_STOP_S + paint_quality.RTK_LOST_STOP_DELAY
 
 def fusion_after_lost_fix(seconds):
     """固定解只在 t=0 给一次，之后 seconds 秒只有浮点；轮速、IMU、测向照常。返回最后的位姿。"""
-    f = gf.GnssFusion(gf.FusionConfig(drive_differential=True, yaw_input='angle', rtk_hold_s=HOLD_S,
+    f = gf.GnssFusion(gf.FusionConfig(yaw_input='angle', rtk_hold_s=HOLD_S,
                                       antenna_xy=(0., 0.), baseline_yaw_body_deg=-90.))
     f.set_origin(31., 120.)
     lat, lon = f.to_geodetic(0., 0.)
@@ -78,7 +78,7 @@ class NoSlowdown(unittest.TestCase):
         def pose(reasons):
             return NS(usable_for_control=True, reasons=reasons, speed=.8, rtk_trusted=False)
         m = self.mission()
-        self.assertIsNone(m._stable_speed_limit(1., pose(('rtk_hold_pending',)), .02))
+        self.assertIsNone(m._stable_speed_limit(1., pose(('rtk_hold',)), .02))
         self.assertIsNone(m._stable_speed_limit(1.02, pose(('rtk_hold', 'rtk_float')), .02))
         m = self.mission()
         self.assertEqual(m._stable_speed_limit(1., pose(('wheel_hold',)), .02), .3)

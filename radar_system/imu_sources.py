@@ -11,8 +11,8 @@ LABELS = {'hda536t':'HDA536T（CAN）','imu762':'IMU762（USB）'}
 
 
 class ImuSources:
-    def __init__(self, supported, path=None):
-        self.supported = supported
+    def __init__(self, path=None):
+        self.supported = True       # App 遥测字段（原来阿克曼车为 False，2026-11-23 删了）
         self.path = Path(path) if path else None
         self.active = 'hda536t'
         self.revision = 0
@@ -45,8 +45,6 @@ class ImuSources:
         return sample is not None and 0 <= now-sample[0] <= .2
 
     def select(self, source, now):
-        if not self.supported:
-            raise ValueError('当前车型不支持两路 IMU 切换')
         if source not in SOURCES:
             raise ValueError('不支持的 IMU 来源')
         if not self.ready(source,now):

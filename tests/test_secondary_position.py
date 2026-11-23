@@ -18,7 +18,7 @@ BASE = .41
 
 
 def config(on=True):
-    return gf.FusionConfig(drive_differential=True, yaw_input='angle', continuous_output=True,
+    return gf.FusionConfig(yaw_input='angle', continuous_output=True,
                            antenna_xy=ANT, baseline_yaw_body_deg=-90., dual_weight_m=.02,
                            fix_floor_m=.002, fix_sigma_scale=.25, fix_jitter_k=2.0, rtk_hold_s=9.0,
                            rejoin_rate_mps=.04, output_position_tau_s=.10,

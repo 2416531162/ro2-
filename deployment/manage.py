@@ -55,7 +55,7 @@ def verify(release):
         if p.suffix == '.py':
             compile(p.read_text(), str(p), 'exec')
     # Validate the staged profile with the staged validator, not host cached state.
-    env = dict(os.environ, PYTHONPATH=str(release), RK3588_ROBOT_CONFIG=str(release/'robot_core/robot.json'))
+    env = dict(os.environ, PYTHONPATH=str(release), RK3588_ROBOT_CONFIG=str(release/'robot_core/robot_gen5.json'))
     subprocess.run([sys.executable, '-c', 'from robot_core.config import PROFILE'],
                    cwd=release, env=env, check=True)
     return manifest

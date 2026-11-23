@@ -11,8 +11,7 @@ ROOT = Path(os.environ.get('ROUTE_END_ROOT', Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / 'radar_system'), str(ROOT)]
 from path_tracker import Path as RoutePath, PathConfig, PathTracker, Section, SectionTracker
 from robot_core.kinematics import ChassisGeometry
-from line_tracker import LineConfig, LineTracker
-from line_mission import LineMission
+from line_mission import IdleTracker, LineMission
 
 DT = .02
 CFG = PathConfig(cruise_mps=.8, delay_s=0., lead_s=0., steer_gain=1., start_min_left_m=0.)
@@ -106,7 +105,7 @@ class RouteEndFeedback(unittest.TestCase):
 
     def test_mission_marks_done_and_releases_navigation(self):
         fusion=Fusion()
-        m=LineMission(fusion,SimpleNamespace(),tracker=LineTracker(LineConfig(),GEO),path_config=CFG)
+        m=LineMission(fusion,SimpleNamespace(),tracker=IdleTracker(GEO),path_config=CFG)
         sec=Section(1,RoutePath((0.,0.,0.),[(10.4,0.)]))
         sec.field_role='paint'; sec.paint_to_m=10.; sec.cruise_mps=.8
         m.tracker=SectionTracker([sec],CFG,GEO,constant_straight_speed=True)

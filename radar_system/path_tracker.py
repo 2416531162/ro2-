@@ -198,7 +198,7 @@ class PathConfig:
     ff_preview_s: float = 0.05       # 曲率前馈再往前看这么久：舵机从一个角度转到另一个角度要时间
     # 前馈曲率两脉冲整形（ZV）：曲率突变（直线进弧、出弧）时先给 1 − ff_shape_ratio，晚 ff_shape_gap_s 再补上，
     # 躲开底盘角速度的欠阻尼超调；路径本身不变。突变两边有一边 |κ| 超过 ff_shape_kappa_max（贴着最小半径的弧，
-    # 少给的前馈靠反馈补不回来）就不整形。0 为不用（阿克曼车）；差速车见 differential_config
+    # 少给的前馈靠反馈补不回来）就不整形。0 为不用（PathConfig 默认）；Gen5 见 differential_config
     ff_shape_ratio: float = 0.0
     ff_shape_gap_s: float = 0.48
     ff_shape_kappa_max: float = 1.2
@@ -270,7 +270,7 @@ class PathConfig:
     launch_big_e_m: float = rules.LAUNCH_BIG_E_M
     launch_big_heading_deg: float = rules.LAUNCH_BIG_HEADING_DEG
     launch_big_max_deg_s: float = rules.LAUNCH_BIG_DEG_S
-    # Gen5前进长直线：快速IMU航向内环、慢喷头横偏外环；基础配置关闭以兼容旧车与纯几何调用方。
+    # Gen5前进长直线：快速IMU航向内环、慢喷头横偏外环；基础配置关闭（纯几何调用方、测试用），Gen5 由 differential_config 打开。
     straight_imu_enabled: bool = False
     straight_min_length_m: float = 6.0
     straight_settle_m: float = 1.0
@@ -508,7 +508,7 @@ def differential_config(config=PathConfig()):
                    straight_imu_first=ImuFirstConfig(rtk_trim=False, rtk_fit=True), arc_imu_first=True, arc_partial_imu_first=True)
 
 
-DIFF_REVERSE_MPS = rules.DIFF_REVERSE_MPS  # 差速车倒车段限速（SectionTracker reverse_mps；阿克曼车 0.3）
+DIFF_REVERSE_MPS = rules.DIFF_REVERSE_MPS  # 差速车倒车段限速（SectionTracker reverse_mps；默认 0.3）
 # 普通路线倒车接入后的助跑（SectionTracker reverse_runup）：倒完车往前起步，万向轮要整个翻过来（175° → 5° 在头 0.25 m 里），
 # 倒车停在助跑起点的横偏也比往前开过去大（4–5 vs 2–3 mm）。2026-10-07 用户：车在点后面直接倒一点，但「线头不能差」，
 # 「2.5 m 没必要，1.5 能不能一样的效果」。仿真（Gen5 拟合底盘，10 种摆位 × 48 种子，起喷后 0.5 m 内最大偏差 中位/p90/最大）：
@@ -517,7 +517,7 @@ DIFF_REVERSE_MPS = rules.DIFF_REVERSE_MPS  # 差速车倒车段限速（SectionT
 #   助跑仍 1.5 m、起步锁车头 0.6 → 1.0 m（start_hold_m）2.25/4.4/7.9（起喷后 2 m 内中位 4.05 → 3.57），每种摆位中位、最大都不比原来大；
 #   1.2 m 再好一点但只给 IMU 直行留 0.3 m 交接，没用。倒车前后差 1.5° 就原地转正几乎没用，没要。
 REVERSE_HOLD_M = rules.REVERSE_HOLD_M
-DIFF_SETTLE_S = 0.2         # 差速车段尾停稳要持续多久才换段（SectionTracker settle_s；阿克曼车 0.3）
+DIFF_SETTLE_S = 0.2         # 差速车段尾停稳要持续多久才换段（SectionTracker settle_s；默认 0.3）
 
 
 @dataclass
@@ -605,7 +605,7 @@ class PathTracker:
         self.approach_to_m = None       # 正式路线（喷线起点）在本段的路程处（可在段尾之后）；None 不管（见 approach_zone_m）
         self.approach_mps = None        # 离它 approach_zone_m 以内最多这么快（画线速度）
         self.runup_distance_m = 0.
-        self.first_line_runup = False   # 重启后第一条加长的助跑（route_plan.FIRST_RUN_UP_M）：这条线按没有记忆处理
+        self.first_line = False         # 重启后第一条（规划时没有上一条线的换算，段上记 first_line）：这条线按没有记忆拟合
         self.paint_start_guard = None
         self._paint_start_beta_history = deque(maxlen=2048)
         self.reverse_runup = False
@@ -1076,7 +1076,7 @@ class PathTracker:
         self._sent.clear()
         self._reset_straight()
         # 静止后的前进喷线/纯直线倒车起步先保持相对 IMU 方向；绝对方向仍按质量规则学习。
-        self._launch_armed = (self.geo.differential and self.cfg.straight_imu_enabled
+        self._launch_armed = (self.cfg.straight_imu_enabled
                               and self.cfg.straight_imu_first is not None
                               and (self.reverse_straight or
                                    self.entry_stabilize_mps is not None and self.runup_start_mps > 0.)
@@ -1214,7 +1214,7 @@ class PathTracker:
                 v = self.st.v_cmd = 0.0
                 wz = 0.0
                 self._arc_tail_w = 0.0
-        if (self.geo.differential and self.st.state == 'RUNNING'
+        if (self.st.state == 'RUNNING'
                 and (self.reverse_straight or self.runup_speed_mps is not None and self.st.s < self.paint_from_m)
                 and self.path._piece(max(0.,self.st.s)).straight):
             # 直线倒车/圆前切线的低速纠正不能用额外锁向量把一轮反向；入弧后交回原转向包络。
@@ -1249,7 +1249,7 @@ class PathTracker:
         """每拍控制前更新起步稳定状态（用上一拍的路程）。只管真正从停着起步、还没到喷线区；连续走过段与段的交接
         （场地连续弧、圆弧掉头）不算起步。"""
         cfg, st = self.cfg, self.st
-        if cfg.launch_settle_max_m <= 0 or not self.geo.differential or st.state != 'RUNNING':
+        if cfg.launch_settle_max_m <= 0 or st.state != 'RUNNING':
             return
         if self._settle is None:
             moving = abs(pose.speed) >= 0.05 or self._v_prev >= 0.05
@@ -1356,7 +1356,7 @@ class PathTracker:
         """直线在行进方向坐标内复用稳向与横偏控制；路线仍管理车速、停车及弯道交接。"""
         cfg, st = self.cfg, self.st
         imu = self._fresh_straight_imu()
-        if not cfg.straight_imu_enabled or not self.geo.differential or imu is None or 'imu_mismatch' in getattr(pose, 'reasons', ()):
+        if not cfg.straight_imu_enabled or imu is None or 'imu_mismatch' in getattr(pose, 'reasons', ()):
             self._reset_straight()
             return legacy_w
         _, imu_yaw, gyro = imu
@@ -1486,7 +1486,7 @@ class PathTracker:
             # 定位可用、不在推算维持、0.5 s 内有新定位、精度和卫星数合格
             reasons = getattr(pose, 'reasons', ()) or ()
             if (getattr(pose, 'quality', None) != 'RTK_FIXED' or not getattr(pose, 'usable_for_control', False)
-                    or 'rtk_hold' in reasons or 'rtk_hold_pending' in reasons
+                    or 'rtk_hold' in reasons
                     or self._imu_now is None or self._quality_frame_t is None
                     or not 0.0 <= self._imu_now - self._quality_frame_t <= 0.5
                     or not self._rtk_quality_ok() or self._quality is None):
@@ -1553,10 +1553,10 @@ class PathTracker:
                       if self.paint_from_m>0. else 0.)
         baseline_ok = self._baseline_ok()
         if guide.token is None and align is not None:
-            # 重启后第一条（规划时没有记忆、加长了助跑）：助跑里按卫星轨迹定角度（ImuFirstGuide.no_memory）。只按规划时定的，
-            # 不再看此刻有没有记忆：接入那段直线（助跑起点退后以后常有好几米）自己会拟合好、记进记忆，但那是按双天线开头的
-            # 短距离拟合（2026-11-22 仿真：按它算有记忆，第一条线头最差 1.35 → 1.58 cm、全线最差 2.15 → 3.01 cm）
-            guide.no_memory = self.first_line_runup
+            # 重启后第一条（规划时没有记忆）：助跑里按卫星轨迹定角度（ImuFirstGuide.no_memory）。只按规划时定的，
+            # 不再看此刻有没有记忆：接入那段直线常有好几米、自己会拟合好记进记忆，但那是按双天线开头的短距离拟合
+            # （2026-11-22 仿真：按它算有记忆，第一条线头最差 1.35 → 1.58 cm、全线最差 2.15 → 3.01 cm）
+            guide.no_memory = self.first_line
             guide.token = align.begin_line()            # 新的一条线：上一条线拟合好的换算定下来，可带过来
         was_locked = guide.locked
         if not guide.locked and baseline_ok:
@@ -1812,7 +1812,7 @@ class PathTracker:
         回来或 jump_accept_s 后再拉），沿圆路程按走过的路推、慢慢靠向卫星。不估角度 β：圆一圈只有十几米，
         直线那套角度拟合在卫星小台阶上会学偏（05:41 那圈回放学出 −0.5°、推算和卫星差到 10 cm）。"""
         cfg, st, guide = self.cfg, self.st, self._arc_guide
-        if not cfg.arc_imu_first or guide is None or not cfg.straight_imu_enabled or not self.geo.differential:
+        if not cfg.arc_imu_first or guide is None or not cfg.straight_imu_enabled:
             return None
         imu = self._fresh_straight_imu()
         piece = next((p for p in self.path.pieces if p.s0 <= st.s < p.s0 + p.length), None)
@@ -2064,7 +2064,7 @@ class PathTracker:
             k_late = self._preview_kappa(ahead - v * cfg.ff_shape_gap_s)
             if max(abs(k), abs(k_late)) <= cfg.ff_shape_kappa_max:
                 k += cfg.ff_shape_ratio * (k_late - k)
-        if (self.geo.differential and cfg.ff_shape_ratio > 0.0
+        if (cfg.ff_shape_ratio > 0.0
                 and any(value is not None for value in (cfg.ff_entry_ratio, cfg.ff_entry_gap_s, cfg.ff_entry_preview_s))):
             entry_cruise = cfg.arc_speed_mps if cfg.arc_speed_mps is not None else cfg.cruise_mps
             weight = 1.0 if cfg.ff_entry_min_cruise_mps <= 0.0 else \
@@ -2162,13 +2162,12 @@ class PathTracker:
         arc=tracker.cfg.arc_speed_mps
         if arc is not None and tracker._work_arc_piece(piece):return arc
         turn=min(TURN_SPEED_MPS,arc if arc is not None else math.inf)
-        if tracker.geo.differential:
-            # 转场弯：内侧轮不低于 WHEEL_MIN_MPS（10-08 用户），不超过横向加速度（motion_speeds.transit_bend_speed）
-            turn=transit_bend_speed(piece.kappa,tracker.geo.track_m,tracker.cfg.lat_accel_mps2,turn)
+        # 转场弯：内侧轮不低于 WHEEL_MIN_MPS（10-08 用户），不超过横向加速度（motion_speeds.transit_bend_speed）
+        turn=transit_bend_speed(piece.kappa,tracker.geo.track_m,tracker.cfg.lat_accel_mps2,turn)
         return turn
 
     def _curve_speed(self, s, v):
-        """Gen5 用首尾斜率为零的速度包络提前准备过弯，其他底盘保留原制动曲线。
+        """用首尾斜率为零的速度包络提前准备过弯。
         s 已包含执行延迟预估，额外距离余量使实际到弯口前完成降速；连续分段也统一预瞄。"""
         cfg = self.cfg
         v=max(v,self._v_prev)
@@ -2182,13 +2181,10 @@ class PathTracker:
             if p.s0 + p.length <= s or abs(p.kappa) <= 1e-6 or self._straight_stitch(preview_pieces,index):
                 continue
             d = max(0.0, p.s0 - s - margin)
-            curve_v2 = cfg.arc_speed_mps**2 if self.geo.differential and cfg.arc_speed_mps is not None else cfg.lat_accel_mps2 / abs(p.kappa)
-            if self.geo.differential:
-                target=self._curve_target_at(p.s0+min(1e-6,p.length/2))
-                length=self._turn_ramp_distance(v,target)
-                u=1. if length<=1e-9 else min(1.,d/length)
-                allowed=target+max(0.,v-target)*u*u*(3.-2.*u)
-            else:allowed=math.sqrt(curve_v2+2.*cfg.decel_mps2*d)
+            target=self._curve_target_at(p.s0+min(1e-6,p.length/2))
+            length=self._turn_ramp_distance(v,target)
+            u=1. if length<=1e-9 else min(1.,d/length)
+            allowed=target+max(0.,v-target)*u*u*(3.-2.*u)
             limit=min(limit,allowed)
         # 换段前预先满足下一段速度/终点约束，不能交接后才突然减速。
         offset=self.path.length
@@ -2255,7 +2251,7 @@ class PathTracker:
 
     def constant_arc_speed_here(self):
         piece=self.path._piece(max(0.,min(self.path.length,self.st.s)))
-        return (self.geo.differential and self.cfg.arc_speed_mps is not None and not piece.straight
+        return (self.cfg.arc_speed_mps is not None and not piece.straight
                 and not self._straight_stitch(self.path.pieces,self.path.pieces.index(piece)))
 
     def _control(self, pose, dt, steer=None):
@@ -2467,7 +2463,7 @@ class PathTracker:
         if paint_window is not None and self.cfg.arc_speed_mps is not None and self._work_arc_piece(current_piece):
             # 正式画圆/画弧线保持作业定速；停喷后的转场再平缓收至掉头速度。
             curve_limit=self.cfg.arc_speed_mps
-        if (self.geo.differential and not current_piece.straight
+        if (not current_piece.straight
                 and not self._straight_stitch(self.path.pieces,self.path.pieces.index(current_piece))):
             curve_limit=min(curve_limit,self._curve_target_at(max(0.,s_now)))
         curve_adjusted=curve_limit<requested-1e-6 or self._v_prev>curve_limit+1e-6
@@ -2602,7 +2598,7 @@ class SectionTracker:
                  pivot_min=math.radians(rules.PIVOT_MIN_DEG), pivot_retries=2, pivot_floor=0.1, paint_offset_limit_m=None,
                  constant_straight_speed=False, reverse_runup=False, constant_paint_speed=False, pivot_brake=None):
         """pivot_rate 不为 None（差速车）：下一段起点车头方向与车差 pivot_min 以上时，停稳后原地转过去再开，
-        起步时也一样；角速度不超过 pivot_rate、角加速度不超过 pivot_accel。阿克曼车为 None，不原地转。
+        起步时也一样；角速度不超过 pivot_rate、角加速度不超过 pivot_accel。None 为不原地转（测试、纯几何调用）。
         原地转仍按 pivot_tol 瞄准；转完差 pivot_min 以内不补转，直接慢速往前开，万向轮回正、车头由跟踪纠正
         （2026-09-30 实车：转完一停车头回弹约 1°，按 1° 补转时小指令推不动，反复补转卡住 27 s）。
         转完仍差 pivot_min 以上最多补转 pivot_retries 次，再不行按 pivot_timeout 中止。没转到位时角速度不低于
@@ -2638,7 +2634,7 @@ class SectionTracker:
         self.pivot_brake = pivot_accel if pivot_brake is None else pivot_brake
         self.trackers = []
         for i, sec in enumerate(self.sections):
-            reverse_straight = (sec.direction < 0 and self.geo.differential and config.straight_imu_enabled
+            reverse_straight = (sec.direction < 0 and config.straight_imu_enabled
                                 and all(p.straight for p in sec.path.pieces))
             # 「离终点太近不起步」只对整条路线的最后一段有意义；后面还有段的（如 0.3–0.9 m 的接入、倒车助跑段）
             # 照样起步，否则短接入段一起步就报「已经过了路线终点」（2026-10-01 实车）
@@ -2653,7 +2649,7 @@ class SectionTracker:
             mark=getattr(sec,'paint_from_m',0.)
             end=sec.path.length if sec.paint_to_m is None else sec.paint_to_m
             spans=sec.paint_spans if sec.paint_spans is not None and not getattr(sec,'paint_dashed',False) else [(mark,end)]
-            if (self.geo.differential and sec.direction>0 and getattr(sec,'field_role',None)=='paint'
+            if (sec.direction>0 and getattr(sec,'field_role',None)=='paint'
                     and cfg.arc_speed_mps is not None
                     and spans and all(any(not p.straight and p.s0<b-1e-8 and p.s0+p.length>a+1e-8
                                           for p in sec.path.pieces) for a,b in spans)):
@@ -2664,7 +2660,7 @@ class SectionTracker:
                 # 原来按 2 cm 容差停、再靠多走的 5 cm 盖过终点，实车水泵停在定点后 6–11 cm
                 cfg = replace(cfg, stop_tol_m=min(cfg.stop_tol_m, pivot_stop_tol))
             if sec.direction < 0:
-                # 倒车按行进方向换算控制点；差速车传入增益为 1，阿克曼车沿用其倒车补偿。
+                # 倒车按行进方向换算控制点；差速车传入增益 reverse_gain = 1。
                 cfg = replace(cfg, cruise_mps=min(cfg.cruise_mps, reverse_mps), track_x_m=-cfg.track_x_m,
                               steer_gain=reverse_gain, straight_imu_enabled=reverse_straight,
                               arc_imu_first=False, arc_speed_mps=None)
@@ -2676,7 +2672,7 @@ class SectionTracker:
                 if cfg.reverse_section_creep_m is not None:
                     cfg = replace(cfg, start_creep_m=cfg.reverse_section_creep_m)
             # 前进喷线直线与圆弧、连续转场共用柔和起步。
-            if self.geo.differential and sec.direction>0 and (
+            if sec.direction>0 and (
                     getattr(sec,'field_role',None)=='paint'
                     or any(not p.straight for p in sec.path.pieces) or sec.continuous_after
                     or i>0 and self.sections[i-1].continuous_after):
@@ -2685,13 +2681,13 @@ class SectionTracker:
             tracker.reverse_straight=reverse_straight
             if reverse_straight:tracker.set_nozzle(cfg.track_x_m,0.)
             tracker._arc_work_role=getattr(sec,'field_role',None)!='transit'
-            tracker.constant_straight_speed = constant_straight_speed and self.geo.differential
+            tracker.constant_straight_speed = constant_straight_speed
             mark=getattr(sec,'paint_from_m',0.)
             end = sec.path.length if sec.paint_to_m is None else sec.paint_to_m
             if not math.isfinite(end) or not 0 <= mark <= end <= sec.path.length:
                 raise ValueError('划线范围无效')
             tracker.paint_from_m, tracker.paint_to_m = mark, end
-            tracker.constant_paint_speed=(constant_paint_speed and self.geo.differential and sec.direction>0
+            tracker.constant_paint_speed=(constant_paint_speed and sec.direction>0
                                           and getattr(sec,'field_role',None)=='paint')
             if tracker.constant_paint_speed and sec.paint_to_m is None:
                 raise ValueError('旧路线缺少停喷终点，请重新规划后作业')
@@ -2702,7 +2698,7 @@ class SectionTracker:
                 # 虚线只管水泵（route_operations.paint_status 按 sec.paint_spans 开关）；车速、纠偏、线头起步按整条线走，
                 # 空隙里不提速、下一截不当新线头重新起步
                 tracker.paint_spans=[(mark,end)]
-            if (self.geo.differential and sec.direction>0 and getattr(sec,'field_role',None)=='paint'
+            if (sec.direction>0 and getattr(sec,'field_role',None)=='paint'
                     and end < sec.path.length and all(p.straight for p in sec.path.pieces if p.s0+p.length>end+1e-9)):
                 from route_plan import SOLO_CIRCLE_EXIT_M
                 paint_tail=sec.path._piece(max(mark,end-1e-8))
@@ -2712,7 +2708,7 @@ class SectionTracker:
                 # 仅整圆的 1 m 切线离开段按剩余距离自然减速，避免整米低速爬行；其他线尾沿用原策略。
                 if not circle_exit:
                     tracker.run_out_m = sec.path.length-end
-            if (constant_straight_speed and self.geo.differential and sec.direction>0
+            if (constant_straight_speed and sec.direction>0
                     and getattr(sec,'field_role',None)=='paint' and mark>0):
                 # 10-05 用户定助跑 0.5 m/s、正常不低于 0.3；10-06 晚用户：「起步的助跑是允许降速的，在进入的直线的
                 # 时候必须直」→ 0.3（仿真线头 2 m 弯中位 0.55 → 0.37–0.53 cm，到线头仍 0.8 m/s，每次起步多约 0.5 s）
@@ -2725,9 +2721,9 @@ class SectionTracker:
                     # 10-08 用户：圆前切线助跑由 0.3 提到 0.35 m/s，入圆仍平滑接到圆弧速度。
                     tracker.runup_speed_mps=rules.CIRCLE_RUNUP_MPS
                 from route_plan import RUN_UP_M
-                # 重启后第一条加长的助跑（route_plan.FIRST_RUN_UP_M，规划时记在段上）整段都按助跑速度走
-                tracker.runup_distance_m=getattr(sec,'runup_m',None) or RUN_UP_M
-                tracker.first_line_runup=getattr(sec,'runup_m',None) is not None
+                tracker.runup_distance_m=RUN_UP_M
+                # 重启后第一条（规划时没有上一条线的换算，route_plan 记在段上）：助跑照常，只是拟合按没有记忆
+                tracker.first_line=bool(getattr(sec,'first_line',False))
                 if self.reverse_runup and 0 < i == self._first_paint and self.sections[i-1].direction < 0:
                     # 倒车接入后的助跑：保留起步锁车头距离，航向收至 1° 后才交接（横偏仍用原门槛）。
                     tracker.reverse_runup = True
@@ -2745,13 +2741,13 @@ class SectionTracker:
                         runup_release_e_m=max(tracker.cfg.runup_release_e_m,.03),
                         runup_release_heading_deg=max(tracker.cfg.runup_release_heading_deg,2.0))
 
-            if (self.geo.differential and sec.direction>0 and getattr(sec,'field_role',None)=='paint'
+            if (sec.direction>0 and getattr(sec,'field_role',None)=='paint'
                     and all(p.straight for p in sec.path.pieces)):
                 tracker.paint_offset_limit_m=paint_offset_limit_m
                 tracker.paint_from_m=mark
             last=sec.path.pieces[-1]
             # 最后一段非整圆刷弧才启用：实际刷弧角度扣除助跑，整圆、直线、倒车与转场均不参与。
-            if (self.geo.differential and sec.direction>0 and getattr(sec,'field_role',None)=='paint'
+            if (sec.direction>0 and getattr(sec,'field_role',None)=='paint'
                     and not last.straight):
                 if not math.isfinite(mark) or not 0<=mark<=sec.path.length:
                     raise ValueError('圆弧划线起点无效')
@@ -2788,7 +2784,7 @@ class SectionTracker:
             total += sec.path.length
         self.length = total
         self.cusps = len(self.sections) - 1
-        # 倒车换向次数、段与段之间原地转向的次数（差速车；阿克曼车为 0）
+        # 倒车换向次数、段与段之间原地转向的次数
         self.reversals = sum(1 for a, b in zip(self.sections, self.sections[1:]) if a.direction != b.direction)
         self.pivots = 0 if pivot_rate is None else sum(
             1 for a, b in zip(self.sections, self.sections[1:])
@@ -2819,7 +2815,7 @@ class SectionTracker:
         for i,sec in enumerate(self.sections):
             if type(sec.continuous_after) is not bool:raise ValueError('连续前进标记必须为布尔值')
             if not sec.continuous_after:continue
-            if not self.geo.differential or i+1>=len(self.sections):raise ValueError('连续前进缺少可衔接的下一段')
+            if i+1>=len(self.sections):raise ValueError('连续前进缺少可衔接的下一段')
             nxt=self.sections[i+1]
             end,start=sec.car_pose(sec.path.length),nxt.car_pose(0.)
             if (sec.direction!=1 or nxt.direction!=1 or getattr(sec,'pause_after',None)
@@ -3123,26 +3119,26 @@ class SectionTracker:
 
     def constant_speed_here(self):
         """直线巡航按段设定速度；原地转、曲线和到点刹停由原控制器处理。"""
-        if not self.constant_straight_speed or not self.geo.differential or self.switching:
+        if not self.constant_straight_speed or self.switching:
             return False
         tr = self.trackers[self.index]
         return abs(tr.path.kappa(max(0., min(tr.path.length, tr.st.s)))) < 1e-9
 
     def constant_arc_speed_here(self):
-        if not self.geo.differential or self.switching or self._pivot is not None:
+        if self.switching or self._pivot is not None:
             return False
         return self.sections[self.index].direction > 0 and self.trackers[self.index].constant_arc_speed_here()
 
     def _spray_straight(self, sec, tracker):
-        """仅前进长直线喷线启用积分隔离；圆、短线、转场和旧底盘继续原控制。"""
-        return (self.geo.differential and tracker.cfg.straight_imu_enabled and sec.direction > 0
+        """仅前进长直线喷线启用积分隔离；圆、短线、转场继续原控制。"""
+        return (tracker.cfg.straight_imu_enabled and sec.direction > 0
                 and getattr(sec, 'field_role', None) == 'paint'
                 and sec.path.length >= tracker.cfg.straight_min_length_m
                 and all(piece.straight for piece in sec.path.pieces))
 
     def _paint_curve(self, sec, tracker):
         """差速车前进的喷线段里带弯（整圆、作业圆弧连同它们的助跑）：停车后重新起步时积分从 0 开始，不接转场的。"""
-        return (self.geo.differential and tracker.cfg.straight_imu_enabled and sec.direction > 0
+        return (tracker.cfg.straight_imu_enabled and sec.direction > 0
                 and getattr(sec, 'field_role', None) == 'paint'
                 and not all(piece.straight for piece in sec.path.pieces))
 

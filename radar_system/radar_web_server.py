@@ -71,13 +71,9 @@ MANUAL_HEARTBEAT_TIMEOUT_S = 0.75
 # =============================================================================
 # 手动遥控:速度档与转向档解耦
 # =============================================================================
-# 改造前前端把 (vx, wz) 成对硬编码成九宫格 x 三档,但阿克曼底盘的前轮转角由
-# 固件按 TurnR = Vx / Vz 解算 (见 wheeltec_protocol/PROTOCOL.md 8.1),也就是说
-# 转角只取决于**比值**。实测三个速度档的「左拐」换算出来都是 20.1 度,全部撞在
-# 舵机 20 度限位上 —— 三档完全一样,而斜向键只有 13 度,所以手感又钝又不跟手。
-#
-# 现在速度和转角是两个独立维度:UI 指定「开多快」和「方向盘打多少度」,
-# 角速度由后端按当前车速实时换算,换速度档不会改变转弯半径。
+# 车上网页控制台的方向键:速度和转角是两个独立维度,UI 指定「开多快」和「方向盘打多少度」,
+# 角速度由后端按当前车速和转角实时换算(robot_core.kinematics.yaw_from_steer,按车型配置的
+# wheelbase_m / max_steer_rad),换速度档不会改变转弯半径。App 摇杆走 app_link.resolve_stick。
 CHASSIS = ChassisGeometry()
 
 
@@ -312,8 +308,8 @@ class WebBridgeNode(Node):
         self.manual_session = None
         self.is_armed = False
 
-        self.manual_drive = ManualDriveLatch(MANUAL_HEARTBEAT_TIMEOUT_S, allow_pivot=CHASSIS.differential)
-        # IMU 定向直行使用当前选源偏航角（不用 RTK）；旧车保持原话题。独立回调组运行 50 Hz。
+        self.manual_drive = ManualDriveLatch(MANUAL_HEARTBEAT_TIMEOUT_S)
+        # IMU 定向直行使用当前选源偏航角（不用 RTK）。独立回调组运行 50 Hz。
         # 记住车自己的持续偏转，下一趟起步就带上（2026-11-21 起步往右偏 2–3°），存盘重启也在。
         self.straight = HeadingHold(HoldConfig(learn_bias=True),
                                     bias_path=os.environ.get('RK3588_STRAIGHT_BIAS', '~/rtk/straight_bias.json'))
@@ -321,7 +317,7 @@ class WebBridgeNode(Node):
         self._imu_pending = None
         self._imu_gate_stamp_ns = 0
         self.imu_group = MutuallyExclusiveCallbackGroup()
-        imu_topic = '/imu/selected/data' if CHASSIS.differential else '/imu/data'
+        imu_topic = '/imu/selected/data'
         self.sub_imu = self.create_subscription(Imu, imu_topic, self.imu_cb, 20,
                                                 callback_group=self.imu_group)
         # 里程计车速:直行时判断车走起来没有(轮子卡住时不累积积分,松开后不猛甩)
@@ -458,17 +454,15 @@ class WebBridgeNode(Node):
             pass
         o = msg.orientation
         with self.control_lock:
-            if CHASSIS.differential:
-                source = msg.header.frame_id.removeprefix('selected_')
-                stamp = msg.header.stamp
-                ns = stamp.sec*1000000000+stamp.nanosec
-                age = (self.get_clock().now().nanoseconds-ns)/1e9
-                if (source not in ('hda536t','imu762') or self._imu_pending is not None
-                        or ns < self._imu_gate_stamp_ns or not 0 <= age <= .2):return
-                if self._imu_source is None:self._imu_source = source
-                if source != self._imu_source:return
-                received_at = time.monotonic()-age
-            else:received_at = time.monotonic()
+            source = msg.header.frame_id.removeprefix('selected_')
+            stamp = msg.header.stamp
+            ns = stamp.sec*1000000000+stamp.nanosec
+            age = (self.get_clock().now().nanoseconds-ns)/1e9
+            if (source not in ('hda536t','imu762') or self._imu_pending is not None
+                    or ns < self._imu_gate_stamp_ns or not 0 <= age <= .2):return
+            if self._imu_source is None:self._imu_source = source
+            if source != self._imu_source:return
+            received_at = time.monotonic()-age
             self.straight.on_imu(yaw_from_quaternion(o.x,o.y,o.z,o.w),msg.angular_velocity.z,received_at)
 
     def odom_cb(self, msg):
@@ -521,19 +515,18 @@ class WebBridgeNode(Node):
         with data_lock:previous=state.get('line',{})
         self._store_status('line', msg)
         with data_lock:current=state.get('line',{})
-        if CHASSIS.differential:
-            selection = current.get('imu_sources') or {}
-            active = selection.get('active')
-            result = current.get('last_result') or {}
-            with self.control_lock:
-                pending = self._imu_pending
-                confirmed = pending is None or time.monotonic() >= pending[2] or (result.get('id') == pending[0]
-                                                and result.get('cmd') == 'imu_source')
-                if confirmed and active in ('hda536t','imu762'):
-                    if pending is not None or active != self._imu_source:
-                        self.straight.forget_imu()
-                    self._imu_pending = None
-                    self._imu_source = active
+        selection = current.get('imu_sources') or {}
+        active = selection.get('active')
+        result = current.get('last_result') or {}
+        with self.control_lock:
+            pending = self._imu_pending
+            confirmed = pending is None or time.monotonic() >= pending[2] or (result.get('id') == pending[0]
+                                            and result.get('cmd') == 'imu_source')
+            if confirmed and active in ('hda536t','imu762'):
+                if pending is not None or active != self._imu_source:
+                    self.straight.forget_imu()
+                self._imu_pending = None
+                self._imu_source = active
         if previous.get('task')=='route' and previous.get('phase') in ('RUNNING','PAUSING') and current.get('phase')=='IDLE':
             PUMP.stop('job_finished')
 

@@ -18,7 +18,7 @@ LOST_AT = 3.0
 def drive(until, control_sigma=0.012, record_from=LOST_AT):
     """固定解 20 Hz 到 LOST_AT，之后只有浮点（测向也浮点）；轮速、IMU 照常。control_sigma 调小，让不确定度在 0.5 s 内
     就过门槛（实车 σ 从约 0.8 cm 起、约 4.5 cm/s 涨，过 3 cm 也在 0.45–0.5 s，正卡边上）。返回 [(t − LOST_AT, pose)]，从 record_from 起每 20 ms。"""
-    f = gf.GnssFusion(gf.FusionConfig(drive_differential=True, yaw_input='angle', rtk_hold_s=HOLD_S,
+    f = gf.GnssFusion(gf.FusionConfig(yaw_input='angle', rtk_hold_s=HOLD_S,
                                       antenna_xy=(0., 0.), baseline_yaw_body_deg=-90., control_sigma_xy_m=control_sigma))
     f.set_origin(31., 120.)
     out, k = [], 0

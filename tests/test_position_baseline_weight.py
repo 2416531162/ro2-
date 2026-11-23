@@ -86,7 +86,7 @@ class BaselineWeight(unittest.TestCase):
 
     def test_fixed_pose_remains_trusted_with_larger_observation_variance(self):
         def run(scale):
-            f=gf.GnssFusion(gf.FusionConfig(drive_differential=True,yaw_input='angle',rtk_hold_s=5.,
+            f=gf.GnssFusion(gf.FusionConfig(yaw_input='angle',rtk_hold_s=5.,
                                           antenna_xy=(0.,0.),baseline_yaw_body_deg=-90.))
             f.set_origin(31.,120.)
             def fix(t,x,y,variance=1.):
@@ -106,7 +106,7 @@ class BaselineWeight(unittest.TestCase):
         self.assertLess(abs(pb.x),abs(pa.x))
 
     def test_unfixed_arc_position_does_not_move_the_inertial_estimate(self):
-        f=gf.GnssFusion(gf.FusionConfig(drive_differential=True,yaw_input='angle',rtk_hold_s=5.,antenna_xy=(0.,0.)))
+        f=gf.GnssFusion(gf.FusionConfig(yaw_input='angle',rtk_hold_s=5.,antenna_xy=(0.,0.)))
         f.set_origin(31.,120.)
         f.add_fix(gf.GnssFix(0.,31.,120.,0.,'NARROW_INT',.01,.01,.02,1.,35))
         before=(f._s.x,f._s.y)

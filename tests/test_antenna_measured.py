@@ -58,9 +58,6 @@ class AntennaMeasured(unittest.TestCase):
         car = dict(CAR); car.pop('antenna_xy')
         self.assertEqual(self.load(car)[0].antenna_xy, line_node.GEN5_ANTENNA_MEASURED)
 
-    def test_old_chassis_unchanged(self):
-        ack = dict(runtime_config.PROFILE, drive=dict(runtime_config.PROFILE.get('drive') or {}, type='ackermann'))
-        self.assertEqual(self.load(CAR, ack)[0].antenna_xy, (0.24, 0.2075))
 
 
 if __name__ == '__main__':

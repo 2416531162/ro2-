@@ -28,10 +28,10 @@ START_LEARN_HOLD_S = 1.0
 # 卫星可信 = 主天线固定 + 副天线固定 + 测向固定且基线在带内，三样都在这么久内来过；可信时不报任何定位错误（10-05）
 RTK_TRUSTED_FRESH_S = 1.0
 # 卫星数（10-06 定 20，10-08 改 17）：少于 SATS_MIN 不用；SATS_MIN–(SATS_FULL−1) 颗要同时满足
-# 接收机 σ ≤ LOW_SATS_MAX_SIGMA_M（10-08 2.0 → 2.7 cm）、两天线距离误差 < LOW_SATS_MAX_PAIR_M、固定解；≥ SATS_FULL 照常
+# 接收机 σ ≤ LOW_SATS_MAX_SIGMA_M（10-08 2.0 → 2.7 cm；11-22 用户「17–19 颗也收到 2.5」，和 ≥ SATS_FULL 的 FIT_MAX_SIGMA_M 一样）、两天线距离误差 < LOW_SATS_MAX_PAIR_M、固定解；≥ SATS_FULL 照常
 SATS_MIN = 17
 SATS_FULL = 20
-LOW_SATS_MAX_SIGMA_M = 0.027
+LOW_SATS_MAX_SIGMA_M = 0.025
 LOW_SATS_MAX_PAIR_M = 0.03
 # 卫星位置可靠（直线拟合的四道关，10-06；10-07 两天线距离 3 → 5 cm）：接收机 σ ≤ 2.5 cm；两天线距离误差 ≤ 5 cm，
 # 超了以后 0.5 s 再用；连续 2 帧不合格停用，连续合格 2 s 再用
@@ -109,9 +109,8 @@ GRASS_MIN_SPEED_MPS = 0.4
 
 # ───────────── 四、起步、助跑、线头 ─────────────
 
-# 助跑长度 2 m（11-19）；重启后第一条（还没学到换算）4 m（11-22）
+# 助跑长度 2 m（11-19）；重启后第一条也一样（11-22 加的第一条 4 m，11-23 用户「不能靠加长助跑解决问题」删掉）
 RUN_UP_M = 2.00
-FIRST_RUN_UP_M = 4.00
 # 助跑速度：直线 0.3 m/s、起步 0.35、从 0.5 m/s 起开始喷（10-05 / 10-06）；圆前切线助跑 0.35 m/s（10-08）
 RUNUP_SPEED_MPS = 0.3
 RUNUP_START_MPS = 0.35

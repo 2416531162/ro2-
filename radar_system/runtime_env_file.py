@@ -88,7 +88,7 @@ def resolve(environ, project):
     defaults = {
         'RK3588_PYTHON': '/usr/bin/python3',
         'RK3588_ROS_ROOT': '/opt/ros',
-        'RK3588_ROBOT_CONFIG': str(project / 'robot_core/robot.json'),
+        'RK3588_ROBOT_CONFIG': str(project / 'robot_core/robot_gen5.json'),
     }
     for key, default in defaults.items():
         values.setdefault(key, default)

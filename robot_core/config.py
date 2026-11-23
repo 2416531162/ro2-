@@ -5,10 +5,11 @@ import math
 import os
 from pathlib import Path
 
-DEFAULT_PATH = Path(__file__).with_name('robot.json')
-# 底盘驱动方式：ackermann 旧 Wheeltec 前轮转向；differential Gen5 两后轮差速、前面自由万向轮（能原地转）
-DRIVE_TYPES = ('ackermann', 'differential')
-# 两种底盘共用的运动控制周期；传感器采样和状态上报使用各自的频率。
+DEFAULT_PATH = Path(__file__).with_name('robot_gen5.json')
+# 底盘驱动方式只有 differential：Gen5 两后轮差速、前面自由万向轮（能原地转）。
+# 旧阿克曼车（Wheeltec 底盘，robot.json）2026-11-23 用户「删阿克曼底盘的代码」后删了
+DRIVE_TYPES = ('differential',)
+# 运动控制周期；传感器采样和状态上报使用各自的频率。
 CONTROL_HZ = 50.0
 CONTROL_DT = 1.0 / CONTROL_HZ
 
@@ -17,9 +18,6 @@ def load_profile(path=None):
     path = Path(path or os.environ.get('RK3588_ROBOT_CONFIG', DEFAULT_PATH))
     profile = json.loads(path.read_text())
     default = json.loads(DEFAULT_PATH.read_text())
-    if isinstance(profile, dict) and 'drive' not in profile:
-        # 加 drive 段之前的现场配置（/etc/rk3588/robot.json）没有这一段，按旧车（阿克曼）读
-        profile['drive'] = dict(default['drive'], type='ackermann')
     if isinstance(profile, dict) and isinstance(profile.get('drive'), dict) and 'nozzle_right_m' not in profile['drive']:
         # 加水泵横向位置之前的现场配置：水泵按在车中线上读（与当时的行为相同）
         profile['drive']['nozzle_right_m'] = 0.0

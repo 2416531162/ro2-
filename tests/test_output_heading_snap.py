@@ -20,7 +20,7 @@ BASE = .41
 class Rig:
     """Gen5 融合配置；车沿 +x（车头 0）以 speed 直走，卫星、轮速、IMU 都 10 Hz。"""
     def __init__(self):
-        self.f = gf.GnssFusion(gf.FusionConfig(drive_differential=True, yaw_input='angle', continuous_output=True,
+        self.f = gf.GnssFusion(gf.FusionConfig(yaw_input='angle', continuous_output=True,
                                                antenna_xy=ANT, baseline_yaw_body_deg=-90.))
         self.f.set_origin(31., 120.)
         self.t, self.x, self.imu = 0., 0., 0.
