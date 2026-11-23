@@ -921,7 +921,8 @@ class LineMission:
         reverses = sum(1 for sec in sections if sec.direction < 0)
         turns = ('，原地转向 %d 次' % tracker.pivots if tracker.pivots else '') + \
                 ('，圆弧掉头 %d 次' % info['arc_turns'] if info.get('arc_turns') else '') + \
-                ('，倒车 %d 次' % reverses if reverses else '')
+                ('，倒车 %d 次' % reverses if reverses else '') + \
+                ('，开机第一条先空跑 %.0f m 学车头再绕回来画' % info['learn_m'] if info.get('learn_m') else '')
         self.message = '申请控制权（接入 %.1f m，全程 %.1f m%s）' % (entry_m, tracker.length, turns)
         return True, self.message
 

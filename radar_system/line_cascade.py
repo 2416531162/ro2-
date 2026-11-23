@@ -534,6 +534,13 @@ class ImuFirstGuide:
         """rtk_fit：拟合出的角度差的误差（rad），还没开始拟合为 None。"""
         return None if self._fit is None else math.sqrt(max(0.0, self._fit['P'][1][1]))
 
+    def fit_angle(self):
+        """rtk_fit：拟合出的此刻角度差（rad，不按 fit_beta_rate 限速跟），还没开始拟合为 None。"""
+        if self._fit is None:
+            return None
+        lim = math.sin(self.cfg.max_heading_fix_deg * DEG)
+        return math.asin(max(-lim, min(lim, self._fit_now(self._travel)[1])))
+
     def update(self, measured, rel, distance, dt, nozzle, rtk_ok, fast=False, steering=False, roll=None):
         """锁住偏移以后每拍一次。measured：卫星（融合位置，天线杠杆臂按 rel + β 改算）量的喷头横偏，m；
         rel：IMU 参考航向 − 线方向，rad；distance：这一拍往前走的路，m；nozzle：喷头（车体前, 左），m；
@@ -1052,6 +1059,13 @@ class ImuAlignment:
         if c is None or not math.isfinite(now) or not 0.0 <= now - c[0] <= self.cfg.max_age_s:
             return None
         return c[1], c[2]
+
+    def better_than_carried(self, now, sigma):
+        """误差 sigma（rad）比现在能带过去的 c 准：这条线还没记下同样准或更准的，且上一条线带到现在的更不准或没有。"""
+        if self.pending is not None and self.pending[3] is not None and self.pending[3] <= sigma:
+            return False
+        p = self.predict(now)
+        return p is None or sigma < p[1]
 
     def update_line(self, token, t, c, sigma=None):
         """这条线的 c（偏移 + β）；sigma（rad）为空表示没经卫星拟合，只给下一条借、不参与校准和加权。"""

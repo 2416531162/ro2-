@@ -1182,8 +1182,11 @@ def _body_min_along(x, y, yaw, body, h0, x0, y0):
     return best
 
 
-def arc_entry(first, car, space_m, body=None):
-    """圆弧进线：(分段, 接入路程米)；后方空地不够任何半径用时返回 None（调用方照原地转进线）。"""
+def arc_entry(first, car, space_m, body=None, *, stop=False, first_turn=0):
+    """圆弧进线：(分段, 接入路程米)；后方空地不够任何半径用时返回 None（调用方照原地转进线）。
+
+    stop（开机第一条空跑后绕回，_learn_loop）：圆弧开到助跑起点 G 停稳，再像原地转进线那样起步助跑（新的一段）；
+    G 不往线头挪（助跑照常 RUN_UP_M），放不下就 None。first_turn ±1：先往左 / 右转，整条后轴轨迹不过线到另一侧。"""
     if space_m < ENTRY_ARC_MIN_SPACE_M - 1e-9:
         return None
     body = body or _default_body()
@@ -1193,17 +1196,24 @@ def arc_entry(first, car, space_m, body=None):
     goal = (gx, gy, h0)
     limit = min(_body_min_along(gx, gy, h0, body, h0, x0, y0) - (space_m - ENTRY_ARC_MARGIN_M),
                 _body_min_along(*car, body, h0, x0, y0))
-    shifts = [i * ENTRY_ARC_SHIFT_STEP_M for i in range(int((run - ENTRY_ARC_MIN_STRAIGHT_M) / ENTRY_ARC_SHIFT_STEP_M + 1e-9) + 1)]
+    shifts = [0.0] if stop else [
+        i * ENTRY_ARC_SHIFT_STEP_M for i in range(int((run - ENTRY_ARC_MIN_STRAIGHT_M) / ENTRY_ARC_SHIFT_STEP_M + 1e-9) + 1)]
     for shift, radius in ((a, r) for a in shifts for r in ENTRY_ARC_RADII):
         goal = _offset((gx, gy), h0, shift) + (h0,)
-        way = dubins(tuple(car), goal, radius)
+        try:
+            way = dubins(tuple(car), goal, radius, first_turn)
+        except ValueError:
+            if not first_turn:
+                raise
+            continue             # 这个半径往那一侧绕不过来
         x, y, yaw = car
         ok = True
         for length, k in way:
             n = max(1, int(math.ceil(length / ENTRY_ARC_STEP_M)))
             for _ in range(n):
                 x, y, yaw = advance(x, y, yaw, length / n, k)
-                if _body_min_along(x, y, yaw, body, h0, x0, y0) < limit - 1e-9:
+                if (_body_min_along(x, y, yaw, body, h0, x0, y0) < limit - 1e-9
+                        or first_turn and first_turn * (-(x - x0) * math.sin(h0) + (y - y0) * math.cos(h0)) < -1e-6):
                     ok = False
                     break
             if not ok:
@@ -1215,6 +1225,8 @@ def arc_entry(first, car, space_m, body=None):
         for length, k in way:
             out.add(1, length, k)
         out.pose = goal          # Dubins 终点已验算到 1e-6 以内；接着助跑，同一段不停车
+        if stop:
+            out.pivot(0.0)       # 空跑绕回：到 G 断开成新的一段（停稳、车头差不到 PIVOT_MIN_DEG 不转），站着起步助跑
         out.add(1, run - shift, 0.0)
         for length, k in pieces:
             out.add(1, length, k)
@@ -1371,10 +1383,11 @@ def _dubins_words(alpha, beta, d):
     return out
 
 
-def dubins(start, goal, radius):
+def dubins(start, goal, radius, first_turn=0):
     """start、goal 为 (x, y, yaw)。返回最短的 [(长度, 曲率), …]（去掉零长度段；已在终点时为空）。
 
     每个候选都积分验算终点，公式或数值出错的候选直接丢掉，不会把车带到别处。
+    first_turn 为 ±1 时只要先往左（+1）/ 右（−1）转的（开机第一条空跑后绕回，往路线里面那一侧）。
     """
     x0, y0, yaw0 = start
     dx, dy = goal[0] - x0, goal[1] - y0
@@ -1388,6 +1401,8 @@ def dubins(start, goal, radius):
     best = None
     for word, *lengths in _dubins_words(alpha, beta, dist / radius):
         pieces = [(u * radius, curv[c]) for c, u in zip(word, lengths) if u * radius > 1e-6]
+        if first_turn and not (pieces and pieces[0][1] * first_turn > 0.0):
+            continue
         x, y, yaw = start
         for length, kappa in pieces:
             x, y, yaw = advance(x, y, yaw, length, kappa)
@@ -1669,10 +1684,60 @@ def plan_current(spec, car_pose, min_radius, *, body=None, max_entry_m=MAX_ENTRY
         entry, entry_m = arc
     if entry_m > max_entry_m:
         raise ValueError('车离路线太远（接入路线 %.0f m，最多 %.0f m），请先把车开近些' % (entry_m, max_entry_m))
-    sections = _planned_sections(entry, route, 'route_'+run.kind+'_')
+    learn = None
     if first_line and run.kind == 'path':
+        # 开机第一条先空跑学换算再绕回来画（_learn_loop）；接入远近照上面算，空跑和绕回的路程不算进 MAX_ENTRY_M
+        learn = _learn_loop(route[0], car_pose, entry_fn, nozzle_x, run.entry_space_m, body, _inside_turn(run, route[0]))
+        if learn is not None:
+            entry, entry_m, learn = learn
+    if info is not None:
+        info['learn_m'] = LEARN_M if learn is not None else 0.0
+    sections = _planned_sections(entry, route, 'route_'+run.kind+'_')
+    if learn is not None:
+        sections[learn].learn = True          # 空跑学换算；画线那段开头有学好的换算，不再按没有记忆
+    elif first_line and run.kind == 'path':
         sections[len(entry) - 1].first_line = True
     return (_circle_paint_end(sections, run) if run.kind == 'circle' else sections), entry_m + run_in
+
+
+# 开机第一条（没有学好的 IMU 换算，LineMission.first_line_no_memory）先在这条线上空跑学：从助跑起点 G 开过线头、再往前
+# LEARN_M 不喷，然后只往前按圆弧（arc_entry stop）往路线里面那一侧绕回 G、停稳，再正常助跑画整条。2026-11-23 用户：
+# 「允许开机第一段在两个点中间直走学习但不喷，学好后，再自动平滑继续喷」「必须在内学习」「空跑后，不要倒回来，圆弧接上」。
+# 仿真（48 次）第一条线头 0.3 m 最差 2.42 → 1.21–1.29 cm，和后面几条一样；圆弧直接接助跑不停车最差 3.06（出圆弧车头没稳）。
+# 只往前绕回去整整转一圈：IMU 转角刻度误差（SCH16T 实测每圈约 −0.47°）由 ImuAlignment.scale 先验补（−0.0017，每圈 −0.61°）
+LEARN_M = rules.FIRST_LINE_LEARN_M
+INSIDE_MIN_M = 0.1             # 路线其余点的重心离第一条线不到这么远（单条线）：不挑哪一侧
+
+
+def _inside_turn(spec, first):
+    """路线里面在第一条线的哪一侧：+1 左、−1 右、0 分不出（单条线、点都在线上）。"""
+    _, (x0, y0, h0), _ = first
+    pts = spec.points
+    side = sum(-(x - x0) * math.sin(h0) + (y - y0) * math.cos(h0) for x, y in pts) / len(pts)
+    return 0 if abs(side) < INSIDE_MIN_M else (1 if side > 0 else -1)
+
+
+def _learn_loop(first, car, entry_fn, nozzle_x, space_m, body, turn=0):
+    """开机第一条的空跑学换算 + 圆弧绕回：(分段, 接入路程米, 空跑那段的下标)；第一条开头不是够 LEARN_M 的直线、
+    接入最后不是往前开、绕不回来（后方空地、往里那一侧放不下）时 None（照原来直接画，第一条按没有记忆拟合）。"""
+    pieces = list(first[2])
+    if LEARN_M <= 0 or not pieces or abs(pieces[0][1]) > 1e-12 or pieces[0][0] < LEARN_M - 1e-9:
+        return None
+    lead, lead_m = entry_fn((first[0], first[1], []), car, nozzle_x)
+    if not lead or lead[-1][0] < 0:
+        return None
+    lead = list(lead)
+    direction, start, run = lead[-1]
+    run = list(run)
+    _append(run, LEARN_M, 0.0)
+    lead[-1] = (direction, start, run)
+    x, y, yaw = start
+    for length, k in run:
+        x, y, yaw = advance(x, y, yaw, length, k)
+    loop = arc_entry(first, (x, y, yaw), space_m, body, stop=True, first_turn=turn)
+    if loop is None:
+        return None
+    return lead + loop[0], lead_m + LEARN_M + loop[1], len(lead) - 1
 
 
 def plan(spec, car_pose, min_radius, *, body=None, max_entry_m=MAX_ENTRY_M, nozzle_x=None, info=None, first_line=False):

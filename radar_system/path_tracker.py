@@ -606,6 +606,7 @@ class PathTracker:
         self.approach_mps = None        # 离它 approach_zone_m 以内最多这么快（画线速度）
         self.runup_distance_m = 0.
         self.first_line = False         # 重启后第一条（规划时没有上一条线的换算，段上记 first_line）：这条线按没有记忆拟合
+        self.learn = False              # 开机第一条的空跑学换算段（route_plan 段上记 learn）：不喷，学到的交给画线那段开头
         self.paint_start_guard = None
         self._paint_start_beta_history = deque(maxlen=2048)
         self.reverse_runup = False
@@ -1653,6 +1654,12 @@ class PathTracker:
                 crab = guide.fit_crab()
                 if crab is not None:
                     align.update_crab(guide.token, self._imu_now, *crab)
+            elif (self.learn and align is not None and first.rtk_fit and guide.rtk_accepted and sigma is not None
+                    and align.better_than_carried(self._imu_now, sigma)):
+                # 空跑学换算那段只有几米，拟合还到不了能跨线带的程度（carry_fit_sigma_deg），但比手上带着的准：按拟合出的角度
+                # （不按限速跟的 β）连同误差记下，绕回来画线那段开头和双天线按误差加权（ImuFirstGuide.blend_start）
+                angle = guide.fit_angle()
+                align.update_line(guide.token, self._imu_now, guide.offset + (guide.beta if angle is None else angle), sigma)
             elif align is not None and (
                     first.rtk_trim and rtk_ok and guide.mode == 'rtk' and guide.travel >= first.fast_m
                     or not first.rtk_trim and not first.rtk_fit and guide.source == 'learned'):
@@ -2774,6 +2781,11 @@ class SectionTracker:
                 mark = getattr(sec, 'paint_from_m', 0.0)
                 if math.isfinite(mark) and 0 < mark <= sec.path.length:
                     tracker.integral_curve_from_m = mark
+            if getattr(sec, 'learn', False):
+                # 开机第一条空跑学换算（route_plan._learn_loop）：整段当助跑、按没有记忆拟合，不喷；学到的换算交给画线那段开头
+                tracker.first_line = True
+                tracker.learn = True
+                tracker.paint_from_m = sec.path.length
             self.trackers.append(tracker)
         self._set_continuations()
         self._set_approach()
