@@ -1182,11 +1182,11 @@ def _body_min_along(x, y, yaw, body, h0, x0, y0):
     return best
 
 
-def arc_entry(first, car, space_m, body=None, *, stop=False, first_turn=0):
+def arc_entry(first, car, space_m, body=None, *, split=False, first_turn=0):
     """圆弧进线：(分段, 接入路程米)；后方空地不够任何半径用时返回 None（调用方照原地转进线）。
 
-    stop（开机第一条空跑后绕回，_learn_loop）：圆弧开到助跑起点 G 停稳，再像原地转进线那样起步助跑（新的一段）；
-    G 不往线头挪（助跑照常 RUN_UP_M），放不下就 None。first_turn ±1：先往左 / 右转，整条后轴轨迹不过线到另一侧。"""
+    split（开机第一条空跑后绕回，_learn_loop）：圆弧到助跑起点 G 断开成新的一段（画线那段从 G 起，学到的换算从这里接上；
+    段与段相切、调用方标 continuous_after 不停车）；G 不往线头挪（助跑照常 RUN_UP_M），放不下就 None。first_turn ±1：先往左 / 右转，整条后轴轨迹不过线到另一侧。"""
     if space_m < ENTRY_ARC_MIN_SPACE_M - 1e-9:
         return None
     body = body or _default_body()
@@ -1196,7 +1196,7 @@ def arc_entry(first, car, space_m, body=None, *, stop=False, first_turn=0):
     goal = (gx, gy, h0)
     limit = min(_body_min_along(gx, gy, h0, body, h0, x0, y0) - (space_m - ENTRY_ARC_MARGIN_M),
                 _body_min_along(*car, body, h0, x0, y0))
-    shifts = [0.0] if stop else [
+    shifts = [0.0] if split else [
         i * ENTRY_ARC_SHIFT_STEP_M for i in range(int((run - ENTRY_ARC_MIN_STRAIGHT_M) / ENTRY_ARC_SHIFT_STEP_M + 1e-9) + 1)]
     for shift, radius in ((a, r) for a in shifts for r in ENTRY_ARC_RADII):
         goal = _offset((gx, gy), h0, shift) + (h0,)
@@ -1225,8 +1225,8 @@ def arc_entry(first, car, space_m, body=None, *, stop=False, first_turn=0):
         for length, k in way:
             out.add(1, length, k)
         out.pose = goal          # Dubins 终点已验算到 1e-6 以内；接着助跑，同一段不停车
-        if stop:
-            out.pivot(0.0)       # 空跑绕回：到 G 断开成新的一段（停稳、车头差不到 PIVOT_MIN_DEG 不转），站着起步助跑
+        if split:
+            out.pivot(0.0)       # 空跑绕回：到 G 断开成新的一段（相切，不转）
         out.add(1, run - shift, 0.0)
         for length, k in pieces:
             out.add(1, length, k)
@@ -1695,15 +1695,18 @@ def plan_current(spec, car_pose, min_radius, *, body=None, max_entry_m=MAX_ENTRY
     sections = _planned_sections(entry, route, 'route_'+run.kind+'_')
     if learn is not None:
         sections[learn].learn = True          # 空跑学换算；画线那段开头有学好的换算，不再按没有记忆
+        for sec in sections[learn:len(entry) - 1]:
+            sec.continuous_after = True       # 空跑 → 圆弧绕回 → 助跑画线一路不停车（相切、都往前；11-23 用户「中间不要停」）
     elif first_line and run.kind == 'path':
         sections[len(entry) - 1].first_line = True
     return (_circle_paint_end(sections, run) if run.kind == 'circle' else sections), entry_m + run_in
 
 
 # 开机第一条（没有学好的 IMU 换算，LineMission.first_line_no_memory）先在这条线上空跑学：从助跑起点 G 开过线头、再往前
-# LEARN_M 不喷，然后只往前按圆弧（arc_entry stop）往路线里面那一侧绕回 G、停稳，再正常助跑画整条。2026-11-23 用户：
-# 「允许开机第一段在两个点中间直走学习但不喷，学好后，再自动平滑继续喷」「必须在内学习」「空跑后，不要倒回来，圆弧接上」。
-# 仿真（48 次）第一条线头 0.3 m 最差 2.42 → 1.21–1.29 cm，和后面几条一样；圆弧直接接助跑不停车最差 3.06（出圆弧车头没稳）。
+# LEARN_M 不喷，然后只往前按圆弧往路线里面那一侧绕回 G，不停车接着助跑画整条。2026-11-23 用户：「允许开机第一段在两个点
+# 中间直走学习但不喷，学好后，再自动平滑继续喷」「必须在内学习」「空跑后，不要倒回来，圆弧接上」「丝滑转回来接上喷的线，
+# 中间不要停」。圆弧到 G 断开成单独一段（arc_entry split）：画线那段从 G 起用学到的换算；圆弧和助跑画线放在同一段时
+# 仿真第一条线头最差 3.06 cm。
 # 只往前绕回去整整转一圈：IMU 转角刻度误差（SCH16T 实测每圈约 −0.47°）由 ImuAlignment.scale 先验补（−0.0017，每圈 −0.61°）
 LEARN_M = rules.FIRST_LINE_LEARN_M
 INSIDE_MIN_M = 0.1             # 路线其余点的重心离第一条线不到这么远（单条线）：不挑哪一侧
@@ -1734,7 +1737,7 @@ def _learn_loop(first, car, entry_fn, nozzle_x, space_m, body, turn=0):
     x, y, yaw = start
     for length, k in run:
         x, y, yaw = advance(x, y, yaw, length, k)
-    loop = arc_entry(first, (x, y, yaw), space_m, body, stop=True, first_turn=turn)
+    loop = arc_entry(first, (x, y, yaw), space_m, body, split=True, first_turn=turn)
     if loop is None:
         return None
     return lead + loop[0], lead_m + LEARN_M + loop[1], len(lead) - 1
