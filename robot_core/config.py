@@ -7,7 +7,8 @@ from pathlib import Path
 
 DEFAULT_PATH = Path(__file__).with_name('robot_gen5.json')
 # 底盘驱动方式只有 differential：Gen5 两后轮差速、前面自由万向轮（能原地转）。
-# 旧阿克曼车（Wheeltec 底盘，robot.json）2026-11-23 用户「删阿克曼底盘的代码」后删了
+# 旧阿克曼车（Wheeltec 底盘）2026-11-23 用户「删阿克曼底盘的代码」后删了。robot.json 现在是 robot_gen5.json 的原样拷贝，
+# 只为车上已装版本的升级校验（f74ad8c7 及以前的 manage.verify 拿新发布里的 robot_core/robot.json 校验配置）；运行照旧读 robot_gen5.json
 DRIVE_TYPES = ('differential',)
 # 运动控制周期；传感器采样和状态上报使用各自的频率。
 CONTROL_HZ = 50.0
