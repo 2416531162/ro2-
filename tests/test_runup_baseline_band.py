@@ -1,5 +1,5 @@
-"""助跑 / 开喷前「卫星可信」按卫星可信的基线范围 0.35–0.45（用户 11-21 定的规则），学开头换算按 0.40–0.44
-（用户 2026-11-22「学开头换算还是按 0.40–0.44」，原 0.40–0.42）。
+"""助跑 / 开喷前「卫星可信」按卫星可信的基线范围 0.35–0.45（用户 11-21 定的规则），学开头换算按 0.40–0.45
+（用户 2026-11-22「学开头换算还是按 0.40–0.44」，原 0.40–0.42；11-23「需要放宽到 0.4 到 0.45」）。
 
 2026-11-22：Gen5 测向基线中位 0.418 m、σ 0.0035，23–51 % 的帧在 0.42 以上。原来助跑可信按 0.40–0.42（连 3 帧出界冻 1 s），
 助跑里卫星一半时间被挡、拟合攒不出点，起步锁住的角度误差（重启后第一条没有上一条线的记忆，测向误差 1.5°）
@@ -26,8 +26,11 @@ class RunupBaselineBand(unittest.TestCase):
         p = fused(tr)
         t = frames(tr, 1., [.418, .425, .426, .424, .425])      # 这台车常见：连着几帧 0.42 以上
         self.assertTrue(tr._runup_position_trusted(p))
-        self.assertTrue(tr._baseline_ok())                      # 学开头换算按 0.40–0.44：照样学
-        t = frames(tr, t, [.445, .446, .447])                   # 0.44 以上：卫星照样可信，开头换算不学
+        self.assertTrue(tr._baseline_ok())                      # 学开头换算按 0.40–0.45：照样学
+        t = frames(tr, t, [.445, .446, .449])                   # 0.44–0.45（11-23 放宽）：卫星可信，开头换算也学
+        self.assertTrue(tr._runup_position_trusted(p))
+        self.assertTrue(tr._baseline_ok())
+        t = frames(tr, t, [.395, .396, .397])                   # 0.40 以下：卫星照样可信，开头换算不学
         self.assertTrue(tr._runup_position_trusted(p))
         self.assertFalse(tr._baseline_ok())
         frames(tr, t, [.435, .44])
@@ -78,14 +81,14 @@ class RunupBaselineBand(unittest.TestCase):
             tr._straight_first(fused(tr, e=0.), .02, .3, 0., tr.path.pieces[0], 0., 0.)
         return g
 
-    def test_start_offset_learned_inside_040_044(self):
-        for length in (.425, .435, .439):                       # 这台车常见的 0.42 以上：照样学、锁住
+    def test_start_offset_learned_inside_040_045(self):
+        for length in (.425, .435, .439, .445, .449):                       # 这台车常见的 0.42 以上：照样学、锁住
             g = self.learn(length)
             self.assertTrue(g.locked, length)
             self.assertEqual(g.source, 'learned')
 
-    def test_start_offset_not_learned_outside_040_044(self):
-        for length in (.445, .395):                             # 卫星可信（0.35–0.45）但不在 0.40–0.44：不学
+    def test_start_offset_not_learned_outside_040_045(self):
+        for length in (.395, .38):                              # 卫星可信（0.35–0.45）但不在 0.40–0.45：不学
             g = self.learn(length)
             self.assertFalse(g.locked, length)
             self.assertIsNone(g.offset)

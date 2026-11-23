@@ -278,6 +278,9 @@ class ImuFirstConfig:
     # 10-06 那块坏区靠 σ > 2.5 cm（98%）照样挡住
     fit_max_pair_m: float = rules.FIT_MAX_PAIR_M
     fit_pair_settle_s: float = rules.FIT_PAIR_SETTLE_S
+    # 精度 ≤ 这个值的固定解一定采用（user_rules.RTK_ACCEPT_SIGMA_M，PathTracker._rtk_precise）。11-22 185721：σ ≤ 1.24 cm、
+    # 35 颗以上、两天线差 ≤ 1.9 cm，只因基线读 0.424（> 0.42）起步放行一直不过，整条喷线卫星一拍没用，草地上偏到 5.9 cm
+    fit_accept_sigma_m: float = rules.RTK_ACCEPT_SIGMA_M
     # 卫星数（主天线）：用户 10-06 晚定 20；10-08 用户改：低于 17 才不信。17–19 颗只在 σ ≤ fit_low_sats_max_sigma_m、
     # 两天线距离误差 < fit_low_sats_max_pair_m、固定解时照常信（10-06 16:32 那趟靠楼一侧主天线掉到 17–19 颗，σ ≤ 2.0 cm、
     # 两天线误差 ≤ 2.9 cm、一直固定解，卫星本来是好的，被 20 颗挡掉 18–26 m 没纠，按 IMU 偏了 2.5 cm）
@@ -352,7 +355,7 @@ class ImuFirstConfig:
                      'rejoin_m', 'rejoin_s', 'offset_reject_deg', 'gyro_max_deg_s', 'fit_bin_m', 'fit_noise_m',
                      'fit_prior_m', 'fit_prior_deg', 'jump_window_m', 'jump_slope_deg', 'fit_prior_min_deg',
                      'fit_prior_max_deg', 'carry_fit_sigma_deg', 'fit_rate_m', 'fit_beta_rate_deg', 'jump_accept_s', 'jump_accept_max_m',
-                     'fit_max_sigma_m', 'fit_max_pair_m', 'fit_settle_s', 'fit_pair_settle_s',
+                     'fit_max_sigma_m', 'fit_max_pair_m', 'fit_accept_sigma_m', 'fit_settle_s', 'fit_pair_settle_s',
                      'fit_low_sats_max_sigma_m', 'fit_low_sats_max_pair_m',
                      'antenna_pick_pair_m', 'antenna_agree_m', 'antenna_margin_m', 'antenna_fresh_s',
                      'runup_rtk_tau_m', 'runup_k_e', 'runup_max_bias_deg', 'runup_rate_deg_s', 'runup_target_accel_deg_s2', 'runup_blend_m',
@@ -934,10 +937,17 @@ class AlignmentConfig:
     （每转 +180° 约 −0.30°），两项一起拟合残差 0.38°；只按其中一项残差 0.9–1.0°。相邻两条线干净的 7 对：上一条线拟合好
     的 c 按校准带过掉头，留一法误差中位 0.23°、最大 0.40°；双天线开头学的中位 0.14°、最大 0.56°；两者平均 0.15°、0.24°。
     开头双天线只攒到 15–25 个样本的三趟（误差 0.45–0.86°），带过来的误差 0.14–0.39°。默认值取这批数据，车上按每条线
-    拟合好的 c 在线修正（卡尔曼，状态 [每分钟变多少, 每转 1 rad 变多少]）。"""
-    drift_deg_min: float = -0.07
+    拟合好的 c 在线修正（卡尔曼，状态 [每分钟变多少, 每转 1 rad 变多少]）。
+
+    scale 2026-11-23 −0.0017 → 0：Gen5 SCH16T 的转角刻度误差（实测 −0.00127，真转一圈多读 0.46°）标定在 IMU 固件参数里
+    （0x2012 陀螺 Z 刻度 −1270 ppm，user_rules.GEN5_IMU_YAW_SCALE_PPM），这里只剩标定残差，先验取 0、误差 scale_sigma 照旧。
+    模块没写这个值时真转一圈多读 0.46°，先验 0 就不补了。
+    drift_deg_min 同日 −0.07 → 0（用户「一起改成 0」）：−0.07 是 10 月旧 IMU（HDA536T）的；SCH16T 两次实测 c 随时间
+    +0.005 ± 0.034°/min（11-23，22.7 min）、+0.002 ± 0.026°/min（11-22 晚，11 min），即没有。只改刻度、留着 −0.07 时
+    11-23 的 13 次跨线带误差整体偏 +0.07°，两项都取 0 后 |平均| 0.10°、最大 0.37°、整体 +0.02°。误差 drift_sigma 照旧"""
+    drift_deg_min: float = 0.0
     drift_sigma_deg_min: float = 0.05
-    scale: float = -0.0017
+    scale: float = 0.0
     scale_sigma: float = 0.001
     walk_deg_sqrt_min: float = 0.10   # 模型以外的随机变化，°/√min
     # 每分钟变化量本身也会慢慢变（傍晚最后几分钟比平均快），°/min/√min。按 24 趟顺序回放：0 → 加权后开头误差中位 0.13° 最大

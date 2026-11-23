@@ -1325,7 +1325,8 @@ class PathTracker:
         nx,ny=self._straight_nozzle
         e+=(nx-self.cfg.track_x_m)*math.sin(heading)+ny*(math.cos(heading)-1.)
         guided=self._straight_guided
-        trusted=(self._runup_position_trusted(pose) and self._straight_guide is not None
+        # 精度够的固定解（_rtk_precise）也算可信：不然基线读数偏长时起步放行一直不过，卫星纠偏跟着整条线关着（185721）
+        trusted=((self._runup_position_trusted(pose) or self._rtk_precise(pose)) and self._straight_guide is not None
                  and self._straight_guide.rtk_accepted and self._fresh_straight_imu() is not None)
         beta=None if self._straight_guide is None else self._straight_guide.beta
         # 记录最近 0.75 m 的校准变化供复核。参数可随可靠观测继续更新；放行检查其位置/方向结果是否稳定一致。
@@ -1476,9 +1477,10 @@ class PathTracker:
     def _runup_position_trusted(self, pose):
         """助跑拟合比沿线拟合更严格：位置、测向均新鲜，当前帧也必须合格。
 
-        基线按卫星可信的范围（fit_min_baseline_m–fit_max_baseline_m，用户定的 0.35–0.45），0.40–0.44 只管学开头换算
+        基线按卫星可信的范围（fit_min_baseline_m–fit_max_baseline_m，用户定的 0.35–0.45），0.40–0.45 只管学开头换算
         （2026-11-22：Gen5 基线中位 0.418、σ 0.0035，23–51 % 的帧 > 0.42，原来按 0.40–0.42 助跑里卫星一半时间被挡，
-        起步锁住的角度误差 1.5° 一直带进线头：201657 线头 −3.3 cm、全线 4.9 cm）。"""
+        起步锁住的角度误差 1.5° 一直带进线头：201657 线头 −3.3 cm、全线 4.9 cm）。
+        这里不过时，精度够的固定解照样采用（_rtk_precise）。"""
         if not position_observation_allowed(pose):return False
         first = self.cfg.straight_imu_first
         if getattr(pose, 'single_antenna', False):
@@ -1504,6 +1506,25 @@ class PathTracker:
         sigma, sats, pair, fixed = self._quality
         return (self._quality_good(sigma, sats, pair, fixed)
                 and pair is not None and math.isfinite(pair) and pair <= first.fit_max_pair_m)
+
+    def _rtk_precise(self, pose):
+        """这一拍卫星精度够，一定采用（2026-11-23 用户「如果精度 ≤2cm，应该都被采用」，user_rules.RTK_ACCEPT_SIGMA_M）：
+        融合位置可用、固定解，0.5 s 内的主天线帧 σ ≤ fit_accept_sigma_m、卫星数 ≥ fit_min_sats、两天线距离误差
+        ≤ fit_max_pair_m（没对齐不看）。成立时测向基线带、起步放行（_runup_position_trusted）、积分冻结、不合格后的
+        等待（_rtk_quality_ok）都不挡卫星纠偏；跳点门照旧。
+        11-22 185721：σ ≤ 1.24 cm、35 颗以上、两天线差 ≤ 1.9 cm，基线读 0.424 起步放行一直不过，整条喷线卫星没用上。"""
+        first = self.cfg.straight_imu_first
+        if (first is None or self._quality is None or self._imu_now is None or self._quality_frame_t is None
+                or not 0.0 <= self._imu_now - self._quality_frame_t <= 0.5
+                or getattr(pose, 'quality', None) != 'RTK_FIXED' or not position_observation_allowed(pose)):
+            return False
+        sigma, sats, pair, fixed = self._quality
+        try:
+            return (fixed is not False and math.isfinite(sigma) and sigma <= first.fit_accept_sigma_m
+                    and sats is not None and sats >= first.fit_min_sats
+                    and (pair is None or not math.isfinite(pair) or pair <= first.fit_max_pair_m))
+        except TypeError:
+            return False
 
     def _straight_eligible(self, piece, speed):
         """这拍能不能（继续）交给直线内环：(可以, 助跑还在等收稳)。"""
@@ -1609,18 +1630,20 @@ class PathTracker:
             nx, ny = self._straight_nozzle
             h = rel + guide.beta
             measured = base_lat + (nx-cfg.track_x_m)*math.sin(h) + ny*(math.cos(h)-1.0)
-            # 卫星纠偏：拟合按用户定的可信规则（固定解 + 基线 0.35–0.45），观测器老办法仍按 min/max_baseline_m（0.40–0.44）
+            # 卫星纠偏：拟合按用户定的可信规则（固定解 + 基线 0.35–0.45），观测器老办法仍按 min/max_baseline_m（0.40–0.45）
             # 助跑冻结的是横偏积分，不是不许用可信位置拟合；否则起步锁住的角度误差一直推到线头。
             # 起喷前积分按设计冻结，正常融合校正也可冻结积分；二者都不应阻断可信位置拟合。
             # 所有直线助跑共用当前质量、时效及跳点检查，不能只给倒车接入放行。
+            # 精度够（_rtk_precise，σ ≤ 2 cm 固定解）一定采用：上面这些门都不挡，只剩跳点门（11-23 用户）
+            precise = first.rtk_fit and self._rtk_precise(pose)
             starting = (st.s < self.paint_from_m or self.paint_start_guard is not None
                         and not self.paint_start_guard.started
                         or self._entry_speed_active and not self._entry_ramp_released)
-            position_ok = (self._runup_position_trusted(pose)
-                           if self.runup_speed_mps is not None and starting
-                           else not st.integral_frozen)
-            rtk_ok = position_ok and (self._baseline_ok(fit=True) and self._rtk_quality_ok() if first.rtk_fit
-                                      else baseline_ok)
+            position_ok = precise or (self._runup_position_trusted(pose)
+                                      if self.runup_speed_mps is not None and starting
+                                      else not st.integral_frozen)
+            rtk_ok = position_ok and (precise or (self._baseline_ok(fit=True) and self._rtk_quality_ok() if first.rtk_fit
+                                                  else baseline_ok))
             # 融合已经改用副天线定位（主天线被污染或没固定，gnss_fusion FusionConfig.secondary_*）：融合位置就是好的那根，
             # 两天线距离误差、测向基线、主天线接收机质量都不挡，也不再另选天线
             fused_second = first.rtk_fit and getattr(pose, 'position_antenna', 'main') == 'second'
@@ -1631,7 +1654,7 @@ class PathTracker:
                 # 两根天线对不上、有一根和 IMU 推算对得上：用它，两天线的距离误差、测向基线都不再挡（2026-11-21 用户：
                 # 「左卫星被污染了，右卫星其实还是好的，但是基线已经 0.3 m 了，我认为还能继续用」——基线出界正是因为另一根坏了，
                 # 测向照样不用、车头靠 IMU）；接收机质量照常要合格
-                rtk_ok = position_ok and self._receiver_quality_ok()
+                rtk_ok = position_ok and (precise or self._receiver_quality_ok())
                 measured += pick[1]
             # 用副天线时，融合位置（跟着被干扰的主天线）比副天线多偏的那段沿线法向挪回去，报给 app（地图喷线、作业报告）
             self._antenna['shift'] = None if pick is None or pick[0] != 'second' else (
@@ -1839,12 +1862,16 @@ class PathTracker:
         baseline_ok = self._baseline_ok()
         # _arc_first 在 _control 之前执行，不能读取上一拍的 integral_frozen。
         # 定位退化时连同沿圆进度、轮速比例及航向换算一起停止学习，不能只冻结径向修正。
-        rtk_ok = lateral_integral_allowed(pose) and self._baseline_ok(fit=True) and self._rtk_quality_ok()
-        heading_ok = baseline_ok and rtk_ok and self._arc_hold is None
+        # 位置纠偏：精度够的固定解（_rtk_precise，σ ≤ 2 cm）不看测向基线带和不合格后的等待（11-23 用户「都被采用」）；
+        # 航向换算 heading_ok 不是位置采用，照旧要窄带基线 + 长期质量门槛
+        precise = self._rtk_precise(pose)
+        quality_ok = self._baseline_ok(fit=True) and self._rtk_quality_ok()
+        rtk_ok = lateral_integral_allowed(pose) and (precise or quality_ok)
+        heading_ok = baseline_ok and lateral_integral_allowed(pose) and quality_ok and self._arc_hold is None
         # 径向恢复使用成对位置的持续确认；航向换算仍保留上面的长期质量门槛。
         partial_pair_ok=partial is not None and self._partial_arc_pair_ok()
         if partial is not None:
-            rtk_ok=lateral_integral_allowed(pose) and self._baseline_ok(fit=True) and partial_pair_ok
+            rtk_ok=lateral_integral_allowed(pose) and (precise or self._baseline_ok(fit=True)) and partial_pair_ok
         difference = wrap(pose.yaw - imu_yaw)
         if not guide.locked:
             if heading_ok:

@@ -1707,7 +1707,7 @@ def plan_current(spec, car_pose, min_radius, *, body=None, max_entry_m=MAX_ENTRY
 # 中间直走学习但不喷，学好后，再自动平滑继续喷」「必须在内学习」「空跑后，不要倒回来，圆弧接上」「丝滑转回来接上喷的线，
 # 中间不要停」。圆弧到 G 断开成单独一段（arc_entry split）：画线那段从 G 起用学到的换算；圆弧和助跑画线放在同一段时
 # 仿真第一条线头最差 3.06 cm。
-# 只往前绕回去整整转一圈：IMU 转角刻度误差（SCH16T 实测每圈约 −0.47°）由 ImuAlignment.scale 先验补（−0.0017，每圈 −0.61°）
+# 只往前绕回去整整转一圈：IMU 转角刻度误差（SCH16T 实测每圈多读约 0.46°）已标定在 IMU 固件参数里（0x2012 −1270 ppm）
 LEARN_M = rules.FIRST_LINE_LEARN_M
 INSIDE_MIN_M = 0.1             # 路线其余点的重心离第一条线不到这么远（单条线）：不挑哪一侧
 
