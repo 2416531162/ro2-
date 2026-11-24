@@ -106,6 +106,12 @@ REENTRY_STILL_S = rules.REENTRY_STILL_S  # 车速、转速都低于下面两个�
 REENTRY_STILL_MPS = 0.03
 REENTRY_STILL_DEG_S = 2.0
 REENTRY_WAIT_S = 120.0
+# IMU 换算跨线带过去（line_cascade.ImuAlignment.feed_imu still）：两轮车速 < STILL_WHEEL_MPS、轮子算的转速 < STILL_WHEEL_DEG_S
+# 持续 STILL_HOLD_S（轮速这么久内来过）才算车停着——这时 IMU 偏航的变化是 IMU 自己的（11-24 固件静止修正一下拨了 +4.12°）
+STILL_WHEEL_MPS = 0.01
+STILL_WHEEL_DEG_S = 0.5
+STILL_HOLD_S = 0.5
+STILL_WHEEL_FRESH_S = 0.3
 REENTRY_WAIT_NOTICE = '偏离接入路线，已停车，等定位对齐后从最近处重新接入'
 REENTRY_NOTICE = '已从当前位置重新接入（接入 %.1f m，第 %d 次）'
 # 起喷门槛没过（paint_quality.PAINT_START_MAX_OFFSET_M）：车照走、先不喷
@@ -262,6 +268,8 @@ class LineMission:
         self._rtk_quality = None        # 最近一帧主天线定位 (测量时刻, σ m, 卫星数, 两天线距离误差 m, 固定解)：直线卫星纠偏只在合格时用
         self._fix2 = None               # 最近一帧副天线 (测量时刻, 本地 x, y, 固定解, 两天线标称距离 m)：两根对不上时直线选天线用
         self._imu_alignment = ImuAlignment()    # 上一条线对好的 IMU → 地面方向，开头基线不对时借（跨作业保留）
+        self._wheel_still = None        # 轮子说车停着 (从什么时候起, 最近一帧轮速时刻)；在动为 None
+        self._wheel_t = None
         self._fix2_t = None             # 副天线最近一次固定解的时刻
         self._usable_since = None       # 暂停中定位从什么时候起一直可用（自动继续用）
         self._resume_failed = None      # 自动继续时起步检查没过的原因代码（报给操作员）
@@ -429,10 +437,33 @@ class LineMission:
         if yaw is not None and math.isfinite(yaw) and math.isfinite(gyro_z):
             self._imu = (t, yaw, gyro_z)
             self._latency.on_imu(t, yaw, gyro_z)
-            self._imu_alignment.feed_imu(t, yaw)   # 累计转角：换算跨线带过去时按转角校准
+            # 累计转角：换算跨线带过去时按转角校准；车停着时偏航的变化是 IMU 自己的，换算跟着挪（ImuAlignment.feed_imu）
+            self._imu_alignment.feed_imu(t, yaw, still=self._still(t, gyro_z))
+
+    def _still(self, t, gyro_z):
+        """车停着：轮子说停够 STILL_HOLD_S（轮速 STILL_WHEEL_FRESH_S 内来过）、陀螺 < still_max_gyro_deg_s。"""
+        w = self._wheel_still
+        return (w is not None and self._wheel_t is not None and abs(t - self._wheel_t) <= STILL_WHEEL_FRESH_S
+                and t - w >= STILL_HOLD_S and abs(gyro_z) < math.radians(self._imu_alignment.cfg.still_max_gyro_deg_s))
+
+    def _note_wheel(self, t, speed, yaw_rate):
+        try:
+            if not (math.isfinite(t) and math.isfinite(speed) and math.isfinite(yaw_rate)):
+                self._wheel_still = None
+                return
+        except TypeError:
+            self._wheel_still = None
+            return
+        if abs(speed) < STILL_WHEEL_MPS and abs(yaw_rate) < math.radians(STILL_WHEEL_DEG_S):
+            if self._wheel_still is None:
+                self._wheel_still = t
+        else:
+            self._wheel_still = None
+        self._wheel_t = t if self._wheel_t is None else max(t, self._wheel_t)
 
     def on_wheel(self, t, speed, yaw_rate):
         self.fusion.add_wheel(self.samples.WheelSample(t=t, speed=speed, yaw_rate=yaw_rate))
+        self._note_wheel(t, speed, yaw_rate)
         before = self._latency.value
         self._latency.on_wheel(t, speed)
         self._save_latency(before)
@@ -443,6 +474,12 @@ class LineMission:
 
     def on_wheel_motion(self, sample):
         self.fusion.add_wheel(sample)
+        end_t = getattr(sample, 'end_t', None)
+        if end_t is None:
+            self._note_wheel(sample.t, sample.speed, sample.yaw_rate)
+        else:
+            self._note_wheel(end_t, sample.end_speed if sample.end_speed is not None else sample.speed,
+                             sample.end_yaw_rate if sample.end_yaw_rate is not None else sample.yaw_rate)
         before = self._latency.value
         self._latency.on_wheel(sample.t, sample.speed, getattr(sample, 'end_t', None), getattr(sample, 'end_speed', None))
         self._save_latency(before)

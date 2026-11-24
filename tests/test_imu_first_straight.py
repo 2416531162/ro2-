@@ -437,12 +437,12 @@ class LongLineDrift(unittest.TestCase):
 
 
 class CarryAcrossLines(unittest.TestCase):
-    """上一条线卫星拟合好的换算按时间、转角校准带过来，和开头双天线测的加权（10-06 傍晚：掉头后双天线只攒到几个样本，
-    开头换算错 0.45–0.86°）。"""
+    """上一条线卫星拟合好的换算带过来（不学、不推算，11-24 用户「删掉学习」），和开头双天线测的加权（10-06 傍晚：掉头后
+    双天线只攒到几个样本，开头换算错 0.45–0.86°）。"""
 
     def lines(self, d_deg_min, k, n=12, sigma_deg=.02, dt_min=1.2, turn=math.pi, seed=1):
         rng = __import__('random').Random(seed)
-        al, t, yaw, c = ImuAlignment(AlignmentConfig(drift_deg_min=0., scale=0.)), 0., 0., -.25
+        al, t, yaw, c = ImuAlignment(AlignmentConfig()), 0., 0., -.25
         errs = []
         al.feed_imu(t, yaw)
         for i in range(n):
@@ -460,12 +460,20 @@ class CarryAcrossLines(unittest.TestCase):
                 al.feed_imu(t, wrap(yaw))
         return al, errs
 
-    def test_calibration_learns_drift_and_scale(self):
-        al, errs = self.lines(-.1, .002)
-        self.assertAlmostEqual(math.degrees(al.x[0]), -.1, delta=.04)
-        self.assertAlmostEqual(-al.x[1], .002, delta=.0008)  # c 随转角变 −k：IMU 多读了 k
-        self.assertLess(max(errs[-4:]), .08)
-        self.assertGreater(errs[0], .25)                     # 校准前带过来差得多
+    def test_carries_the_last_lines_c_as_is(self):
+        # SCH16T：c 不随时间、转角变（刻度标在 IMU 固件里）——带过来的就是上一条线拟合的，误差只剩拟合噪声
+        al, errs = self.lines(0., 0.)
+        self.assertLess(max(errs), .1)
+        # 不学：两条线之间 c 变了（11-24 那种 IMU 自己拨了一下）也不推算到下一条，带过来的仍是上一条线的值
+        al = ImuAlignment()
+        al.feed_imu(0., 0.)
+        for t, c in ((0., -155.95), (138., -154.17), (300., -158.05)):
+            al.feed_imu(t, 0.)
+            tok = al.begin_line()
+            al.update_line(tok, t, c * DEG, .05 * DEG)
+        al.feed_imu(300.02, 0.)
+        al.begin_line()
+        self.assertAlmostEqual(math.degrees(al.predict(300.02)[0]), -158.05, places=9)
 
     def test_imu_gap_breaks_the_carry(self):
         al = ImuAlignment()
@@ -506,7 +514,7 @@ class CarryAcrossLines(unittest.TestCase):
         bad = lambda t: (.04, 16, .06) if t < 15. else (.015, 28, .005)        # noqa: E731
         worst = {}
         for carry in (True, False):
-            al = ImuAlignment(AlignmentConfig(drift_deg_min=0., scale=0.))
+            al = ImuAlignment(AlignmentConfig())
             tr, rows, hold = closed_loop('imu_fit', dual_bias_deg=0., alignment=al, length=40., seconds=70., imu_drift_deg_min=-.4)
             self.assertEqual(tr.st.state, 'DONE')
             self.assertLess(abs(math.degrees(tr._straight_guide.fit_rate()[0] if tr._straight_guide.locked else 0.)), 1.)
@@ -519,7 +527,7 @@ class CarryAcrossLines(unittest.TestCase):
         self.assertGreater(worst[False], worst[True] * 1.5)
 
     def test_second_line_starts_with_the_first_lines_fitted_conversion(self):
-        al = ImuAlignment(AlignmentConfig(drift_deg_min=0., scale=0.))
+        al = ImuAlignment(AlignmentConfig())
         tr, rows, hold = closed_loop('imu_fit', dual_bias_deg=.0, alignment=al)
         self.assertEqual(tr.st.state, 'DONE')
         # 第二条线：双天线偏 0.9°，开头 2 s 基线出界（只攒到几个样本）——没有带过来的会先往外偏

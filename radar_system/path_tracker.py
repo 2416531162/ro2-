@@ -677,6 +677,7 @@ class PathTracker:
         self._secondary = None          # 副天线最近一帧 (测量时刻, x, y, 固定解, 车体系杠杆臂 (前, 左))
         self._primary = None            # 主天线同样保存原始坐标，可靠整圆观测不再叠加融合位置的滞后。
         self._quality = None            # 最近一帧 (σ m, 卫星数, 两天线距离误差 m 或 None, 固定解 True/False 或 None)
+        self._sigma_lp = None           # σ 低通（ImuFirstConfig.poor_sky_sigma_tau_s，单帧先夹到 5 cm），m：楼下模式用
         self._imu_alignment = None      # 任务层的 line_cascade.ImuAlignment：上一条线对好的角度
         self._reset_straight()
         self._reset_arc()
@@ -844,8 +845,16 @@ class PathTracker:
         try:
             if first is None or not math.isfinite(t) or self._quality_frame_t is not None and t <= self._quality_frame_t:
                 return
+            previous_t = self._quality_frame_t
             self._quality_frame_t = t
             self._quality = (sigma_m, sats, pair_m, fixed)
+            if math.isfinite(sigma_m):
+                value = min(sigma_m, 0.05)
+                if self._sigma_lp is None or previous_t is None:
+                    self._sigma_lp = value
+                else:
+                    k = min(1.0, (t - previous_t) / first.poor_sky_sigma_tau_s)
+                    self._sigma_lp += k * (value - self._sigma_lp)
             receiver_bad = not self._quality_good(sigma_m, sats, pair_m, fixed, pair_required=False)
             self._receiver_bad_n = self._receiver_bad_n + 1 if receiver_bad else 0
             if self._receiver_bad_n >= first.fit_quality_frames:
@@ -1662,6 +1671,9 @@ class PathTracker:
             self._antenna['shift_t'] = self._imu_now
             # 草地模式（ImuFirstConfig.grass_*）：电流认出草地时，线头段之后（同 paint_pull 过渡）拟合角度跟侧滑跟得快些
             guide.grass_weight = self._grass_weight(pose, dt, piece)
+            # 楼下模式（ImuFirstConfig.poor_sky_*）：σ 低通超过门槛、不是草地，这条线靠 IMU 和带过来的角度走
+            guide.set_poor_sky(self._sigma_lp is not None and self._sigma_lp > first.poor_sky_sigma_m,
+                               bool(self._ground is not None and self._ground.grass))
             # steering：IMU 已经在开（上一拍权重 > 0）；rtk_trim、rtk_fit 都关时这以后卫星不再修正
             guide.update(measured, rel, max(0.0, pose.speed)*dt, dt, (nx, ny), rtk_ok, fast=st.s < self.paint_from_m,
                          steering=self._straight_weight > 0.0, roll=self._roll_now(dt))
@@ -1728,9 +1740,15 @@ class PathTracker:
         previous_target = self._straight_target
         # 纠偏增益、限幅、目标角速度/加速度与位置观察器一起连续交接，避免开喷那拍突然松手。
         along = self._paint_along(piece)
-        pull = paint_pull(first, along)
-        boost = self._pull_boost.update(guide.e, guide.rtk_accepted and guide.mode == 'rtk', max(0.0, pose.speed)*dt)
-        pull = self._pull_boost.limit(pull)
+        if guide.poor_sky:
+            # 楼下模式：线头段之后不往回拉（× poor_sky_pull_scale），加强往回拉不开
+            pull = paint_pull(first, along, first.poor_sky_pull_scale)
+            self._pull_boost.reset()
+            boost = False
+        else:
+            pull = paint_pull(first, along)
+            boost = self._pull_boost.update(guide.e, guide.rtk_accepted and guide.mode == 'rtk', max(0.0, pose.speed)*dt)
+            pull = self._pull_boost.limit(pull)
         self._straight_target, self._straight_bias, aligning, self._straight_aligned = imu_first_target(
             first, guide, self._straight_target, piece.yaw, dt,cfg.straight_target_rate_deg_s,
             CascadeConfig.align_deg, self._straight_aligned, pull=pull,entry_weight=entry_weight,
@@ -1763,6 +1781,7 @@ class PathTracker:
             grass=bool(self._ground is not None and self._ground.grass),
             ground_a=None if self._ground is None or self._ground.median is None else round(self._ground.median, 2),
             grass_weight=round(guide.grass_weight, 4),
+            sigma_lp_cm=None if self._sigma_lp is None else round(100 * self._sigma_lp, 3),
             target_rate_deg_s=math.degrees(self._straight_target_rate), aligning=aligning, baseline_ok=baseline_ok,
             outer_e=guide.e, outer_e_rtk=measured, inner_wz=inner_w, legacy_wz=legacy_w, final_wz=output,
             **guide.status(), **self._antenna_status(), **self._straight_core.status(),

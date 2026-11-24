@@ -349,6 +349,27 @@ class ImuFirstConfig:
     grass_min_speed_mps: float = rules.GRASS_MIN_SPEED_MPS
     grass_current_fresh_s: float = 0.5
     grass_fit_walk_b_deg: float = 0.1
+    # 楼下模式（2026-11-24 用户「写补丁先仿真」，user_rules.POOR_SKY_*）：楼下卫星被楼面反射，用上的星从 40 掉到 24、σ 1.25 →
+    # 1.6–1.9 cm，卫星位置连着几米偏 1–1.5 cm；车跟着拉，平地直线鼓 1.6–4.2 cm（IMU 本身是直的）。σ（poor_sky_sigma_tau_s
+    # 低通）> poor_sky_sigma_m、不是草地：这条直线进楼下模式（一条线里进了就不退，除非下面的出口）——线头段之后不往回拉
+    # （paint_pull 的线头后部分 × poor_sky_pull_scale，加强往回拉不开），开头 fit_start_m 以后拟合角度用到车头上每米最多改
+    # poor_sky_beta_rate_deg（开头照常 fit_start_beta_rate_deg：带过来的角度有错在这几米里按卫星对掉），真偏 / 位置跟随门槛
+    # 放到 poor_sky_follow_e_m。线头段照旧。
+    # 出口（这条线退回平常、不再进）：拟合角度和正在用的差 > max(poor_sky_exit_deg, poor_sky_exit_sigma × 拟合误差)；
+    # 可信卫星说喷头同一边偏 > poor_sky_exit_e_m 走满 poor_sky_exit_m（车真偏了）；认出草地。
+    # 回放 11-24 楼下 6 条 × 4（车端真实代码，带过来角度误差 ±0.08°，user_rules.POOR_SKY_*）：鼓包 3.28 → 1.72 cm，
+    # 最大 2.43 → 2.50 cm，线头不变。开头也放慢（0.1°/m）鼓包 1.9、最差 6.6；出口 4 cm 楼下卫星自己偏就误退，鼓包 2.1–2.4。
+    # 6 m 后的角度限速 0.02 → 0.08°/m（11-24 晚）：0.02 时记忆错、侧滑时线斜着走，回放见 user_rules.POOR_SKY_BETA_RATE_DEG
+    poor_sky_enabled: bool = True
+    poor_sky_sigma_m: float = rules.POOR_SKY_SIGMA_M
+    poor_sky_sigma_tau_s: float = 2.0
+    poor_sky_pull_scale: float = rules.POOR_SKY_PULL_SCALE
+    poor_sky_beta_rate_deg: float = rules.POOR_SKY_BETA_RATE_DEG
+    poor_sky_follow_e_m: float = rules.POOR_SKY_EXIT_E_M
+    poor_sky_exit_deg: float = rules.POOR_SKY_EXIT_DEG
+    poor_sky_exit_sigma: float = 3.0
+    poor_sky_exit_e_m: float = rules.POOR_SKY_EXIT_E_M
+    poor_sky_exit_m: float = rules.PERSIST_M
 
     def __post_init__(self):
         for name in ('observer_m', 'fast_observer_m', 'max_heading_fix_deg', 'k_e', 'max_bias_deg', 'rate_deg_s', 'jump_m',
@@ -365,12 +386,18 @@ class ImuFirstConfig:
                      'head_k_e', 'head_max_bias_deg', 'crab_prior_sigma', 'crab_max', 'crab_roll_tau_s',
                      'crab_max_roll_deg', 'crab_roll_fresh_s', 'boost_e_m', 'boost_release_e_m', 'boost_persist_m',
                      'boost_max_bias_deg', 'grass_window_m', 'grass_on_a', 'grass_off_a', 'grass_min_speed_mps',
-                     'grass_current_fresh_s', 'grass_fit_walk_b_deg'):
+                     'grass_current_fresh_s', 'grass_fit_walk_b_deg', 'poor_sky_sigma_m', 'poor_sky_sigma_tau_s',
+                     'poor_sky_beta_rate_deg', 'poor_sky_follow_e_m', 'poor_sky_exit_deg',
+                     'poor_sky_exit_sigma', 'poor_sky_exit_e_m', 'poor_sky_exit_m'):
             value = getattr(self, name)
             if not math.isfinite(value) or value <= 0:
                 raise ValueError(name + ' 必须是有限正数')
         if type(self.grass_enabled) is not bool:
             raise ValueError('grass_enabled 必须是 True 或 False')
+        if type(self.poor_sky_enabled) is not bool:
+            raise ValueError('poor_sky_enabled 必须是 True 或 False')
+        if not (math.isfinite(self.poor_sky_pull_scale) and 0.0 <= self.poor_sky_pull_scale <= 1.0):
+            raise ValueError('poor_sky_pull_scale 必须在 0..1')
         if self.grass_off_a > self.grass_on_a:
             raise ValueError('grass_off_a 不能大于 grass_on_a')
         if not math.isfinite(self.crab_prior) or abs(self.crab_prior) > self.crab_max:
@@ -454,6 +481,29 @@ class ImuFirstGuide:
         self._position_confirmed_m = 0.0
         self._position_correction = 0.0
         self.grass_weight = 0.0      # 草地模式权重 0..1（跟踪器每拍给，见 ImuFirstConfig.grass_*）：拟合角度游走往 grass_fit_walk_b_deg 放
+        self.poor_sky = False        # 楼下模式（ImuFirstConfig.poor_sky_*）：这条线进了就不退，除非出口
+        self.poor_sky_exit = None    # 退出的原因：angle 角度对不上 / offset 车真偏了 / grass 草地；退了这条线不再进
+        self._poor_far = (0, 0.0)    # 楼下模式里可信卫星说喷头同一边偏超过 poor_sky_exit_e_m 的 (边, 走了多远)
+
+    def set_poor_sky(self, poor, grass):
+        """跟踪器每拍给：poor 卫星差（σ 低通超过 poor_sky_sigma_m），grass 认出草地。见 ImuFirstConfig.poor_sky_*。"""
+        if not self.cfg.poor_sky_enabled or self.poor_sky_exit is not None:
+            return
+        if grass:
+            if self.poor_sky:
+                self._leave_poor_sky('grass')
+            return
+        if poor:
+            self.poor_sky = True
+
+    def _leave_poor_sky(self, reason):
+        self.poor_sky = False
+        self.poor_sky_exit = reason
+
+    def _persist_e_m(self):
+        """真偏（_persist_check）门槛：楼下模式放到 poor_sky_follow_e_m。"""
+        cfg = self.cfg
+        return max(cfg.persist_e_m, cfg.poor_sky_follow_e_m) if self.poor_sky else cfg.persist_e_m
 
     def _walk_b(self):
         """拟合角度 b 的随机游走，rad/√m：平地 fit_walk_b_deg，草地按 grass_weight 放到 grass_fit_walk_b_deg。"""
@@ -760,7 +810,14 @@ class ImuFirstGuide:
         f['c'] += max(-cfg.fit_rate_m * step, min(cfg.fit_rate_m * step, c_now - f['c']))
         enough = self.fit_points * cfg.fit_bin_m >= cfg.fit_start_points_m - 1e-9
         start = u < cfg.fit_start_m and enough
+        if self.poor_sky and enough:
+            # 楼下模式出口：拟合出的角度和正在用的差太多（带过来的角度错了），退回平常按 fit_*_beta_rate 跟
+            sb = math.sqrt(max(0.0, f['P'][1][1]))
+            if abs(b_now - f['b']) > max(math.sin(cfg.poor_sky_exit_deg * DEG), cfg.poor_sky_exit_sigma * sb):
+                self._leave_poor_sky('angle')
         rate = cfg.fit_start_beta_rate_deg if start else cfg.fit_beta_rate_deg
+        if self.poor_sky and not start and u >= cfg.fit_start_m:
+            rate = cfg.poor_sky_beta_rate_deg
         if self._runup and enough and self.no_memory:
             rate = max(rate, cfg.fit_runup_beta_rate_deg)   # 没有记忆：助跑里不喷，角度按卫星轨迹尽快用上
         db = rate * DEG * step
@@ -768,6 +825,13 @@ class ImuFirstGuide:
         self.beta = math.asin(max(-lim, min(lim, f['b'])))
         self.fit_e = base + f['c']
         self.e = self._follow_position(measured, rel, distance, nozzle)
+        if self.poor_sky and self.rtk_accepted and not self.fast:
+            # 楼下模式出口：可信卫星说喷头同一边偏超过 poor_sky_exit_e_m 走满 poor_sky_exit_m（车真偏了，要往回拉）
+            side = 0 if abs(measured) <= cfg.poor_sky_exit_e_m else (1 if measured > 0 else -1)
+            far = self._poor_far[1] + step if side and side == self._poor_far[0] else (step if side else 0.0)
+            self._poor_far = (side, far)
+            if side and far >= cfg.poor_sky_exit_m - 1e-9:
+                self._leave_poor_sky('offset')
         return self.e
 
     def _follow_position(self, measured, rel, distance, nozzle):
@@ -778,7 +842,8 @@ class ImuFirstGuide:
         """
         cfg, step = self.cfg, abs(distance)
         sign = 1 if measured > 0.0 else -1
-        qualified = self.rtk_accepted and not self.fast and abs(measured) > cfg.position_follow_min_e_m
+        min_e = max(cfg.position_follow_min_e_m, cfg.poor_sky_follow_e_m) if self.poor_sky else cfg.position_follow_min_e_m
+        qualified = self.rtk_accepted and not self.fast and abs(measured) > min_e
         if qualified:
             if sign != self._position_sign:
                 self._position_confirmed_m = 0.0
@@ -846,12 +911,12 @@ class ImuFirstGuide:
         横向位置台阶不证明航向有误，不同时放大角度不确定度；角度由后续连续观测的斜率学习。
         这一点起拟合跟上（见 ImuFirstConfig.persist_m）。10-07 回放：残差在 1.0–1.5 cm 之间晃，逐点都要超 1 cm 会被
         0.99 断开，所以按平均。"""
-        cfg = self.cfg
+        cfg, pe = self.cfg, self._persist_e_m()
         r = z - self._fit_now(hu, ph)[0]
         p = self._persist
-        if abs(r) <= 0.5 * cfg.persist_e_m or p and (r > 0) != (p[-1][1] > 0):
+        if abs(r) <= 0.5 * pe or p and (r > 0) != (p[-1][1] > 0):
             p = self._persist = None
-        if abs(r) <= 0.5 * cfg.persist_e_m:
+        if abs(r) <= 0.5 * pe:
             return
         if p is None:
             p = self._persist = deque()
@@ -859,7 +924,7 @@ class ImuFirstGuide:
         while len(p) > 1 and hu - p[1][0] >= cfg.persist_m - 1e-9:
             p.popleft()                                  # 只留最近 persist_m 的点
         mean = sum(v for _, v in p) / len(p)
-        if hu - p[0][0] >= cfg.persist_m - 1e-9 and abs(mean) > cfg.persist_e_m:
+        if hu - p[0][0] >= cfg.persist_m - 1e-9 and abs(mean) > pe:
             P = self._fit['P']
             P[0][0] += mean * mean
             self.persists += 1
@@ -926,33 +991,26 @@ class ImuFirstGuide:
                     first_start_dual_deg=deg((self.start or {}).get('dual')),
                     first_start_carried_deg=deg((self.start or {}).get('carried')),
                     first_start_sigma_deg=deg((self.start or {}).get('sigma')),
-                    first_start_weight=None if self.start is None else round(self.start['weight'], 3))
+                    first_start_weight=None if self.start is None else round(self.start['weight'], 3),
+                    first_poor_sky=self.poor_sky, first_poor_sky_exit=self.poor_sky_exit)
 
 
 @dataclass(frozen=True)
 class AlignmentConfig:
-    """IMU → 地面方向换算 c（真实车头 − IMU 偏航）跨线带过去的校准（ImuAlignment）。
+    """IMU → 地面方向换算 c（真实车头 − IMU 偏航）跨线带过去（ImuAlignment）：只带上一条线卫星拟合好的 c，不学、不推算。
 
-    2026-10-06 傍晚实车 4094cc78 的 17 趟（卫星拟合充分）：c 随时间变约 −0.07°/min，随 IMU 累计转角变约 −0.17%
-    （每转 +180° 约 −0.30°），两项一起拟合残差 0.38°；只按其中一项残差 0.9–1.0°。相邻两条线干净的 7 对：上一条线拟合好
-    的 c 按校准带过掉头，留一法误差中位 0.23°、最大 0.40°；双天线开头学的中位 0.14°、最大 0.56°；两者平均 0.15°、0.24°。
-    开头双天线只攒到 15–25 个样本的三趟（误差 0.45–0.86°），带过来的误差 0.14–0.39°。默认值取这批数据，车上按每条线
-    拟合好的 c 在线修正（卡尔曼，状态 [每分钟变多少, 每转 1 rad 变多少]）。
+    2026-11-24 用户「删掉学习」：原来相邻两条线拟合好就在线学「c 每分钟变多少、每转一圈变多少」（卡尔曼），是给 10 月
+    旧 IMU（HDA536T，c 随时间约 −0.07～−0.4°/min、转角刻度 −0.17%）用的。SCH16T 实测 c 随时间 +0.005 ± 0.034°/min、
+    刻度已标定在 IMU 固件里（0x2012，user_rules.GEN5_IMU_YAW_SCALE_PPM；车上不做刻度，用户规矩），没什么可学。11-24 固件
+    静止修正一下拨了 +4.12°，学习把它学成漂移 +0.35°/min、刻度 −0.44%，后面带过去的换算错 1.7–3.4°；按 11-24 的线顺序
+    重放，不学（只带上一条线的 c）06:58 以后各条开头误差 −0.18～+0.07°。
 
-    scale 2026-11-23 −0.0017 → 0：Gen5 SCH16T 的转角刻度误差（实测 −0.00127，真转一圈多读 0.46°）标定在 IMU 固件参数里
-    （0x2012 陀螺 Z 刻度 −1270 ppm，user_rules.GEN5_IMU_YAW_SCALE_PPM），这里只剩标定残差，先验取 0、误差 scale_sigma 照旧。
-    模块没写这个值时真转一圈多读 0.46°，先验 0 就不补了。
-    drift_deg_min 同日 −0.07 → 0（用户「一起改成 0」）：−0.07 是 10 月旧 IMU（HDA536T）的；SCH16T 两次实测 c 随时间
-    +0.005 ± 0.034°/min（11-23，22.7 min）、+0.002 ± 0.026°/min（11-22 晚，11 min），即没有。只改刻度、留着 −0.07 时
-    11-23 的 13 次跨线带误差整体偏 +0.07°，两项都取 0 后 |平均| 0.10°、最大 0.37°、整体 +0.02°。误差 drift_sigma 照旧"""
-    drift_deg_min: float = 0.0
+    下面几项只用来放大带过去的 c 的误差（隔得越久、转得越多越不信，开头和双天线按误差加权），不推算 c：
+    drift_sigma_deg_min、drift_walk（随时间）、scale_sigma（随转角）、walk_deg_sqrt_min（其余随机变化）。"""
     drift_sigma_deg_min: float = 0.05
-    scale: float = 0.0
     scale_sigma: float = 0.001
     walk_deg_sqrt_min: float = 0.10   # 模型以外的随机变化，°/√min
-    # 每分钟变化量本身也会慢慢变（傍晚最后几分钟比平均快），°/min/√min。按 24 趟顺序回放：0 → 加权后开头误差中位 0.13° 最大
-    # 0.30°，0.02 → 0.12° / 0.30°，0.05–0.2 反应过度、最大 0.46–0.67°；校准量从 0 开始学也有 0.17° / 0.37°（双天线 0.20° / 0.86°）
-    drift_walk: float = 0.02
+    drift_walk: float = 0.02          # °/min/√min
     obs_floor_deg: float = 0.05       # 一条线拟合出的 c 至少按这么大的误差算
     max_age_s: float = 600.0          # 上一条线的 c 超过这么久不带
     imu_gap_s: float = 1.0            # IMU 断了这么久：累计转角接不上，以前的 c 作废
@@ -964,41 +1022,38 @@ class AlignmentConfig:
     max_gap_deg: float = 3.0
     dual_sigma_deg: float = 0.3       # 双天线学满 lock_samples 时开头换算的误差（傍晚实车中位 0.22°、最大 0.66°）
     rate_walk_deg_m: float = 0.003    # 带过去的漂移速度（°/m）每过 1 min 多算这么大的误差（漂移速度本身会变）
+    # 2026-11-24：06:43 写过 IMU 参数后 SCH16T 固件偏航零偏不对（静止时偏航 −0.5～−0.95°/min），06:58 第一次安静停车，
+    # 固件静止修正把偏航一下拨了 +4.12°（陀螺读数一直 0）。车停着（调用方给 still：两轮都停、陀螺 < still_max_gyro_deg_s）
+    # 地面车头不变，IMU 偏航的变化全是 IMU 自己的：带过去的 c 跟着挪（c −= 变化），不算转角
+    still_max_gyro_deg_s: float = 0.5
 
     def __post_init__(self):
         for name in ('drift_sigma_deg_min', 'scale_sigma', 'walk_deg_sqrt_min', 'drift_walk', 'obs_floor_deg', 'max_age_s', 'imu_gap_s',
-                     'rate_walk_deg_m',
-                     'max_gap_deg', 'dual_sigma_deg'):
+                     'rate_walk_deg_m', 'still_max_gyro_deg_s', 'max_gap_deg', 'dual_sigma_deg'):
             value = getattr(self, name)
             if not math.isfinite(value) or value <= 0:
                 raise ValueError(name + ' 必须是有限正数')
-        for name in ('drift_deg_min', 'scale'):
-            if not math.isfinite(getattr(self, name)):
-                raise ValueError(name + ' 必须是有限数')
 
 
 class ImuAlignment:
     """任务层持有、跨线跨作业共用的 IMU → 地面方向换算 c（真实车头 − IMU 偏航，rad）：
 
-    - feed_imu：每帧 IMU 偏航，累出展开的转角 θ（掉头转了几圈都记得）；
-    - 每条线开头 begin_line（把上一条线定下来的 c 交给校准），这条线卫星拟合好了 update_line 记下 (时刻, θ, c, 误差)；
-    - predict：上一条线的 c + 每分钟变化 × 分钟 + 比例 × 转角，连同误差；开头和双天线测的按误差加权（ImuFirstGuide.blend_start）；
-    - 相邻两条线都拟合好：差值 = 每分钟变化 × 分钟 + 比例 × 转角，在线修正两个校准量。"""
+    - feed_imu：每帧 IMU 偏航，累出展开的转角 θ（掉头转了几圈都记得）；车停着时偏航的变化是 IMU 自己的，c 跟着挪；
+    - 每条线开头 begin_line（上一条线记下的 c 定下来），这条线卫星拟合好了 update_line 记下 (时刻, θ, c, 误差)；
+    - predict：上一条线的 c（不学、不推算，见 AlignmentConfig），误差按隔的时间、转角放大；开头和双天线测的按误差加权
+      （ImuFirstGuide.blend_start）。"""
 
     def __init__(self, config=AlignmentConfig()):
         self.cfg = config
-        d, k = config.drift_deg_min * DEG, config.scale
-        self.x = [d, k]
-        self.P = [[(config.drift_sigma_deg_min * DEG) ** 2, 0.0], [0.0, config.scale_sigma ** 2]]
         self.theta = self._yaw = self._imu_t = None
-        self.obs = None                  # 上一条线定下来的 (t, θ, c, σ)；σ 为空：没经卫星拟合（只借，不校准）
+        self.obs = None                  # 上一条线定下来的 (t, θ, c, σ)；σ 为空：没经卫星拟合（只借，不加权）
         self.pending = None              # 这条线正在更新的
         self.token = 0
-        self.calibrations = 0
         self.rate = None                 # 最近一条线拟合好的漂移速度 (时刻, rad/m, 误差 rad/m)，下一条线开头带过去
         self._rate_pending = None
         self.crab = None                 # 最近一条线拟合好的侧滑 k (时刻, k, 误差)，下一条线开头带过去（同一块场地）
         self._crab_pending = None
+        self.still_shift = 0.0           # 车停着时 IMU 偏航自己变了多少（累计，rad），换算已跟着挪
 
     # 旧接口：value / t 是最近一条线的 c 和时刻
     @property
@@ -1019,29 +1074,36 @@ class ImuAlignment:
         return (o is not None and o[3] is not None and t is not None and math.isfinite(t)
                 and 0.0 <= t - o[0] <= self.cfg.max_age_s)
 
-    def feed_imu(self, t, yaw):
+    def feed_imu(self, t, yaw, still=False):
+        """每帧 IMU 偏航。still：车停着（调用方判：两轮都停够久、陀螺 < still_max_gyro_deg_s）——地面车头没变，偏航的变化
+        是 IMU 自己的（固件静止修正、零偏漂），换算 c 跟着挪、不算转角（见 AlignmentConfig.still_max_gyro_deg_s）。"""
         if not (math.isfinite(t) and math.isfinite(yaw)):
             return
         if self._yaw is None or t - self._imu_t > self.cfg.imu_gap_s:
             if self._yaw is not None:
                 self.obs = self.pending = None   # IMU 断过：转角接不上
             self.theta = yaw
+        elif still:
+            d = wrap(yaw - self._yaw)
+            self.still_shift += d
+            self.obs = self._shifted(self.obs, -d)
+            self.pending = self._shifted(self.pending, -d)
         else:
             self.theta += wrap(yaw - self._yaw)
         self._yaw, self._imu_t = yaw, t
 
+    @staticmethod
+    def _shifted(o, dc):
+        return None if o is None else (o[0], o[1], wrap(o[2] + dc), o[3])
+
     def begin_line(self):
-        """新的一条线开头（偏移刚锁住）调用：上一条线记下的 c 定下来，能和再上一条配成对就校准。返回这条线的号。"""
+        """新的一条线开头（偏移刚锁住）调用：上一条线记下的 c 定下来。返回这条线的号。"""
         if self._rate_pending is not None:
             self.rate, self._rate_pending = self._rate_pending, None
         if self._crab_pending is not None:
             self.crab, self._crab_pending = self._crab_pending, None
-        p, o = self.pending, self.obs
-        if p is not None:
-            if (o is not None and p[3] is not None and o[3] is not None and p[1] is not None and o[1] is not None
-                    and 0.0 < p[0] - o[0] <= self.cfg.max_age_s):
-                self._calibrate(o, p)
-            self.obs = p
+        if self.pending is not None:
+            self.obs = self.pending
         self.pending = None
         self.token += 1
         return self.token
@@ -1078,7 +1140,7 @@ class ImuAlignment:
         return p is None or sigma < p[1]
 
     def update_line(self, token, t, c, sigma=None):
-        """这条线的 c（偏移 + β）；sigma（rad）为空表示没经卫星拟合，只给下一条借、不参与校准和加权。"""
+        """这条线的 c（偏移 + β）；sigma（rad）为空表示没经卫星拟合，只给下一条借、不参与加权。"""
         if token == self.token and math.isfinite(t) and math.isfinite(c):
             if sigma is None and self.pending is not None and self.pending[3] is not None:
                 return
@@ -1086,19 +1148,6 @@ class ImuAlignment:
 
     def remember(self, t, value):
         self.update_line(self.token, t, value)
-
-    def _calibrate(self, o, p):
-        dt, dth = (p[0] - o[0]) / 60.0, p[1] - o[1]
-        z = wrap(p[2] - o[2]) - (self.x[0] * dt + self.x[1] * dth)
-        self.P[0][0] += (self.cfg.drift_walk * DEG) ** 2 * dt
-        P = self.P
-        ph = [P[0][0] * dt + P[0][1] * dth, P[1][0] * dt + P[1][1] * dth]
-        r = o[3] ** 2 + p[3] ** 2 + (self.cfg.walk_deg_sqrt_min * DEG) ** 2 * dt
-        gain = 1.0 / (dt * ph[0] + dth * ph[1] + r)
-        k = [ph[0] * gain, ph[1] * gain]
-        self.x = [self.x[0] + k[0] * z, self.x[1] + k[1] * z]
-        self.P = [[P[0][0] - k[0] * ph[0], P[0][1] - k[0] * ph[1]], [P[1][0] - k[1] * ph[0], P[1][1] - k[1] * ph[1]]]
-        self.calibrations += 1
 
     def predict(self, now):
         """上一条线（这条线开头时就是 obs）的 c 带到现在：(c, σ) rad；没有、太旧、转角接不上返回 None。"""
@@ -1109,11 +1158,11 @@ class ImuAlignment:
         if o[1] is None or self.theta is None:
             return None
         dth = self.theta - o[1]
-        P = self.P
-        pdd = P[0][0] + (self.cfg.drift_walk * DEG) ** 2 * dt
-        var = ((o[3] if o[3] is not None else self.cfg.dual_sigma_deg * DEG) ** 2 + dt * dt * pdd + dth * dth * P[1][1]
-               + 2 * dt * dth * P[0][1] + (self.cfg.walk_deg_sqrt_min * DEG) ** 2 * dt)
-        return wrap(o[2] + self.x[0] * dt + self.x[1] * dth), math.sqrt(max(var, 0.0))
+        cfg = self.cfg
+        pdd = (cfg.drift_sigma_deg_min * DEG) ** 2 + (cfg.drift_walk * DEG) ** 2 * dt
+        var = ((o[3] if o[3] is not None else cfg.dual_sigma_deg * DEG) ** 2 + dt * dt * pdd + dth * dth * cfg.scale_sigma ** 2
+               + (cfg.walk_deg_sqrt_min * DEG) ** 2 * dt)
+        return o[2], math.sqrt(max(var, 0.0))
 
     def recall(self, now, difference, max_age_s, max_gap_deg):
         """开头基线不对时借：带到现在的 c；和此刻 融合航向 − IMU 偏航 差超过 max_gap_deg（IMU 重启归零）不借。"""
@@ -1128,10 +1177,7 @@ class ImuAlignment:
 
     def status(self):
         deg = lambda a: None if a is None else round(math.degrees(a), 4)  # noqa: E731
-        return dict(align_drift_deg_min=deg(self.x[0]), align_scale_pct=round(self.x[1] * 100, 4),
-                    align_drift_sigma=deg(math.sqrt(max(self.P[0][0], 0.0))),
-                    align_scale_sigma_pct=round(math.sqrt(max(self.P[1][1], 0.0)) * 100, 4),
-                    align_calibrations=self.calibrations, align_theta_deg=deg(self.theta),
+        return dict(align_still_shift_deg=deg(self.still_shift), align_theta_deg=deg(self.theta),
                     align_c_deg=deg(None if self.obs is None else self.obs[2]))
 
 
@@ -1142,11 +1188,13 @@ def paint_weight(cfg, along_m):
     return 1.0 if along_m >= cfg.head_m else 0.0
 
 
-def paint_pull(cfg, along_m):
+def paint_pull(cfg, along_m, scale=1.0):
     """画线时往回拉的 (k_e, 车头最多偏几度)：开喷处后 along_m 米。head_m 内按 head_k_e / head_max_bias_deg，
-    再 head_blend_m 内线性过渡到 k_e / max_bias_deg（ImuFirstConfig）。"""
+    再 head_blend_m 内线性过渡到 k_e / max_bias_deg（ImuFirstConfig）。scale 只乘线头段之后那部分（楼下模式
+    poor_sky_pull_scale），线头段照旧。"""
     w = paint_weight(cfg, along_m)
-    return (1.0 - w) * cfg.head_k_e + w * cfg.k_e, (1.0 - w) * cfg.head_max_bias_deg + w * cfg.max_bias_deg
+    return ((1.0 - w) * cfg.head_k_e + w * cfg.k_e * scale,
+            (1.0 - w) * cfg.head_max_bias_deg + w * cfg.max_bias_deg * scale)
 
 
 def paint_deadband(cfg, along_m):
