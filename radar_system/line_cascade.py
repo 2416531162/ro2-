@@ -1035,6 +1035,153 @@ class AlignmentConfig:
                 raise ValueError(name + ' 必须是有限正数')
 
 
+@dataclass(frozen=True)
+class DriveLearnConfig:
+    """开机后作业前的行驶里顺带学换算 c（DriveLearner）。门槛在 user_rules.DRIVE_LEARN_*。"""
+    min_m: float = rules.DRIVE_LEARN_MIN_M
+    max_sigma_deg: float = rules.DRIVE_LEARN_MAX_SIGMA_DEG
+    keep_s: float = rules.DRIVE_LEARN_KEEP_S
+    span_s: float = 0.8              # 车头方向用前后这么久的两个固定解连线，对中点时刻的 IMU 偏航
+    min_speed_mps: float = 0.2
+    max_rate_deg_s: float = 10.0     # 转得比这快不用（原地转、急弯：杆臂修正、时间对齐都不准）
+    max_fix_sigma_m: float = 0.02    # 固定解 σ（水平合成）超过这个不用
+    wheel_fresh_s: float = 0.3       # 轮速离那一刻这么近才拿来分前进、倒车
+    corr_m: float = 0.5              # 误差按每这么多米一个独立的点算
+    floor_deg: float = 0.15          # 学出来的误差至少按这么大（卫星慢变的偏差平均不掉）
+    outlier_deg: float = 3.0         # 离中位这么远的点不用
+    max_step_mps: float = 3.0        # 相邻两帧位置隔得比这个速度还远：当跳点，断开重连
+
+    def __post_init__(self):
+        for name in ('min_m', 'max_sigma_deg', 'keep_s', 'span_s', 'min_speed_mps', 'max_rate_deg_s', 'max_fix_sigma_m',
+                     'wheel_fresh_s', 'corr_m', 'floor_deg', 'outlier_deg', 'max_step_mps'):
+            value = getattr(self, name)
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError(name + ' 必须是有限正数')
+
+
+def _interp(seq, t):
+    """seq：按时刻排好的 (t, v)；t 在范围里返回线性插值，不在返回 None。"""
+    if not seq or t < seq[0][0] or t > seq[-1][0]:
+        return None
+    lo, hi = 0, len(seq) - 1
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        if seq[mid][0] <= t:
+            lo = mid
+        else:
+            hi = mid
+    (t0, v0), (t1, v1) = seq[lo], seq[hi]
+    return v0 if t1 <= t0 else v0 + (v1 - v0) * (t - t0) / (t1 - t0)
+
+
+class DriveLearner:
+    """开机后作业前的行驶里顺带学 c（真实车头 − IMU 偏航）：开着（前进、倒车按轮速分）、RTK 固定、σ 小、转得不快时，
+    span_s 前后两个固定解连线的方向减掉主天线杆臂随转弯的修正就是车头，c = 车头 − 中点时刻的 IMU 偏航。
+    按路程加权、去掉离群，只算最近 keep_s 内的。停车时 IMU 偏航自己变（ImuAlignment.feed_imu still）跟着挪，IMU 断过清空。
+    11-25 用户「开机多跑一会学习能不能省去」：学够了开机第一条就不空跑（ImuAlignment.adopt_drive）。"""
+
+    def __init__(self, config=DriveLearnConfig()):
+        self.cfg = config
+        self.fixes = deque()             # (t, x, y) 连续的固定解
+        self.yaws = deque()              # (t, 展开的 IMU 偏航)
+        self.wheels = deque()            # (t, 轮速 m/s，倒车为负)
+        self.samples = deque()           # (t, c − 当时的 _off, 这一步的路程 m)
+        self._off = 0.0                  # 停车时 IMU 偏航自己变的累计（shift）：读的时候加回去，不用逐个改
+
+    def reset(self):
+        self.fixes.clear()
+        self.yaws.clear()
+        self.wheels.clear()
+        self.samples.clear()
+        self._off = 0.0
+
+    def shift(self, dc):
+        """车停着 IMU 偏航自己变了 −dc：学到的 c 跟着挪。"""
+        self._off = wrap(self._off + dc)
+
+    def on_imu(self, t, yaw):
+        self.yaws.append((t, yaw))
+        while self.yaws and self.yaws[0][0] < t - 3.0 * self.cfg.span_s - 1.0:
+            self.yaws.popleft()
+
+    def on_wheel(self, t, speed):
+        if not (math.isfinite(t) and math.isfinite(speed)):
+            return
+        if self.wheels and t < self.wheels[-1][0]:
+            return
+        self.wheels.append((t, speed))
+        while self.wheels and self.wheels[0][0] < t - 3.0 * self.cfg.span_s - 1.0:
+            self.wheels.popleft()
+
+    def _wheel_at(self, t):
+        best = None
+        for tw, v in self.wheels:
+            if abs(tw - t) <= self.cfg.wheel_fresh_s and (best is None or abs(tw - t) < abs(best[0] - t)):
+                best = (tw, v)
+        return None if best is None else best[1]
+
+    def on_fix(self, t, x, y, ok, lever):
+        """一帧主天线位置（本地米）。ok：固定解且 σ ≤ max_fix_sigma_m；不 ok 断开（不跨着连）。lever：主天线（前、左）m。"""
+        cfg = self.cfg
+        if not ok or not all(math.isfinite(v) for v in (t, x, y)):
+            self.fixes.clear()
+            return
+        if self.fixes and t <= self.fixes[-1][0]:
+            return
+        if self.fixes and math.hypot(x - self.fixes[-1][1], y - self.fixes[-1][2]) > cfg.max_step_mps * (t - self.fixes[-1][0]):
+            self.fixes.clear()           # 位置跳了（车不可能这么快）：从这一帧重新连
+        self.fixes.append((t, x, y))
+        while len(self.fixes) > 2 and self.fixes[1][0] <= t - cfg.span_s:
+            self.fixes.popleft()
+        ta, xa, ya = self.fixes[0]
+        dt = t - ta
+        if dt < 0.6 * cfg.span_s or dt > 1.5 * cfg.span_s:
+            return
+        dx, dy = x - xa, y - ya
+        v = math.hypot(dx, dy) / dt
+        if v < cfg.min_speed_mps:
+            return
+        tm = 0.5 * (t + ta)
+        ya0, ya1, ym = _interp(self.yaws, ta), _interp(self.yaws, t), _interp(self.yaws, tm)
+        wheel = self._wheel_at(tm)
+        if ya0 is None or ya1 is None or ym is None or wheel is None or abs(wheel) < 0.5 * cfg.min_speed_mps:
+            return
+        om = (ya1 - ya0) / dt
+        if abs(om) > math.radians(cfg.max_rate_deg_s):
+            return
+        sv = 1.0 if wheel > 0 else -1.0
+        ax, ay = lever
+        # 天线在车体系的速度 = (车速 − ω·ay, ω·ax)，模长是卫星量的 v：侧向分量已知，纵向分量按前进 / 倒车开方
+        side = ax * om
+        head = math.atan2(dy, dx) - math.atan2(side, sv * math.sqrt(max(v * v - side * side, 0.0)))
+        tp, xp, yp = self.fixes[-2]
+        self.samples.append((tm, wrap(head - ym - self._off), math.hypot(x - xp, y - yp)))
+        while self.samples and self.samples[0][0] < t - cfg.keep_s:
+            self.samples.popleft()
+
+    def estimate(self, now):
+        """最近 keep_s 内学到的 (c, σ, 路程 m)；不够 min_m 返回 None（σ 由调用方和 max_sigma_deg 比）。"""
+        cfg = self.cfg
+        while self.samples and self.samples[0][0] < now - cfg.keep_s:
+            self.samples.popleft()
+        if sum(w for _, _, w in self.samples) < cfg.min_m:
+            return None
+        sw = sum(w * math.sin(c) for _, c, w in self.samples)
+        cw = sum(w * math.cos(c) for _, c, w in self.samples)
+        c0 = math.atan2(sw, cw)
+        d = sorted(wrap(c - c0) for _, c, _ in self.samples)
+        c0 = wrap(c0 + d[len(d) // 2])
+        kept = [(wrap(c - c0), w) for _, c, w in self.samples if abs(wrap(c - c0)) <= math.radians(cfg.outlier_deg)]
+        c0 = wrap(c0 + self._off)
+        dist = sum(w for _, w in kept)
+        if dist < cfg.min_m:
+            return None
+        m = sum(e * w for e, w in kept) / dist
+        var = sum(w * (e - m) ** 2 for e, w in kept) / dist
+        sigma = max(math.radians(cfg.floor_deg), math.sqrt(var / max(1.0, dist / cfg.corr_m)))
+        return wrap(c0 + m), sigma, dist
+
+
 class ImuAlignment:
     """任务层持有、跨线跨作业共用的 IMU → 地面方向换算 c（真实车头 − IMU 偏航，rad）：
 
@@ -1054,6 +1201,10 @@ class ImuAlignment:
         self.crab = None                 # 最近一条线拟合好的侧滑 k (时刻, k, 误差)，下一条线开头带过去（同一块场地）
         self._crab_pending = None
         self.still_shift = 0.0           # 车停着时 IMU 偏航自己变了多少（累计，rad），换算已跟着挪
+        self.drive = DriveLearner()      # 开机后作业前的行驶里顺带学的 c（adopt_drive）
+        self.adopted = None              # 最近一次把行驶里学的当记忆用：(时刻, c, σ, 路程 m)
+        self._raw = None                 # 展开的 IMU 偏航（停车时的变化也算，DriveLearner 用）
+        self._drive_status = None
 
     # 旧接口：value / t 是最近一条线的 c 和时刻
     @property
@@ -1082,15 +1233,34 @@ class ImuAlignment:
         if self._yaw is None or t - self._imu_t > self.cfg.imu_gap_s:
             if self._yaw is not None:
                 self.obs = self.pending = None   # IMU 断过：转角接不上
-            self.theta = yaw
+            self.theta = self._raw = yaw
+            self.drive.reset()
         elif still:
             d = wrap(yaw - self._yaw)
             self.still_shift += d
+            self._raw += d
             self.obs = self._shifted(self.obs, -d)
             self.pending = self._shifted(self.pending, -d)
+            self.drive.shift(-d)
         else:
-            self.theta += wrap(yaw - self._yaw)
+            d = wrap(yaw - self._yaw)
+            self.theta += d
+            self._raw += d
         self._yaw, self._imu_t = yaw, t
+        self.drive.on_imu(t, self._raw)
+
+    def adopt_drive(self):
+        """没有能带的换算（remembered() 为假）时，开机后行驶里学够的 c（DriveLearner，误差 ≤ max_sigma_deg）当作上一条线
+        定下来的（obs）用：开机第一条就不空跑、按有记忆走（LineMission._plan_route）。返回 (c, σ, 路程 m)，没用上返回 None。"""
+        if self.remembered() or self._imu_t is None or self.theta is None:
+            return None
+        est = self.drive.estimate(self._imu_t)
+        if est is None or est[1] > math.radians(self.drive.cfg.max_sigma_deg):
+            return None
+        c, sigma, dist = est
+        self.obs, self.pending = (self._imu_t, self.theta, c, sigma), None
+        self.adopted = (self._imu_t, c, sigma, dist)
+        return est
 
     @staticmethod
     def _shifted(o, dc):
@@ -1177,8 +1347,15 @@ class ImuAlignment:
 
     def status(self):
         deg = lambda a: None if a is None else round(math.degrees(a), 4)  # noqa: E731
+        now = self._imu_t
+        if now is not None and (self._drive_status is None or not 0.0 <= now - self._drive_status[0] < 1.0):
+            self._drive_status = (now, self.drive.estimate(now))      # 每拍都要 status：学到的每秒算一次
+        drive = None if self._drive_status is None else self._drive_status[1]
         return dict(align_still_shift_deg=deg(self.still_shift), align_theta_deg=deg(self.theta),
-                    align_c_deg=deg(None if self.obs is None else self.obs[2]))
+                    align_c_deg=deg(None if self.obs is None else self.obs[2]),
+                    align_drive_m=None if drive is None else round(drive[2], 2),
+                    align_drive_sigma_deg=None if drive is None else deg(drive[1]),
+                    align_adopted_m=None if self.adopted is None else round(self.adopted[3], 2))
 
 
 def paint_weight(cfg, along_m):

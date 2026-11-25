@@ -5,7 +5,10 @@
 - 规划：给了 first_line 的连线路线，接入、助跑和不给时一模一样，只在接上助跑的第一条段上记 first_line；圆不记；
 - 任务层：差速车直线 IMU 为主 + 卫星拟合、ImuAlignment 没有记忆 → 开始作业规划给 first_line，有记忆 → 不给；
 - 拟合（只在记了 first_line 的这条上，ImuFirstGuide.no_memory）：助跑把推算往卫星拉时不动卡尔曼状态（角度差不被当成位置吃掉）；
-  助跑里角度按 fit_runup_beta_rate_deg 用上。有记忆的线照旧。"""
+  助跑里角度按 fit_runup_beta_rate_deg 用上。有记忆的线照旧。
+
+规划、任务层这两组测的是开机第一条不空跑时（第一段不够 LEARN_M 长等，route_plan._learn_loop 返回 None）的退路：
+关掉空跑（LEARN_M = 0）来测（11-25 空跑改成原地掉头开回起点，不再要后方空地，平常总会空跑）。"""
 from dataclasses import replace
 import math
 from pathlib import Path
@@ -43,7 +46,48 @@ def geometry(sections):
              tuple((round(p.length, 9), round(p.kappa, 9)) for p in sec.path.pieces)) for sec in sections]
 
 
-class Planning(unittest.TestCase):
+class DryRun(unittest.TestCase):
+    """开机第一条空跑（11-25 用户「空跑不要圆弧了，直线原地掉头去起点」）：助跑起点 G 开过线头 LEARN_M，原地掉头、
+    直线开回 G，原地转正再助跑画线；全程往前、不走弧线，后方空地填 0 也照样空跑。"""
+
+    def test_turn_back_in_place_to_the_start(self):
+        for car in (FAR, (-6., .05, 0.), (14., 1., math.pi)):
+            with self.subTest(car=car):
+                info = {}
+                sections, entry = rp.plan_current(LINE, car, MIN_R, nozzle_x=NOZZLE, info=info, first_line=True)
+                _, plain_entry = rp.plan_current(LINE, car, MIN_R, nozzle_x=NOZZLE, first_line=False)
+                self.assertEqual(info['learn_m'], rp.LEARN_M)
+                k = [getattr(s, 'learn', False) for s in sections].index(True)
+                learn, back, paint = sections[k], sections[k + 1], sections[k + 2]
+                h0 = paint.path.pose(0.)[2]
+                g = paint.path.pose(0.)[:2]
+                # 空跑：从 G 顺线开过线头 LEARN_M
+                self.assertAlmostEqual(learn.path.length, rp.RUN_UP_M + rp.LEARN_M, places=6)
+                self.assertLess(math.dist(learn.path.pose(0.)[:2], g), 1e-6)
+                self.assertLess(abs(rp.wrap(learn.path.pose(0.)[2] - h0)), 1e-6)
+                # 原地掉头、直线开回 G
+                self.assertLess(abs(abs(rp.wrap(back.path.pose(0.)[2] - h0)) - math.pi), 1e-6)
+                self.assertAlmostEqual(back.path.length, rp.RUN_UP_M + rp.LEARN_M, places=6)
+                self.assertLess(math.dist(back.path.pose(back.path.length)[:2], g), 1e-6)
+                for sec in sections[k:k + 2]:
+                    self.assertEqual(sec.direction, 1)                                   # 不倒车
+                    self.assertTrue(all(abs(p.kappa) < 1e-12 for p in sec.path.pieces))   # 不走弧线
+                self.assertFalse(any(s.continuous_after for s in sections))             # 掉头处停车原地转
+                self.assertFalse(any(getattr(s, 'first_line', False) for s in sections))  # 画线那段有空跑学好的
+                self.assertAlmostEqual(entry - plain_entry, 2 * (rp.LEARN_M + rp.RUN_UP_M), places=6)
+
+
+class NoDryRun(unittest.TestCase):
+    """关掉开机第一条空跑（route_plan.LEARN_M = 0），测不空跑时的退路。"""
+
+    def setUp(self):
+        self._learn_m, rp.LEARN_M = rp.LEARN_M, 0.0
+
+    def tearDown(self):
+        rp.LEARN_M = self._learn_m
+
+
+class Planning(NoDryRun):
     CARS = (FAR, rp.axle_for((-.8, 0.), 0., *NOZZLE) + (0.,), (-6., .05, 0.), (14., 1., math.pi))
 
     def test_first_line_only_marks_the_section(self):
@@ -96,7 +140,7 @@ class Planning(unittest.TestCase):
             self.assertFalse(any(t.first_line for t in route.trackers if t is not tr))
 
 
-class Memory(unittest.TestCase):
+class Memory(NoDryRun):
     def test_remembered(self):
         a = ImuAlignment()
         self.assertFalse(a.remembered())

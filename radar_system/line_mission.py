@@ -328,6 +328,7 @@ class LineMission:
             if sol in RTK_FIXED_SOLS:
                 self._check_innovation(m)
                 self._latency_fix(raw_t, m)
+            self._drive_fix(m, sol in RTK_FIXED_SOLS)
             self.fusion.add_fix(s.GnssFix(t=m['t'], lat_deg=m['lat'], lon_deg=m['lon'], height_m=m['height'],
                                           sol=sol, sigma_n=m['sigma_n'], sigma_e=m['sigma_e'],
                                           sigma_u=m['sigma_u'], diff_age_s=inf(diff_age), sats=m['sats'],
@@ -460,6 +461,7 @@ class LineMission:
         else:
             self._wheel_still = None
         self._wheel_t = t if self._wheel_t is None else max(t, self._wheel_t)
+        self._imu_alignment.drive.on_wheel(t, speed)
 
     def on_wheel(self, t, speed, yaw_rate):
         self.fusion.add_wheel(self.samples.WheelSample(t=t, speed=speed, yaw_rate=yaw_rate))
@@ -483,6 +485,19 @@ class LineMission:
         before = self._latency.value
         self._latency.on_wheel(sample.t, sample.speed, getattr(sample, 'end_t', None), getattr(sample, 'end_speed', None))
         self._save_latency(before)
+
+    def _drive_fix(self, m, fixed):
+        """主天线位置交给开机后行驶里顺带学换算（ImuAlignment.drive）：固定解、σ 小才算，不然断开。"""
+        learner = self._imu_alignment.drive
+        try:
+            ok = fixed and math.hypot(m['sigma_n'], m['sigma_e']) <= learner.cfg.max_fix_sigma_m
+            x, y = self.fusion.to_local(m['lat'], m['lon'])
+            lever = getattr(self.fusion, 'antenna_lever', None)
+            lever = lever() if callable(lever) else self.fusion.config.antenna_xy
+        except (AttributeError, KeyError, ValueError, TypeError):
+            learner.on_fix(math.nan, math.nan, math.nan, False, (0.0, 0.0))
+            return
+        learner.on_fix(m['t'], x, y, ok, (float(lever[0]), float(lever[1])))
 
     def _latency_fix(self, raw_t, m):
         """卫星固定解交给延迟估计（按接收机标的原始时间，本地米，现在用的天线杠杆臂）。"""
@@ -959,7 +974,8 @@ class LineMission:
         turns = ('，原地转向 %d 次' % tracker.pivots if tracker.pivots else '') + \
                 ('，圆弧掉头 %d 次' % info['arc_turns'] if info.get('arc_turns') else '') + \
                 ('，倒车 %d 次' % reverses if reverses else '') + \
-                ('，开机第一条先空跑 %.0f m 学车头再绕回来画' % info['learn_m'] if info.get('learn_m') else '')
+                ('，开机第一条先空跑 %.0f m 学车头再掉头回起点画' % info['learn_m'] if info.get('learn_m') else '') + \
+                ('，车头已在开机后行驶的 %.0f m 里学好，不空跑' % info['drive_learned_m'] if info.get('drive_learned_m') else '')
         self.message = '申请控制权（接入 %.1f m，全程 %.1f m%s）' % (entry_m, tracker.length, turns)
         return True, self.message
 
@@ -969,6 +985,11 @@ class LineMission:
         planner_nozzle = (route_nozzle['forward'], -route_nozzle['right']) if route_nozzle else None
         car = (pose.x, pose.y, pose.yaw)    # 规划从后轴中心起（压线的是水泵，见 planner_nozzle）
         info = {}
+        if planner_nozzle is not None and self.first_line_no_memory():
+            # 开机后作业前的行驶里学够了换算（DriveLearner）：当记忆用，第一条不空跑（11-25 用户「开机多跑一会学习能不能省去」）
+            drive = self._imu_alignment.adopt_drive()
+            if drive is not None:
+                info['drive_learned_m'] = drive[2]
         sections, entry_m = planner(spec, car, self.min_route_radius, body=self.body, nozzle_x=planner_nozzle,
                                     info=info, first_line=planner_nozzle is not None and self.first_line_no_memory())
         from live_cruise import label_sections
