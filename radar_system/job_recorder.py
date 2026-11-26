@@ -123,7 +123,7 @@ README = '''# 作业记录（job_recorder 自动记）
 
 ## 话题（看「看到的 → 算的 → 发的 → 车做的」）
 - 看到的：`/gnss/raw`（每条 RTK 测量：fix 主天线、fix2 副天线、heading 双天线测向、vel；sol 解算状态，NARROW_INT 才算固定）、
-  `/gnss/status`（2 Hz，数据来源 source：usb / tablet WiFi / bluetooth / can）、`/imu`、`/imu/data`（陀螺、IMU 航向角）、
+  `/gnss/status`（2 Hz，数据来源 source：usb / tablet WiFi / bluetooth / can / tablet_usb USB 线）、`/imu`、`/imu/data`（陀螺、IMU 航向角）、
   `/odom`（兼容轮速里程计，约 50 Hz）、`/wheel/odometry`（Gen5 对齐轮程，JSON；time_basis=host_receive，
   start→t 区间轮程 distance 米 / turn 弧度，speed/yaw_rate 为终点即时值；quality 区分 encoder/speed/pending/invalid，
   两轮 speed_t/position_t 是接收时刻，epoch 区分驱动重连，seq 去重；详见 docs/WHEEL_ODOMETRY.md）。

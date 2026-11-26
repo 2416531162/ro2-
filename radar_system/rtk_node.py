@@ -4,9 +4,12 @@
 
 接收机可以接在车上的 USB 串口，也可以接在安卓平板的串口上：平板 app 把串口原始字节经 TCP 48622
 原样转过来（gnss_bridge.TabletSerialServer），或者走蓝牙 RFCOMM（gnss_bridge.BluetoothSerialServer，
-平板不用连车的 WiFi），或者走 CAN（gnss_bridge.CanSerialBridge，平板 MCU 的 CAN 口接车的 can0）。几路同时监听，正在出数据的那一路一直用下去，它 2 s 没数据才换另一路；几路的数据从不
-混在一起（换路时解析状态、钟差全部重来）。平板转来的数据（WiFi 或蓝牙）的差分由平板用同一个 CORS 账号自己连、
-直接写进平板串口，车端这时暂停自己的 CORS（同一账号两处登录会互相顶掉），换回 USB 再连。
+平板不用连车的 WiFi），或者走 CAN（gnss_bridge.CanSerialBridge，平板 MCU 的 CAN 口接车的 can0），或者走 USB 数据线
+（gnss_bridge.TabletUsbSerial，板子 J17 当 USB 设备，启动时 usb_gadget.ensure 建虚拟串口）。几路同时监听，正在出数据的那一路
+一直用下去，它 2 s 没数据才换另一路；只有一个例外：USB 线不丢帧，车停着（接收机测速 < 0.05 m/s）且 USB 已连续出数据 1 s
+时从 WiFi / 蓝牙 / CAN 换到 USB。几路的数据从不混在一起（换路时解析状态、钟差全部重来，所以车动着不换）。
+平板转来的数据（WiFi、蓝牙、CAN、USB 线）的差分由平板用同一个 CORS 账号自己连、
+直接写进平板串口，车端这时暂停自己的 CORS（同一账号两处登录会互相顶掉），换回车上串口再连。
 
     /gnss/raw      std_msgs/String JSON，每条测量一条（fix / heading / vel，字段见 um982.Um982Stream）；
                    时间是本机单调时钟的测量时刻，走直线节点（融合）用它
@@ -38,7 +41,9 @@ from ntrip_config import NtripReload
 import runtime_config  # bootstraps the release root for direct script launches
 import heading_mount
 from robot_core.service_watchdog import watchdog
-from gnss_bridge import BT_CHANNEL, CAN_CHANNEL, TABLET_PORT, BluetoothSerialServer, CanSerialBridge, TabletSerialServer
+from gnss_bridge import (BT_CHANNEL, CAN_CHANNEL, TABLET_PORT, BluetoothSerialServer, CanSerialBridge, TabletSerialServer,
+                         TabletUsbSerial)
+import usb_gadget
 
 DEFAULT_PORT = ('/dev/serial/by-id/usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_Controller_'
                 'b0d06fec6eabed1183a10e9aa7669f5d-if00-port0')
@@ -47,9 +52,14 @@ FUSION_CONFIG = '~/rtk/fusion.json'     # 标定（安装偏差）与走直线�
 # 只增加副天线 20 Hz 日志（与主天线 BESTPOS 同频，按测量时刻配对检查两天线距离），不清除已有输出、不写接收机闪存
 ANT2_LOG = b'BESTNAVHA 0.05\r\n'
 SOURCE_HOLD_S = 2.0                     # 正在用的一路（USB / 平板 WiFi / 平板蓝牙 / 平板 CAN）这么久没数据才换另一路
-# 平板转来的几路（WiFi TCP、蓝牙、CAN）：差分由平板自己连 CORS，车端暂停自己的 CORS、不往这几路写改正数
-TABLET_SOURCES = ('tablet', 'bluetooth', 'can')
-SOURCE_TEXT = {'tablet': '串口', 'bluetooth': '蓝牙', 'can': 'CAN'}
+# 平板转来的几路（WiFi TCP、蓝牙、CAN、USB 线）：差分由平板自己连 CORS，车端暂停自己的 CORS、不往这几路写改正数
+TABLET_SOURCES = ('tablet', 'bluetooth', 'can', 'tablet_usb')
+SOURCE_TEXT = {'tablet': '串口', 'bluetooth': '蓝牙', 'can': 'CAN', 'tablet_usb': 'USB 线'}
+# USB 线接管：车停着（接收机 BESTVEL 水平速度低于这个、1 s 内的）且 USB 连续出数据（间隔不超过 USB_RUN_GAP_S）这么久
+USB_TAKEOVER_S = 1.0
+USB_RUN_GAP_S = 0.5
+USB_TAKEOVER_MAX_SPEED_MPS = 0.05
+USB_AUTO = 'auto'                       # --usb-direct 默认：建 J17 的虚拟串口（usb_gadget.ensure）并读它
 
 # sensor_msgs/NavSatStatus 的取值（照 nmea_navsat_driver 的对应：单点 FIX、伪距差分 SBAS、RTK 浮点/固定 GBAS）
 NO_FIX, FIX, SBAS_FIX, GBAS_FIX = -1, 0, 1, 2
@@ -119,7 +129,8 @@ def load_heading_calibration(path=FUSION_CONFIG):
 
 class RtkNode(Node):
     def __init__(self, port, baud=921600, ntrip_env=DEFAULT_ENV, serial_factory=None, fusion_config=FUSION_CONFIG,
-                 tablet_port=None, bt_channel=None, bt_factory=None, can_channel=None, can_factory=None):
+                 tablet_port=None, bt_channel=None, bt_factory=None, can_channel=None, can_factory=None,
+                 usb_device=None, usb_factory=None):
         super().__init__('rtk_node')
         self.port, self.baud = port, baud
         self.serial_factory = serial_factory
@@ -137,8 +148,9 @@ class RtkNode(Node):
         self.write_lock = threading.Lock()
         self.ser = None
         self.port_error = None
-        self.source = None                  # 正在用的接收机数据：'usb' / 'tablet' / 'bluetooth' / 'can'，还没收到过为 None
+        self.source = None                  # 正在用的接收机数据：'usb' / 'tablet' / 'bluetooth' / 'can' / 'tablet_usb'，还没收到过为 None
         self.source_rx = {}                 # 每一路最后收到数据的时刻
+        self.usb_run_since = None           # USB 线这一段连续出数据从什么时候开始（接管用）
         self.running = True
         self.cors = NtripReload(ntrip_env, lambda env: NtripClient(env, self.gga_report, self.write_corrections))
         # 平板串口转发（tablet_port=None 不监听；0 由系统分配端口，测试用）
@@ -163,6 +175,15 @@ class RtkNode(Node):
                                                                 in_use=lambda: self.source == 'can')))()
             if self.can.error:
                 self.get_logger().error('平板 CAN 转发暂不可用（会重试）：%s' % self.can.error)
+        # 平板 USB 线（usb_device=None 不开；'auto' 建 J17 的虚拟串口再读；别的值当固定节点；usb_factory 测试用）
+        self.usb = None
+        if usb_device is not None:
+            if usb_factory is not None:
+                self.usb = usb_factory()
+            elif usb_device == USB_AUTO:
+                self.usb = TabletUsbSerial(setup=usb_gadget.ensure, on_connect=self.usb_connected)
+            else:
+                self.usb = TabletUsbSerial(device=usb_device, on_connect=self.usb_connected)
         self.create_timer(0.5, self.publish_status)
         self.reader = threading.Thread(target=self.read_loop, daemon=True)
         self.reader.start()
@@ -175,6 +196,9 @@ class RtkNode(Node):
         if self.can is not None:
             self.can_reader = threading.Thread(target=self.bridge_loop, args=(self.can, 'can'), daemon=True)
             self.can_reader.start()
+        if self.usb is not None:
+            self.usb_reader = threading.Thread(target=self.bridge_loop, args=(self.usb, 'tablet_usb'), daemon=True)
+            self.usb_reader.start()
 
     # ---- 串口 ----
     def open_serial(self):
@@ -229,8 +253,11 @@ class RtkNode(Node):
     def can_connected(self):
         self.get_logger().info('平板 CAN 转发开始收到数据：%s' % self.can.channel)
 
+    def usb_connected(self):
+        self.get_logger().info('平板 USB 线开始收到数据：%s' % self.usb.path)
+
     def bridge_loop(self, bridge, source):
-        """平板转来的一路（WiFi 'tablet' / 蓝牙 'bluetooth' / CAN 'can'）的读线程。"""
+        """平板转来的一路（WiFi 'tablet' / 蓝牙 'bluetooth' / CAN 'can' / USB 线 'tablet_usb'）的读线程。"""
         while self.running:
             watchdog.tick(source)
             try:
@@ -251,16 +278,22 @@ class RtkNode(Node):
             self.bt.error = text
         elif source == 'can':
             self.can.error = text
+        elif source == 'tablet_usb':
+            self.usb.error = text
         else:
             self.tablet_error = text
 
     def on_serial_data(self, data, t_rx, source='usb'):
         # 不能叫 handle：会遮住 rclpy.Node.handle，Node.__init__ 里 `with self.handle:` 就崩了
         with self.stream_lock:
+            if source == 'tablet_usb':
+                prev = self.source_rx.get(source)
+                if prev is None or t_rx - prev > USB_RUN_GAP_S:
+                    self.usb_run_since = t_rx
             self.source_rx[source] = t_rx
             if source != self.source:
                 last = self.source_rx.get(self.source)
-                if last is not None and t_rx - last < SOURCE_HOLD_S:
+                if last is not None and t_rx - last < SOURCE_HOLD_S and not self.usb_takes_over(source, t_rx):
                     return                  # 另一路正在出数据：两台接收机（或同一台的两个口）不混用
                 if self.source is not None:
                     self.get_logger().warning('接收机数据来源 %s → %s' % (self.source, source))
@@ -274,6 +307,18 @@ class RtkNode(Node):
             elif m['kind'] == 'heading' and heading_valid(m):
                 self.pub_heading.publish(heading_imu(m, self.stamp(m['t']), self.mount_offset_deg,
                                                      self.baseline_yaw_body_deg))
+
+    def usb_takes_over(self, source, t_rx):
+        """USB 线（不丢帧）能不能从正在用的 WiFi / 蓝牙 / CAN 接过来：同一台接收机同一个口的字节，只是换条线；
+        换路要重来钟差和两天线配对，所以只在车停着（这一路接收机测的水平速度，1 s 内的）、USB 已连续出数据 1 s 时换。
+        要在 stream_lock 里调。"""
+        if source != 'tablet_usb' or self.source not in ('tablet', 'bluetooth', 'can'):
+            return False
+        if self.usb_run_since is None or t_rx - self.usb_run_since < USB_TAKEOVER_S:
+            return False
+        vel = self.stream.last.get('vel')
+        return (vel is not None and t_rx - vel.get('t_rx', -1e9) <= 1.0
+                and abs(vel.get('speed', 1e9)) < USB_TAKEOVER_MAX_SPEED_MPS)
 
     def stamp(self, t_meas):
         """单调时钟的测量时刻 → ROS 时间戳（标准消息的 header 用，和其他节点的时间一致）。"""
@@ -309,6 +354,7 @@ class RtkNode(Node):
         tablet = self.tablet.status() if self.tablet is not None else None
         bt = self.bt.status() if self.bt is not None else None
         can = self.can.status() if self.can is not None else None
+        usb = self.usb.status() if getattr(self, 'usb', None) is not None else None
         if self.source=='can' and can is not None:
             # CAN 在拼包层先做 CRC；继续计入原有诊断总数，坏包不会因前置过滤而被隐藏。
             st['crc_errors']+=can.get('crc_errors',0)
@@ -322,6 +368,9 @@ class RtkNode(Node):
         elif self.source == 'can':
             st['port_open'] = bool(can and can['connected'])
             st['port_error'] = None if st['port_open'] else 'can silent'
+        elif self.source == 'tablet_usb':
+            st['port_open'] = bool(usb and usb['connected'])
+            st['port_error'] = None if st['port_open'] else 'usb cable silent'
         else:
             st['port_open'] = self.ser is not None
             st['port_error'] = self.port_error
@@ -333,6 +382,9 @@ class RtkNode(Node):
         st['can'] = dict(listening=can is not None,
                          **(can or dict(channel=None, open=False, connected=False, peer=None, frames=0, gaps=0,
                                         bytes_in=0, acks=0, error=None)))
+        st['tablet_usb'] = dict(listening=usb is not None,
+                                **(usb or dict(device=None, open=False, connected=False, peer=None, udc=None, opens=0,
+                                               hangups=0, bytes_in=0, error=None)))
         if self.cors.client is not None:
             n = self.cors.client.status()
             st['ntrip'] = dict(configured=True, connected=n['connected'], mount=n['mount'],
@@ -347,7 +399,7 @@ class RtkNode(Node):
         return st
 
     def sync_cors(self):
-        """数据来自平板（WiFi、蓝牙或 CAN）时暂停车端 CORS（平板自己连），换回 USB（或还没数据）时恢复。"""
+        """数据来自平板（WiFi、蓝牙、CAN 或 USB 线）时暂停车端 CORS（平板自己连），换回车上串口（或还没数据）时恢复。"""
         if self.source in TABLET_SOURCES:
             self.cors.pause('tablet')
         else:
@@ -367,6 +419,8 @@ class RtkNode(Node):
             self.bt.close()
         if self.can is not None:
             self.can.close()
+        if self.usb is not None:
+            self.usb.close()
 
 
 def main():
@@ -380,13 +434,17 @@ def main():
                    help='平板蓝牙转发的 RFCOMM 通道，0 不开')
     p.add_argument('--can-channel', default=os.environ.get('RK3588_RTK_CAN_CHANNEL', CAN_CHANNEL),
                    help='收平板 CAN 转发的接口（500 kbit/s，与驱动器同一条总线），空字符串不收')
+    p.add_argument('--usb-direct', default=os.environ.get('RK3588_RTK_USB_DIRECT', USB_AUTO),
+                   help='平板 USB 线：auto 在 J17 建 USB 虚拟串口并读（默认，要 root），/dev/ttyGSN 只读这个节点，空字符串不开')
     argv = __import__('sys').argv[1:]
     args = p.parse_args(argv[:argv.index('--ros-args')] if '--ros-args' in argv else argv)
     rclpy.init()
     node = RtkNode(args.port, args.baud, args.ntrip_env, tablet_port=args.tablet_port or None,
-                   bt_channel=args.bt_channel or None, can_channel=args.can_channel or None)
+                   bt_channel=args.bt_channel or None, can_channel=args.can_channel or None,
+                   usb_device=args.usb_direct or None)
     watchdog.start("ros", "serial", *(("tablet",) if node.tablet is not None else ()),
-                   *(("bluetooth",) if node.bt is not None else ()), *(("can",) if node.can is not None else ()))
+                   *(("bluetooth",) if node.bt is not None else ()), *(("can",) if node.can is not None else ()),
+                   *(("tablet_usb",) if node.usb is not None else ()))
     node.create_timer(0.5, lambda: watchdog.tick("ros"))
 
     def on_signal(_sig=None, _frame=None):

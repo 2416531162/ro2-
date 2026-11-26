@@ -16,7 +16,11 @@ BlueZ 收连接、把连好的 socket 交过来，之后和 TCP 那一路一样�
 
 还可以走 CAN（CanSerialBridge）：平板（cpdevice SPRING2_MIX）MCU 的 CAN1/CAN2 接到车的 can0（500 kbit/s，
 和 OID 驱动器、IMU 同一条总线）。rtk_node 当第三路（'can'）。帧格式见 CAN_DATA_ID。
+
+还可以走 USB 数据线（TabletUsbSerial）：平板 USB-A 经 A 转 C 数据线插板子 J17，板子当 USB 设备（CDC-ACM 虚拟串口，
+usb_gadget）。不丢帧、带宽够转原始观测；rtk_node 当第四路（'tablet_usb'），车停着时优先于 WiFi / 蓝牙 / CAN。
 """
+import os
 import select
 import socket
 import struct
@@ -410,6 +414,128 @@ class CanSerialBridge:
 
     def close(self):
         self._close_sock()
+
+
+USB_QUIET_S = 2.0                       # 这么久没收到数据算没连着（平板拔线、停了 USB 输出）
+USB_RETRY_S = 1.0                       # 虚拟串口打不开 / 断了以后隔这么久再开
+
+
+class TabletUsbSerial:
+    """平板经 USB 数据线转发串口：read / status / close 与 TabletSerialServer 一样，rtk_node 当另一路串口用。
+
+    板子 J17 配成 CDC-ACM USB 设备（usb_gadget.ensure，setup 回调给出 /dev/ttyGS<N>），平板 USB-A 当主机插上来，
+    「UM982 转发」1.5.0 起把接收机串口原始字节原样写进来。只读：车不往这根线写（echo 也关掉，回显会把定位数据
+    原样送回平板）。tty 设成原始模式（不转换回车换行、不按行缓冲），二进制日志原样到 Um982Stream。
+    平板拔线或停了 USB 输出时内核挂断这个 tty（读到 EOF / EIO）：关掉、USB_RETRY_S 后重开，原因写进 status()['error']。
+    device：固定节点（不建 gadget）；None 时每次打开前调 setup() 建好 gadget、取它的节点。opener、clock 测试用。
+    """
+
+    def __init__(self, device=None, setup=None, timeout=0.1, on_connect=None, opener=None, clock=time.monotonic):
+        self.device, self.setup, self.timeout, self.on_connect = device, setup, timeout, on_connect
+        self.opener, self.clock = opener, clock
+        self.fd = None
+        self.path = device
+        self.gadget = None              # setup() 的结果（udc、serial_device、created）
+        self.error = None
+        self.opens = self.bytes_in = self.hangups = 0
+        self.last_rx = None
+        self._reopen_at = 0.0
+
+    def _resolve(self):
+        if self.device is not None:
+            return self.device
+        info = self.setup() if self.setup is not None else None
+        self.gadget = info
+        path = (info or {}).get('serial_device')
+        if not path:
+            raise OSError('USB 虚拟串口没有节点（gadget 的 port_num 读不到）')
+        return path
+
+    def _open(self):
+        try:
+            path = self._resolve()
+            fd = self.opener(path) if self.opener is not None else os.open(path, os.O_RDONLY | os.O_NOCTTY | os.O_NONBLOCK)
+            try:
+                raw_tty(fd)
+            except Exception:
+                os.close(fd)
+                raise
+        except Exception as exc:        # 没有 configfs、控制器被占、节点不存在、没权限……
+            self.fd, self.error = None, '%s: %s' % (type(exc).__name__, exc)
+            self._reopen_at = self.clock() + USB_RETRY_S
+            return False
+        self.fd, self.path, self.error = fd, path, None
+        self.opens += 1
+        return True
+
+    def connected(self, now=None):
+        now = self.clock() if now is None else now
+        return self.fd is not None and self.last_rx is not None and now - self.last_rx <= USB_QUIET_S
+
+    def read(self, n=4096):
+        """最多等 timeout 秒；没连着或这段时间没数据时返回 b''。"""
+        if self.fd is None:
+            if self.clock() < self._reopen_at or not self._open():
+                time.sleep(self.timeout)
+                return b''
+        fd = self.fd
+        try:
+            ready, _, _ = select.select([fd], [], [], self.timeout)
+            if not ready:
+                return b''
+            data = os.read(fd, n)
+        except (BlockingIOError, InterruptedError):
+            return b''
+        except (OSError, ValueError) as exc:    # EIO：平板拔线，tty 被挂断
+            self._hangup('%s: %s' % (type(exc).__name__, exc))
+            return b''
+        if not data:                    # EOF：同上
+            self._hangup('平板拔线或停了 USB 输出')
+            return b''
+        now = self.clock()
+        was = self.connected(now)
+        self.last_rx = now
+        self.bytes_in += len(data)
+        if not was and self.on_connect is not None:
+            self.on_connect()
+        return data
+
+    def _hangup(self, why):
+        self.hangups += 1
+        self._close_fd()
+        self.error = why
+        self._reopen_at = self.clock() + USB_RETRY_S
+
+    def status(self):
+        g = self.gadget or {}
+        return dict(device=self.path, open=self.fd is not None, connected=self.connected(), peer=None,
+                    udc=g.get('udc'), opens=self.opens, hangups=self.hangups, bytes_in=self.bytes_in, error=self.error)
+
+    def _close_fd(self):
+        fd, self.fd = self.fd, None
+        self.last_rx = None
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+    def close(self):
+        self._close_fd()
+
+
+def raw_tty(fd):
+    """tty 原始模式（同 cfmakeraw）+ 不等载波；清掉打开前积压的旧数据（重连不补发旧定位）。"""
+    import termios
+    attrs = termios.tcgetattr(fd)
+    attrs[0] &= ~(termios.IGNBRK | termios.BRKINT | termios.PARMRK | termios.ISTRIP | termios.INLCR | termios.IGNCR
+                  | termios.ICRNL | termios.IXON | termios.IXOFF | termios.INPCK)
+    attrs[1] &= ~termios.OPOST
+    attrs[2] = (attrs[2] & ~(termios.CSIZE | termios.PARENB)) | termios.CS8 | termios.CREAD | termios.CLOCAL
+    attrs[3] &= ~(termios.ECHO | termios.ECHONL | termios.ICANON | termios.ISIG | termios.IEXTEN)
+    attrs[6][termios.VMIN], attrs[6][termios.VTIME] = 1, 0
+    termios.tcsetattr(fd, termios.TCSANOW, attrs)
+    termios.tcflush(fd, termios.TCIFLUSH)
 
 
 def bt_address(device_path):

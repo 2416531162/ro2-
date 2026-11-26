@@ -535,10 +535,11 @@ def rtk_telemetry(gnss, now):
             # 接收机 GSA 报的 PDOP（2 s 内收到的，没有为 null）；单天线 PDOP 小于 3 才可信
             'pdop': _num(g.get('pdop'), 2),
             # 接收机数据从哪来：'usb'（车上串口）/ 'tablet'（平板 WiFi 转发）/ 'bluetooth'（平板蓝牙转发）/
-            # 'can'（平板 CAN 转发，见 gnss_bridge）；旧 RTK 节点没有
-            'source': g.get('source') if g.get('source') in ('usb', 'tablet', 'bluetooth', 'can') else None,
-            # 平板转发（WiFi、蓝牙或 CAN）连着车
-            'tablet_connected': any((g.get(k) or {}).get('connected') for k in ('tablet', 'bluetooth', 'can')),
+            # 'can'（平板 CAN 转发）/ 'tablet_usb'（平板 USB 线转发，见 gnss_bridge）；旧 RTK 节点没有
+            'source': g.get('source') if g.get('source') in ('usb', 'tablet', 'bluetooth', 'can', 'tablet_usb') else None,
+            # 平板转发（WiFi、蓝牙、CAN 或 USB 线）连着车
+            'tablet_connected': any((g.get(k) or {}).get('connected')
+                                    for k in ('tablet', 'bluetooth', 'can', 'tablet_usb')),
             'antennas': {name: {
                 'available': bool(a.get('available')), 'source': a.get('source'),
                 'sol': a.get('sol'), 'fix': a.get('fix', 'NONE'),
