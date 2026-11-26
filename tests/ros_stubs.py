@@ -252,7 +252,7 @@ def install():
 
     std = types.ModuleType('std_msgs'); std_msg = types.ModuleType('std_msgs.msg')
     std_msg.String = String
-    for name in ('Float32', 'Float64', 'Bool', 'Int32'):
+    for name in ('Float32', 'Float64', 'Bool', 'Int32', 'UInt8MultiArray'):
         setattr(std_msg, name, _simple(name))
     std.msg = std_msg
 

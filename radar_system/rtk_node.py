@@ -18,11 +18,15 @@
     /gnss/fix      sensor_msgs/NavSatFix，ANT1 位置（frame_id gnss），协方差 ENU 对角
     /gnss/heading  sensor_msgs/Imu，只有车头方向（ENU，东为 0 逆时针），已扣 ~/rtk/fusion.json 里的安装偏差；
                    航向无效时不发。后两个是 ROS 2 标准消息，Foxglove 地图、rviz2、rosbag、robot_localization 可直接用
+    /gnss/usb_bytes std_msgs/UInt8MultiArray，平板 USB 线收到的原始字节原样（攒 0.1 s 一条，不管当前用不用这一路）：
+                   接收机 COM2 的全部输出（含原始观测 OBSVMB / OBSVHB、星历）和平板插进来的 CORS 改正数行
+                   `$RTCM3,<十六进制>`；作业记录存进 bag，事后精算（PPK）用。车端不解析原始观测
 
 CORS 账号在 ~/rtk/ntrip.env（权限 600，由人手工创建，本节点只读、不打印密码）。没有账号文件时照常
 输出单点定位，状态里写明未配置差分。接收机的日志频率和基线配置记录见车上 ~/rtk/README.md。
 """
 import argparse
+import array
 import json
 import math
 import os
@@ -34,7 +38,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.time import Time
 from sensor_msgs.msg import Imu, NavSatFix, NavSatStatus
-from std_msgs.msg import String
+from std_msgs.msg import String, UInt8MultiArray
 
 from um982 import RTK_FIXED, RTK_FLOAT, NtripClient, Um982Stream
 from ntrip_config import NtripReload
@@ -60,6 +64,9 @@ USB_TAKEOVER_S = 1.0
 USB_RUN_GAP_S = 0.5
 USB_TAKEOVER_MAX_SPEED_MPS = 0.05
 USB_AUTO = 'auto'                       # --usb-direct 默认：建 J17 的虚拟串口（usb_gadget.ensure）并读它
+# /gnss/usb_bytes：USB 线原始字节攒这么久或这么多发一条（约 20 KB/s，一秒 10 条，作业记录写得过来）
+USB_BYTES_PERIOD_S = 0.1
+USB_BYTES_MAX = 16384
 
 # sensor_msgs/NavSatStatus 的取值（照 nmea_navsat_driver 的对应：单点 FIX、伪距差分 SBAS、RTK 浮点/固定 GBAS）
 NO_FIX, FIX, SBAS_FIX, GBAS_FIX = -1, 0, 1, 2
@@ -138,6 +145,8 @@ class RtkNode(Node):
         self.pub_status = self.create_publisher(String, '/gnss/status', 1)
         self.pub_fix = self.create_publisher(NavSatFix, '/gnss/fix', 10)
         self.pub_heading = self.create_publisher(Imu, '/gnss/heading', 10)
+        self.pub_usb_bytes = self.create_publisher(UInt8MultiArray, '/gnss/usb_bytes', 50)
+        self.usb_bytes, self.usb_bytes_since, self.usb_bytes_error = bytearray(), None, None
         try:
             self.mount_offset_deg, self.baseline_yaw_body_deg = load_heading_calibration(fusion_config)
         except (OSError, ValueError, TypeError) as exc:
@@ -266,12 +275,31 @@ class RtkNode(Node):
                 self._bridge_error(source, '%s: %s' % (type(exc).__name__, exc))
                 time.sleep(0.5)
                 continue
+            if source == 'tablet_usb':
+                self.record_usb(data, time.monotonic())
             if data:
                 try:
                     self.on_serial_data(data, time.monotonic(), source)
                 except Exception as exc:
                     self._bridge_error(source, 'data: %s: %s' % (type(exc).__name__, exc))
                     self.get_logger().error('处理平板%s数据出错：%r' % (SOURCE_TEXT[source], exc))
+
+    def record_usb(self, data, now):
+        """USB 线收到的原始字节原样发到 /gnss/usb_bytes（作业记录存，事后精算用）：攒 USB_BYTES_PERIOD_S 秒或
+        USB_BYTES_MAX 字节发一条，读超时（线上没数据）时把攒着的发掉。只是旁路记录：出错只记下原因，不影响定位。"""
+        try:
+            if data:
+                if not self.usb_bytes:
+                    self.usb_bytes_since = now
+                self.usb_bytes += data
+            if self.usb_bytes and (not data or len(self.usb_bytes) >= USB_BYTES_MAX
+                                   or now - self.usb_bytes_since >= USB_BYTES_PERIOD_S):
+                msg = UInt8MultiArray()
+                msg.data = array.array('B', self.usb_bytes)
+                self.usb_bytes = bytearray()
+                self.pub_usb_bytes.publish(msg)
+        except Exception as exc:            # 记录出错不能拖垮读线程
+            self.usb_bytes, self.usb_bytes_error = bytearray(), '%s: %s' % (type(exc).__name__, exc)
 
     def _bridge_error(self, source, text):
         if source == 'bluetooth':
@@ -346,6 +374,7 @@ class RtkNode(Node):
         with self.stream_lock:
             st = self.stream.status(now)
             hd = self.stream.last.get('heading')
+            rtcm_lines, rtcm_rx = getattr(self.stream, 'rtcm_lines', 0), getattr(self.stream, 'rtcm_rx', None)
         if st.get('heading') is not None:
             # 双天线测出的车头方向（ENU 度，已扣安装偏差）：只在测向有效时给，无效时的数不能拿来显示
             ok = st['heading'].get('valid') and hd is not None and heading_valid(hd)
@@ -385,6 +414,11 @@ class RtkNode(Node):
         st['tablet_usb'] = dict(listening=usb is not None,
                                 **(usb or dict(device=None, open=False, connected=False, peer=None, udc=None, opens=0,
                                                hangups=0, bytes_in=0, error=None)))
+        # 原始字节旁路记录（/gnss/usb_bytes）出的错；平板经 USB 线插进来的 CORS 改正数行（$RTCM3）：正用 USB 这一路时才数
+        st['tablet_usb']['raw_error'] = getattr(self, 'usb_bytes_error', None)
+        st['tablet_usb']['rtcm_lines'] = rtcm_lines if self.source == 'tablet_usb' else 0
+        st['tablet_usb']['rtcm_age_s'] = (round(now - rtcm_rx, 1) if self.source == 'tablet_usb' and rtcm_rx is not None
+                                          else None)
         if self.cors.client is not None:
             n = self.cors.client.status()
             st['ntrip'] = dict(configured=True, connected=n['connected'], mount=n['mount'],

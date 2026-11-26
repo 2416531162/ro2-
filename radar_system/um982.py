@@ -651,6 +651,9 @@ class Um982Stream:
     位置精度取 GST（没有 GST 用假定值，标 sigma_assumed）。
     收到主天线 BESTPOS 标回 dual。
     fix 消息都带 antenna_mode，走直线节点按它换天线杠杆臂。
+
+    平板经 USB 线转来时，流里还夹着平板插进来的 CORS 改正数行 `$RTCM3,<十六进制>`（一行一帧 RTCM3，只插在接收机
+    一条消息的末尾，不会劈开接收机的帧）：这里只计数（rtcm_lines），不解析；原始观测（OBSVMB / OBSVHB）、星历帧也只是跳过。
     """
 
     RATE_WINDOW_S = 2.0
@@ -676,6 +679,8 @@ class Um982Stream:
         self.times = {k: deque() for k in ('fix', 'fix2', 'heading', 'vel')}
         self.crc_errors = 0
         self.last_rx = None
+        self.rtcm_lines = 0             # 平板经 USB 线插进来的 CORS 改正数行（$RTCM3）：只计数，原始字节另有录制
+        self.rtcm_rx = None
 
     def feed(self, data, t_rx):
         """ASCII 行（以换行结尾）和二进制帧（同步字开头、按长度取）混在一起也行。二进制帧到齐前停下等后续数据；
@@ -711,6 +716,10 @@ class Um982Stream:
         return out
 
     def _line(self, raw, t_rx, out):
+        if b'$RTCM3,' in raw:          # 紧跟在原始观测帧后面时，前面会粘着那一帧没跳干净的尾巴
+            self.rtcm_lines += 1
+            self.rtcm_rx = t_rx
+            return
         line = raw.decode('ascii', 'replace').strip()
         if line.startswith(('$GNGGA', '$GPGGA')):
             fields = parse_gga(line)

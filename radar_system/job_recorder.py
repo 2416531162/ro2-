@@ -16,6 +16,7 @@
     context/segNN/    这一段开始时的配置快照：版本号（release.txt、发布清单 manifest.json 带源码提交）、robot 配置、
                       oid.yaml、fusion.json、route.json、line_state.json
     segNN/            这一段的 ROS 2 bag（mcap，zstd 压缩）：点开始前 PRE_S 秒到停下后 POST_S 秒
+                      （平板 USB 线原始字节 /gnss/usb_bytes 点开始前留 LONG_PRE_S，事后精算用）
 一次「开始」或「继续」是一段；同一个作业暂停后再继续，接着往同一个目录里加段（记录进程重启过也按作业 id 找回目录）。
 没有作业记录的任务（网页上的 A—B 直线）按任务名加开始时间单独成一个作业。
 总量超过 MAX_TOTAL_MB 或磁盘剩余不到 MIN_FREE_MB 时删最旧的作业目录（正在记的不删）。
@@ -58,6 +59,7 @@ TOPICS = {
     '/gnss/status': 'std_msgs/msg/String',
     '/gnss/raw': 'std_msgs/msg/String',
     '/gnss/fix': 'sensor_msgs/msg/NavSatFix',
+    '/gnss/usb_bytes': 'std_msgs/msg/UInt8MultiArray',
     '/gnss/heading': 'sensor_msgs/msg/Imu',
     '/imu': 'sensor_msgs/msg/Imu',
     '/imu/data': 'sensor_msgs/msg/Imu',
@@ -70,6 +72,10 @@ TOPICS = {
     '/voltage': 'std_msgs/msg/Float32',
     '/rosout': 'rcl_interfaces/msg/Log',
 }
+# 这几个话题点开始之前留得更久（秒）：原始观测事后精算（PPK）要开始前多一段数据收敛
+LONG_PRE_S = {'/gnss/usb_bytes': 120.0}
+# 订阅队列深度（默认 50）：原始字节一秒约 10 条，记录进程偶尔卡一下也别丢
+DEPTH = {'/gnss/usb_bytes': 500}
 # 这几个是 String JSON，另外解码算摘要
 SUMMARY_TOPICS = ('/line/status', '/gnss/status', '/motion/status', '/oid/status', '/straight/status')
 
@@ -144,6 +150,17 @@ README = '''# 作业记录（job_recorder 自动记）
 3. `wz`（算的）→ `/oid/trace` `w_cmd`（限速后）→ `w`（读回）：转向有没有被限、延迟多少、左右轮是否一侧跟不上。
    轮子给了转速却不动（原地转卡住）时看 `motor_a`：一直贴着同一个值 = 顶到驱动器上位机设的最大电流。
 4. `/gnss/raw` 的 `sol` 和 `t_rx - t`：解算状态掉了没有、数据有没有晚到 / 断流（蓝牙、WiFi、CAN 转发）。
+
+## 原始观测（`/gnss/usb_bytes`，平板 USB 线接着时才有）
+- std_msgs/UInt8MultiArray，`data` 是平板 USB 线收到的原始字节，按记录时间先后接起来就是完整的一条字节流
+  （点开始前多留 120 s，给事后精算收敛）。里面有两种东西：
+  1. 接收机 UM982 COM2 的全部输出，原样：车用的 BESTPOSB / HEADINGB / BESTVELB / BESTNAVHB，主、副天线原始观测
+     OBSVMB / OBSVHB（Unicore N4 二进制，同步字 `AA 44 B5`，消息 ID 12 / 13，5 Hz），GPS / BDS / GAL / GLO 星历
+     （EPHB，有变化才发），GGA、GSV 文本行。
+  2. 基站数据：平板连 CORS 收到的 RTCM3 改正数（虚拟基站的观测和坐标），每帧一行 `$RTCM3,<十六进制>\r\n`，
+     只插在接收机一条消息的末尾。
+- 拆开：用 `radar_system/tools/usb_raw_extract.py <segNN 目录>` 写出 `um982.bin`（去掉 `$RTCM3` 行后的接收机字节流）和
+  `base.rtcm3`（还原的 RTCM3 二进制），再用 RTKLIB（demo5，`-r unicore`）等做事后差分。
 '''
 
 
@@ -415,6 +432,7 @@ class JobRecorder:
         self.files, self.clock, self.wall, self.log = files, clock, wall, log
         self.watch = JobWatch(post_s, wall)
         self.ring = collections.deque()
+        self.long_rings = {topic: collections.deque() for topic in LONG_PRE_S}
         self.dir = self.info = None
         self.segment = self.seg = self.summary = None
         self.last_status = None
@@ -429,6 +447,11 @@ class JobRecorder:
         now = self.clock()
         if self.segment is not None:
             self._write(topic, type_name, data, t_ns)
+        elif topic in self.long_rings:
+            ring = self.long_rings[topic]
+            ring.append((t_ns, topic, type_name, data))
+            while ring and ring[0][0] < t_ns - int(LONG_PRE_S[topic] * 1e9):
+                ring.popleft()
         else:
             self.ring.append((t_ns, topic, type_name, data))
             while self.ring and self.ring[0][0] < t_ns - self.pre_ns:
@@ -542,8 +565,11 @@ class JobRecorder:
         self.summary = Summary()
         self.info['segments'].append(dict(name=name, start=self.seg['start'], end=None))
         self.error = None
-        ring, self.ring = self.ring, collections.deque()
-        for t_ns, topic, type_name, data in ring:     # 点开始之前的 PRE_S 秒
+        rings = [self.ring] + list(self.long_rings.values())
+        self.ring = collections.deque()
+        self.long_rings = {topic: collections.deque() for topic in LONG_PRE_S}
+        # 点开始之前的 PRE_S 秒（LONG_PRE_S 里的话题更久），按时间先后写
+        for t_ns, topic, type_name, data in sorted((m for r in rings for m in r), key=lambda m: m[0]):
             self._write(topic, type_name, data, t_ns)
         self._save()
 
@@ -645,7 +671,8 @@ def attach(node, rec):
         return cb
 
     for topic, type_name in TOPICS.items():
-        node.create_subscription(get_message(type_name), topic, callback(topic, type_name), QoSProfile(depth=50), raw=True)
+        node.create_subscription(get_message(type_name), topic, callback(topic, type_name),
+                                 QoSProfile(depth=DEPTH.get(topic, 50)), raw=True)
     pub = node.create_publisher(String, '/jobrec/status', 1)
 
     def every_second():
