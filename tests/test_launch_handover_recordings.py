@@ -7,6 +7,7 @@ import sys,unittest
 ROOT=Path(__file__).resolve().parents[1]
 sys.path[:0]=[str(ROOT/'radar_system'),str(ROOT)]
 import path_tracker as pt
+import user_rules as rules
 from robot_core.kinematics import ChassisGeometry
 
 GEO=ChassisGeometry(drive='differential',track_m=.675,diff_min_radius_m=.5)
@@ -59,7 +60,9 @@ class RecordedHandover(unittest.TestCase):
         self.assertTrue(bad)
         self.assertGreater(max(r['v_sent'] for r in bad),.49)
         self.assertTrue(all(not r['settle']['done'] for r in bad))
-        self.assertLessEqual(max(r['v'] for r in bad),.35+1e-9)
+        # 没收稳不放开：车速压在起步稳定段车速以内（11-27 0.35 → 0.45，user_rules.LAUNCH_SETTLE_MPS），到不了 0.5
+        self.assertLessEqual(max(r['v'] for r in bad),rules.LAUNCH_SETTLE_MPS+1e-9)
+        self.assertLess(max(r['v'] for r in bad),.49)
 
     def test_handover_obeys_zero_speed_cap(self):
         tr,_=replay('9fbb5dde')

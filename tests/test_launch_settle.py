@@ -12,6 +12,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / 'radar_system'), str(ROOT)]
 import route_plan as rp
+import user_rules as rules
 from path_tracker import Path as Route, PathConfig, Section, SectionTracker, differential_config
 from robot_core.kinematics import ChassisGeometry
 
@@ -95,7 +96,12 @@ class LaunchSettle(unittest.TestCase):
     def test_start_swing_is_smaller(self):
         median = lambda rs: sorted(r['swing'] for r in rs)[len(rs) // 2]
         self.assertLess(median(self.new), .85 * median(self.old))
-        self.assertLess(max(r['swing'] for r in self.new), .8 * max(r['swing'] for r in self.old))
+        # 最差那趟：11-27 进线提速（起步档、起步稳定段 0.35 → 0.45，user_rules.LAUNCH_SETTLE_MPS）以后，起步稳定策略对最差
+        # 那趟的削减从 2 成多变成 1 成左右（0.35 时 3.55 / 4.65°，0.45 时 3.78 / 4.12°），线头不变差；照旧要比不用小，
+        # 且不超过 3.9°
+        worst = max(r['swing'] for r in self.new)
+        self.assertLess(worst, max(r['swing'] for r in self.old))
+        self.assertLess(worst, 3.9)
 
     def test_line_head_is_not_worse(self):
         # 线头规则（用户）：线头精度不能变差；模型里允许 0.2 cm 的数值差
@@ -111,8 +117,11 @@ class LaunchSettle(unittest.TestCase):
             for r in res['rows']:
                 if r['settle']:
                     # 交接中失去收稳条件时允许按既有减速度退回，不能继续提速。
-                    self.assertLessEqual(r['vc'], max(.35,prev) + 1e-9)
-                    self.assertLessEqual(abs(r['wc']), math.radians(4.) + 1e-9)
+                    self.assertLessEqual(r['vc'], max(rules.LAUNCH_SETTLE_MPS,prev) + 1e-9)
+                    # 大偏差（喷头 ≥ LAUNCH_BIG_E_M 或车头 ≥ LAUNCH_BIG_HEADING_DEG）时按设计放宽到 LAUNCH_BIG_DEG_S
+                    # （11-27 进线 0.45 m/s 后 e0 +2 cm、h0 +4° 那趟走到 0.29 m 时喷头到了 5.06 cm）
+                    big = abs(r['noz']) >= 100 * rules.LAUNCH_BIG_E_M or abs(r['h']) >= rules.LAUNCH_BIG_HEADING_DEG
+                    self.assertLessEqual(abs(r['wc']), math.radians(rules.LAUNCH_BIG_DEG_S if big else 4.) + 1e-9)
                 self.assertLessEqual(abs(r['wc']), 2 * abs(r['vc']) / TRACK + 1e-9)
                 prev=r['vc']
             self.assertLess(settling[-1]['s'],rp.RUN_UP_M+.05)

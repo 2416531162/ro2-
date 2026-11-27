@@ -257,7 +257,7 @@ class PathConfig:
     launch_settle_rate_deg_s: float = 2.0
     launch_settle_calm_s: float = 0.3
     launch_settle_max_deg_s: float = rules.LAUNCH_SETTLE_DEG_S
-    launch_settle_mps: float = 0.35
+    launch_settle_mps: float = rules.LAUNCH_SETTLE_MPS     # 起步稳定段车速（11-27 0.35 → 0.45，user_rules）
     launch_settle_blend_s: float = 1.0
     # 起步偏差不能靠加长助跑消化：可信横偏/航向误差增大时逐步放宽纠偏，实际收稳后才交接速度。
     launch_recover_max_deg_s: float = rules.LAUNCH_RECOVER_DEG_S

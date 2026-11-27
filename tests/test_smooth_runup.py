@@ -9,6 +9,7 @@ sys.path[:0]=[str(ROOT/'radar_system'),str(ROOT)]
 from path_tracker import Path as Route,Section,SectionTracker,PathConfig,differential_config
 from robot_core.kinematics import ChassisGeometry
 from line_tracker import lateral_integral_allowed
+import user_rules as rules
 
 DT=.02
 GEO=ChassisGeometry(drive='differential',track_m=.675,diff_min_radius_m=.5)
@@ -93,9 +94,10 @@ class SmoothRunup(unittest.TestCase):
                     self.assertTrue(all(b['v']>=a['v']-1e-8 for a,b in zip(rows,rows[1:])))
                     self.assertGreater(rows[0]['v'],0.)
                     self.assertLess(rows[0]['v'],.005)
-                    # 新鲜 IMU 下静止起步连续升至 0.35，之后沿原缓慢提速；两阶段都不允许速度阶跃。
+                    # 新鲜 IMU 下静止起步连续升至起步档（user_rules.RUNUP_START_MPS，11-27 0.35 → 0.45），之后沿原缓慢提速；
+                    # 两阶段都不允许速度阶跃。
                     self.assertLessEqual(max(r['a'] for r in rows),.500001)
-                    self.assertLessEqual(max(r['a'] for r in rows if r['v']>.351),.200001)
+                    self.assertLessEqual(max(r['a'] for r in rows if r['v']>rules.RUNUP_START_MPS+.001),.200001)
                     accel=[0.]+[r['a'] for r in rows]
                     self.assertLessEqual(max(abs(b-a)/DT for a,b in zip(accel,accel[1:])),2.000001)
                     # 不再沿前段连续卡在 0.3 m/s，然后把提速挤到线头前。
@@ -141,7 +143,7 @@ class SmoothRunup(unittest.TestCase):
         tr.speed_limit_mps=0.
         self.assertEqual(tr.update(pose(),DT),(0.,0.))
         tr.speed_limit_mps=None
-        self.assertEqual(tr.update(pose(),DT)[0],.35)
+        self.assertEqual(tr.update(pose(),DT)[0],rules.RUNUP_START_MPS)
         # 已经起步后的保护降速和恢复均不再跳回起步下限。
         tr.speed_limit_mps=.1
         self.assertEqual(tr.update(pose(.01,.35),DT)[0],.1)
@@ -188,7 +190,7 @@ class SmoothRunup(unittest.TestCase):
     def test_stopped_midline_resume_uses_floor_and_new_stabilization_distance(self):
         tr=make();tr.start(pose());tr.paint_start_guard.started=True
         tr._hint=4.;tr.pause();self.assertTrue(tr.start(pose(4.,0.)))
-        self.assertEqual(tr.update(pose(4.,0.),DT)[0],.35)
+        self.assertEqual(tr.update(pose(4.,0.),DT)[0],rules.RUNUP_START_MPS)
         self.assertEqual(tr._entry_hold_from,4.)
         self.assertEqual(tr.paint_target_mps,.5)
 
