@@ -261,6 +261,9 @@ class LineMission:
         self.route_rev = 0
         self._route_cache = None
         self._antenna = None            # 最近一次天线定位 (t, lat, lon, sol, sigma)
+        # RTK 完好性（rtk_node 写在定位里的 integrity，gnss_integrity）：最近一帧的判断；state == 'jump' 时 RTK 跳了不采用
+        self._integrity = None
+        self._rtk_suspect = False
         self._imu = None                # 最近一帧 IMU (t, 偏航 rad, 陀螺 z rad/s)，差速车定点画线的内环用
         self._attitude = None           # 最近一帧 IMU 姿态 (t, 横滚, 俯仰) rad，直线侧滑补偿用
         self._motor = None              # 最近一帧两轮电机电流 (收到时刻, 左 A, 右 A)，没有读数为 None：直线草地识别用
@@ -323,9 +326,14 @@ class LineMission:
                 # 单天线的差分龄期取自 GGA，有的接收机不填；GGA 报 RTK 固定 / 浮点本身就说明差分在用，按新鲜的算
                 diff_age = 0.0
             self._antenna = (m['t'], m['lat'], m['lon'], m['sol'], max(m['sigma_n'], m['sigma_e']))
+            # RTK 完好性（user_rules.RTK_INTEGRITY_*）：载波相位说 RTK 跳了——直线卫星纠偏当不是固定解（不用），
+            # 融合降权到最低、不当三固定可信；不丢帧、照常算固定解（不触发推算维持、停喷停车，10-05 规矩）
+            self._integrity = m.get('integrity') if isinstance(m.get('integrity'), dict) else None
+            suspect = self._rtk_suspect = bool(self._integrity and self._integrity.get('state') == 'jump')
             pb = m.get('position_baseline') or {}
             pair = pb.get('error_m') if pb.get('epoch_aligned') else None
-            self._rtk_quality = (m['t'], math.hypot(m['sigma_n'], m['sigma_e']), m.get('sats'), pair, sol in RTK_FIXED_SOLS)
+            self._rtk_quality = (m['t'], math.hypot(m['sigma_n'], m['sigma_e']), m.get('sats'), pair,
+                                 sol in RTK_FIXED_SOLS and not suspect)
             if sol in RTK_FIXED_SOLS:
                 self._check_innovation(m)
                 self._latency_fix(raw_t, m)
@@ -333,8 +341,11 @@ class LineMission:
             self.fusion.add_fix(s.GnssFix(t=m['t'], lat_deg=m['lat'], lon_deg=m['lon'], height_m=m['height'],
                                           sol=sol, sigma_n=m['sigma_n'], sigma_e=m['sigma_e'],
                                           sigma_u=m['sigma_u'], diff_age_s=inf(diff_age), sats=m['sats'],
-                                          position_variance_scale=m.get('position_variance_scale',1.),
-                                          inertial_only=self._constant_arc_speed() and sol not in RTK_FIXED_SOLS))
+                                          position_variance_scale=(max(m.get('position_variance_scale', 1.),
+                                                                       rules.RTK_JUMP_VARIANCE_SCALE) if suspect
+                                                                   else m.get('position_variance_scale', 1.)),
+                                          inertial_only=self._constant_arc_speed() and sol not in RTK_FIXED_SOLS,
+                                          suspect=suspect))
         elif kind == 'fix2':
             # 副天线固定状态与相对位置进入融合；相对偏差只降权，不否决主天线固定解。
             if m.get('sol') in RTK_FIXED_SOLS:
@@ -342,7 +353,10 @@ class LineMission:
             try:
                 x2, y2 = self.fusion.to_local(m['lat'], m['lon'])
                 nominal = (m.get('position_baseline') or {}).get('nominal_m') or 0.41
-                self._fix2 = (m['t'], x2, y2, m.get('sol') in RTK_FIXED_SOLS, float(nominal))
+                # 主天线判 RTK 跳了（两根一起跳最常见）：副天线也不给直线纠偏用
+                fixed2 = m.get('sol') in RTK_FIXED_SOLS and not (
+                    isinstance(m.get('integrity'), dict) and m['integrity'].get('state') == 'jump')
+                self._fix2 = (m['t'], x2, y2, fixed2, float(nominal))
             except (AttributeError, KeyError, TypeError, ValueError):
                 pass
             add_fix2 = getattr(self.fusion, 'add_fix2', None)
@@ -865,7 +879,7 @@ class LineMission:
             if callable(primary) and self._antenna is not None and lever is not None:
                 t1,lat,lon,sol,_ = self._antenna
                 x1,y1 = self.fusion.to_local(lat,lon)
-                primary(t1,x1,y1,sol in RTK_FIXED_SOLS,lever)
+                primary(t1,x1,y1,sol in RTK_FIXED_SOLS and not self._rtk_suspect,lever)
             if callable(secondary) and self._fix2 is not None and lever is not None:
                 # 副天线杠杆臂 = 主天线（含倾斜补偿）+ 测向基线（车体系方向 baseline_yaw_body_deg − 安装偏差 mount_offset_deg，
                 # 同 gnss_fusion；长度取标称）
@@ -1456,7 +1470,7 @@ class LineMission:
                                                          start_after=self._orient['cmd'] is not None)
         return _json_safe(dict(phase=self.phase, message=self.message, cruise=self.cruise, pose=pose,
                                antenna_mode=self.antenna_mode, orient=orient, gnss_latency=self._latency.status(),
-                               tracker=self.tracker.status(), task=self.task,
+                               tracker=self.tracker.status(), task=self.task, rtk_integrity=self._integrity,
                                origin=self._origin(), antenna=self._antenna_status(), route=self._route_status(),
                                route_limits=dict(min_radius=round(self.min_route_radius, 3),
                                                  max_points=route_plan.MAX_POINTS, max_laps=route_plan.MAX_LAPS,

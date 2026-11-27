@@ -41,6 +41,7 @@ from sensor_msgs.msg import Imu, NavSatFix, NavSatStatus
 from std_msgs.msg import String, UInt8MultiArray
 
 from um982 import RTK_FIXED, RTK_FLOAT, NtripClient, Um982Stream
+from gnss_integrity import RtkIntegrity
 from ntrip_config import NtripReload
 import runtime_config  # bootstraps the release root for direct script launches
 import heading_mount
@@ -73,6 +74,9 @@ NO_FIX, FIX, SBAS_FIX, GBAS_FIX = -1, 0, 1, 2
 SERVICES = 1 | 2 | 4 | 8               # GPS | GLONASS | 北斗(COMPASS) | Galileo
 DIAGONAL_KNOWN = 2
 UNKNOWN_VAR = 1e6                       # 横滚、俯仰不知道：给很大的方差
+
+
+INTEGRITY_FIXED = RTK_FIXED     # 完好性监测只拿固定解比（浮点解本来就不当可信）
 
 
 def navsat_status(sol):
@@ -153,6 +157,9 @@ class RtkNode(Node):
             self.mount_offset_deg, self.baseline_yaw_body_deg = 0.0, -90.0
             self.get_logger().error('读不了标定文件 %s：%s（航向先不扣安装偏差）' % (fusion_config, exc))
         self.stream = Um982Stream()
+        # RTK 完好性监测（gnss_integrity，user_rules.RTK_INTEGRITY_*）：同一路接收机字节里的原始观测做载波相位历元差分，
+        # 查 RTK 跳没跳；结果写在 /gnss/raw 的主、副天线定位里（integrity），任务层按它决定用不用。出错只记下，不影响定位
+        self.integrity, self.integrity_error = RtkIntegrity(), None
         self.stream_lock = threading.Lock()
         self.write_lock = threading.Lock()
         self.ser = None
@@ -327,7 +334,9 @@ class RtkNode(Node):
                     self.get_logger().warning('接收机数据来源 %s → %s' % (self.source, source))
                 self.source = source
                 self.stream = Um982Stream()     # 换一路：钟差、两天线配对、上一条测量全部重来
+                self.integrity = RtkIntegrity()
             messages = self.stream.feed(data, t_rx)
+            self._check_integrity(data, messages)
         for m in messages:
             self.pub_raw.publish(String(data=json.dumps(m, allow_nan=False)))
             if m['kind'] == 'fix':
@@ -335,6 +344,27 @@ class RtkNode(Node):
             elif m['kind'] == 'heading' and heading_valid(m):
                 self.pub_heading.publish(heading_imu(m, self.stamp(m['t']), self.mount_offset_deg,
                                                      self.baseline_yaw_body_deg))
+
+    def _check_integrity(self, data, messages):
+        """RTK 完好性：喂原始字节、主天线定位和测向；主、副天线定位带上判断（integrity）。要在 stream_lock 里调。"""
+        try:
+            mon = getattr(self, 'integrity', None)
+            if mon is None:
+                mon = self.integrity = RtkIntegrity()
+            mon.feed_bytes(data)
+            for m in messages:
+                kind = m.get('kind')
+                if kind == 'fix' and m.get('gps_tow_s') is not None:
+                    mon.add_fix(m['gps_tow_s'], m.get('lat'), m.get('lon'), m.get('height'), m.get('sol') in INTEGRITY_FIXED)
+                elif kind == 'heading':
+                    mon.add_heading(m.get('gps_tow_s'), m.get('heading'), heading_valid(m))
+            st = mon.status()
+            for m in messages:
+                if m.get('kind') in ('fix', 'fix2'):
+                    m['integrity'] = st
+        except Exception as exc:            # 监测出错不能拖垮定位
+            self.integrity_error = '%s: %s' % (type(exc).__name__, exc)
+            self.integrity = RtkIntegrity()
 
     def usb_takes_over(self, source, t_rx):
         """USB 线（不丢帧）能不能从正在用的 WiFi / 蓝牙 / CAN 接过来：同一台接收机同一个口的字节，只是换条线；
@@ -375,6 +405,8 @@ class RtkNode(Node):
             st = self.stream.status(now)
             hd = self.stream.last.get('heading')
             rtcm_lines, rtcm_rx = getattr(self.stream, 'rtcm_lines', 0), getattr(self.stream, 'rtcm_rx', None)
+            mon = getattr(self, 'integrity', None)
+            integrity = dict(mon.status() if mon is not None else {}, error=getattr(self, 'integrity_error', None))
         if st.get('heading') is not None:
             # 双天线测出的车头方向（ENU 度，已扣安装偏差）：只在测向有效时给，无效时的数不能拿来显示
             ok = st['heading'].get('valid') and hd is not None and heading_valid(hd)
@@ -430,6 +462,7 @@ class RtkNode(Node):
         st['ntrip']['config_revision'] = self.cors.applied_revision
         st['ntrip']['config_error'] = self.cors.error
         st['ntrip']['paused'] = self.cors.paused
+        st['integrity'] = integrity
         return st
 
     def sync_cors(self):

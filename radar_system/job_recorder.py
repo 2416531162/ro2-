@@ -161,6 +161,12 @@ README = '''# 作业记录（job_recorder 自动记）
      只插在接收机一条消息的末尾。
 - 拆开：用 `radar_system/tools/usb_raw_extract.py <segNN 目录>` 写出 `um982.bin`（去掉 `$RTCM3` 行后的接收机字节流）和
   `base.rtcm3`（还原的 RTCM3 二进制），再用 RTKLIB（demo5，`-r unicore`）等做事后差分。
+
+## RTK 完好性（`integrity`，gnss_integrity）
+- rtk_node 用同一路字节里的原始观测做载波相位历元差分，查接收机 RTK 有没有跳：`/gnss/raw` 主、副天线定位带
+  `integrity`（`state` ok / jump / unknown，`delta_m` RTK 和载波相位的水平差，`reason`），`/gnss/status` 也有，
+  `/line/status` 的 `rtk_integrity` 是任务层收到的最近一帧。`jump` 的那段：直线卫星纠偏不用，融合降权、不当三固定可信。
+- `job.json` 的 `rtk.integrity`：各状态占比、判跳的次数。回放：`radar_system/tools/rtk_integrity_replay.py <segNN 目录>`。
 '''
 
 
@@ -277,6 +283,8 @@ class Summary:
         self.sats_min = None
         self.diff_age_max = None
         self.sources = collections.Counter()
+        self.integrity = collections.Counter()   # /gnss/status 里 RTK 完好性（gnss_integrity）各状态的条数
+        self.integrity_jumps = None              # 判 RTK 跳了的次数 [首条, 末条]（累计数）
         self.modes = []                      # 控制权切换 [t, mode, reason, waiting_stationary]
         self.health = collections.Counter()  # 不健康的原因
         self.chassis_faults = collections.Counter()
@@ -315,6 +323,10 @@ class Summary:
             self.fix[str(d.get('rtk'))] += 1
             self.heading['ok' if d.get('heading_ok') else 'invalid'] += 1
             self.sources[str(d.get('source'))] += 1
+            integ = d.get('integrity')
+            if isinstance(integ, dict) and integ.get('enabled'):
+                self.integrity[str(integ.get('state'))] += 1
+                self.integrity_jumps = self._span(self.integrity_jumps, integ.get('jumps'))
             if isinstance(d.get('sats'), (int, float)):
                 self.sats_min = d['sats'] if self.sats_min is None else min(self.sats_min, d['sats'])
             if isinstance(d.get('diff_age'), (int, float)):
@@ -360,7 +372,9 @@ class Summary:
             rtk=dict(fix_share={k: round(v / n_fix, 3) for k, v in self.fix.items()} if n_fix else {},
                      heading_ok_share=round(self.heading['ok'] / n_head, 3) if n_head else None,
                      sats_min=self.sats_min, diff_age_max_s=self.diff_age_max, source=dict(self.sources),
-                     jumps=delta(self.jumps), position_resets=delta(self.resets)),
+                     jumps=delta(self.jumps), position_resets=delta(self.resets),
+                     integrity=(dict(share={k: round(v / sum(self.integrity.values()), 3) for k, v in self.integrity.items()},
+                                     rtk_jumps=delta(self.integrity_jumps)) if self.integrity else None)),
             motion=dict(changes=self.modes, unhealthy=dict(self.health)),
             chassis=dict(faults=dict(self.chassis_faults), silent=dict(self.silent), link_errors=delta(self.link_errors),
                          io_errors=delta(self.io_errors), voltage_min=self.voltage_min),

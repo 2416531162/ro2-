@@ -107,6 +107,32 @@ REENTRY_STILL_S = 0.5
 # 第一个线头没过起喷门槛：线头后这么远以内才停下退回去重新助跑，次数算进重新接入（10-11）
 REDO_RUNUP_PAST_M = 0.30
 
+# RTK 完好性监测（11-27 用户「这些先加上」，gnss_integrity.RtkIntegrity）：载波相位历元差分（TDCP）查接收机 RTK 有没有跳。
+# c30c07fd 22:18:28 那条：喷线 14.7 m 处 RTK 两根天线一起往左跳 10 cm，IMU 车头没动、车没被带偏；离线 TDCP 那里是平的，
+# 跳的是 RTK（原来只能按 σ、卫星数猜）。每个原始观测历元拿 RTK_JUMP_WINDOW_S 前的历元当参考，载波相位算的天线位移和
+# RTK 位移比：水平差连续 RTK_JUMP_PERSIST 次 > RTK_JUMP_M 就判 RTK 跳了，参考历元冻成锚点，最近 RTK_RECOVER_S 对锚点的差
+# 平均回到 RTK_RECOVER_M 以内才算回来；跳了以后星少了查不了照旧当跳了（不回头信刚跳过的 RTK），锚点最多
+# RTK_JUMP_HOLD_MAX_S 或开始转（换线）才放。跳了这段：直线卫星纠偏不用（当不是固定解），
+# 融合降权到最低（方差 × RTK_JUMP_VARIANCE_SCALE）、不当三固定可信——不丢帧、不停车（10-05 规矩照旧）。
+# 在转（测向 0.5–1.5 s 里转得比 TDCP_TURN_DEG_S 快）、星不够（< TDCP_MIN_SATS）、残差大（> TDCP_RES_MAX_M）时
+# 「不确定」，不拦 RTK。
+# 门槛按 c30c07fd 7 条线回放定（tools/rtk_integrity_replay.py）：4 条 RTK 好的线这个水平差 p99 3.5–4.9 cm、最大 5.0 cm，
+# 用户说的 3–4 cm 会常误报，取 5 cm 并要连续 2 次；22:18:28 那次跳变两次是 9.6 / 11.0 cm。测向在直线上自己会漂
+# 1–3°，按 3°/s 判在转几乎一直「在转」，用 10°/s（原地转约 85°/s、1.5 m 半径弧 19°/s 照样抓得到）。
+RTK_INTEGRITY_ENABLED = True
+RTK_JUMP_WINDOW_S = 2.0
+RTK_JUMP_M = 0.05
+RTK_JUMP_PERSIST = 2
+RTK_RECOVER_M = 0.025
+RTK_RECOVER_S = 1.0
+RTK_JUMP_HOLD_MAX_S = 20.0
+RTK_JUMP_VARIANCE_SCALE = 25.0
+TDCP_MIN_SATS = 7
+TDCP_RES_MAX_M = 0.012
+TDCP_ELEV_MASK_DEG = 15.0
+TDCP_CN0_MIN = 30.0
+TDCP_TURN_DEG_S = 10.0
+
 # ───────────── 三、直线：IMU 为主，卫星慢慢修 ─────────────
 
 # 开头学不到换算就借上一条线的：10 分钟以内、和此刻差 ≤ 10°（10-06）

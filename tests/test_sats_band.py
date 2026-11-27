@@ -106,7 +106,9 @@ class SatsBand(unittest.TestCase):
     def test_mission_passes_fixed_flag(self):
         import line_mission
         src = inspect.getsource(line_mission.LineMission.on_gnss)
-        self.assertIn('pair, sol in RTK_FIXED_SOLS)', src)
+        # 固定解标志照传（11-27 起 RTK 完好性监测判跳了的那帧当不是固定解，gnss_integrity）
+        self.assertIn('pair,', src)
+        self.assertIn('sol in RTK_FIXED_SOLS and not suspect)', src)
 
 
 if __name__ == '__main__':

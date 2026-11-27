@@ -57,6 +57,8 @@ class GnssFix:
     sats: int
     position_variance_scale: float = 1.0  # 同历元相对基线可疑时只降位置权重，不否决固定解。
     inertial_only: bool = False         # 圆弧短时失去固定解：仅 IMU/轮速推算，不用浮点位置拉偏轨迹。
+    # RTK 完好性监测说这帧 RTK 跳了（gnss_integrity，任务层给）：不当三固定可信、不拿来学标定；方差由调用方放大
+    suspect: bool = False
     # 到达时最近一帧副天线固定解 (测量时刻, 本地东, 北, 解类型, σe, σn)；融合自己在 add_fix 里填，调用方不用管
     secondary: tuple = None
 
@@ -849,7 +851,7 @@ class GnssFusion:
             self._dual.add_primary(s.t, *xy)
             cfg = self.config
             xy = (xy[0], xy[1], self._dual.recent_dev(s.t, cfg.dual_weight_window_s) if cfg.dual_weight_m > 0 else None,
-                  self._trust_at(s.t))
+                  self._trust_at(s.t) and not s.suspect)
         self._add(3, s, xy)
 
     def add_velocity(self, s: GnssVelocity):
@@ -1493,7 +1495,7 @@ class GnssFusion:
         s, cfg = self._s, self.config
         if not cfg.heading_course_check:
             return
-        if (xy is None or sample.sol not in _FIXED or not s.yaw_ready or not s.position_ready
+        if (xy is None or sample.sol not in _FIXED or not s.yaw_ready or not s.position_ready or sample.suspect
                 or sample.t - s.last_turn_t <= 1.0 or s.speed < cfg.course_min_speed_mps):
             self._course_clear()
             return
@@ -1810,9 +1812,10 @@ class GnssFusion:
         if fixed:
             s.fixed_t = sample.t
             s.hold_distance = s.hold_turn = s.motion_error = 0.0
-            self._wheel_scale_fix(sample, xy)
-            self._position_course(sample, xy)
-            self._learn_heading_bias(sample, xy)
+            if not sample.suspect:              # RTK 跳了的那段不学标定（轮径、单天线车头、测向偏差）
+                self._wheel_scale_fix(sample, xy)
+                self._position_course(sample, xy)
+                self._learn_heading_bias(sample, xy)
         else:
             s.align = None
             self._end_segment()
