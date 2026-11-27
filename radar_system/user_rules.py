@@ -71,6 +71,23 @@ OUTPUT_SNAP_DEG = 2.0
 # 测向变浮点但主、副天线都固定：航向不确定度放宽到这么多照样走（09-27「测向变浮点不能停，靠 IMU 维持」）。
 # 融合（gnss_fusion.HEADING_HOLD_SIGMA_DEG）和任务层（line_mission.GYRO_HOLD_SIGMA_YAW_DEG）用同一个值
 HEADING_HOLD_SIGMA_DEG = 2.0
+# 测向被楼面反射带偏时不跟着走（11-27 用户「改」，gnss_fusion FusionConfig.heading_course_*）：
+# 10-10 20:03 那条 48 m 线：楼下测向在 s 12–28 m 比实际行驶方向偏 +2.7–3.6°，IMU 是直的（和陀螺积分一致、不漂），
+# 融合航向按直行 2 s 时间常数跟过去偏了 2–3°，融合位置跟着推偏，RTK 被当离群降权。
+# 做法（不报错、不停车，10-05 规矩照旧）：直线上从开头起比「各自相对 IMU 变了多少」——测向（最近 HEADING_COURSE_DUAL_S 平均）、
+# 最近 HEADING_COURSE_WINDOW_M 固定解拟合的行驶方向。测向变了 > HEADING_COURSE_SUSPECT_DEG、行驶方向没变
+# （≤ HEADING_COURSE_AGREE_DEG，IMU 和卫星轨迹两票对测向一票）：这帧测向换成「这段直线开头的测向 + IMU 之后转过的角」，
+# 已经被拖过去的也拉回来；测向变化回到 HEADING_COURSE_RELEASE_DEG 以内、或行驶方向也变到 2 × AGREE 就恢复。
+# 两个起点按 HEADING_COURSE_BASE_TAU_S 慢慢跟（IMU 零漂这种慢变化不算）。转弯、IMU 断着照旧全信测向。
+# 一上来就偏的（安装偏差）不算「变了」，照旧交给测向偏差在线学习。
+# 离线三趟实录：48 m 线 s 12–24 m 全判上（测向变 +2.3–3.5°、轨迹 ±0.3°），19:59 那条测向变 −1.2–2.0° 也判上，20:01 那条基本不判。
+HEADING_COURSE_CHECK = True
+HEADING_COURSE_WINDOW_M = 3.0
+HEADING_COURSE_DUAL_S = 2.0
+HEADING_COURSE_SUSPECT_DEG = 1.0
+HEADING_COURSE_RELEASE_DEG = 0.6
+HEADING_COURSE_AGREE_DEG = 0.5
+HEADING_COURSE_BASE_TAU_S = 30.0
 
 # ───────────── 二、卫星断了、传感器不好时 ─────────────
 
