@@ -1230,10 +1230,22 @@ class GnssFusion:
             bound = max(bound, math.radians(cfg.angle_rate_floor_deg_s))
         return bound + math.radians(cfg.gyro_margin_deg_s)
 
+    def _yaw_frozen(self, sample):
+        """yaw_input = 'angle'、车停稳（轮子停够 stationary_time_s）、这一帧陀螺不转：IMU 航向角自己的变化不跟
+        （FusionConfig.still_freeze_yaw）。放在 _yaw_rate 里，推算（_predict 按下一帧航向角差匀速转过去）、
+        尖峰判断（_add 挑 future_gyro、_imu）三处一样；只在 _imu 里改来不及，_predict 已经把这一下积进车头了。"""
+        s, cfg = self._s, self.config
+        return (cfg.yaw_input == 'angle' and cfg.still_freeze_yaw
+                and sample.t - s.wheel_t <= cfg.sensor_timeout_s and s.stationary_since is not None
+                and sample.t - s.stationary_since >= cfg.stationary_time_s
+                and abs(sample.gyro_z - s.raw_gyro_bias) <= math.radians(cfg.gyro_margin_deg_s))
+
     def _yaw_rate(self, sample):
         """这一帧用于推算的转速：'rate' 就是陀螺 z 轴；'angle' 是与上一帧 IMU 航向角之差 / 时间差
-        （上一帧没有航向角、隔太久或这一帧没带航向角时退回陀螺）。"""
+        （上一帧没有航向角、隔太久或这一帧没带航向角时退回陀螺；停稳冻结时就是漂移率 s.bias，车头不动）。"""
         s, cfg = self._s, self.config
+        if self._yaw_frozen(sample):
+            return s.bias
         if cfg.yaw_input == 'angle' and sample.yaw is not None and math.isfinite(sample.yaw) \
                 and s.imu_yaw is not None and 0 < sample.t - s.imu_t <= cfg.sensor_timeout_s:
             return _wrap(sample.yaw - s.imu_yaw) / (sample.t - s.imu_t)
@@ -1251,11 +1263,6 @@ class GnssFusion:
         fresh_wheel = sample.t - s.wheel_t <= cfg.sensor_timeout_s
         rate = self._yaw_rate(sample)
         yaw = sample.yaw if sample.yaw is not None and math.isfinite(sample.yaw) else None
-        if (cfg.yaw_input == 'angle' and cfg.still_freeze_yaw and fresh_wheel and s.stationary_since is not None
-                and sample.t - s.stationary_since >= cfg.stationary_time_s
-                and abs(sample.gyro_z - s.raw_gyro_bias) <= math.radians(cfg.gyro_margin_deg_s)):
-            # 车停稳、陀螺不转：航向角的变化是 IMU 自己的（固件静止修正一下拨几度、静止漂），车头不跟（FusionConfig.still_freeze_yaw）
-            rate = s.bias
         self._check_mismatch(sample.t, rate, fresh_wheel)
         bound = self._gyro_bound(s.speed, s.wheel_yaw, sample.t - s.imu_t)
         if fresh_wheel and abs(rate - s.bias) > bound:

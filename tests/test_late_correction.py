@@ -8,7 +8,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / 'radar_system'), str(ROOT)]
-from line_cascade import AlignmentConfig, ImuFirstConfig, ImuFirstGuide
+from line_cascade import ImuFirstConfig, ImuFirstGuide
 
 DEG = math.pi / 180.0
 DT = .02
@@ -16,13 +16,10 @@ NX, NY = .24, -.4575
 FIT = ImuFirstConfig(rtk_trim=False, rtk_fit=True)
 
 
-def run(true_e, metres, v=.8, start=None):
-    """车按 IMU 车头 rel=0 直走（开环），卫星横偏 = true_e(路程)；start=(带过来的换算, 误差 rad) 时按开头加权定先验。
-    返回 (guide, [(路程, 卫星, 推算, β°)])。"""
+def run(true_e, metres, v=.8):
+    """车按 IMU 车头 rel=0 直走（开环），卫星横偏 = true_e(路程)。返回 (guide, [(路程, 卫星, 推算, β°)])。"""
     g = ImuFirstGuide(FIT)
     g.offset, g.offset_n, g.locked, g.source = 0.0, 50, True, 'learned'
-    if start is not None:
-        g.blend_start(start, AlignmentConfig())
     s, out = 0.0, []
     g.update(true_e(s), 0.0, 0.0, DT, (NX, NY), True)
     while s < metres:
@@ -53,17 +50,19 @@ class PersistentDeviation(unittest.TestCase):
 
 class StartAngle(unittest.TestCase):
     def test_start_angle_error_is_used_within_three_metres(self):
-        """开头换算自认准到 0.2°（双天线和带过来的加权），实际差 0.9°：线头后 3 m 内用上（原来 0.15°/m，3 m 最多 0.45°）。"""
+        """开头换算（这条线开头的融合车头学的）实际差 0.9°：线头后 3 m 内用上（原来 0.15°/m，3 m 最多 0.45°）。"""
         beta = .9 * DEG
-        g, out = run(lambda s: s * math.sin(beta), 6.0, start=(0.0, .25 * DEG))
-        self.assertLess(g.start['sigma'], .25 * DEG)
+        g, out = run(lambda s: s * math.sin(beta), 6.0)
         b3 = next(b for s, _, _, b in out if s >= 3.0)
         self.assertGreater(b3, .7)
         self.assertLess(max(abs(sat - est) for s, sat, est, _ in out), .015)
 
-    def test_prior_is_never_tighter_than_half_a_degree(self):
-        g, _ = run(lambda s: 0.0, .1, start=(0.0, .1 * DEG))
-        self.assertGreaterEqual(math.sqrt(g._fit['P'][1][1]) / DEG, .49)
+    def test_prior_is_fixed(self):
+        # 角度先验固定 fit_prior_deg（11-27 删跨线记忆：原来按开头换算和带过来的加权、σ 限在 fit_prior_min/max_deg）
+        self.assertFalse(hasattr(ImuFirstGuide, 'blend_start'))
+        g, _ = run(lambda s: 0.0, .1)
+        self.assertAlmostEqual(math.sqrt(g._fit['P'][1][1]), math.sin(FIT.fit_prior_deg * DEG), places=4)
+        self.assertEqual(FIT.fit_prior_deg, .5)
 
 
 class UntrustedStart(unittest.TestCase):

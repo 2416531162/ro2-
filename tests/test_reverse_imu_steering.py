@@ -10,7 +10,6 @@ ROOT=Path(__file__).resolve().parents[1]
 sys.path[:0]=[str(ROOT/'radar_system'),str(ROOT)]
 from path_tracker import Path as Route,PathConfig,Section,SectionTracker,differential_config,wrap
 from robot_core.kinematics import ChassisGeometry
-from line_cascade import ImuAlignment
 
 DT=.02
 GEO=ChassisGeometry(drive='differential',track_m=.675,diff_min_radius_m=.5)
@@ -74,12 +73,10 @@ class ReverseImu(TestCase):
         reverse=Section(-1,Route((0.,0.,math.pi),[(2.5,0.)]));reverse.field_role='transit'
         forward=Section(1,Route((-2.5,0.,0.),[(8.,0.)]));forward.field_role='paint'
         route=SectionTracker([reverse,forward],differential_config(PathConfig()),GEO)
-        alignment=ImuAlignment();route.share_imu_alignment(alignment);route.set_nozzle(.24,-.4575)
+        route.set_nozzle(.24,-.4575)
         route.sync(1.,(1.,.5,.2),(.235,.197))
         route.set_secondary_fix(1.,2.,3.,True,(.235,-.213))
         back,front=route.trackers
-        self.assertIsNone(back._imu_alignment)
-        self.assertIs(front._imu_alignment,alignment)
         self.assertEqual(front._imu,(1.,.5,.2))
         self.assertEqual(front._imu_lever,(.235,.197))
         self.assertEqual(front._straight_nozzle,(.24,-.4575))
