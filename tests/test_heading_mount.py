@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Gen5 测向安装偏差 +1.7°（2026-11-22 用户「那就补偿这1.7度」，heading_mount）：
+"""Gen5 测向安装偏差（heading_mount）：2026-11-22 用户「那就补偿这1.7度」→ 11-27「把补偿 1.7° 改成 0」
+（user_rules.GEN5_MOUNT_OFFSET_DEG）。
 
-- 车上 fusion.json 写的是没标定过的 0（或没写、没文件）时，融合和 rtk_node 都用 +1.7°；写了别的值照用；
-  车上的文件不改。
+- 车上 fusion.json 写的是没标定过的 0（或没写、没文件）时，融合和 rtk_node 都用 GEN5_MOUNT_OFFSET_DEG（现在 0）；
+  写了别的值照用；车上的文件不改。下面「连线往后转了 1.7°」的几项按文件里人工写 1.7 检查补偿本身。
 - 两根天线的连线在车体系是 baseline_yaw_body − 安装偏差：补了 1.7° 以后副天线（右天线）照样和主天线对得上、
   主天线被污染时照样换右天线定位。
 
@@ -50,11 +51,15 @@ def write(tmp, data):
     return path
 
 
+TILT = 1.7          # 11-22 那次实测的连线后转角度：补偿本身照这个检查（文件里人工写 1.7）
+
+
 class Rule(unittest.TestCase):
     def test_value(self):
-        self.assertEqual(MOUNT, 1.7)
-        self.assertEqual(heading_mount.mount_offset(0.0), 1.7)
-        self.assertEqual(heading_mount.mount_offset(None), 1.7)
+        self.assertEqual(MOUNT, 0.0)
+        self.assertEqual(heading_mount.mount_offset(0.0), 0.0)
+        self.assertEqual(heading_mount.mount_offset(None), 0.0)
+        self.assertEqual(heading_mount.mount_offset(1.7), 1.7)
         self.assertEqual(heading_mount.mount_offset(0.5), 0.5)       # 人工标定过的值优先
         self.assertEqual(heading_mount.mount_offset(-1.2), -1.2)
 
@@ -70,25 +75,25 @@ class FusionConfig(unittest.TestCase):
 
     def test_car_file_zero_uses_measured(self):
         cfg, after = self.load(CAR)
-        self.assertEqual(cfg.mount_offset_deg, 1.7)
+        self.assertEqual(cfg.mount_offset_deg, MOUNT)
         self.assertEqual(cfg.baseline_yaw_body_deg, -90.0)
         self.assertEqual(after, CAR)                                       # 车上的文件不改
 
     def test_missing_key_or_file_uses_measured(self):
         car = dict(CAR); car.pop('mount_offset_deg')
-        self.assertEqual(self.load(car)[0].mount_offset_deg, 1.7)
-        self.assertEqual(self.load(None)[0].mount_offset_deg, 1.7)
+        self.assertEqual(self.load(car)[0].mount_offset_deg, MOUNT)
+        self.assertEqual(self.load(None)[0].mount_offset_deg, MOUNT)
 
     def test_other_value_kept(self):
         self.assertEqual(self.load(dict(CAR, mount_offset_deg=0.9))[0].mount_offset_deg, 0.9)
 
     def test_old_drive_key_in_file_ignored(self):
-        # 删阿克曼车前文件里可能写过的 drive_differential（OBSOLETE_FUSION_KEYS）：丢掉，照样 +1.7°
-        self.assertEqual(self.load(dict(CAR, drive_differential=False))[0].mount_offset_deg, 1.7)
+        # 删阿克曼车前文件里可能写过的 drive_differential（OBSOLETE_FUSION_KEYS）：丢掉，照样用默认
+        self.assertEqual(self.load(dict(CAR, drive_differential=False))[0].mount_offset_deg, MOUNT)
 
     def test_fusion_heading_compensated(self):
-        # 测向 181.7°（连线往后转了 1.7°）：融合给出的车头是真车头 0
-        cfg, _ = self.load(CAR)
+        # 文件里写了 1.7、测向 181.7°（连线往后转了 1.7°）：融合给出的车头是真车头 0
+        cfg, _ = self.load(dict(CAR, mount_offset_deg=TILT))
         f = gf.GnssFusion(cfg)
         f.set_origin(31., 120.)
         yaw = None
@@ -111,14 +116,16 @@ class RtkNodeHeading(unittest.TestCase):
             return rtk_node.load_heading_calibration(write(tmp, data))
 
     def test_same_rule_as_fusion(self):
-        self.assertEqual(self.load(CAR), (1.7, -90.0))
-        self.assertEqual(self.load(None), (1.7, -90.0))
+        self.assertEqual(self.load(CAR), (MOUNT, -90.0))
+        self.assertEqual(self.load(None), (MOUNT, -90.0))
         self.assertEqual(self.load(dict(CAR, mount_offset_deg=0.9)), (0.9, -90.0))
-        self.assertEqual(self.load(dict(CAR, drive_differential=False)), (1.7, -90.0))   # 删掉的旧键不管
+        self.assertEqual(self.load(dict(CAR, drive_differential=False)), (MOUNT, -90.0))   # 删掉的旧键不管
 
     def test_recorded_heading_matches_fusion(self):
-        # /gnss/heading 和状态里的车头：测向 181.7° → 真车头 0
+        # /gnss/heading 和状态里的车头：默认时测向 180° → 真车头 0；文件写 1.7 时测向 181.7° → 真车头 0
         mount, base = self.load(CAR)
+        self.assertAlmostEqual(math.degrees(rtk_node.vehicle_yaw(180. + MOUNT, mount, base)), 0.0, places=9)
+        mount, base = self.load(dict(CAR, mount_offset_deg=TILT))
         self.assertAlmostEqual(math.degrees(rtk_node.vehicle_yaw(181.7, mount, base)), 0.0, places=9)
 
 
@@ -129,7 +136,7 @@ class TiltedRig:
         self.f = gf.GnssFusion(dataclasses.replace(config(True), mount_offset_deg=mount))
         self.f.set_origin(31., 120.)
         self.t, self.speed = 0., .8
-        b = math.radians(-90. - MOUNT)
+        b = math.radians(-90. - mount)
         self.ant2 = (ANT[0] + BASE * math.cos(b), ANT[1] + BASE * math.sin(b))
         self.heading = (90. - math.degrees(b)) % 360.                    # 181.7°
 
@@ -152,7 +159,7 @@ class TiltedRig:
 
 class SecondaryWithMount(unittest.TestCase):
     def test_antennas_agree_after_compensation(self):
-        rig = TiltedRig(MOUNT)
+        rig = TiltedRig(TILT)
         poses = rig.step(60)
         self.assertLess(abs(math.degrees(poses[-1].yaw)), 0.1)            # 车头补对了
         self.assertEqual({p.position_antenna for p in poses}, {'main'})
@@ -162,7 +169,7 @@ class SecondaryWithMount(unittest.TestCase):
         self.assertLess(lateral_cm(poses[-10:]), .3)
 
     def test_left_jump_still_uses_right(self):
-        rig = TiltedRig(MOUNT)
+        rig = TiltedRig(TILT)
         rig.step(60)
         poses = rig.step(40, left=(0., .05), heading=False)
         self.assertGreater(sum(p.position_antenna == 'second' for p in poses) / len(poses), .9)
