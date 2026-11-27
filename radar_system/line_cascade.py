@@ -4,8 +4,7 @@
 
     CascadeConfig       直线内外环参数（IMU 航向保持内环 + 喷头横偏外环），differential_config 从这里取
     ImuFirstConfig      直线 IMU 为主、卫星拟合慢慢修（rtk_fit）的全部参数；用户定的门槛在 user_rules
-    ImuFirstGuide       上面那套的实现：开头换算、拟合、跳点、天线挑选、侧滑、草地
-    ImuAlignment        线与线之间带着 IMU → 地面方向的换算
+    ImuFirstGuide       上面那套的实现：开头换算、拟合、跳点、天线挑选、侧滑、草地（每条线自己的，不跨线带，2026-11-27）
     learn_heading_offset / lateral_heading_step / imu_first_target 等   路线直线每拍调用的计算
 
 2026-11-22 删掉了 A→B 定点画线的控制器 ImuLineTracker（App 早就不发记点、开始；路线、场地作业不用它）。
@@ -182,14 +181,12 @@ class ImuFirstConfig:
     # 冻掉直线上中位 37%、开头 57–72%；零星出界那段卫星横偏去趋势 std 0.46 cm，和基线正常 0.41 cm 差不多，连续出界尾巴
     # 1.44 cm（95%）明显差）。3：冻结中位 37% → 14%，下午那种连续掉到 0.32–0.38 m 照样第三帧（约 0.4 s）就冻
     baseline_bad_frames: int = rules.BASELINE_BAD_FRAMES
-    # 一条线开头基线就不对、偏移学不到：这段已攒够 offset_min_samples 个就用它，否则借上一条线对好的角度（偏移 + β）
-    # 先开，基线正常了再按卫星轨迹纠（用户 10-06 定的；原地掉头 180° 后 IMU 与地面方向的差会变 0.3–0.5°）。
-    # 借的不能超过 borrow_max_age_s，和此刻融合航向 − IMU 偏航差不能超过 borrow_max_gap_deg（挡 IMU 重启归零）
-    borrow_max_age_s: float = rules.BORROW_MAX_AGE_S
-    borrow_max_gap_deg: float = rules.BORROW_MAX_GAP_DEG
+    # 一条线开头基线就不对、偏移学不到：这段已攒够 offset_min_samples 个就用它先开，基线正常了再按卫星轨迹纠（用户 10-06 定的）；
+    # 一个都没攒到就不接管、照原控制开。原来还能借上一条线对好的角度，2026-11-27 用户「就不能有什么记忆这种东西，一旦出错就
+    # 乱套」删掉：每条线的换算只从这条线开头的融合车头（IMU + RTK 位移，gnss_fusion dual_heading_init_only）来
     # 2026-10-06 晚用户：「直接靠 imu 画线，卫星只看啥时候停水泵，不考虑 imu 偏移」。False：IMU 接管以后卫星不再修正
-    # 横偏、不估 β，喷头横偏只按 IMU 航向 × 走过的路推算；IMU → 线方向的换算只用接管前双天线测向学的偏移
-    # （学不到时同样借上一条线的）。接管前（助跑、弯道出来那段本来就由卫星开）卫星照常定横偏，β 不估。
+    # 横偏、不估 β，喷头横偏只按 IMU 航向 × 走过的路推算；IMU → 线方向的换算只用接管前按融合车头学的偏移。
+    # 接管前（助跑、弯道出来那段本来就由卫星开）卫星照常定横偏，β 不估。
     # 沿线走到哪、什么时候停水泵、什么时候停车仍按卫星位置
     rtk_trim: bool = True
     # 2026-10-06 晚用户：「中途卫星好的时候接入修正，让数据在两者更好」。rtk_trim 关着、rtk_fit 开：卫星不逐拍拉横偏，
@@ -200,18 +197,14 @@ class ImuFirstConfig:
     fit_bin_m: float = 0.25
     fit_noise_m: float = 0.004       # 一个点（fit_bin_m 平均）的卫星横偏误差；卫星噪声前后相关，取得比单拍大
     fit_prior_m: float = 0.005
-    fit_prior_deg: float = 0.5       # 双天线测向比实际方向偏 −0.66～+0.63°（10-06 上午实测）
+    # 开头换算的误差：双天线测向比实际方向偏 −0.66～+0.63°（10-06 上午实测）、起步换算实测会差 0.3–0.9°（10-07）；
+    # 原来按跨线带过来的误差收小（下限 0.5°），11-27 删跨线记忆后固定这么大
+    fit_prior_deg: float = 0.5
     # rtk_fit 的跳点只认「短距离内突然跳开」：和 jump_window_m 以前（中间断过就取断之前）最近用过的点比，扣掉已拟合的角度，
     # 差超过 jump_m + tan(jump_slope_deg) × 两点间距才算跳。10-06 傍晚实车 B→A 三趟：掉头后基线冻结前 3–5 m，换算错
     # 0.4–0.9°，卫星和推算按距离均匀拉开，基线一好差已 3.5–4.5 cm，原来按「差 > 2 cm」判成跳点，整条线没再用卫星，偏到 18–38 cm
     jump_window_m: float = 0.4
     jump_slope_deg: float = 1.5
-    # 开头换算的误差（双天线和上一条线带过来的加权后，见 AlignmentConfig）比双天线学满时小多少，拟合角度的先验就收多少，
-    # 夹在 [fit_prior_min_deg, fit_prior_max_deg]；这条线拟合到误差 ≤ carry_fit_sigma_deg 才记下 c 给下一条线带
-    # 下限 0.15 → 0.5°（10-07）：起步换算实测会差 0.3–0.9°（10-07 上午同一方向三趟），比它自己算的误差（0.2–0.3°）大
-    fit_prior_min_deg: float = 0.5
-    fit_prior_max_deg: float = 1.5
-    carry_fit_sigma_deg: float = 0.10
     # 2026-10-06 傍晚 eaf2d772 两趟 101 m 线：App 上喷线（卫星）已明显偏离路线，车却不纠——一条线攒 150+ 点后拟合误差
     # 只剩 0.0007°，不再改；本场 IMU 换算漂约 −0.37°/min。用户：「喷的轨迹偏移了卫星轨迹却没有修正」要解决，同时保持 IMU
     # 的直线度。拟合改成跟踪：修正量 c（真实喷头横偏 − IMU 推算）和角度 b 都允许按距离随机游走（fit_walk_*），角度跟得上
@@ -237,10 +230,10 @@ class ImuFirstConfig:
     fit_start_m: float = 6.0
     fit_start_beta_rate_deg: float = 0.5
     fit_start_points_m: float = 1.0
-    # 没有记忆的线（ImuFirstGuide.no_memory：路线作业重启后第一条）助跑里（还没开喷，不管直线度）拟合点攒够 fit_start_points_m 以后，
-    # 角度每米最多变 fit_runup_beta_rate_deg：2026-11-22 仿真，这时开头按双天线定、测向误差 ±1.5°，拟合在助跑里已经看出角度，
-    # 按 0.5°/m 到线头才用上 0.1–0.6°；放到 2°/m 线头 0.3 m 内最差 1.16 → 0.81 cm（测向偏 +1.5°）。
-    # 有记忆的线不放（仿真：放了后面几条线头中位 0.29 → 0.37 cm，开头本来就准，助跑那点卫星噪声反倒用进去）
+    # 直线助跑里（ImuFirstGuide.runup_fit，还没开喷，不管直线度）拟合点攒够 fit_start_points_m 以后，角度每米最多变
+    # fit_runup_beta_rate_deg：2026-11-22 仿真，开头按双天线定、测向误差 ±1.5° 时，拟合在助跑里已经看出角度，按 0.5°/m 到线头
+    # 才用上 0.1–0.6°；放到 2°/m 线头 0.3 m 内最差 1.16 → 0.81 cm（测向偏 +1.5°）。原来只给重启后第一条（没有跨线记忆），
+    # 11-27 删掉跨线记忆后每条直线都这样（见 path_tracker._straight_first）
     fit_runup_beta_rate_deg: float = 2.0
     # 拟合起点（第一拍的卫星横偏）那一拍卫星不可信、第一个可信点和「起点 + 角度先验」的预测差超过 fit_anchor_sigma 倍标准差：
     # 起点错了，这一点重新当起点（见 ImuFirstGuide._fit_anchor）。10-07 仿真（遮挡较多 100 m）：暂停后重开那拍在多路径区、
@@ -354,13 +347,13 @@ class ImuFirstConfig:
     # 1.6–1.9 cm，卫星位置连着几米偏 1–1.5 cm；车跟着拉，平地直线鼓 1.6–4.2 cm（IMU 本身是直的）。σ（poor_sky_sigma_tau_s
     # 低通）> poor_sky_sigma_m、不是草地：这条直线进楼下模式（一条线里进了就不退，除非下面的出口）——线头段之后不往回拉
     # （paint_pull 的线头后部分 × poor_sky_pull_scale，加强往回拉不开），开头 fit_start_m 以后拟合角度用到车头上每米最多改
-    # poor_sky_beta_rate_deg（开头照常 fit_start_beta_rate_deg：带过来的角度有错在这几米里按卫星对掉），真偏 / 位置跟随门槛
+    # poor_sky_beta_rate_deg（开头照常 fit_start_beta_rate_deg：开头的角度有错在这几米里按卫星对掉），真偏 / 位置跟随门槛
     # 放到 poor_sky_follow_e_m。线头段照旧。
     # 出口（这条线退回平常、不再进）：拟合角度和正在用的差 > max(poor_sky_exit_deg, poor_sky_exit_sigma × 拟合误差)；
     # 可信卫星说喷头同一边偏 > poor_sky_exit_e_m 走满 poor_sky_exit_m（车真偏了）；认出草地。
     # 回放 11-24 楼下 6 条 × 4（车端真实代码，带过来角度误差 ±0.08°，user_rules.POOR_SKY_*）：鼓包 3.28 → 1.72 cm，
     # 最大 2.43 → 2.50 cm，线头不变。开头也放慢（0.1°/m）鼓包 1.9、最差 6.6；出口 4 cm 楼下卫星自己偏就误退，鼓包 2.1–2.4。
-    # 6 m 后的角度限速 0.02 → 0.08°/m（11-24 晚）：0.02 时记忆错、侧滑时线斜着走，回放见 user_rules.POOR_SKY_BETA_RATE_DEG
+    # 6 m 后的角度限速 0.02 → 0.08°/m（11-24 晚）：0.02 时开头角度错、侧滑时线斜着走，回放见 user_rules.POOR_SKY_BETA_RATE_DEG
     poor_sky_enabled: bool = True
     poor_sky_sigma_m: float = rules.POOR_SKY_SIGMA_M
     poor_sky_sigma_tau_s: float = 2.0
@@ -384,8 +377,7 @@ class ImuFirstConfig:
     def __post_init__(self):
         for name in ('observer_m', 'fast_observer_m', 'max_heading_fix_deg', 'k_e', 'max_bias_deg', 'rate_deg_s', 'jump_m',
                      'rejoin_m', 'rejoin_s', 'offset_reject_deg', 'gyro_max_deg_s', 'fit_bin_m', 'fit_noise_m',
-                     'fit_prior_m', 'fit_prior_deg', 'jump_window_m', 'jump_slope_deg', 'fit_prior_min_deg',
-                     'fit_prior_max_deg', 'carry_fit_sigma_deg', 'fit_rate_m', 'fit_beta_rate_deg', 'jump_accept_s', 'jump_accept_max_m',
+                     'fit_prior_m', 'fit_prior_deg', 'jump_window_m', 'jump_slope_deg', 'fit_rate_m', 'fit_beta_rate_deg', 'jump_accept_s', 'jump_accept_max_m',
                      'fit_max_sigma_m', 'fit_max_pair_m', 'fit_accept_sigma_m', 'fit_settle_s', 'fit_pair_settle_s',
                      'fit_low_sats_max_sigma_m', 'fit_low_sats_max_pair_m',
                      'antenna_pick_pair_m', 'antenna_agree_m', 'antenna_margin_m', 'antenna_fresh_s',
@@ -423,8 +415,7 @@ class ImuFirstConfig:
             raise ValueError('boost_release_e_m 不能大于 boost_e_m')
         for name in ('deadband_m', 'paint_deadband_m', 'trust_from_m', 'fast_m', 'min_baseline_m', 'max_baseline_m', 'baseline_hold_s',
                      'fit_walk_c_m', 'fit_walk_b_deg', 'fit_min_baseline_m', 'fit_max_baseline_m', 'fit_start_m',
-                     'fit_start_points_m', 'head_m', 'head_blend_m',
-                     'borrow_max_age_s', 'borrow_max_gap_deg'):
+                     'fit_start_points_m', 'head_m', 'head_blend_m'):
             value = getattr(self, name)
             if not math.isfinite(value) or value < 0:
                 raise ValueError(name + ' 必须是有限非负数')
@@ -456,7 +447,7 @@ class ImuFirstGuide:
         self.offset_n = 0
         self.offset_rejected = 0
         self.locked = False
-        self.source = None           # learned 这段学的 / partial 基线坏了用已攒的 / borrowed 借上一条线的
+        self.source = None           # learned 这段学的 / partial 基线坏了用已攒的
         self.e = None                # 喷头横偏估计，m（线左为正）
         self.beta = 0.0              # 真实车头 − IMU 参考航向（偏航 + 偏移），rad
         self.mode = 'rtk'            # rtk：卫星在修正；imu：卫星和推算对不上，只按 IMU
@@ -466,14 +457,11 @@ class ImuFirstGuide:
         self._agree_s = 0.0
         self.fast = True
         self._runup = False          # 这一拍在助跑里（调用方给的 fast，不含推算开始 fast_m）
-        self.no_memory = False       # 这条线开头没有上一条线拟合好的换算（重启后第一条，调用方按规划设，见 route_plan first_line）
+        self.runup_fit = False       # 助跑里按卫星轨迹尽快定角度（直线每条都开，调用方设，见 path_tracker._straight_first）
         self._rel = None
         self._travel = 0.0
         self.fit_points = 0          # rtk_fit：已拟合的点数
         self._fit_hist = deque()     # rtk_fit：最近用过的 (路程, 卫星横偏 − IMU 推算横移)，判跳点的参照
-        self.token = None            # ImuAlignment.begin_line 给的这条线的号
-        self.start = None            # 开头换算怎么定的：dual 双天线 / carried 带过来的 / sigma 误差 / weight 带过来的权重
-        self._prior_scale = 1.0      # 拟合角度先验相对 fit_prior_deg 的倍数（开头换算越准越小）
         self._jump_ref = None        # rtk_fit：跳开前的参照 (路程, 值, 当时拟合的角度)
         self._jump_after = []        # rtk_fit：跳开以后的 (路程, 值)，看新位置稳不稳
         self._jump_s = 0.0           # rtk_fit：跳开以后卫星可用的时间
@@ -550,48 +538,14 @@ class ImuFirstGuide:
             self.locked, self.source = True, 'learned'
         return True
 
-    def lock_without_baseline(self, alignment, now, difference):
-        """基线不对、偏移还没锁时调用：已攒够 offset_min_samples 个就用已攒的，否则借 alignment（ImuAlignment）里
-        上一条线对好的角度。difference = 此刻融合航向 − IMU 偏航。返回是否锁上。"""
-        cfg = self.cfg
+    def lock_without_baseline(self):
+        """基线不对、偏移还没锁时调用：已攒够 offset_min_samples 个就用已攒的（不借别的线的，11-27 删跨线记忆）。返回是否锁上。"""
         if self.locked:
             return True
-        if self.offset is not None and self.offset_n >= cfg.offset_min_samples:
+        if self.offset is not None and self.offset_n >= self.cfg.offset_min_samples:
             self.locked, self.source = True, 'partial'
             return True
-        value = None if alignment is None else alignment.recall(now, difference, cfg.borrow_max_age_s,
-                                                                 cfg.borrow_max_gap_deg)
-        if value is None:
-            return False
-        self.offset, self.beta, self.locked, self.source = value, 0.0, True, 'borrowed'
-        return True
-
-    def blend_start(self, predicted, align_cfg, rate=None, crab=None):
-        """偏移刚锁住时调用：predicted = ImuAlignment.predict(此刻)，(c, σ) rad 或 None。learned / partial 时和双天线学的
-        按误差加权（双天线误差 = dual_sigma_deg × √(lock_samples / 样本数)）；两者差 > max_gap_deg 只用双天线。"""
-        cfg = self.cfg
-        if not self.locked or self.start is not None:
-            return
-        full = align_cfg.dual_sigma_deg * DEG
-        if self.source == 'borrowed':
-            sd = predicted[1] if predicted is not None else 2.0 * full
-            self.start = dict(dual=None, carried=self.offset, sigma=sd, weight=1.0)
-        else:
-            sd = full * math.sqrt(cfg.lock_samples / max(1, self.offset_n))
-            self.start = dict(dual=self.offset, carried=None, sigma=sd, weight=0.0)
-            if predicted is not None:
-                c, sc = predicted
-                gap = wrap(c - self.offset)
-                self.start['carried'] = c
-                if abs(gap) <= align_cfg.max_gap_deg * DEG:
-                    w = sd * sd / (sd * sd + sc * sc)
-                    self.offset = wrap(self.offset + w * gap)
-                    self.start.update(sigma=math.sqrt(sd * sd * sc * sc / (sd * sd + sc * sc)), weight=w)
-        self._prior_scale = self.start['sigma'] / full
-        if rate is not None and all(math.isfinite(v) for v in rate):
-            self.start['rate'] = rate
-        if crab is not None and all(math.isfinite(v) for v in crab):
-            self.start['crab'] = crab
+        return False
 
     def fit_rate(self):
         """rtk_fit：拟合出的漂移速度 (rad/m, 误差 rad/m)，还没开始拟合为 None。"""
@@ -600,13 +554,6 @@ class ImuFirstGuide:
     def fit_sigma(self):
         """rtk_fit：拟合出的角度差的误差（rad），还没开始拟合为 None。"""
         return None if self._fit is None else math.sqrt(max(0.0, self._fit['P'][1][1]))
-
-    def fit_angle(self):
-        """rtk_fit：拟合出的此刻角度差（rad，不按 fit_beta_rate 限速跟），还没开始拟合为 None。"""
-        if self._fit is None:
-            return None
-        lim = math.sin(self.cfg.max_heading_fix_deg * DEG)
-        return math.asin(max(-lim, min(lim, self._fit_now(self._travel)[1])))
 
     def update(self, measured, rel, distance, dt, nozzle, rtk_ok, fast=False, steering=False, roll=None, raw=False):
         """锁住偏移以后每拍一次。measured：卫星（融合位置，天线杠杆臂按 rel + β 改算）量的喷头横偏，m；
@@ -719,15 +666,14 @@ class ImuFirstGuide:
     def pull_to(self, measured, fraction):
         """助跑段（还没喷）：推算横偏按 fraction（0–1）直接往卫星横偏 measured 靠；拟合的修正量一起挪，开喷时接着用。
 
-        没有记忆的线（no_memory）卡尔曼状态 x 不挪，只按卫星点更新：2026-11-22 仿真，每拍把 x 的修正量 c 也往卫星拉，
+        runup_fit 开着（直线）时卡尔曼状态 x 不挪，只按卫星点更新：2026-11-22 仿真，每拍把 x 的修正量 c 也往卫星拉，
         起步换算角度错 1.8° 时卫星和推算按距离拉开的差全被这里当位置吃掉，助跑 2 m 拟合角度只学到 0.6°（拉开 5.6 cm），
-        线头 −3.3 cm 的那种第一条就是这样；不挪以后走 1.2 m 就学到 1.6°（真值 1.8°）。有记忆的线开头换算本来就准，
-        照旧一起挪（仿真：也不挪时后面几条线头中位 0.29 → 0.37 cm）。"""
+        线头 −3.3 cm 的那种就是这样；不挪以后走 1.2 m 就学到 1.6°（真值 1.8°）。"""
         if self.e is None or self._fit is None or not math.isfinite(measured):
             return
         d = max(0.0, min(1.0, fraction)) * (measured - self.e)
         self._fit['c'] += d
-        if not self.no_memory:
+        if not self.runup_fit:
             self._fit['x'][0] += d
         self.e += d
         if self._position_e is not None:
@@ -764,17 +710,9 @@ class ImuFirstGuide:
         self.roll = roll if use_roll else None
         if self.e is None:
             self.rtk_accepted = rtk_ok
-            prior = max(cfg.fit_prior_min_deg, min(cfg.fit_prior_max_deg, cfg.fit_prior_deg * self._prior_scale))
-            sc, sb, sr = cfg.fit_prior_m, math.sin(prior * DEG), cfg.fit_prior_rate_deg * DEG
-            r0 = 0.0
-            carried = (self.start or {}).get('rate')
-            if carried is not None:                  # 上一条线学到的漂移速度（线头就是卫星差的地方也能按它推）
-                r0, sr = carried[0], min(sr, carried[1])
+            sc, sb, sr = cfg.fit_prior_m, math.sin(cfg.fit_prior_deg * DEG), cfg.fit_prior_rate_deg * DEG
             k0, sk = (cfg.crab_prior, cfg.crab_prior_sigma) if cfg.crab_enabled else (0.0, 0.0)
-            crab = (self.start or {}).get('crab')
-            if cfg.crab_enabled and crab is not None:  # 上一条线学到的侧滑（同一块场地基本不变）
-                k0, sk = crab[0], min(sk, crab[1])
-            self._fit = dict(e0=measured, imu=0.0, x=[0.0, 0.0, r0, k0],
+            self._fit = dict(e0=measured, imu=0.0, x=[0.0, 0.0, 0.0, k0],
                              P=[[sc * sc, 0.0, 0.0, 0.0], [0.0, sb * sb, 0.0, 0.0], [0.0, 0.0, sr * sr, 0.0],
                                 [0.0, 0.0, 0.0, sk * sk]],
                              u=0.0, Phi=0.0, phi_total=0.0, cell=[0.0, 0.0, 0, 0.0, 0.0], c=0.0, b=0.0, anchor=not rtk_ok)
@@ -827,15 +765,15 @@ class ImuFirstGuide:
         enough = self.fit_points * cfg.fit_bin_m >= cfg.fit_start_points_m - 1e-9
         start = u < cfg.fit_start_m and enough
         if self.poor_sky and enough:
-            # 楼下模式出口：拟合出的角度和正在用的差太多（带过来的角度错了），退回平常按 fit_*_beta_rate 跟
+            # 楼下模式出口：拟合出的角度和正在用的差太多（开头的角度错了），退回平常按 fit_*_beta_rate 跟
             sb = math.sqrt(max(0.0, f['P'][1][1]))
             if abs(b_now - f['b']) > max(math.sin(cfg.poor_sky_exit_deg * DEG), cfg.poor_sky_exit_sigma * sb):
                 self._leave_poor_sky('angle')
         rate = cfg.fit_start_beta_rate_deg if start else cfg.fit_beta_rate_deg
         if self.poor_sky and not start and u >= cfg.fit_start_m:
             rate = cfg.poor_sky_beta_rate_deg
-        if self._runup and enough and self.no_memory:
-            rate = max(rate, cfg.fit_runup_beta_rate_deg)   # 没有记忆：助跑里不喷，角度按卫星轨迹尽快用上
+        if self._runup and enough and self.runup_fit:
+            rate = max(rate, cfg.fit_runup_beta_rate_deg)   # 助跑里不喷，角度按卫星轨迹尽快用上
         db = rate * DEG * step
         f['b'] += max(-db, min(db, b_now - f['b']))
         self.beta = math.asin(max(-lim, min(lim, f['b'])))
@@ -980,12 +918,6 @@ class ImuFirstGuide:
         f['u'] = hu
         f['Phi'] = f['Phi'] if ph is None else ph
 
-    def fit_crab(self):
-        """rtk_fit：拟合出的侧滑 k（侧滑 / 横滚）和误差；没开或还没拟合为 None。"""
-        if self._fit is None or not self.cfg.crab_enabled:
-            return None
-        return self._fit['x'][3], math.sqrt(max(0.0, self._fit['P'][3][3]))
-
     def status(self):
         deg = lambda a: None if a is None else round(math.degrees(a), 3)  # noqa: E731
         return dict(first_mode=self.mode, first_rtk_trim=self.cfg.rtk_trim, first_fast=self.fast, first_locked=self.locked,
@@ -1006,409 +938,7 @@ class ImuFirstGuide:
                     first_crab_k=None if self._fit is None else round(self._fit['x'][3], 4),
                     first_crab_deg=round(math.degrees(self.crab), 4),
                     first_roll_deg=None if self.roll is None else round(math.degrees(self.roll), 3),
-                    first_start_dual_deg=deg((self.start or {}).get('dual')),
-                    first_start_carried_deg=deg((self.start or {}).get('carried')),
-                    first_start_sigma_deg=deg((self.start or {}).get('sigma')),
-                    first_start_weight=None if self.start is None else round(self.start['weight'], 3),
                     first_poor_sky=self.poor_sky, first_poor_sky_exit=self.poor_sky_exit)
-
-
-@dataclass(frozen=True)
-class AlignmentConfig:
-    """IMU → 地面方向换算 c（真实车头 − IMU 偏航）跨线带过去（ImuAlignment）：只带上一条线卫星拟合好的 c，不学、不推算。
-
-    2026-11-24 用户「删掉学习」：原来相邻两条线拟合好就在线学「c 每分钟变多少、每转一圈变多少」（卡尔曼），是给 10 月
-    旧 IMU（HDA536T，c 随时间约 −0.07～−0.4°/min、转角刻度 −0.17%）用的。SCH16T 实测 c 随时间 +0.005 ± 0.034°/min、
-    刻度已标定在 IMU 固件里（0x2012，user_rules.GEN5_IMU_YAW_SCALE_PPM；车上不做刻度，用户规矩），没什么可学。11-24 固件
-    静止修正一下拨了 +4.12°，学习把它学成漂移 +0.35°/min、刻度 −0.44%，后面带过去的换算错 1.7–3.4°；按 11-24 的线顺序
-    重放，不学（只带上一条线的 c）06:58 以后各条开头误差 −0.18～+0.07°。
-
-    下面几项只用来放大带过去的 c 的误差（隔得越久、转得越多越不信，开头和双天线按误差加权），不推算 c：
-    drift_sigma_deg_min、drift_walk（随时间）、scale_sigma（随转角）、walk_deg_sqrt_min（其余随机变化）。"""
-    drift_sigma_deg_min: float = 0.05
-    scale_sigma: float = 0.001
-    walk_deg_sqrt_min: float = 0.10   # 模型以外的随机变化，°/√min
-    drift_walk: float = 0.02          # °/min/√min
-    obs_floor_deg: float = 0.05       # 一条线拟合出的 c 至少按这么大的误差算
-    max_age_s: float = 600.0          # 上一条线的 c 超过这么久不带
-    imu_gap_s: float = 1.0            # IMU 断了这么久：累计转角接不上，以前的 c 作废
-    # 带过来的和双天线测的差超过它：不混（IMU 重启、测向坏），只用双天线。2026-10-10 1.5 → 3.0：双天线开头学的比卫星轨迹
-    # 方向偏中位 0.5°、最大 1.3°，带过来的中位 0.2°；10-10 16:16:42 两者差 1.56° 刚过 1.5，丢了准的（差 0.2°）用了偏的
-    # （差 1.34°），线头偏 2 cm、β 补了 12 m 又反向过头 2.5 cm。今天和 10-09 的 16 条直线回放：开头换算误差中位
-    # 0.25° → 0.16°、最大 1.34° → 0.42°，其余各条不变。IMU 重启归零的差远大于 3°，照样只用双天线。
-    # （同时试过把 dual_sigma_deg 调到 0.5：中位 0.19°、最大 0.54°，有两条变差，没用）
-    max_gap_deg: float = 3.0
-    dual_sigma_deg: float = 0.3       # 双天线学满 lock_samples 时开头换算的误差（傍晚实车中位 0.22°、最大 0.66°）
-    rate_walk_deg_m: float = 0.003    # 带过去的漂移速度（°/m）每过 1 min 多算这么大的误差（漂移速度本身会变）
-    # 2026-11-24：06:43 写过 IMU 参数后 SCH16T 固件偏航零偏不对（静止时偏航 −0.5～−0.95°/min），06:58 第一次安静停车，
-    # 固件静止修正把偏航一下拨了 +4.12°（陀螺读数一直 0）。车停着（调用方给 still：两轮都停、陀螺 < still_max_gyro_deg_s）
-    # 地面车头不变，IMU 偏航的变化全是 IMU 自己的：带过去的 c 跟着挪（c −= 变化），不算转角
-    still_max_gyro_deg_s: float = 0.5
-
-    def __post_init__(self):
-        for name in ('drift_sigma_deg_min', 'scale_sigma', 'walk_deg_sqrt_min', 'drift_walk', 'obs_floor_deg', 'max_age_s', 'imu_gap_s',
-                     'rate_walk_deg_m', 'still_max_gyro_deg_s', 'max_gap_deg', 'dual_sigma_deg'):
-            value = getattr(self, name)
-            if not math.isfinite(value) or value <= 0:
-                raise ValueError(name + ' 必须是有限正数')
-
-
-@dataclass(frozen=True)
-class DriveLearnConfig:
-    """开机后作业前的行驶里顺带学换算 c（DriveLearner）。门槛在 user_rules.DRIVE_LEARN_*。"""
-    min_m: float = rules.DRIVE_LEARN_MIN_M
-    max_sigma_deg: float = rules.DRIVE_LEARN_MAX_SIGMA_DEG
-    keep_s: float = rules.DRIVE_LEARN_KEEP_S
-    span_s: float = 0.8              # 车头方向用前后这么久的两个固定解连线，对中点时刻的 IMU 偏航
-    min_speed_mps: float = 0.2
-    max_rate_deg_s: float = 10.0     # 转得比这快不用（原地转、急弯：杆臂修正、时间对齐都不准）
-    max_fix_sigma_m: float = 0.02    # 固定解 σ（水平合成）超过这个不用
-    wheel_fresh_s: float = 0.3       # 轮速离那一刻这么近才拿来分前进、倒车
-    corr_m: float = 0.5              # 误差按每这么多米一个独立的点算
-    floor_deg: float = 0.15          # 学出来的误差至少按这么大（卫星慢变的偏差平均不掉）
-    outlier_deg: float = 3.0         # 离中位这么远的点不用
-    max_step_mps: float = 3.0        # 相邻两帧位置隔得比这个速度还远：当跳点，断开重连
-
-    def __post_init__(self):
-        for name in ('min_m', 'max_sigma_deg', 'keep_s', 'span_s', 'min_speed_mps', 'max_rate_deg_s', 'max_fix_sigma_m',
-                     'wheel_fresh_s', 'corr_m', 'floor_deg', 'outlier_deg', 'max_step_mps'):
-            value = getattr(self, name)
-            if not math.isfinite(value) or value <= 0:
-                raise ValueError(name + ' 必须是有限正数')
-
-
-def _interp(seq, t):
-    """seq：按时刻排好的 (t, v)；t 在范围里返回线性插值，不在返回 None。"""
-    if not seq or t < seq[0][0] or t > seq[-1][0]:
-        return None
-    lo, hi = 0, len(seq) - 1
-    while hi - lo > 1:
-        mid = (lo + hi) // 2
-        if seq[mid][0] <= t:
-            lo = mid
-        else:
-            hi = mid
-    (t0, v0), (t1, v1) = seq[lo], seq[hi]
-    return v0 if t1 <= t0 else v0 + (v1 - v0) * (t - t0) / (t1 - t0)
-
-
-class DriveLearner:
-    """开机后作业前的行驶里顺带学 c（真实车头 − IMU 偏航）：开着（前进、倒车按轮速分）、RTK 固定、σ 小、转得不快时，
-    span_s 前后两个固定解连线的方向减掉主天线杆臂随转弯的修正就是车头，c = 车头 − 中点时刻的 IMU 偏航。
-    按路程加权、去掉离群，只算最近 keep_s 内的。停车时 IMU 偏航自己变（ImuAlignment.feed_imu still）跟着挪，IMU 断过清空。
-    11-25 用户「开机多跑一会学习能不能省去」：学够了开机第一条就不空跑（ImuAlignment.adopt_drive）。"""
-
-    def __init__(self, config=DriveLearnConfig()):
-        self.cfg = config
-        self.fixes = deque()             # (t, x, y) 连续的固定解
-        self.yaws = deque()              # (t, 展开的 IMU 偏航)
-        self.wheels = deque()            # (t, 轮速 m/s，倒车为负)
-        self.samples = deque()           # (t, c − 当时的 _off, 这一步的路程 m)
-        self._off = 0.0                  # 停车时 IMU 偏航自己变的累计（shift）：读的时候加回去，不用逐个改
-
-    def reset(self):
-        self.fixes.clear()
-        self.yaws.clear()
-        self.wheels.clear()
-        self.samples.clear()
-        self._off = 0.0
-
-    def shift(self, dc):
-        """车停着 IMU 偏航自己变了 −dc：学到的 c 跟着挪。"""
-        self._off = wrap(self._off + dc)
-
-    def on_imu(self, t, yaw):
-        self.yaws.append((t, yaw))
-        while self.yaws and self.yaws[0][0] < t - 3.0 * self.cfg.span_s - 1.0:
-            self.yaws.popleft()
-
-    def on_wheel(self, t, speed):
-        if not (math.isfinite(t) and math.isfinite(speed)):
-            return
-        if self.wheels and t < self.wheels[-1][0]:
-            return
-        self.wheels.append((t, speed))
-        while self.wheels and self.wheels[0][0] < t - 3.0 * self.cfg.span_s - 1.0:
-            self.wheels.popleft()
-
-    def _wheel_at(self, t):
-        best = None
-        for tw, v in self.wheels:
-            if abs(tw - t) <= self.cfg.wheel_fresh_s and (best is None or abs(tw - t) < abs(best[0] - t)):
-                best = (tw, v)
-        return None if best is None else best[1]
-
-    def on_fix(self, t, x, y, ok, lever):
-        """一帧主天线位置（本地米）。ok：固定解且 σ ≤ max_fix_sigma_m；不 ok 断开（不跨着连）。lever：主天线（前、左）m。"""
-        cfg = self.cfg
-        if not ok or not all(math.isfinite(v) for v in (t, x, y)):
-            self.fixes.clear()
-            return
-        if self.fixes and t <= self.fixes[-1][0]:
-            return
-        if self.fixes and math.hypot(x - self.fixes[-1][1], y - self.fixes[-1][2]) > cfg.max_step_mps * (t - self.fixes[-1][0]):
-            self.fixes.clear()           # 位置跳了（车不可能这么快）：从这一帧重新连
-        self.fixes.append((t, x, y))
-        while len(self.fixes) > 2 and self.fixes[1][0] <= t - cfg.span_s:
-            self.fixes.popleft()
-        ta, xa, ya = self.fixes[0]
-        dt = t - ta
-        if dt < 0.6 * cfg.span_s or dt > 1.5 * cfg.span_s:
-            return
-        dx, dy = x - xa, y - ya
-        v = math.hypot(dx, dy) / dt
-        if v < cfg.min_speed_mps:
-            return
-        tm = 0.5 * (t + ta)
-        ya0, ya1, ym = _interp(self.yaws, ta), _interp(self.yaws, t), _interp(self.yaws, tm)
-        wheel = self._wheel_at(tm)
-        if ya0 is None or ya1 is None or ym is None or wheel is None or abs(wheel) < 0.5 * cfg.min_speed_mps:
-            return
-        om = (ya1 - ya0) / dt
-        if abs(om) > math.radians(cfg.max_rate_deg_s):
-            return
-        sv = 1.0 if wheel > 0 else -1.0
-        ax, ay = lever
-        # 天线在车体系的速度 = (车速 − ω·ay, ω·ax)，模长是卫星量的 v：侧向分量已知，纵向分量按前进 / 倒车开方
-        side = ax * om
-        head = math.atan2(dy, dx) - math.atan2(side, sv * math.sqrt(max(v * v - side * side, 0.0)))
-        tp, xp, yp = self.fixes[-2]
-        self.samples.append((tm, wrap(head - ym - self._off), math.hypot(x - xp, y - yp)))
-        while self.samples and self.samples[0][0] < t - cfg.keep_s:
-            self.samples.popleft()
-
-    def estimate(self, now):
-        """最近 keep_s 内学到的 (c, σ, 路程 m)；不够 min_m 返回 None（σ 由调用方和 max_sigma_deg 比）。"""
-        cfg = self.cfg
-        while self.samples and self.samples[0][0] < now - cfg.keep_s:
-            self.samples.popleft()
-        if sum(w for _, _, w in self.samples) < cfg.min_m:
-            return None
-        sw = sum(w * math.sin(c) for _, c, w in self.samples)
-        cw = sum(w * math.cos(c) for _, c, w in self.samples)
-        c0 = math.atan2(sw, cw)
-        d = sorted(wrap(c - c0) for _, c, _ in self.samples)
-        c0 = wrap(c0 + d[len(d) // 2])
-        kept = [(wrap(c - c0), w) for _, c, w in self.samples if abs(wrap(c - c0)) <= math.radians(cfg.outlier_deg)]
-        c0 = wrap(c0 + self._off)
-        dist = sum(w for _, w in kept)
-        if dist < cfg.min_m:
-            return None
-        m = sum(e * w for e, w in kept) / dist
-        var = sum(w * (e - m) ** 2 for e, w in kept) / dist
-        sigma = max(math.radians(cfg.floor_deg), math.sqrt(var / max(1.0, dist / cfg.corr_m)))
-        return wrap(c0 + m), sigma, dist
-
-
-class ImuAlignment:
-    """任务层持有、跨线跨作业共用的 IMU → 地面方向换算 c（真实车头 − IMU 偏航，rad）：
-
-    - feed_imu：每帧 IMU 偏航，累出展开的转角 θ（掉头转了几圈都记得）；车停着时偏航的变化是 IMU 自己的，c 跟着挪；
-    - 每条线开头 begin_line（上一条线记下的 c 定下来），这条线卫星拟合好了 update_line 记下 (时刻, θ, c, 误差)；
-    - predict：上一条线的 c（不学、不推算，见 AlignmentConfig），误差按隔的时间、转角放大；开头和双天线测的按误差加权
-      （ImuFirstGuide.blend_start）。"""
-
-    def __init__(self, config=AlignmentConfig()):
-        self.cfg = config
-        self.theta = self._yaw = self._imu_t = None
-        self.obs = None                  # 上一条线定下来的 (t, θ, c, σ)；σ 为空：没经卫星拟合（只借，不加权）
-        self.pending = None              # 这条线正在更新的
-        self.token = 0
-        self.rate = None                 # 最近一条线拟合好的漂移速度 (时刻, rad/m, 误差 rad/m)，下一条线开头带过去
-        self._rate_pending = None
-        self.crab = None                 # 最近一条线拟合好的侧滑 k (时刻, k, 误差)，下一条线开头带过去（同一块场地）
-        self._crab_pending = None
-        self.still_shift = 0.0           # 车停着时 IMU 偏航自己变了多少（累计，rad），换算已跟着挪
-        self.drive = DriveLearner()      # 开机后作业前的行驶里顺带学的 c（adopt_drive）
-        self.adopted = None              # 最近一次把行驶里学的当记忆用：(时刻, c, σ, 路程 m)
-        self._raw = None                 # 展开的 IMU 偏航（停车时的变化也算，DriveLearner 用）
-        self._drive_status = None
-
-    # 旧接口：value / t 是最近一条线的 c 和时刻
-    @property
-    def value(self):
-        o = self.pending or self.obs
-        return None if o is None else o[2]
-
-    @property
-    def t(self):
-        o = self.pending or self.obs
-        return None if o is None else o[0]
-
-    def remembered(self):
-        """有没有能带到下一条线开头的换算：最近一条线经卫星拟合好（不是只借来的）、离最近一帧 IMU 不超过 max_age_s、
-        IMU 没断过。重启后第一条没有（LineMission.first_line_no_memory）。"""
-        o = self.pending or self.obs
-        t = self._imu_t
-        return (o is not None and o[3] is not None and t is not None and math.isfinite(t)
-                and 0.0 <= t - o[0] <= self.cfg.max_age_s)
-
-    def feed_imu(self, t, yaw, still=False):
-        """每帧 IMU 偏航。still：车停着（调用方判：两轮都停够久、陀螺 < still_max_gyro_deg_s）——地面车头没变，偏航的变化
-        是 IMU 自己的（固件静止修正、零偏漂），换算 c 跟着挪、不算转角（见 AlignmentConfig.still_max_gyro_deg_s）。"""
-        if not (math.isfinite(t) and math.isfinite(yaw)):
-            return
-        if self._yaw is None or t - self._imu_t > self.cfg.imu_gap_s:
-            if self._yaw is not None:
-                self.obs = self.pending = None   # IMU 断过：转角接不上
-            self.theta = self._raw = yaw
-            self.drive.reset()
-        elif still:
-            d = wrap(yaw - self._yaw)
-            self.still_shift += d
-            self._raw += d
-            self.obs = self._shifted(self.obs, -d)
-            self.pending = self._shifted(self.pending, -d)
-            self.drive.shift(-d)
-        else:
-            d = wrap(yaw - self._yaw)
-            self.theta += d
-            self._raw += d
-        self._yaw, self._imu_t = yaw, t
-        self.drive.on_imu(t, self._raw)
-
-    def adopt_drive(self):
-        """没有能带的换算（remembered() 为假）时，开机后行驶里学够的 c（DriveLearner，误差 ≤ max_sigma_deg）当作上一条线
-        定下来的（obs）用：开机第一条就不空跑、按有记忆走（LineMission._plan_route）。返回 (c, σ, 路程 m)，没用上返回 None。"""
-        if self.remembered() or self._imu_t is None or self.theta is None:
-            return None
-        est = self.drive.estimate(self._imu_t)
-        if est is None or est[1] > math.radians(self.drive.cfg.max_sigma_deg):
-            return None
-        c, sigma, dist = est
-        self.obs, self.pending = (self._imu_t, self.theta, c, sigma), None
-        self.adopted = (self._imu_t, c, sigma, dist)
-        return est
-
-    @staticmethod
-    def _shifted(o, dc):
-        return None if o is None else (o[0], o[1], wrap(o[2] + dc), o[3])
-
-    def begin_line(self):
-        """新的一条线开头（偏移刚锁住）调用：上一条线记下的 c 定下来。返回这条线的号。"""
-        if self._rate_pending is not None:
-            self.rate, self._rate_pending = self._rate_pending, None
-        if self._crab_pending is not None:
-            self.crab, self._crab_pending = self._crab_pending, None
-        if self.pending is not None:
-            self.obs = self.pending
-        self.pending = None
-        self.token += 1
-        return self.token
-
-    def update_rate(self, token, t, rate, sigma):
-        """这条线拟合出的漂移速度（rad/m）和误差，下一条线开头带过去。"""
-        if token == self.token and all(math.isfinite(v) for v in (t, rate, sigma)):
-            self._rate_pending = (t, rate, sigma)
-
-    def predict_rate(self, now):
-        """上一条线的漂移速度 (rad/m, 误差)；太旧（> max_age_s）或 IMU 断过返回 None。误差按隔的时间放大。"""
-        r = self.rate
-        if r is None or self.obs is None or not math.isfinite(now) or not 0.0 <= now - r[0] <= self.cfg.max_age_s:
-            return None
-        return r[1], math.hypot(r[2], self.cfg.rate_walk_deg_m * DEG * math.sqrt((now - r[0]) / 60.0))
-
-    def update_crab(self, token, t, k, sigma):
-        """这条线拟合出的侧滑 k（侧滑 / 横滚）和误差，下一条线开头带过去。"""
-        if token == self.token and all(math.isfinite(v) for v in (t, k, sigma)):
-            self._crab_pending = (t, k, sigma)
-
-    def predict_crab(self, now):
-        """上一条线的侧滑 (k, 误差)；太旧（> max_age_s）返回 None。场地不变，k 不随转角、时间漂，误差不放大。"""
-        c = self.crab
-        if c is None or not math.isfinite(now) or not 0.0 <= now - c[0] <= self.cfg.max_age_s:
-            return None
-        return c[1], c[2]
-
-    def better_than_carried(self, now, sigma):
-        """误差 sigma（rad）比现在能带过去的 c 准：这条线还没记下同样准或更准的，且上一条线带到现在的更不准或没有。"""
-        if self.pending is not None and self.pending[3] is not None and self.pending[3] <= sigma:
-            return False
-        p = self.predict(now)
-        return p is None or sigma < p[1]
-
-    def update_line(self, token, t, c, sigma=None):
-        """这条线的 c（偏移 + β）；sigma（rad）为空表示没经卫星拟合，只给下一条借、不参与加权。"""
-        if token == self.token and math.isfinite(t) and math.isfinite(c):
-            if sigma is None and self.pending is not None and self.pending[3] is not None:
-                return
-            self.pending = (t, self.theta, wrap(c), None if sigma is None else max(sigma, self.cfg.obs_floor_deg * DEG))
-
-    def remember(self, t, value):
-        self.update_line(self.token, t, value)
-
-    def predict(self, now):
-        """上一条线（这条线开头时就是 obs）的 c 带到现在：(c, σ) rad；没有、太旧、转角接不上返回 None。"""
-        o = self.obs
-        if o is None or not math.isfinite(now) or not 0.0 <= now - o[0] <= self.cfg.max_age_s:
-            return None
-        dt = (now - o[0]) / 60.0
-        if o[1] is None or self.theta is None:
-            return None
-        dth = self.theta - o[1]
-        cfg = self.cfg
-        pdd = (cfg.drift_sigma_deg_min * DEG) ** 2 + (cfg.drift_walk * DEG) ** 2 * dt
-        var = ((o[3] if o[3] is not None else cfg.dual_sigma_deg * DEG) ** 2 + dt * dt * pdd + dth * dth * cfg.scale_sigma ** 2
-               + (cfg.walk_deg_sqrt_min * DEG) ** 2 * dt)
-        return o[2], math.sqrt(max(var, 0.0))
-
-    def recall(self, now, difference, max_age_s, max_gap_deg):
-        """开头基线不对时借：带到现在的 c；和此刻 融合航向 − IMU 偏航 差超过 max_gap_deg（IMU 重启归零）不借。"""
-        o = self.pending or self.obs
-        if o is None or not math.isfinite(now) or not math.isfinite(difference) or not 0.0 <= now - o[0] <= max_age_s:
-            return None
-        pred = self.predict(now) if o is self.obs else None
-        value = pred[0] if pred is not None else o[2]
-        if abs(wrap(difference - value)) > max_gap_deg * DEG:
-            return None
-        return value
-
-    def status(self):
-        deg = lambda a: None if a is None else round(math.degrees(a), 4)  # noqa: E731
-        now = self._imu_t
-        if now is not None and (self._drive_status is None or not 0.0 <= now - self._drive_status[0] < 1.0):
-            self._drive_status = (now, self.drive.estimate(now))      # 每拍都要 status：学到的每秒算一次
-        drive = None if self._drive_status is None else self._drive_status[1]
-        return dict(align_still_shift_deg=deg(self.still_shift), align_theta_deg=deg(self.theta),
-                    align_c_deg=deg(None if self.obs is None else self.obs[2]),
-                    align_drive_m=None if drive is None else round(drive[2], 2),
-                    align_drive_sigma_deg=None if drive is None else deg(drive[1]),
-                    align_adopted_m=None if self.adopted is None else round(self.adopted[3], 2))
-
-    def summary(self, now=None):
-        """只读：车头换算记忆 / 开机行驶学习的当前进度（供平板显示首条是否免空跑）。"""
-        t = self._imu_t if now is None else now
-        cfg = self.drive.cfg
-        if t is None or not math.isfinite(t):
-            return dict(state='none', min_m=round(cfg.min_m, 1))
-        if self.remembered():
-            o = self.pending or self.obs
-            pred = self.predict(t) if self.pending is None else None
-            sig = pred[1] if pred is not None else o[3]
-            from_drive = (self.pending is None and self.adopted is not None
-                          and self.obs is not None and abs(self.obs[0] - self.adopted[0]) < 1e-6)
-            return dict(state='ready', source='drive' if from_drive else 'line',
-                        sigma_deg=None if sig is None else round(math.degrees(sig), 2),
-                        age_s=round(max(0.0, t - o[0]), 0),
-                        drive_m=None if not from_drive else round(self.adopted[3], 1),
-                        min_m=round(cfg.min_m, 1))
-        dist = sum(w for ts, _, w in self.drive.samples if ts >= t - cfg.keep_s)
-        est = None
-        if dist >= cfg.min_m:
-            if self._drive_status is not None and 0.0 <= t - self._drive_status[0] < 1.0:
-                est = self._drive_status[1]
-            else:
-                est = self.drive.estimate(t)
-                self._drive_status = (t, est)
-        if est is not None:
-            sig_deg = round(math.degrees(est[1]), 2)
-            ready = est[1] <= math.radians(cfg.max_sigma_deg)
-            return dict(state='drive_ready' if ready else 'learning',
-                        drive_m=round(est[2], 1), min_m=round(cfg.min_m, 1),
-                        sigma_deg=sig_deg, max_sigma_deg=round(cfg.max_sigma_deg, 2))
-        if dist > 0.05:
-            return dict(state='learning', drive_m=round(dist, 1), min_m=round(cfg.min_m, 1))
-        return dict(state='none', drive_m=0.0, min_m=round(cfg.min_m, 1))
 
 
 def paint_weight(cfg, along_m):

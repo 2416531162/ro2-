@@ -13,7 +13,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / 'radar_system'), str(ROOT)]
 import paint_quality
-from line_cascade import AlignmentConfig, ImuAlignment, ImuFirstConfig, ImuFirstGuide, imu_first_target, wrap
+from line_cascade import ImuFirstConfig, ImuFirstGuide, imu_first_target, wrap
 from path_tracker import Path as Route, PathConfig, PathTracker, differential_config
 from robot_core.kinematics import ChassisGeometry
 
@@ -125,8 +125,8 @@ class Guide(unittest.TestCase):
             replace(differential_config(PathConfig()), straight_imu_first='on')
 
 
-def closed_loop(law, rtk_jump=lambda t: 0., dual_bias_deg=.4, seconds=40., length=20., alignment=None, t0=0.,
-                baseline=None, imu_off=1.7, quality=None, imu_drift_deg_min=0.):
+def closed_loop(law, rtk_jump=lambda t: 0., dual_bias_deg=.4, seconds=40., length=20., t0=0.,
+                baseline=None, imu_off=1.7, quality=None, imu_drift_deg_min=0., calibrated=False):
     """延迟 0.36 s 的差速车走 20 m 直线；卫星位置往左跳 rtk_jump(t) m，双天线测向偏 dual_bias_deg。
     law：imu_first 卫星修正开着 / imu_only 只靠 IMU 画线 / imu_fit 差速车默认（卫星好时拟合角度）/ ab 原 A/B。
     返回 (tracker, [(t, 路程, 真喷头横偏)], 结束前最后一拍的直线状态)。"""
@@ -138,8 +138,6 @@ def closed_loop(law, rtk_jump=lambda t: 0., dual_bias_deg=.4, seconds=40., lengt
     elif law == 'imu_only':
         cfg = replace(cfg, straight_imu_first=replace(cfg.straight_imu_first, rtk_trim=False, rtk_fit=False))
     tr = PathTracker(Route((0., 0., 0.), [(length, 0.)]), cfg, GEO)
-    if alignment is not None:
-        tr.share_imu_alignment(alignment)
     tr.set_nozzle(NX, NY)
     x = y = psi = v = w = 0.
     y, psi = .003, .3 * DEG
@@ -149,14 +147,12 @@ def closed_loop(law, rtk_jump=lambda t: 0., dual_bias_deg=.4, seconds=40., lengt
     def fused():
         return NS(x=x, y=y + rtk_jump(t), yaw=psi + dual_bias_deg * DEG, speed=v, yaw_rate=w,
                   usable_for_control=True, quality='RTK_FIXED', reasons=(), correction_xy=(0., 0.),
-                  correction_yaw=0., rtk_trusted=True)
+                  correction_yaw=0., rtk_trusted=True, heading_calibrated=calibrated)
     drift = lambda t: imu_drift_deg_min * DEG * t / 60.                        # noqa: E731
     tr.sync(t, (t, psi + imu_off + drift(t), 0.))
     assert tr.start(fused())
     while t < t0 + seconds and tr.st.state == 'RUNNING':
         tr.sync(t, (t, psi + imu_off + drift(t), w))
-        if alignment is not None:
-            alignment.feed_imu(t, wrap(psi + imu_off + drift(t)))
         if baseline is not None:
             tr.set_heading_baseline(t, baseline(t - t0))
         if quality is not None:
@@ -216,13 +212,11 @@ class ImuOnly(unittest.TestCase):
 
     def test_rtk_jumps_after_takeover_change_nothing(self):
         jump = lambda t: .05 if 10. <= t < 13. else (.6 if t >= 16. else 0.)    # noqa: E731
-        alignment = ImuAlignment()
-        tr, rows, hold = closed_loop('imu_only', rtk_jump=jump, dual_bias_deg=0., alignment=alignment)
+        tr, rows, hold = closed_loop('imu_only', rtk_jump=jump, dual_bias_deg=0.)
         self.assertEqual(tr.st.state, 'DONE')                # 卫星跳 0.6 m 也不中止、照常走到头
         self.assertLess(max(abs(e) for t, s, e in rows if t >= 8.), .012)
         self.assertEqual((hold['first_rtk_trim'], hold['first_beta_deg'], hold['first_source']), (False, 0., 'learned'))
         self.assertAlmostEqual(hold['first_innovation'], .6, delta=.02)   # 卫星看到了 0.6 m，但没拿来修
-        self.assertAlmostEqual(alignment.value, 1.7 * -1, delta=.01)      # 学到的换算记下，下一条线基线不对时借
 
     def test_dual_antenna_bias_is_drawn_as_is(self):
         # 换算用的双天线测向偏 0.4°：IMU 照这个方向画，卫星看得到偏差但不纠（用户定的取舍）
@@ -436,108 +430,32 @@ class LongLineDrift(unittest.TestCase):
         self.assertAlmostEqual(math.degrees(g.beta), math.degrees(drift * 100.), delta=.12)
 
 
-class CarryAcrossLines(unittest.TestCase):
-    """上一条线卫星拟合好的换算带过来（不学、不推算，11-24 用户「删掉学习」），和开头双天线测的加权（10-06 傍晚：掉头后
-    双天线只攒到几个样本，开头换算错 0.45–0.86°）。"""
+class NoCarryAcrossLines(unittest.TestCase):
+    """不跨线带换算（2026-11-27 用户「就不能有什么记忆这种东西，一旦出错就乱套」）：每条线只从自己开头的融合车头学、按这条线
+    的卫星拟合修。开头测向基线就不对时：融合车头已按 IMU + RTK 位移对好（heading_calibrated）照常学；还靠测向就只用已攒的，
+    一个都没有就不接管（原来借上一条线的）。"""
 
-    def lines(self, d_deg_min, k, n=12, sigma_deg=.02, dt_min=1.2, turn=math.pi, seed=1):
-        rng = __import__('random').Random(seed)
-        al, t, yaw, c = ImuAlignment(AlignmentConfig()), 0., 0., -.25
-        errs = []
-        al.feed_imu(t, yaw)
-        for i in range(n):
-            tok = al.begin_line()
-            pred = al.predict(t)
-            if pred is not None:
-                errs.append(math.degrees(abs(wrap(pred[0] - c))))
-            al.update_line(tok, t, c + rng.gauss(0., sigma_deg * DEG), sigma_deg * DEG)
-            steps = int(dt_min * 60 / .02)
-            rot = turn if i % 2 == 0 else -turn * .2
-            for _ in range(steps):                       # 掉头 + 等：IMU 读到的转角含比例误差，c 随时间、转角变
-                t += .02
-                yaw += rot / steps
-                c += d_deg_min * DEG * .02 / 60 - k * rot / steps
-                al.feed_imu(t, wrap(yaw))
-        return al, errs
-
-    def test_carries_the_last_lines_c_as_is(self):
-        # SCH16T：c 不随时间、转角变（刻度标在 IMU 固件里）——带过来的就是上一条线拟合的，误差只剩拟合噪声
-        al, errs = self.lines(0., 0.)
-        self.assertLess(max(errs), .1)
-        # 不学：两条线之间 c 变了（11-24 那种 IMU 自己拨了一下）也不推算到下一条，带过来的仍是上一条线的值
-        al = ImuAlignment()
-        al.feed_imu(0., 0.)
-        for t, c in ((0., -155.95), (138., -154.17), (300., -158.05)):
-            al.feed_imu(t, 0.)
-            tok = al.begin_line()
-            al.update_line(tok, t, c * DEG, .05 * DEG)
-        al.feed_imu(300.02, 0.)
-        al.begin_line()
-        self.assertAlmostEqual(math.degrees(al.predict(300.02)[0]), -158.05, places=9)
-
-    def test_imu_gap_breaks_the_carry(self):
-        al = ImuAlignment()
-        al.feed_imu(0., 0.)
-        tok = al.begin_line()
-        al.update_line(tok, 0., .1, .001)
-        al.begin_line()
-        al.feed_imu(.02, 0.)
-        self.assertIsNotNone(al.predict(.02))
-        al.feed_imu(5., 0.)                                  # IMU 断了 5 s：转角接不上
-        self.assertIsNone(al.predict(5.))
-
-    def test_blend_partial_dual_with_carried(self):
-        cfg = AlignmentConfig()
-        g = ImuFirstGuide(FIT)
-        g.offset, g.offset_n, g.locked, g.source = .8 * DEG, 12, True, 'partial'
-        g.blend_start((0., .1 * DEG), cfg)
-        self.assertLess(abs(math.degrees(g.offset)), .05)    # 双天线只攒 12 个：几乎全听带过来的
-        self.assertGreater(g.start['weight'], .9)
-        g = ImuFirstGuide(FIT)
-        g.offset, g.offset_n, g.locked, g.source = .8 * DEG, 50, True, 'learned'
-        g.blend_start((-3.2 * DEG, .1 * DEG), cfg)           # 差 4°（超过 max_gap_deg 3°）：IMU 重启或测向坏，不混
-        self.assertAlmostEqual(math.degrees(g.offset), .8, places=9)
-        self.assertEqual(g.start['weight'], 0.)
-
-    def test_blend_keeps_carried_when_dual_is_off_by_one_and_a_half_degrees(self):
-        # 10-10 16:16:42 实录：双天线学满 50 个 −20.654°，上一条带来 −19.090°（σ 约 0.135°），差 1.56°；卫星轨迹反推
-        # 真值 −19.31°。原来门槛 1.5° 只用双天线（差 1.34°），线头偏 2 cm、整段 12 m 才收回又反向过头
-        cfg = AlignmentConfig()
-        g = ImuFirstGuide(FIT)
-        g.offset, g.offset_n, g.locked, g.source = -20.654 * DEG, 50, True, 'learned'
-        g.blend_start((-19.090 * DEG, .135 * DEG), cfg)
-        self.assertGreater(g.start['weight'], .8)
-        self.assertLess(abs(math.degrees(g.offset) + 19.31), .15)
-
-    def test_drift_rate_learned_on_one_line_carries_into_a_bad_start_on_the_next(self):
-        # IMU 漂 −0.4°/min：第一条线卫星好、学出漂移速度；第二条线开头 15 s 卫星质量差，按带过来的漂移速度推
-        bad = lambda t: (.04, 16, .06) if t < 15. else (.015, 28, .005)        # noqa: E731
-        worst = {}
-        for carry in (True, False):
-            al = ImuAlignment(AlignmentConfig())
-            tr, rows, hold = closed_loop('imu_fit', dual_bias_deg=0., alignment=al, length=40., seconds=70., imu_drift_deg_min=-.4)
-            self.assertEqual(tr.st.state, 'DONE')
-            self.assertLess(abs(math.degrees(tr._straight_guide.fit_rate()[0] if tr._straight_guide.locked else 0.)), 1.)
-            t1 = rows[-1][0] + .02
-            tr, rows, hold = closed_loop('imu_fit', dual_bias_deg=0., alignment=al if carry else ImuAlignment(), length=40.,
-                                         seconds=70., t0=t1, imu_drift_deg_min=-.4, quality=bad)
-            self.assertEqual(tr.st.state, 'DONE')
-            worst[carry] = max(abs(e) for t, s, e in rows if s >= 1.)
-        self.assertLess(worst[True], .015)
-        self.assertGreater(worst[False], worst[True] * 1.5)
-
-    def test_second_line_starts_with_the_first_lines_fitted_conversion(self):
-        al = ImuAlignment(AlignmentConfig())
-        tr, rows, hold = closed_loop('imu_fit', dual_bias_deg=.0, alignment=al)
+    def test_each_line_learns_its_own_conversion(self):
+        tr, rows, hold = closed_loop('imu_fit', dual_bias_deg=.9)
         self.assertEqual(tr.st.state, 'DONE')
-        # 第二条线：双天线偏 0.9°，开头 2 s 基线出界（只攒到几个样本）——没有带过来的会先往外偏
+        self.assertEqual(hold['first_source'], 'learned')
+        self.assertFalse(any(k.startswith('first_start_') for k in hold))
+        self.assertFalse(hasattr(tr, 'share_imu_alignment'))
+        self.assertLess(max(abs(e) for t, s, e in rows if s >= 3.), .015)
+
+    def test_bad_baseline_does_not_matter_once_the_heading_is_calibrated(self):
         bad = lambda t: .36 if t < 2. else .41               # noqa: E731
-        tr, rows, hold = closed_loop('imu_fit', dual_bias_deg=.9, alignment=al, t0=rows[-1][0] + .02, baseline=bad)
+        tr, rows, hold = closed_loop('imu_fit', dual_bias_deg=.0, baseline=bad, calibrated=True)
         self.assertEqual(tr.st.state, 'DONE')
-        self.assertGreater(hold['first_start_weight'], .5)
+        self.assertEqual(hold['first_source'], 'learned')
         self.assertLess(max(abs(e) for t, s, e in rows if s >= 1.), .015)
-        tr, rows, hold = closed_loop('imu_fit', dual_bias_deg=.9, baseline=bad)
-        self.assertGreater(max(abs(e) for t, s, e in rows if s >= 1.), .02)
+
+    def test_bad_baseline_with_dual_heading_uses_only_its_own_samples(self):
+        g = ImuFirstGuide(FIT)
+        self.assertFalse(g.lock_without_baseline())          # 一个都没攒到：不借，不接管
+        g.offset, g.offset_n = .1, FIT.offset_min_samples
+        self.assertTrue(g.lock_without_baseline())
+        self.assertEqual(g.source, 'partial')
 
 
 def runup_start(first=None, wobble_rad_s=.12, seconds=12.):

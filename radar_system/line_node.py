@@ -248,8 +248,6 @@ class LineNode(Node):
                 self.mission.fusion.reset_imu_source()
                 self.mission.pose = None
                 self.mission._imu = None
-                from line_cascade import ImuAlignment
-                self.mission._imu_alignment = ImuAlignment()
                 self._attitude = None
                 self.attitude_controls.select_imu_source(source)
             result = True,'已选择 '+('IMU762' if source=='imu762' else 'HDA536T')+'，等待定位重新稳定'
@@ -438,6 +436,7 @@ def load_fusion_config(gnss_fusion, path):
     overrides.setdefault('track_heading_switch_sigma_deg', user_rules.TRACK_HEADING_SWITCH_SIGMA_DEG)
     overrides.setdefault('track_heading_max_turn_deg', user_rules.TRACK_HEADING_MAX_TURN_DEG)
     overrides.setdefault('track_heading_min_radius_m', user_rules.TRACK_HEADING_MIN_RADIUS_M)
+    overrides.setdefault('track_heading_recover_n', user_rules.TRACK_HEADING_RECOVER_N)
     overrides.setdefault('dual_heading_check_deg', user_rules.DUAL_HEADING_CHECK_DEG)
     # Gen5（HDA536T）：航向推算用 IMU 自己算的航向角（2026-09-28 用户要求）；原地转向转角大，
     # 按 3% 刻度误差加航向不确定度，测向按 20 ms 时间同步误差随转速降权。

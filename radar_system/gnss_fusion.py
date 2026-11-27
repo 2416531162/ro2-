@@ -268,7 +268,14 @@ class FusionConfig:
     # 一段里车头转过超过这么多、而且比半径 track_heading_min_radius_m 的圆弧转得还急（原地转）就从这帧重新起一段
     track_heading_max_turn_deg: float = 30.0
     track_heading_min_radius_m: float = 0.5
+    # 对好以后一段差得超过 3σ 当跳点不修；连着 track_heading_recover_n 段都这样、彼此差不到 track_heading_recover_spread_deg：
+    # 不是跳点，是车头本身错了（IMU 航向角跳、开头错），放开按卫星位移重新对（不然一直挡着、错到底）
+    track_heading_recover_n: int = 3
+    track_heading_recover_spread_deg: float = 1.0
     dual_heading_check_deg: float = 3.0
+    # yaw_input = 'angle'：车停稳（轮子停够 stationary_time_s、陀螺不转）时 IMU 航向角自己的变化不跟（11-24 车停着时 SCH16T
+    # 固件静止修正一下拨了 +4.12°、静止时每分钟漂 0.5–0.95°，陀螺读数一直 0）。原来靠跨线带的换算跟着挪，11-27 删了跨线记忆
+    still_freeze_yaw: bool = True
     # 判停稳（融合静止检测、任务层 robot_core.standstill）要不要卫星地速也静止：双天线有 BESTVEL 多普勒地速；
     # 单天线没有地速，只看轮子（2026-10-07 用户：「只要轮子不动就行」）
     ground_speed_still: bool = True
@@ -300,7 +307,7 @@ class FusionConfig:
                 continue
             if name in ('continuous_output', 'heading_bias_learning', 'wheel_increment_enabled',
                         'wheel_scale_auto', 'sensor_failover_enabled', 'tilt_compensation_enabled', 'ground_speed_still',
-                        'heading_course_check', 'dual_heading_init_only'):
+                        'heading_course_check', 'dual_heading_init_only', 'still_freeze_yaw'):
                 if type(value) is not bool:
                     raise ValueError(name + ' 必须是布尔值')
                 continue
@@ -329,6 +336,8 @@ class FusionConfig:
             raise ValueError('推算比例误差必须是 0–1 的比例')
         if self.heading_course_release_deg > self.heading_course_suspect_deg:
             raise ValueError('heading_course_release_deg 不能大于 heading_course_suspect_deg')
+        if type(self.track_heading_recover_n) is not int or self.track_heading_recover_n < 2:
+            raise ValueError('track_heading_recover_n 必须是至少 2 的整数')
 
 
 @dataclass(frozen=True)
@@ -375,6 +384,9 @@ class FusedPose:
     rtk_trusted: bool = False
     # 最近一帧卫星位置用的哪根天线：'main' 主天线 / 'second' 主天线被污染或没固定、改用副天线（FusionConfig.secondary_*）
     position_antenna: str = 'main'
+    # 车头已按 IMU + RTK 位移对好、测向只做检查（FusionConfig.dual_heading_init_only 开着、走够 track_heading_ready_m）：
+    # 这时测向基线出界不影响车头，直线照常按融合车头学 IMU 换算（path_tracker._straight_first）；还靠测向、没开这个做法为 False
+    heading_calibrated: bool = False
 
 
 def _wrap(angle):
@@ -622,7 +634,8 @@ class _State:
         # 测向只定初值（FusionConfig.dual_heading_init_only）：按卫星位移对过车头的路程、够了没有、测向 − 融合车头（低通，rad）
         self.track_m = 0.0
         self.track_ready = False
-        self.track_aligns = self.track_rejected = 0
+        self.track_aligns = self.track_rejected = self.track_recovered = 0
+        self.track_reject_run = None        # 连着被挡的段：(段数, 第一段的差 rad)
         self.dual_check = None
         self.imu_yaw = None                 # 上一帧 IMU 航向角（yaw_input = 'angle'）
         self.mismatch_since = None          # 差速车：IMU 转向与轮速里程计相反从什么时候开始
@@ -1238,6 +1251,11 @@ class GnssFusion:
         fresh_wheel = sample.t - s.wheel_t <= cfg.sensor_timeout_s
         rate = self._yaw_rate(sample)
         yaw = sample.yaw if sample.yaw is not None and math.isfinite(sample.yaw) else None
+        if (cfg.yaw_input == 'angle' and cfg.still_freeze_yaw and fresh_wheel and s.stationary_since is not None
+                and sample.t - s.stationary_since >= cfg.stationary_time_s
+                and abs(sample.gyro_z - s.raw_gyro_bias) <= math.radians(cfg.gyro_margin_deg_s)):
+            # 车停稳、陀螺不转：航向角的变化是 IMU 自己的（固件静止修正一下拨几度、静止漂），车头不跟（FusionConfig.still_freeze_yaw）
+            rate = s.bias
         self._check_mismatch(sample.t, rate, fresh_wheel)
         bound = self._gyro_bound(s.speed, s.wheel_yaw, sample.t - s.imu_t)
         if fresh_wheel and abs(rate - s.bias) > bound:
@@ -1463,7 +1481,7 @@ class GnssFusion:
             s.sat_yaw, s.sat_yaw_t = yaw, sample.t
         if not imu_ok and (s.track_ready or s.track_m):
             # IMU 断了 / 和轮速对不上：「IMU + 卫星位移」这条车头没了，回到按测向（之后重新攒）
-            s.track_ready, s.track_m, s.align = False, 0.0, None
+            s.track_ready, s.track_m, s.align, s.track_reject_run = False, 0.0, None, None
         if trusted and not imu_ok and s.yaw_ready:
             # 卫星可信、IMU 断着（IMU 只是辅助）：航向直接取测向，主天线位置不动、后轴点按新航向改算；
             # 两帧测向之间按测向算的转速推（见 _predict）
@@ -2013,8 +2031,23 @@ class GnssFusion:
                 p[7] = max(p[7], math.radians(cfg.track_heading_switch_sigma_deg) ** 2)
                 s.p = tuple(p)
             elif delta * delta > 9. * (s.p[7] + var):
+                # 对好以后 IMU 记着车头，一段差这么多多半是卫星跳了 / 打滑，不修；连着 track_heading_recover_n 段都差这么多、
+                # 彼此对得上，就是车头本身错了（IMU 航向角跳、开头错）：把车头方差放到这么大，按这段接过来
                 s.track_rejected += 1
-                return                  # 对好以后 IMU 记着车头，一段差这么多是卫星跳了 / 打滑，不修
+                run = s.track_reject_run
+                if run is None or abs(_wrap(delta - run[1])) > math.radians(cfg.track_heading_recover_spread_deg):
+                    run = (0, delta)
+                run = (run[0] + 1, run[1])
+                if run[0] < cfg.track_heading_recover_n:
+                    s.track_reject_run = run
+                    return
+                s.track_reject_run = None
+                s.track_recovered += 1
+                p = list(s.p)
+                p[7] = max(p[7], delta * delta)
+                s.p = tuple(p)
+            else:
+                s.track_reject_run = None
         first = not s.yaw_ready
         if self._yaw_observation(_wrap(s.yaw + delta), var, update_bias=False):
             s.course_t = s.t
@@ -2295,7 +2328,8 @@ class GnssFusion:
                          (s.ground_speed <= .02) if 0 <= s.t-s.ground_t <= max(cfg.sensor_timeout_s,STATIONARY_DOPPLER_FRESH_S) else None,
                          s.motion_evidence, gnss_still_required=cfg.ground_speed_still,
                          single_antenna=cfg.course_align_distance_m > 0, rtk_trusted=trusted,
-                         position_antenna='second' if s.ant2_active and s.t - s.ant2_t <= cfg.fixed_timeout_s else 'main')
+                         position_antenna='second' if s.ant2_active and s.t - s.ant2_t <= cfg.fixed_timeout_s else 'main',
+                         heading_calibrated=bool(cfg.dual_heading_init_only and s.track_ready))
 
     def antenna_lever(self):
         """现在用的 ANT1 水平杠杆臂（车体系前、左，m，含倾斜补偿）；line_mission 核对定位跳动时用同一个。"""
@@ -2367,6 +2401,7 @@ class GnssFusion:
             'segments': segments,
             'dual_heading': {'role': ('check' if s.track_ready else 'steer') if cfg.dual_heading_init_only else 'steer',
                              'track_m': s.track_m, 'track_aligns': s.track_aligns, 'track_rejected': s.track_rejected,
+                             'track_recovered': s.track_recovered,
                              'minus_fused_deg': None if s.dual_check is None else math.degrees(s.dual_check),
                              'disagree': (s.dual_check is not None
                                           and abs(math.degrees(s.dual_check)) >= cfg.dual_heading_check_deg)},

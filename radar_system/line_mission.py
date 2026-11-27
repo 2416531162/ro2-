@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from types import SimpleNamespace
 
 import route_plan
-from line_cascade import REASON_TEXT, ImuAlignment
+from line_cascade import REASON_TEXT
 from path_tracker import DIFF_REVERSE_MPS, DIFF_SETTLE_S, PathConfig, PivotRebound, SectionTracker, differential_config
 from route_operations import RouteOperations
 from rtk_hold_budget import DegradedSpeedLimiter
@@ -106,12 +106,6 @@ REENTRY_STILL_S = rules.REENTRY_STILL_S  # 车速、转速都低于下面两个�
 REENTRY_STILL_MPS = 0.03
 REENTRY_STILL_DEG_S = 2.0
 REENTRY_WAIT_S = 120.0
-# IMU 换算跨线带过去（line_cascade.ImuAlignment.feed_imu still）：两轮车速 < STILL_WHEEL_MPS、轮子算的转速 < STILL_WHEEL_DEG_S
-# 持续 STILL_HOLD_S（轮速这么久内来过）才算车停着——这时 IMU 偏航的变化是 IMU 自己的（11-24 固件静止修正一下拨了 +4.12°）
-STILL_WHEEL_MPS = 0.01
-STILL_WHEEL_DEG_S = 0.5
-STILL_HOLD_S = 0.5
-STILL_WHEEL_FRESH_S = 0.3
 REENTRY_WAIT_NOTICE = '偏离接入路线，已停车，等定位对齐后从最近处重新接入'
 REENTRY_NOTICE = '已从当前位置重新接入（接入 %.1f m，第 %d 次）'
 # 起喷门槛没过（paint_quality.PAINT_START_MAX_OFFSET_M）：车照走、先不喷
@@ -270,10 +264,7 @@ class LineMission:
         self._heading_baseline = None   # 最近一帧双天线测向 (测量时刻, 基线长 m)：直线 IMU 为主时基线不对就不用卫星修正
         self._rtk_quality = None        # 最近一帧主天线定位 (测量时刻, σ m, 卫星数, 两天线距离误差 m, 固定解)：直线卫星纠偏只在合格时用
         self._fix2 = None               # 最近一帧副天线 (测量时刻, 本地 x, y, 固定解, 两天线标称距离 m)：两根对不上时直线选天线用
-        self._imu_alignment = ImuAlignment()    # 上一条线对好的 IMU → 地面方向，开头基线不对时借（跨作业保留）
         self._pivot_rebound = PivotRebound()    # 原地转停下后的车头回弹补偿，按左 / 右转各学一个（跨作业保留）
-        self._wheel_still = None        # 轮子说车停着 (从什么时候起, 最近一帧轮速时刻)；在动为 None
-        self._wheel_t = None
         self._fix2_t = None             # 副天线最近一次固定解的时刻
         self._usable_since = None       # 暂停中定位从什么时候起一直可用（自动继续用）
         self._resume_failed = None      # 自动继续时起步检查没过的原因代码（报给操作员）
@@ -337,7 +328,6 @@ class LineMission:
             if sol in RTK_FIXED_SOLS:
                 self._check_innovation(m)
                 self._latency_fix(raw_t, m)
-            self._drive_fix(m, sol in RTK_FIXED_SOLS)
             self.fusion.add_fix(s.GnssFix(t=m['t'], lat_deg=m['lat'], lon_deg=m['lon'], height_m=m['height'],
                                           sol=sol, sigma_n=m['sigma_n'], sigma_e=m['sigma_e'],
                                           sigma_u=m['sigma_u'], diff_age_s=inf(diff_age), sats=m['sats'],
@@ -399,7 +389,6 @@ class LineMission:
         if callable(switch):
             switch(config)
         self._latency.reset(self._latency_saved.get(mode, GNSS_LATENCY_INITIAL_S))   # 换了接收机和转发路径：用这一路上次的值重估
-        self._imu_alignment = ImuAlignment()    # 借来的 IMU → 地面方向是按旧天线对的
         self._innovation = self._jump = None
 
     def _check_innovation(self, m):
@@ -453,34 +442,9 @@ class LineMission:
         if yaw is not None and math.isfinite(yaw) and math.isfinite(gyro_z):
             self._imu = (t, yaw, gyro_z)
             self._latency.on_imu(t, yaw, gyro_z)
-            # 累计转角：换算跨线带过去时按转角校准；车停着时偏航的变化是 IMU 自己的，换算跟着挪（ImuAlignment.feed_imu）
-            self._imu_alignment.feed_imu(t, yaw, still=self._still(t, gyro_z))
-
-    def _still(self, t, gyro_z):
-        """车停着：轮子说停够 STILL_HOLD_S（轮速 STILL_WHEEL_FRESH_S 内来过）、陀螺 < still_max_gyro_deg_s。"""
-        w = self._wheel_still
-        return (w is not None and self._wheel_t is not None and abs(t - self._wheel_t) <= STILL_WHEEL_FRESH_S
-                and t - w >= STILL_HOLD_S and abs(gyro_z) < math.radians(self._imu_alignment.cfg.still_max_gyro_deg_s))
-
-    def _note_wheel(self, t, speed, yaw_rate):
-        try:
-            if not (math.isfinite(t) and math.isfinite(speed) and math.isfinite(yaw_rate)):
-                self._wheel_still = None
-                return
-        except TypeError:
-            self._wheel_still = None
-            return
-        if abs(speed) < STILL_WHEEL_MPS and abs(yaw_rate) < math.radians(STILL_WHEEL_DEG_S):
-            if self._wheel_still is None:
-                self._wheel_still = t
-        else:
-            self._wheel_still = None
-        self._wheel_t = t if self._wheel_t is None else max(t, self._wheel_t)
-        self._imu_alignment.drive.on_wheel(t, speed)
 
     def on_wheel(self, t, speed, yaw_rate):
         self.fusion.add_wheel(self.samples.WheelSample(t=t, speed=speed, yaw_rate=yaw_rate))
-        self._note_wheel(t, speed, yaw_rate)
         before = self._latency.value
         self._latency.on_wheel(t, speed)
         self._save_latency(before)
@@ -491,28 +455,9 @@ class LineMission:
 
     def on_wheel_motion(self, sample):
         self.fusion.add_wheel(sample)
-        end_t = getattr(sample, 'end_t', None)
-        if end_t is None:
-            self._note_wheel(sample.t, sample.speed, sample.yaw_rate)
-        else:
-            self._note_wheel(end_t, sample.end_speed if sample.end_speed is not None else sample.speed,
-                             sample.end_yaw_rate if sample.end_yaw_rate is not None else sample.yaw_rate)
         before = self._latency.value
         self._latency.on_wheel(sample.t, sample.speed, getattr(sample, 'end_t', None), getattr(sample, 'end_speed', None))
         self._save_latency(before)
-
-    def _drive_fix(self, m, fixed):
-        """主天线位置交给开机后行驶里顺带学换算（ImuAlignment.drive）：固定解、σ 小才算，不然断开。"""
-        learner = self._imu_alignment.drive
-        try:
-            ok = fixed and math.hypot(m['sigma_n'], m['sigma_e']) <= learner.cfg.max_fix_sigma_m
-            x, y = self.fusion.to_local(m['lat'], m['lon'])
-            lever = getattr(self.fusion, 'antenna_lever', None)
-            lever = lever() if callable(lever) else self.fusion.config.antenna_xy
-        except (AttributeError, KeyError, ValueError, TypeError):
-            learner.on_fix(math.nan, math.nan, math.nan, False, (0.0, 0.0))
-            return
-        learner.on_fix(m['t'], x, y, ok, (float(lever[0]), float(lever[1])))
 
     def _latency_fix(self, raw_t, m):
         """卫星固定解交给延迟估计（按接收机标的原始时间，本地米，现在用的天线杠杆臂）。"""
@@ -887,9 +832,6 @@ class LineMission:
                 fc = self.fusion.config
                 b = math.radians(getattr(fc, 'baseline_yaw_body_deg', -90.0) - getattr(fc, 'mount_offset_deg', 0.0))
                 secondary(t2, x2, y2, fixed2, (lever[0] + length * math.cos(b), lever[1] + length * math.sin(b)))
-            share = getattr(tracker, 'share_imu_alignment', None)
-            if callable(share):
-                share(self._imu_alignment)
             share_rebound = getattr(tracker, 'share_pivot_rebound', None)
             if callable(share_rebound):
                 share_rebound(self._pivot_rebound)
@@ -991,10 +933,7 @@ class LineMission:
         reverses = sum(1 for sec in sections if sec.direction < 0)
         turns = ('，原地转向 %d 次' % tracker.pivots if tracker.pivots else '') + \
                 ('，圆弧掉头 %d 次' % info['arc_turns'] if info.get('arc_turns') else '') + \
-                ('，倒车 %d 次' % reverses if reverses else '') + \
-                ('，开机第一条先空跑 %.0f m 学车头再%s回起点画' % (info['learn_m'], '圆弧绕' if info.get('learn_turn') == 'arc' else '掉头')
-                 if info.get('learn_m') else '') + \
-                ('，车头已在开机后行驶的 %.0f m 里学好，不空跑' % info['drive_learned_m'] if info.get('drive_learned_m') else '')
+                ('，倒车 %d 次' % reverses if reverses else '')
         self.message = '申请控制权（接入 %.1f m，全程 %.1f m%s）' % (entry_m, tracker.length, turns)
         return True, self.message
 
@@ -1004,26 +943,12 @@ class LineMission:
         planner_nozzle = (route_nozzle['forward'], -route_nozzle['right']) if route_nozzle else None
         car = (pose.x, pose.y, pose.yaw)    # 规划从后轴中心起（压线的是水泵，见 planner_nozzle）
         info = {}
-        if planner_nozzle is not None and self.first_line_no_memory():
-            # 开机后作业前的行驶里学够了换算（DriveLearner）：当记忆用，第一条不空跑（11-25 用户「开机多跑一会学习能不能省去」）
-            drive = self._imu_alignment.adopt_drive()
-            if drive is not None:
-                info['drive_learned_m'] = drive[2]
-        sections, entry_m = planner(spec, car, self.min_route_radius, body=self.body, nozzle_x=planner_nozzle,
-                                    info=info, first_line=planner_nozzle is not None and self.first_line_no_memory())
+        sections, entry_m = planner(spec, car, self.min_route_radius, body=self.body, nozzle_x=planner_nozzle, info=info)
         from live_cruise import label_sections
         label_sections(sections,entry_m,cruise)
         cfg = dataclasses.replace(self.path_cfg, cruise_mps=cruise, track_x_m=0.0)
         tracker = SectionTracker(sections, cfg, self.geo, **self.section_options(route=True))
         return sections, entry_m, tracker, info
-
-    def first_line_no_memory(self):
-        """这次作业的第一条直线按没有记忆拟合吗：直线 IMU 为主 + 卫星拟合，任务层还没有上一条线拟合好的换算（重启后第一条、
-        隔了 max_age_s 以上、IMU 断过）。开始作业、接入偏离后重新接入时规划记在第一条段上（route_plan first_line）；
-        助跑长度不变（2026-11-23 用户「不能靠加长助跑解决问题」，原来的第一条 4 m 删掉）。"""
-        first = getattr(self.path_cfg, 'straight_imu_first', None)
-        return bool(getattr(self.path_cfg, 'straight_imu_enabled', False) and first is not None
-                    and first.rtk_fit and not self._imu_alignment.remembered())
 
     def _reentry_allowed(self, past_m=0.0):
         """接入时偏离能不能就近重新接入：普通路线任务（不是场地、补画）、还没开喷、没超过 REENTRY_MAX 次。
@@ -1492,7 +1417,6 @@ class LineMission:
                                                  accel=self.path_cfg.accel_mps2,
                                                  lateral_accel=self.path_cfg.lat_accel_mps2),
                                calibration=calibration, diag=self._diag(calibration), tilt=tilt,
-                               alignment=self._imu_alignment.summary(self._last_tick),
                                imu_hold_test=self._imu_hold_test_status(),
                                rtk_events=self._jump_events(), operations=self.operations.status()))
 

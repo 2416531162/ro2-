@@ -675,23 +675,11 @@ def _line_estimation(ln):
             out['speed_source'] = pose['speed_source']
         if pose.get('yaw_source') in ('imu', 'wheel'):
             out['yaw_source'] = pose['yaw_source']
-    align = ln.get('alignment') if isinstance(ln.get('alignment'), dict) else None
-    if align and align.get('state') in ('ready', 'drive_ready', 'learning', 'none'):
-        a_out = {'state': align['state']}
-        if align.get('source') in ('line', 'drive'):
-            a_out['source'] = align['source']
-        for k, d in (('sigma_deg', 2), ('drive_m', 1), ('min_m', 1), ('age_s', 0), ('max_sigma_deg', 2)):
-            v = _num(align.get(k), d)
-            if v is not None and v >= 0:
-                a_out[k] = v
-        out['alignment'] = a_out
 
     # 只在行驶中（非切换、非原地转向）透传直线 / 圆弧控制器状态，避免暂停或换段时显示上一段的旧状态
     running = (ln.get('phase') == 'RUNNING' and tr is not None and tr.get('state') == 'RUNNING'
                and not tr.get('switching') and not tr.get('pivoting'))
     if running:
-        if tr.get('learn') is True:
-            out['learn'] = True
         sh = tr.get('straight_hold') if isinstance(tr.get('straight_hold'), dict) else None
         if sh and (sh.get('active') is True or sh.get('control_law') in ('imu_first', 'imu_launch')):
             law = sh.get('control_law') if sh.get('control_law') in ('imu_first', 'imu_launch') else None
@@ -715,7 +703,7 @@ def _line_estimation(ln):
                 'position_follow': sh.get('first_position_follow') is True,
                 'pull_boost': sh.get('pull_boost') is True,
                 'antenna': sh.get('rtk_antenna') if sh.get('rtk_antenna') in ('main', 'second') else None,
-                'source': sh.get('first_source') if sh.get('first_source') in ('learned', 'borrowed', 'carried') else None,
+                'source': sh.get('first_source') if sh.get('first_source') in ('learned', 'partial') else None,
                 'baseline_ok': sh.get('baseline_ok') if type(sh.get('baseline_ok')) is bool else None,
                 'fast': sh.get('first_fast') is True,
                 'e_imu_m': _num(sh.get('first_e'), 4),

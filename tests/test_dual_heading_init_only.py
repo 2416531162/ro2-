@@ -31,6 +31,7 @@ def cfg(init_only=True, **kw):
                    track_heading_switch_sigma_deg=rules.TRACK_HEADING_SWITCH_SIGMA_DEG,
                    track_heading_max_turn_deg=rules.TRACK_HEADING_MAX_TURN_DEG,
                    track_heading_min_radius_m=rules.TRACK_HEADING_MIN_RADIUS_M,
+                   track_heading_recover_n=rules.TRACK_HEADING_RECOVER_N,
                    dual_heading_check_deg=rules.DUAL_HEADING_CHECK_DEG, **kw)
 
 
@@ -40,6 +41,7 @@ class Rig:
         self.f.set_origin(31., 120.)
         self.t, self.x, self.y, self.h = 0., 0., 0., 0.
         self.bias = bias_deg
+        self.imu_jump = 0.               # IMU 航向角自己拨了多少（固件静止修正），rad
 
     def step(self, n=1, v=.8, w=0., imu=True, second_off=0., second_every=0):
         out = []
@@ -53,7 +55,7 @@ class Rig:
             f = self.f
             f.add_wheel(gf.WheelSample(t, v, w))
             if imu:
-                f.add_imu(gf.ImuSample(t, w, yaw=self.h + IMU_OFF))
+                f.add_imu(gf.ImuSample(t, w, yaw=self.h + IMU_OFF + self.imu_jump))
             f.add_heading(gf.DualHeading(t, (180. - math.degrees(self.h) - self.bias) % 360., 0., BASE, 'NARROW_INT', .3, 30))
             c, s = math.cos(self.h), math.sin(self.h)
             ax, ay = ANT
@@ -92,10 +94,11 @@ class Rules(unittest.TestCase):
         self.assertIs(c.dual_heading_init_only, rules.DUAL_HEADING_INIT_ONLY)
         self.assertEqual((c.track_heading_distance_m, c.track_heading_ready_m, c.track_heading_sigma_floor_deg,
                           c.track_heading_switch_sigma_deg, c.track_heading_max_turn_deg, c.track_heading_min_radius_m,
-                          c.dual_heading_check_deg),
+                          c.track_heading_recover_n, c.dual_heading_check_deg, c.still_freeze_yaw),
                          (rules.TRACK_HEADING_DISTANCE_M, rules.TRACK_HEADING_READY_M, rules.TRACK_HEADING_SIGMA_FLOOR_DEG,
                           rules.TRACK_HEADING_SWITCH_SIGMA_DEG, rules.TRACK_HEADING_MAX_TURN_DEG,
-                          rules.TRACK_HEADING_MIN_RADIUS_M, rules.DUAL_HEADING_CHECK_DEG))
+                          rules.TRACK_HEADING_MIN_RADIUS_M, rules.TRACK_HEADING_RECOVER_N, rules.DUAL_HEADING_CHECK_DEG,
+                          True))
         self.assertEqual((rules.TRACK_HEADING_DISTANCE_M, rules.TRACK_HEADING_SIGMA_FLOOR_DEG), (1.0, 1.0))   # 用户「走 1m」
         with self.assertRaises(ValueError):
             gf.FusionConfig(dual_heading_init_only=1)
@@ -122,6 +125,7 @@ class InitOnly(unittest.TestCase):
         p = rig.step(10)                 # 0.8 m：还没对过
         self.assertEqual(rig.role()['role'], 'steer')
         self.assertAlmostEqual(rig.err_deg(p[-1]), 2., delta=.3)
+        self.assertFalse(p[-1].heading_calibrated)   # 还靠测向：直线测向基线不对时照旧不学（path_tracker._straight_first）
 
     def test_unbiased_dual_is_about_the_same(self):
         old, new = Rig(bias_deg=0., init_only=False), Rig(bias_deg=0.)
@@ -154,6 +158,36 @@ class InitOnly(unittest.TestCase):
                 q = old.step(134, v=.45, w=-.45 / radius)
                 self.assertEqual(old.role()['track_aligns'], 0)
                 self.assertGreater(abs(old.err_deg(q[-1])), 1.5)
+
+    def test_imu_step_while_standing_is_ignored(self):
+        # 11-24 06:58：车停着，SCH16T 固件静止修正把 IMU 航向角一下拨了 +4.12°（陀螺 0）。原来跨线带的换算（ImuAlignment）
+        # 跟着挪；11-27 删了跨线记忆，融合按航向角增量推车头，这一下当尖峰丢掉，车头不跟着转
+        rig = Rig(yaw_input='angle')
+        rig.step(80)                                  # 走 6.4 m：已按 RTK 位移对好
+        rig.step(30, v=0.)
+        rig.imu_jump = math.radians(4.12)
+        p = rig.step(30, v=0.)
+        p += rig.step(40)
+        self.assertEqual(rig.role()['role'], 'check')
+        self.assertLess(max(abs(rig.err_deg(q)) for q in p), .3)
+        self.assertTrue(p[-1].heading_calibrated)
+
+    def test_wrong_heading_after_takeover_recovers(self):
+        # 对好以后车头整个错了 5°（IMU 航向角在走着时跳、别的原因）：一段差超过 3σ 当跳点不修，连着 3 段都这样就重新对上，
+        # 不会一直挡着错到底（11-27 删跨线记忆时加，TRACK_HEADING_RECOVER_N）
+        for recover in (True, False):
+            with self.subTest(recover=recover):
+                rig = Rig()
+                if not recover:
+                    rig.f.config = replace(rig.f.config, track_heading_recover_n=10 ** 6)
+                rig.step(80)
+                rig.imu_jump = math.radians(5.)
+                p = rig.step(100)                          # 再走 8 m
+                if recover:
+                    self.assertLess(abs(rig.err_deg(p[-1])), .5)
+                    self.assertGreaterEqual(rig.role()['track_recovered'], 1)
+                else:
+                    self.assertGreater(abs(rig.err_deg(p[-1])), 4.)
 
     def test_inconsistent_second_antenna_frames_do_not_block_the_alignment(self):
         # 楼下两根天线互检超 2 cm 的帧很多：这些帧不当一段的起点、终点，段照样攒满

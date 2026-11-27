@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""11-24 楼下的线不直（用户「写补丁先仿真」）。两件事：
+"""11-24 楼下的线不直（用户「写补丁先仿真」）。
 
-1. 跨线带过去的 IMU 换算（ImuAlignment）：车停着时 IMU 偏航的变化是 IMU 自己的（06:58 固件静止修正一下拨了 +4.12°，
-   陀螺一直 0），换算跟着挪、不算转角；跨线学习（漂移、刻度）删掉（用户「删掉学习」），只带上一条线的。
-   原来学成漂移 +0.35°/min、刻度 −0.44%，后面带过去的换算错 1.7–3.4°。
-2. 楼下模式（ImuFirstConfig.poor_sky_*）：σ 低通 > 2 cm（11-27 1.5 → 2.0，user_rules.POOR_SKY_SIGMA_M）、不是草地，这条直线开头 6 m 以后靠 IMU 和对好的角度走——
+（原来第 1 件是跨线带过去的 IMU 换算 ImuAlignment 车停着时跟着 IMU 偏航挪：11-27 用户「就不能有什么记忆这种东西」删了跨线记忆，
+停车时 IMU 偏航一下拨了几度由融合当尖峰丢掉，见 test_dual_heading_init_only.InitOnly.test_imu_step_while_standing_is_ignored）
+楼下模式（ImuFirstConfig.poor_sky_*）：σ 低通 > 2 cm（11-27 1.5 → 2.0，user_rules.POOR_SKY_SIGMA_M）、不是草地，这条直线开头 6 m 以后靠 IMU 和对好的角度走——
    线头段之后不往回拉，拟合角度用到车头上每米最多改 0.08°（user_rules.POOR_SKY_BETA_RATE_DEG）；拟合角度对不上（> 0.6°）、卫星说偏 > 6 cm 走满 1 m、
    认出草地就退回平常。"""
 import math
@@ -19,7 +18,7 @@ from types import SimpleNamespace as NS
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path[:0] = [os.path.join(ROOT, 'radar_system'), ROOT]
-from line_cascade import DEG, AlignmentConfig, ImuAlignment, ImuFirstConfig, ImuFirstGuide, paint_pull  # noqa: E402
+from line_cascade import DEG, ImuFirstConfig, ImuFirstGuide, paint_pull  # noqa: E402
 from path_tracker import Path as Route, PathConfig, PathTracker, differential_config  # noqa: E402
 from robot_core.kinematics import ChassisGeometry  # noqa: E402
 import user_rules as rules  # noqa: E402
@@ -28,111 +27,6 @@ CFG = ImuFirstConfig(rtk_trim=False, rtk_fit=True)
 POOR_SIGMA = rules.POOR_SKY_SIGMA_M + .003     # 闭环里接收机报的楼下 σ：比进楼下门槛高一点（11-27 前门槛 1.5 cm 时用的 1.8 cm）
 GEO = ChassisGeometry(drive='differential', track_m=.675, diff_min_radius_m=.5)
 DT, NX, NY = .02, .23, -.4525
-
-
-def feed(a, t0, t1, yaw, still=False, hz=50.):
-    """t0 → t1 每 1/hz 秒一帧 IMU 偏航（yaw 可以是 t 的函数）。"""
-    n = int(round((t1 - t0) * hz))
-    for i in range(n + 1):
-        t = t0 + i / hz
-        a.feed_imu(t, yaw(t) if callable(yaw) else yaw, still=still)
-    return t1
-
-
-class StillShift(unittest.TestCase):
-    def test_imu_step_while_standing_moves_the_carried_c(self):
-        a = ImuAlignment(AlignmentConfig())
-        feed(a, 0., 1., 0.)
-        tok = a.begin_line()
-        a.update_line(tok, 1., -158. * DEG, .05 * DEG)
-        a.begin_line()
-        theta = a.theta
-        # 停着：固件静止修正把偏航一下拨了 +4.12°（11-24 06:58），陀螺 0
-        feed(a, 1.02, 30., lambda t: 0. if t < 10. else 4.12 * DEG, still=True)
-        c, sigma = a.predict(30.)
-        self.assertAlmostEqual(math.degrees(c), -158. - 4.12, places=6)   # 真车头没变：c = 真 − IMU 跟着挪
-        self.assertAlmostEqual(a.theta, theta)                            # 不算转角
-        self.assertAlmostEqual(math.degrees(a.still_shift), 4.12, places=6)
-
-    def test_turning_counts_as_turn_and_keeps_c(self):
-        a = ImuAlignment(AlignmentConfig())
-        feed(a, 0., 1., 0.)
-        tok = a.begin_line()
-        a.update_line(tok, 1., -158. * DEG, .05 * DEG)
-        a.begin_line()
-        feed(a, 1.02, 5., lambda t: (t - 1.) * 45. * DEG)                 # 原地转 180°（在动）
-        c, _ = a.predict(5.)
-        self.assertAlmostEqual(math.degrees(c), -158., places=6)
-        self.assertAlmostEqual(math.degrees(a.theta), 180., places=3)
-        self.assertEqual(a.still_shift, 0.)
-
-    def test_pending_of_the_current_line_also_moves(self):
-        a = ImuAlignment(AlignmentConfig())
-        feed(a, 0., 1., 0.)
-        tok = a.begin_line()
-        a.update_line(tok, 1., 10. * DEG, .05 * DEG)                       # 这条线还没定下来（暂停停着）
-        feed(a, 1.02, 3., 1. * DEG, still=True)
-        self.assertAlmostEqual(math.degrees(a.value), 9., places=6)
-
-
-class NoLearning(unittest.TestCase):
-    def test_jump_between_lines_is_not_learned(self):
-        # 11-24：两条线之间换算差 +1.8°、−3.9°（固件那一拨）——原来学成漂移 / 刻度，后面每条线都带错；现在只带上一条线的
-        a = ImuAlignment(AlignmentConfig())
-        for t, theta, c in ((0., 0., -155.95), (138., 5., -154.17), (300., -180., -158.05), (480., 0., -157.87)):
-            a.theta, a._imu_t = theta * DEG, t
-            tok = a.begin_line()
-            p = a.predict(t)
-            if t == 480.:
-                self.assertAlmostEqual(math.degrees(p[0]), -158.05, places=9)
-            a.update_line(tok, t, c * DEG, .05 * DEG)
-        self.assertFalse(hasattr(a, 'x'))
-
-    def test_uncertainty_still_grows_with_time_and_turns(self):
-        a = ImuAlignment(AlignmentConfig())
-        a.theta, a._imu_t = 0., 0.
-        tok = a.begin_line()
-        a.update_line(tok, 0., 0., .05 * DEG)
-        a.begin_line()
-        s0 = a.predict(1.)[1]
-        s1 = a.predict(300.)[1]
-        a.theta = 10 * math.pi
-        s2 = a.predict(300.)[1]
-        self.assertLess(s0, s1)
-        self.assertLess(s1, s2)
-
-    def test_config_checks(self):
-        with self.assertRaises(ValueError):
-            AlignmentConfig(still_max_gyro_deg_s=0.)
-        with self.assertRaises(TypeError):
-            AlignmentConfig(drift_deg_min=0.)            # 学习删了，没有这项
-
-
-class MissionStill(unittest.TestCase):
-    def mission(self):
-        import line_mission as lm
-        me = NS(_wheel_still=None, _wheel_t=None, _imu_alignment=ImuAlignment())
-        return lm, me
-
-    def test_still_after_half_a_second_of_stopped_wheels(self):
-        lm, me = self.mission()
-        lm.LineMission._note_wheel(me, 0., 0., 0.)
-        self.assertFalse(lm.LineMission._still(me, .2, 0.))              # 还没停够 0.5 s
-        lm.LineMission._note_wheel(me, .6, 0., 0.)
-        self.assertTrue(lm.LineMission._still(me, .6, 0.))
-        self.assertFalse(lm.LineMission._still(me, .6, math.radians(2.)))  # 陀螺在转：不算停（被人推着转、轮子打滑）
-        self.assertFalse(lm.LineMission._still(me, 1.5, 0.))             # 轮速断了
-
-    def test_moving_or_pivoting_is_not_still(self):
-        lm, me = self.mission()
-        lm.LineMission._note_wheel(me, 0., .3, 0.)
-        lm.LineMission._note_wheel(me, 1., .3, 0.)
-        self.assertFalse(lm.LineMission._still(me, 1., 0.))
-        lm.LineMission._note_wheel(me, 2., 0., math.radians(30.))      # 原地转：车速 0、轮子算的转速大
-        lm.LineMission._note_wheel(me, 3., 0., math.radians(30.))
-        self.assertFalse(lm.LineMission._still(me, 3., 0.))
-        lm.LineMission._note_wheel(me, 3.1, float('nan'), 0.)
-        self.assertIsNone(me._wheel_still)
 
 
 class Guide(unittest.TestCase):

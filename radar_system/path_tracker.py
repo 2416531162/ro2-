@@ -615,8 +615,6 @@ class PathTracker:
         self.approach_to_m = None       # 正式路线（喷线起点）在本段的路程处（可在段尾之后）；None 不管（见 approach_zone_m）
         self.approach_mps = None        # 离它 approach_zone_m 以内最多这么快（画线速度）
         self.runup_distance_m = 0.
-        self.first_line = False         # 重启后第一条（规划时没有上一条线的换算，段上记 first_line）：这条线按没有记忆拟合
-        self.learn = False              # 开机第一条的空跑学换算段（route_plan 段上记 learn）：不喷，学到的交给画线那段开头
         self.paint_start_guard = None
         self._paint_start_beta_history = deque(maxlen=2048)
         self.reverse_runup = False
@@ -690,7 +688,6 @@ class PathTracker:
         self._raw_status = {}
         self._quality = None            # 最近一帧 (σ m, 卫星数, 两天线距离误差 m 或 None, 固定解 True/False 或 None)
         self._sigma_lp = None           # σ 低通（ImuFirstConfig.poor_sky_sigma_tau_s，单帧先夹到 5 cm），m：楼下模式用
-        self._imu_alignment = None      # 任务层的 line_cascade.ImuAlignment：上一条线对好的角度
         self._reset_straight()
         self._reset_arc()
 
@@ -851,10 +848,6 @@ class PathTracker:
                 self._baseline_bad_t = t if self._baseline_bad_t is None else max(t, self._baseline_bad_t)
         except TypeError:
             pass
-
-    def share_imu_alignment(self, alignment):
-        """任务层给的 ImuAlignment（跨线、跨作业共用）。"""
-        self._imu_alignment = alignment
 
     def set_rtk_quality(self, t, sigma_m, sats, pair_m=None, fixed=None):
         """最近一帧主天线定位的测量时刻和质量：接收机 σ（hypot(σn, σe)，m）、卫星数、两天线位置距离误差（m，没对齐为空）、
@@ -1717,34 +1710,25 @@ class PathTracker:
         """长直线 IMU 为主、卫星辅助（line_cascade.ImuFirstGuide 的说明）。车速、停车、弯道交接仍归路径跟踪；
         这里只出转向，另把喷头横偏估计留给偏离中止、降速和喷线资格（卫星跳了时它们也按 IMU 推算）。"""
         cfg, st, guide = self.cfg, self.st, self._straight_guide
-        first, align = guide.cfg, self._imu_alignment
+        first = guide.cfg
         # 同一段助跑与喷线在边界上共享控制状态；仅原本有助跑的直线做半米交接。
         entry_weight=(runup_weight(first,st.s-self.paint_from_m)
                       if self.paint_from_m>0. else 0.)
         baseline_ok = self._baseline_ok()
-        if guide.token is None and align is not None:
-            # 重启后第一条（规划时没有记忆）：助跑里按卫星轨迹定角度（ImuFirstGuide.no_memory）。只按规划时定的，
-            # 不再看此刻有没有记忆：接入那段直线常有好几米、自己会拟合好记进记忆，但那是按双天线开头的短距离拟合
-            # （2026-11-22 仿真：按它算有记忆，第一条线头最差 1.35 → 1.58 cm、全线最差 2.15 → 3.01 cm）
-            guide.no_memory = self.first_line
-            guide.token = align.begin_line()            # 新的一条线：上一条线拟合好的换算定下来，可带过来
-        was_locked = guide.locked
-        if not guide.locked and baseline_ok:
+        # 每条直线都一样：IMU 换算只从这条线开头的融合车头（IMU + RTK 位移）学，助跑里按卫星轨迹尽快定角度
+        # （ImuFirstGuide.runup_fit）。2026-11-27 用户「就不能有什么记忆这种东西，一旦出错就乱套」：原来上一条线拟合好的
+        # 换算带过来、和双天线学的按误差加权，开机后行驶里学的也当记忆，只有重启后第一条才这样
+        guide.runup_fit = True
+        # 融合车头已按 IMU + RTK 位移对好（gnss_fusion FusedPose.heading_calibrated）：测向基线出界不影响它，照常学。
+        # 原来这时只能用已攒的几个样本或借上一条线的（11-27 删了）
+        heading_ok = baseline_ok or getattr(pose, 'heading_calibrated', False) is True
+        if not guide.locked and heading_ok:
             # 接管前按原有样本数学习换算；助跑期间的位置拟合负责校正已锁定的初始误差。
             guide.learn_offset(wrap(pose.yaw - imu_yaw), gyro)
         if self.reverse_runup and st.s >= self.paint_from_m and not baseline_ok:
             # 线头已进坏区时，沿用原有交接；不能继续等待不可信测向把横偏收进新门槛。
             self._runup_released = True
         eligible, runup_wait = self._straight_eligible(piece, speed)
-        # 已有可信跨线标定时，本段最少样本确认一致便可开始原有渐入。
-        # 仍保留 .8 s 控制交接；没有可信历史或本段尚未确认时照旧累计完整样本。
-        if (eligible and not guide.locked and baseline_ok and self.entry_stabilize_mps is not None
-                and st.s<self.paint_from_m and align is not None
-                and guide.offset_n>=first.offset_min_samples and self._runup_position_trusted(pose)):
-            predicted=align.predict(self._imu_now)
-            if (predicted is not None and predicted[1]<=math.radians(align.cfg.dual_sigma_deg)
-                    and abs(wrap(predicted[0]-guide.offset))<=math.radians(1.)):
-                guide.lock_without_baseline(align,self._imu_now,wrap(pose.yaw-imu_yaw))
         if self._launch_armed:
             self._launch_armed = False
             if eligible and not self._rolling_entry:
@@ -1754,13 +1738,9 @@ class PathTracker:
                 heading = max(-LAUNCH_HEADING_LIMIT_RAD, min(LAUNCH_HEADING_LIMIT_RAD, st.heading_err))
                 self._straight_target = wrap(imu_yaw-heading)
                 self._straight_core.reset(now=self._imu_now)
-        if eligible and not guide.locked and not baseline_ok:
-            # 该接管了、开头基线就不对：用这段已攒的或借上一条线对好的角度先开（用户 10-06）
-            guide.lock_without_baseline(align, self._imu_now, wrap(pose.yaw - imu_yaw))
-        if guide.locked and not was_locked and align is not None:
-            # 双天线学的和上一条线带过来的（按时间、转角校准）按误差加权
-            guide.blend_start(align.predict(self._imu_now), align.cfg, rate=align.predict_rate(self._imu_now),
-                              crab=align.predict_crab(self._imu_now))
+        if eligible and not guide.locked and not heading_ok:
+            # 该接管了、开头基线就不对、车头还靠测向：用这段已攒的先开（用户 10-06；不借别的线的）
+            guide.lock_without_baseline()
         eligible = eligible and guide.locked
         measured = None
         rtk_gate = None
@@ -1838,26 +1818,6 @@ class PathTracker:
             if first.rtk_fit and entry_weight>0. and rtk_ok and guide.rtk_accepted:
                 # 助跑及线头交接仍只接纳原质量门和跳点门放行的位置；对齐权重平滑退到零。
                 guide.pull_to(measured, 1.0 - math.exp(-max(0.0, pose.speed)*dt*entry_weight / first.runup_rtk_tau_m))
-            sigma = guide.fit_sigma()
-            if (align is not None and first.rtk_fit and guide.rtk_accepted
-                    and sigma is not None and sigma <= math.radians(first.carry_fit_sigma_deg)):
-                # 卫星拟合好了：记下这条线真实的换算（偏移 + β）和误差，给下一条线带过去、校准随时间 / 转角的变化
-                align.update_line(guide.token, self._imu_now, guide.offset + guide.beta, sigma)
-                align.update_rate(guide.token, self._imu_now, *guide.fit_rate())
-                crab = guide.fit_crab()
-                if crab is not None:
-                    align.update_crab(guide.token, self._imu_now, *crab)
-            elif (self.learn and align is not None and first.rtk_fit and guide.rtk_accepted and sigma is not None
-                    and align.better_than_carried(self._imu_now, sigma)):
-                # 空跑学换算那段只有几米，拟合还到不了能跨线带的程度（carry_fit_sigma_deg），但比手上带着的准：按拟合出的角度
-                # （不按限速跟的 β）连同误差记下，绕回来画线那段开头和双天线按误差加权（ImuFirstGuide.blend_start）
-                angle = guide.fit_angle()
-                align.update_line(guide.token, self._imu_now, guide.offset + (guide.beta if angle is None else angle), sigma)
-            elif align is not None and (
-                    first.rtk_trim and rtk_ok and guide.mode == 'rtk' and guide.travel >= first.fast_m
-                    or not first.rtk_trim and not first.rtk_fit and guide.source == 'learned'):
-                # 卫星对过、过了对准阶段（只靠 IMU 时：这段自己学到了偏移）：记下这条线对好的角度，下一条线开头基线不对时借
-                align.update_line(guide.token, self._imu_now, guide.offset + guide.beta)
         old_weight = self._straight_weight
         step = dt / cfg.straight_blend_s
         self._straight_weight = max(0.0, min(1.0, old_weight + (step if eligible else -step)))
@@ -1886,8 +1846,7 @@ class PathTracker:
             self._straight_guided = None
             self._straight_status = dict(active=False, weight=0.0, eligible=eligible, control_law='imu_first',
                                          runup_wait=runup_wait, baseline_ok=baseline_ok, **guide.status(),
-                                         **self._antenna_status(), **self._raw_lateral_status(),
-                                         **(align.status() if align is not None else {}))
+                                         **self._antenna_status(), **self._raw_lateral_status())
             return legacy_w
 
         if old_weight == 0.0 and self._launch_weight == 0.0:
@@ -1942,10 +1901,9 @@ class PathTracker:
             grass_weight=round(guide.grass_weight, 4),
             sigma_lp_cm=None if self._sigma_lp is None else round(100 * self._sigma_lp, 3),
             target_rate_deg_s=math.degrees(self._straight_target_rate), aligning=aligning, baseline_ok=baseline_ok,
-            rtk_gate=rtk_gate, rtk_precise=rtk_precise, learn=bool(self.learn),
+            rtk_gate=rtk_gate, rtk_precise=rtk_precise,
             outer_e=guide.e, outer_e_rtk=measured, inner_wz=inner_w, legacy_wz=legacy_w, final_wz=output,
-            **guide.status(), **self._antenna_status(), **self._raw_lateral_status(), **self._straight_core.status(),
-            **(align.status() if align is not None else {}))
+            **guide.status(), **self._antenna_status(), **self._raw_lateral_status(), **self._straight_core.status())
         return output
 
     def _arc_radial_rtk_weight(self, rtk_ok, dt):
@@ -2758,7 +2716,7 @@ class PathTracker:
         return dict(state=st.state, reason=st.reason, e=st.e, heading_err_deg=math.degrees(st.heading_err),
                     s=st.s, length=st.length, kappa_ref=st.kappa_ref, v_cmd=st.v_cmd, kappa=st.kappa,
                     integral=st.integral, trim_kappa=-self.cfg.ki_per_m2 * st.integral, stats=dict(st.stats),
-                    integral_frozen=st.integral_frozen, learn=bool(self.learn),
+                    integral_frozen=st.integral_frozen,
                     straight_hold=dict(self._straight_status),
                     arc_hold=dict(self._arc_status), launch_settle=dict(self._settle) if self._settle else None)
 
@@ -2988,8 +2946,6 @@ class SectionTracker:
                     tracker.runup_speed_mps=rules.CIRCLE_RUNUP_MPS
                 from route_plan import RUN_UP_M
                 tracker.runup_distance_m=RUN_UP_M
-                # 重启后第一条（规划时没有上一条线的换算，route_plan 记在段上）：助跑照常，只是拟合按没有记忆
-                tracker.first_line=bool(getattr(sec,'first_line',False))
                 if self.reverse_runup and 0 < i == self._first_paint and self.sections[i-1].direction < 0:
                     # 倒车接入后的助跑：保留起步锁车头距离，航向收至 1° 后才交接（横偏仍用原门槛）。
                     tracker.reverse_runup = True
@@ -3040,11 +2996,6 @@ class SectionTracker:
                 mark = getattr(sec, 'paint_from_m', 0.0)
                 if math.isfinite(mark) and 0 < mark <= sec.path.length:
                     tracker.integral_curve_from_m = mark
-            if getattr(sec, 'learn', False):
-                # 开机第一条空跑学换算（route_plan._learn_loop）：整段当助跑、按没有记忆拟合，不喷；学到的换算交给画线那段开头
-                tracker.first_line = True
-                tracker.learn = True
-                tracker.paint_from_m = sec.path.length
             self.trackers.append(tracker)
         self._set_continuations()
         self._set_approach()
@@ -3194,11 +3145,6 @@ class SectionTracker:
 
     def position_correction(self):
         return self.trackers[self.index].position_correction() if 0 <= self.index < len(self.trackers) else None
-
-    def share_imu_alignment(self, alignment):
-        for sec,tracker in zip(self.sections,self.trackers):
-            # 短倒车独立学习参考，不把倒车暂态标定写回正式喷线的跨线参考。
-            tracker.share_imu_alignment(alignment if sec.direction>0 else None)
 
     def share_pivot_rebound(self, rebound):
         """任务层给原地转回弹补偿（PivotRebound，跨作业接着学）；None 不补偿。"""
@@ -3553,6 +3499,5 @@ class SectionTracker:
                     pivot_rebound=None if self._rebound is None else self._rebound.status(),
                     constant_straight_speed=self.constant_speed_here(),
                     constant_arc_speed=self.constant_arc_speed_here(),
-                    learn=bool(self.trackers[self.index].learn),
                     straight_hold=dict(self.trackers[self.index]._straight_status),
                     arc_hold=dict(self.trackers[self.index]._arc_status))
