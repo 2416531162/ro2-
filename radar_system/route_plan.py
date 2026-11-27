@@ -25,7 +25,8 @@
 喷头位置  nozzle_x 是数时喷头在车中线上、后轴中点前这么多米（共享配置 drive.nozzle_x_m）；是 (前, 左) 二元组时喷头
           可以在侧面（app 的「对准点」，2026-10-02 用户：喷头在右天线右 25 cm），连线路线见 _side_cover。
 开始作业  （app 的 start_current，plan_current）路线不分起点终点：从离车最近的地方开始、跑完整条（圆、闭合路线绕完整圈
-          回到起步处，开放路线从近的那一头画到另一头），见 start_from_nearest；差速车喷头离起点近就倒车助跑进线（runup_entry）。
+          回到起步处，开放路线从近的那一头画到另一头），见 start_from_nearest；差速车进线只走圆弧（_entry，2026-11-27）：
+          车已顺着线就直着开进来 / 直着倒到助跑起点，要转就按圆弧开上线（arc_entry），后方空地放不下不开始。
 接入      路点折线和圆：从车当前位姿到路线起点（第 1 个路点、车头朝第 1 段方向；圆为最南点）用 Dubins
           最短路径：半径 turn_radius 的圆弧 + 直线 + 圆弧，或三段圆弧。只前进，不倒车。
 
@@ -42,8 +43,9 @@ KINDS = ('path', 'points', 'circle')
 #   pivot  停车原地转向，倒车助跑回拐角（默认，旧路线没有这个字段也是它）
 #   arc    圆弧掉头：像阿克曼车那样只往前开、不停车，按路线的 turn_radius 绕过去接到下一条边上（见 _arc_turn）
 TURNS = ('pivot', 'arc')
-# 差速车进线（开到助跑起点）的转法（2026-11-19 用户「可选圆弧还是原地」）：pivot 原地对准助跑起点开过去、转正直接起步（RUNUP_BACK_M = 0）；
-# arc 只往前按圆弧开上线、不停车，要填助跑起点车尾后方有多少空地（entry_space_m），不到 ENTRY_ARC_MIN_SPACE_M 不走圆弧
+# 差速车进线（开到助跑起点）的转法：只有 arc——只往前按圆弧开上线、不停车，要填助跑起点车尾后方有多少空地（entry_space_m），
+# 不到 ENTRY_ARC_MIN_SPACE_M 不开始（见 _entry）。11-19 用户「可选圆弧还是原地」加的 pivot（原地对准助跑起点开过去、转正起步）
+# 2026-11-27 用户「进线只走圆弧，删掉进线的原地转」删了；旧 app、旧存盘路线发来 pivot 当 arc
 ENTRY_TURNS = rules.ENTRY_TURNS
 ENTRY_SPACE_RANGE = (0.0, 50.0)
 MAX_POINTS = 400
@@ -120,7 +122,7 @@ class RouteSpec:
     turn_radius: float = 2.5     # 拐角圆弧、接入路线的转弯半径；差速车连线路线圆弧掉头的半径
     cruise: float = DEFAULT_PAINT_SPEED
     turn: str = 'pivot'          # 差速车连线路线急弯的转法，见 TURNS；阿克曼车、圆、路点折线不用
-    entry_turn: str = 'pivot'    # 差速车连线路线进线的转法，见 ENTRY_TURNS
+    entry_turn: str = 'arc'      # 差速车进线的转法，见 ENTRY_TURNS（11-27 起只有圆弧）
     entry_space_m: float = 0.0   # 圆弧进线：车停在助跑起点时车尾后方还有多少米空地（圆弧不许开出去）
     # 圆：后轴从圆上哪个方位角出发（rad，东 0、逆时针为正）；None 为最南点。开始作业时按车的位置临时换
     # （见 start_from_nearest），不存盘、不发给 app
@@ -183,7 +185,9 @@ def parse_spec(d, *, geodetic=False):
     turn = d.get('turn', 'pivot')       # 旧 app、旧存盘路线没有：原地转向
     if turn not in TURNS:
         raise ValueError('急弯转法必须是 ' + '/'.join(TURNS))
-    entry_turn = d.get('entry_turn', 'pivot')   # 旧 app、旧存盘路线没有：原地转进线
+    entry_turn = d.get('entry_turn', 'arc')
+    if entry_turn == 'pivot':
+        entry_turn = 'arc'          # 旧 app、旧存盘路线：11-27 起进线只走圆弧（删了进线的原地转）
     if entry_turn not in ENTRY_TURNS:
         raise ValueError('进线转法必须是 ' + '/'.join(ENTRY_TURNS))
     entry_space = _number(d.get('entry_space', 0.0), '后方空地', *ENTRY_SPACE_RANGE)
@@ -1148,13 +1152,13 @@ def pivot_entry(first, car, nozzle_x=0.0):
     return _via_runup(first, car, 1)
 
 
-# 圆弧进线（ENTRY_TURNS arc）：只往前、按 Dubins 最短路开到助跑起点 G 时车头已顺线，接着助跑，中间不停车不原地转
+# 圆弧进线（开始作业进线只走它，见 _entry）：只往前、按 Dubins 最短路开到助跑起点 G 时车头已顺线，接着助跑，中间不停车不原地转
 # （起步扭头来自原地转后单边轮换向，圆弧两轮同向就没有）。半径从大往小试（R2–3 实车转得准，R1 只转出 79%），
 # 最小 1.25 m（内轮 ≥0.3 m/s：圆弧后轴 0.5 m/s 时 R1.5 内轮 0.39、R1.25 0.37）。整条接入车身四角不许退到「车在 G 时车尾」后方
 # entry_space_m − ENTRY_ARC_MARGIN_M 以外（车本来就在更后面的照它自己的位置算）。空地填得越大能用的半径越大（自动从大往小试）。
 # 后方空地最少 1.5 m（2026-11-27 用户「后方空地 2 m」→「大于 1.5m 应该也够了吧」，原来 2.5；2026-11-22 定 2.5 前是 1.5）。
-# 画完一条线在线尾掉头往回画，R1.5 要 2.4 m 才放得下，1.75–2.0 m 用 R1.25，1.5 m 放不下照原地转进线；不到下限也照原地转
-# 进线。App 原来默认填 2.5、不许填更低（PivotRoute 同值），要跟着改到 1.5。
+# 画完一条线在线尾掉头往回画，R1.5 要 2.4 m 才放得下，1.75–2.0 m 用 R1.25，1.5 m 放不下；放不下、不到下限原来照原地转
+# 进线，11-27 起不开始（_entry 报错，请操作员挪车或填大空地）。App 原来默认填 2.5、不许填更低（PivotRoute 同值），要跟着改到 1.5。
 ENTRY_ARC_MIN_SPACE_M = rules.ENTRY_ARC_MIN_SPACE_M
 ENTRY_ARC_RADII = rules.ENTRY_ARC_RADII
 ENTRY_ARC_MARGIN_M = 0.1
@@ -1184,7 +1188,7 @@ def _body_min_along(x, y, yaw, body, h0, x0, y0):
 
 
 def arc_entry(first, car, space_m, body=None):
-    """圆弧进线：(分段, 接入路程米)；后方空地不够任何半径用时返回 None（调用方照原地转进线）。"""
+    """圆弧进线：(分段, 接入路程米)；后方空地不够任何半径用时返回 None（调用方 _entry 报错，不开始）。"""
     if space_m < ENTRY_ARC_MIN_SPACE_M - 1e-9:
         return None
     body = body or _default_body()
@@ -1240,6 +1244,31 @@ def runup_entry(first, car, nozzle_x):
     if along <= -run + 1e-9 and abs(side) <= ON_LINE_M and abs(wrap(yaw - h0)) <= math.radians(ON_LINE_DEG):
         return pivot_entry(first, car, nozzle_x)
     return _via_runup(first, car, -1 if along + run > 0.0 else 1)
+
+
+def _arc_entry_problem(space_m):
+    """圆弧进线放不下时给操作员的话（开始作业不开始）。"""
+    if space_m < ENTRY_ARC_MIN_SPACE_M - 1e-9:
+        return ('进线只走圆弧：后方空地 %.1f m，不到 %.1f m 放不下圆弧；请把后方空地填大（至少 %.1f m），'
+                '或把车挪到线头后方、车头顺着线摆正' % (space_m, ENTRY_ARC_MIN_SPACE_M, ENTRY_ARC_MIN_SPACE_M))
+    return ('进线只走圆弧：后方空地 %.1f m 放不下圆弧（最小半径 %.2f m）；请把车挪开（离线头远一点，或挪到线头后方、'
+            '车头顺着线摆正），或把后方空地填大' % (space_m, ENTRY_ARC_RADII[-1]))
+
+
+def _entry(first, car, nozzle_x, entry_fn, space_m, body=None):
+    """差速车开始作业的进线：(分段, 接入路程米, 'straight' / 'arc')；圆弧放不下抛 ValueError。
+
+    进线只走圆弧（2026-11-27 用户「进线只走圆弧，删掉进线的原地转」；线中拐角、线尾掉头不在这里，不变）：
+    原地方式（entry_fn：pivot_entry / runup_entry）本来就一下都不原地转——车已顺着线，直着开进来或直着倒到助跑起点——
+    照旧，更短；要原地转就改走圆弧（arc_entry）。后方空地不到 ENTRY_ARC_MIN_SPACE_M、哪个半径都放不下：不开始，
+    请操作员把车挪开或把后方空地填大（原来这时照原地转进线）。"""
+    entry, entry_m = entry_fn(first, car, nozzle_x)
+    if _turned(entry, car[2]) <= 1e-9:
+        return entry, entry_m, 'straight'
+    arc = arc_entry(first, car, space_m, body)
+    if arc is None:
+        raise ValueError(_arc_entry_problem(space_m))
+    return arc + ('arc',)
 
 # ---- 路线本身（不含接入段）----
 
@@ -1490,9 +1519,14 @@ def start_from_nearest(spec, car_pose, min_radius, *, body=None, nozzle_x=None):
         if nozzle_x is not None:
             # 整圆没有起点终点：差速车挑接入最省事的起点（2026-10-07 用户：画圆直接走最近的接入口开始），
             # 不是离喷头最近的那一点——那一点要往回让出沿圆走和直线助跑，车得绕到后面去
+            # 进线只走圆弧（_entry）：按实际要走的进线算，圆弧放不下的起点不挑（都放不下时 plan_current 报错）
             def cost(c):
                 route, entry_fn, _ = _circle_route(c[1], car_pose, min_radius, nozzle_x)
-                return entry_seconds(entry_fn((1, route[0][1], []), car_pose, nozzle_x)[0], yaw)
+                try:
+                    sections = _entry((1, route[0][1], []), car_pose, nozzle_x, entry_fn, spec.entry_space_m, body)[0]
+                except ValueError:
+                    return math.inf
+                return entry_seconds(sections, yaw)
             return min(cands, key=lambda c: (round(cost(c), 6), c[0]))[1]
     elif spec.closed and len(spec.points) >= 3:
         pts = [tuple(map(float, p)) for p in spec.points]
@@ -1632,9 +1666,10 @@ def _planned_sections(entry, route, name):
 def plan_current(spec, car_pose, min_radius, *, body=None, max_entry_m=MAX_ENTRY_M, nozzle_x=None, info=None):
     """开始作业：从离车最近的地方开始、跑完整条路线（见 start_from_nearest）。返回 ([path_tracker.Section, …], 接入路程米)。
 
-    差速车（nozzle_x 不为 None）：喷头离起点不到 NEAR_START_M 就倒车助跑进线（runup_entry），更远按 pivot_entry
-    开到起点前 ENTRY_LEAD_M 对正；阿克曼车同 plan（Reeds-Shepp / Dubins 接入）。原始图纸不变。
-    info 给一个 dict 时填进 arc_turns：差速车连线路线圆弧掉头的急弯数（其余为 0）。
+    差速车（nozzle_x 不为 None）：进线只走圆弧（_entry：车已顺着线、不用原地转就直着开进来 / 直着倒到助跑起点，
+    否则 arc_entry；圆弧放不下抛 ValueError 不开始）；阿克曼车同 plan（Reeds-Shepp / Dubins 接入）。原始图纸不变。
+    info 给一个 dict 时填进 arc_turns：差速车连线路线圆弧掉头的急弯数（其余为 0）；差速车另填 entry_turn：
+    'straight' 顺线直进 / 直倒、'arc' 圆弧进线。
     开机第一条和其他各条一样（2026-11-27 删掉空跑和跨线记忆，助跑照常 RUN_UP_M）。
     """
     from path_tracker import Path, Section
@@ -1656,15 +1691,9 @@ def plan_current(spec, car_pose, min_radius, *, body=None, max_entry_m=MAX_ENTRY
         route = [(1, start, loop)]
     if run.kind != 'circle':
         entry_fn, run_in = _entry_fn(route[0], car_pose, nozzle_x), 0.0
-    entry, entry_m = entry_fn(route[0], car_pose, nozzle_x)
-    arc = None
-    # 圆弧进线；原地方式本来就一下都不用原地转（顺线直倒 / 直开进来，两轮同时换向）时照用它，更短
-    if run.kind == 'path' and run.entry_turn == 'arc' and _turned(entry, car_pose[2]) > 1e-9:
-        arc = arc_entry(route[0], car_pose, run.entry_space_m, body)
+    entry, entry_m, how = _entry(route[0], car_pose, nozzle_x, entry_fn, run.entry_space_m, body)
     if info is not None:
-        info['entry_turn'] = 'arc' if arc is not None else 'pivot'
-    if arc is not None:
-        entry, entry_m = arc
+        info['entry_turn'] = how
     if entry_m > max_entry_m:
         raise ValueError('车离路线太远（接入路线 %.0f m，最多 %.0f m），请先把车开近些' % (entry_m, max_entry_m))
     sections = _planned_sections(entry, route, 'route_'+run.kind+'_')

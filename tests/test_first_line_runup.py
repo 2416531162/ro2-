@@ -53,7 +53,7 @@ class NoDryRun(unittest.TestCase):
                 self.assertEqual(sum(1 for s in sections if getattr(s, 'field_role', None) == 'paint'), 1)
 
     def test_runup_stays_run_up_m(self):
-        sections, _ = rp.plan_current(LINE, (-6., .05, 0.), MIN_R, nozzle_x=NOZZLE)
+        sections, _ = rp.plan_current(LINE, rp.axle_for((-6., 0.), 0., *NOZZLE) + (0.,), MIN_R, nozzle_x=NOZZLE)
         sec = paint_section(sections)
         self.assertAlmostEqual(sec.paint_from_m, sec.path.length - 12. - rp.LINE_RUN_OUT_M, places=6)
         self.assertFalse(hasattr(rp, 'FIRST_RUN_UP_M'))
