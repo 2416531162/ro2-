@@ -1,7 +1,6 @@
 """接入走法（2026-10-07 用户）：定点画线车在点后面时直接往后倒一点，不要原地转一圈再转回来；
-画圆从接入最省事的地方开始（直接走最近的接入口）。2026-11-27 用户「进线只走圆弧，删掉进线的原地转」：
-本来要原地转的接入改走圆弧（只往前、一段不停），后方空地不够不开始；顺线直倒、直开进来照旧。只做纯规划测试。"""
-from dataclasses import replace
+画圆从接入最省事的地方开始（直接走最近的接入口）。只做纯规划测试。这里测的是原地转进线（app 选 entry_turn='pivot'；
+11-27 起 app 没带时按圆弧，圆弧进线见 test_arc_entry）。"""
 import math
 from pathlib import Path
 import sys
@@ -50,24 +49,13 @@ def line_car(q, side=0., yaw=0.):
     return rp.axle_for((q, side), yaw, *NOZZLE) + (yaw,)
 
 
-LINE = rp.RouteSpec(kind='path', points=((0., 0.), (10., 0.)), closed=False, cruise=.8)
-
-
-def only_forward_arc(test, sections, car):
-    """进线只走圆弧：一段往前、一下都不原地转。"""
-    m = moves(sections, car)
-    test.assertEqual(pivots(m), [], m)
-    test.assertEqual(len(sections), 1, m)
-    test.assertEqual(sections[0].direction, 1, m)
+LINE = rp.RouteSpec(kind='path', points=((0., 0.), (10., 0.)), closed=False, cruise=.8, entry_turn='pivot')
 
 
 class LineEntry(unittest.TestCase):
-    def plan(self, car, space=0., spec=LINE):
-        sections, entry_m = rp.plan_current(replace(spec, entry_space_m=space), car, MIN_R, nozzle_x=NOZZLE)
+    def plan(self, car):
+        sections, entry_m = rp.plan_current(LINE, car, MIN_R, nozzle_x=NOZZLE)
         return moves(sections, car), entry_m
-
-    def sections(self, car, space, spec=LINE):
-        return rp.plan_current(replace(spec, entry_space_m=space), car, MIN_R, nozzle_x=NOZZLE)[0]
 
     def test_behind_start_reverses_instead_of_turning_round(self):
         # 喷头在线头后 0.8 / 1.2 m、车头对着线：原来转 180° 开一点再转 180°，现在直接倒到助跑起点
@@ -78,12 +66,10 @@ class LineEntry(unittest.TestCase):
             self.assertAlmostEqual(m[0][1], rp.RUN_UP_M+q, places=6)
             self.assertEqual(m[1][0], '前')
 
-    def test_slightly_off_line_goes_round_on_an_arc(self):
-        # 原来小转一下倒到助跑起点、再转正；倒过去要原地转的改走圆弧（往前绕回来），后方空地没填不开始
-        car = line_car(-1., .3)
-        with self.assertRaises(ValueError):
-            self.plan(car)
-        only_forward_arc(self, self.sections(car, rp.ENTRY_ARC_MIN_SPACE_M), car)
+    def test_slightly_off_line_reverses_with_small_turns(self):
+        m, _ = self.plan(line_car(-1., .3))
+        self.assertEqual(m[1][0], '倒', m)
+        self.assertLess(max(pivots(m)), 45., m)
 
     def test_past_start_reverses_back(self):
         m, _ = self.plan(line_car(.3))
@@ -91,11 +77,10 @@ class LineEntry(unittest.TestCase):
         self.assertEqual(m[0][0], '倒')
 
     def test_long_reverse_not_used(self):
-        # 倒车超过 REVERSE_ENTRY_MAX_M 不倒：往前按圆弧绕回来（车在线外侧，起点在背后 5 m）
+        # 倒车超过 REVERSE_ENTRY_MAX_M 不倒：照旧掉头往前开（车在线外侧，起点在背后 5 m）
         car = line_car(4., 1.5, 0.)
-        with self.assertRaises(ValueError):
-            self.plan(car)
-        only_forward_arc(self, self.sections(car, rp.ENTRY_ARC_MIN_SPACE_M), car)
+        m, _ = self.plan(car)
+        self.assertNotIn('倒', [v[0] for v in approach(m) if isinstance(v, tuple)], m)
 
     def test_runup_keeps_the_existing_reverse_distance_limit(self):
         # 2026-11-19 助跑 3.5 → 2 m：喷头在线头前 0.8 m 时倒回助跑起点只要 2.8 m，在 REVERSE_ENTRY_MAX_M 以内就直线倒回去；
@@ -104,26 +89,25 @@ class LineEntry(unittest.TestCase):
         back = [v[1] for v in approach(m) if isinstance(v, tuple) and v[0] == '倒']
         self.assertTrue(back and max(back) <= rp.REVERSE_ENTRY_MAX_M + 1e-9, m)
         self.assertEqual(pivots(m), [], m)
-        car = line_car(rp.REVERSE_ENTRY_MAX_M - rp.RUN_UP_M + .2)
-        with self.assertRaises(ValueError):
-            self.plan(car)
-        only_forward_arc(self, self.sections(car, rp.ENTRY_ARC_MIN_SPACE_M), car)
+        m, _ = self.plan(line_car(rp.REVERSE_ENTRY_MAX_M - rp.RUN_UP_M + .2))
+        self.assertNotIn('倒', [v[0] for v in approach(m) if isinstance(v, tuple)], m)
 
-    def test_on_extension_facing_out_goes_on_an_arc(self):
-        # 车已在线的延长线上、助跑起点后方 2 m，车头横着：原来原地转正一次直接开进来；现在一段圆弧开进来，
-        # 车就在助跑起点后面、要往后绕，后方空地 2 m 放不下（R1.25 要 3 m），不开始
+    def test_on_extension_turns_once_and_drives_in(self):
+        # 车已在线的延长线上、助跑起点后方，车头朝外：原地转正一次直接开进来，中间不在助跑起点停
         x, y, _ = line_car(-4.)          # 后轴在后轴线的延长线上（车头朝 +y）
         car = (x, y, math.pi/2)
-        with self.assertRaises(ValueError) as cm:
-            self.plan(car, 2.)
-        self.assertIn('放不下圆弧', str(cm.exception))
-        only_forward_arc(self, self.sections(car, 3.), car)
+        sections, _ = rp.plan_current(LINE, car, MIN_R, nozzle_x=NOZZLE)
+        m = moves(sections, car)
+        self.assertEqual(len(sections), 1, m)
+        self.assertEqual(len(pivots(m)), 1)
 
     def test_far_entry_still_goes_forward_when_reverse_saves_little(self):
         # 起点正后方、喷头在侧面：倒过去和开过去转的角度一样，照旧往前开
         car = (0., 0., 0.)
-        spec = rp.RouteSpec(kind='path', points=((-1.0, 0.), (-6., 0.)), closed=False)
-        only_forward_arc(self, self.sections(car, 3., spec), car)
+        spec = rp.RouteSpec(kind='path', points=((-1.0, 0.), (-6., 0.)), closed=False, entry_turn='pivot')
+        sections, _ = rp.plan_current(spec, car, MIN_R, nozzle_x=NOZZLE)
+        m = approach(moves(sections, car))
+        self.assertNotIn('倒', [v[0] for v in m if isinstance(v, tuple)], m)
 
 
 class ReverseRunup(unittest.TestCase):
@@ -157,7 +141,8 @@ class ReverseRunup(unittest.TestCase):
 
     def test_corner_reverse_in_route_unchanged(self):
         # 路线中间拐角的倒车（原地转 + 倒车回拐角）后的助跑照旧
-        rect = rp.RouteSpec(kind='path', points=((0., 0.), (6., 0.), (6., 4.), (0., 4.)), closed=True, cruise=.8)
+        rect = rp.RouteSpec(kind='path', points=((0., 0.), (6., 0.), (6., 4.), (0., 4.)), closed=True, cruise=.8,
+                            turn='pivot', entry_turn='pivot')
         tr, secs = self.tracker(line_car(-3.), spec=rect)
         first = next(k for k, s in enumerate(secs) if s.field_role == 'paint')
         later = [k for k in range(first+1, len(secs)) if secs[k].direction > 0 > secs[k-1].direction]
@@ -169,29 +154,29 @@ class ReverseRunup(unittest.TestCase):
 class CircleEntry(unittest.TestCase):
     def setUp(self):
         self.spec = rp.RouteSpec(kind='circle', center=(0., 0.), radius=1.5, clockwise=True, laps=1, cruise=.8,
-                                 entry_space_m=2.)
+                                 entry_turn='pivot')
 
     def plan(self, car):
         sections, entry_m = rp.plan_current(self.spec, car, MIN_R, nozzle_x=NOZZLE)
         return sections, moves(sections, car), entry_m
 
-    def test_outside_near_tangent_goes_on_an_arc_with_a_straight_runup(self):
-        # 车在圆外 1 m、车头顺着画的方向：原来转一下顺切线开上圆；现在一段圆弧开上切线，直线助跑至少
-        # ENTRY_ARC_MIN_STRAIGHT_M 再进圆过渡；后方空地没填不开始
+    def test_outside_near_tangent_keeps_small_turns_and_full_runup(self):
+        # 车在圆外 1 m、车头顺着画的方向：原来转 143° 开 3 m 再转 178°，现在转一下顺切线直接开上圆
         car = (0., -2.5, math.pi)
-        with self.assertRaises(ValueError):
-            rp.plan_current(replace(self.spec, entry_space_m=0.), car, MIN_R, nozzle_x=NOZZLE)
         sections, m, entry_m = self.plan(car)
-        only_forward_arc(self, sections, car)
-        pieces = sections[0].path.pieces
-        ramp = len(pieces) - rp.CIRCLE_TRANSITION_STEPS - 2      # 进圆过渡第一小段（后面是过渡、整圈、切线开出）
-        self.assertGreaterEqual(pieces[ramp - 1].length, rp.ENTRY_ARC_MIN_STRAIGHT_M - 1e-9)
-        self.assertLess(entry_m, 12.)
+        self.assertLess(max(pivots(m)), 60., m)
+        r = rp.circle_axle_radius(1.5, NOZZLE, MIN_R, -1.)
+        self.assertAlmostEqual(sections[-1].path.pieces[0].length,rp.RUN_UP_M)
+        # 进圆过渡本身多走 CIRCLE_TRANSITION_M；直线和圆相接处往回挪约半个过渡，可能要多倒这一段。
+        # 助跑比原来的 2.5 m 长出的部分（10-10 起 2.8 m）要先倒回去再开回来，接入多走两遍
+        extra = 2*max(0.,rp.RUN_UP_M-2.5) + 2*rp.RUNUP_BACK_M    # 2026-11-19 转正后顺线倒回：多开到转正点再倒回
+        self.assertLess(entry_m, rp.RUN_UP_M+1.0 + extra + 1.5*rp.CIRCLE_TRANSITION_M + rp.CIRCLE_RUN_IN_M*r/1.5)
 
-    def test_far_outside_goes_on_one_arc(self):
+    def test_far_outside_turns_once(self):
         for yaw in (math.pi/2, -math.pi/2):
             sections, m, _ = self.plan((0., -4.5, yaw))
-            only_forward_arc(self, sections, (0., -4.5, yaw))
+            self.assertEqual(len(sections), 1, m)
+            self.assertEqual(len(pivots(m)), 1, m)
 
     def test_nozzle_on_circle_no_turn_round(self):
         # 喷头已在圆上、车头顺着画的方向：原来「转 38° 倒 2.8 m 转 9°」；现在倒一点就进圆，不掉头

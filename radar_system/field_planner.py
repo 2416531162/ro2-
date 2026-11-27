@@ -23,13 +23,15 @@ PRE_ARC_FRACTION = 0.5
 # 厘米外伸绕成三段停车倒车，角上一次转场 25 s → 一段倒车）；超出的仍按原来的重罚，规划仍报告最大外伸供操作员确认
 OUTSIDE_SPACE_M = 2.0
 # 转场的掉头方式（2026-10-03 用户：原地掉头太僵硬，app 可选，再加一种像阿克曼那样方向打满的掉头）：
-#   pivot  原地转：停车原地转向 → 直线 → 原地转（默认，原来的做法）
+#   pivot  原地转：停车原地转向 → 直线 → 原地转（原来的做法；11-27 前 app 没带时用它）
 #   arc    圆弧：始终向前，按 turn_radius 绕 Dubins 弧线接入；相切段连续交接，实际外伸仍进入预览确认。
 #   lock   打满方向：用车能稳定跟踪的最小半径（cfg.radius），前进 / 倒车弧线（Reeds–Shepp，可三点掉头），不原地转
 # arc / lock 转场最后一段往前开时与「助跑 + 刷线」合成一段（paint_from 往后挪），进线不停车。
-# 默认仍是 pivot：10-03 Gen5 标定整场仿真（6 场）arc R1.0 用时 +1%、95% 与全场最大误差相当，但线头 1 m 内最大中位
+# 10-03 起默认仍是 pivot：Gen5 标定整场仿真（6 场）arc R1.0 用时 +1%、95% 与全场最大误差相当，但线头 1 m 内最大中位
 # 2.0 cm（pivot 1.6），每场超 1.5 cm 的线头 2.5 条（pivot 1.2）——角上只能倒车进助跑，往前起步万向轮翻转甩车头。
 # 试过不合段停稳再进、往前摆正 1–2 m、沿线倒车进线、补转门槛 1.5°、加长慢走 / 锁车头，都没追平。
+# 2026-11-27 用户「都改圆弧」→「原地转也先不要删除，根据app实际选择」：app 没带 turn（旧 app）时改按 arc，
+# app 选了 pivot / lock 照它。存盘的旧任务没记 turn 的照旧按 pivot（那时实际就是原地转）。
 TURN_STYLES = ('pivot', 'arc', 'lock')
 RS_CANDIDATES = 6     # 弧线转场每次取最短的几条走法按用时 / 外伸细比（全算会让整场规划慢很多）
 RS_MIN_RUN_M = 0.3    # 换向之间至少走这么远：更短的一小段前进 / 倒车实车跟不准（万向轮翻转、低速不平顺、停车容差）
@@ -163,7 +165,7 @@ class Settings:
     section_s: float = 1.3
     reverse_section_s: float = .7
     pivot_s: float = 1.7
-    turn: str = 'pivot'          # 转场掉头方式，见 TURN_STYLES
+    turn: str = 'arc'            # 转场掉头方式，见 TURN_STYLES（app 没带时圆弧，2026-11-27）
     turn_radius: float = 1.0     # turn='arc' 的弧线半径（米，app 1.0 / 1.5 / 2.0）；lock 用 radius
 
     def validate(self):

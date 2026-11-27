@@ -24,9 +24,7 @@ DT = .02
 
 
 def spec(radius=2., clockwise=True, laps=1):
-    # 开始作业进线只走圆弧（11-27）：后方空地填 3 m，这些车位都放得下
-    return rp.RouteSpec(kind='circle', center=(0., 0.), radius=radius, clockwise=clockwise, laps=laps, cruise=.8,
-                        entry_space_m=3.)
+    return rp.RouteSpec(kind='circle', center=(0., 0.), radius=radius, clockwise=clockwise, laps=laps, cruise=.8)
 
 
 def nozzle(sec, s):

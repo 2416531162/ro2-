@@ -1,8 +1,7 @@
 """起喷门槛（2026-10-10 用户：「如果起喷是差 5cm 以上，必须停喷」）：每个喷线区间第一次开喷时喷头离线不到 5 cm
 才开，没到先不喷、车照走；开喷后中途偏差照旧只报警不停喷。2026-10-11 起作业的第一个线头没过门槛时退回去重新助跑。
 
-复现 10-10 实录 16:05:30：开始作业时给控制的航向错 27°（每秒只追 1°），接入开偏，原来到线头偏 23 cm 照样开喷。
-11-27 起开始作业进线只走圆弧（2 m 直线助跑把横偏收回，到线头过得了门槛），门槛本身用 route start（原地转进线）复现。"""
+复现 10-10 实录 16:05:30：开始作业时给控制的航向错 27°（每秒只追 1°），接入开偏，原来到线头偏 23 cm 照样开喷。"""
 from pathlib import Path
 import math
 import sys
@@ -44,13 +43,12 @@ class PaintStartGate(unittest.TestCase):
         self.assertEqual(pq.PAINT_START_MAX_OFFSET_M, .05)
 
     # 2026-11-19 进线改成转正后顺线倒回 RUNUP_BACK_M：倒的这 1.5 m 已把 27° 航向错带来的横偏收回，到线头不再过门槛；
-    # 这里关掉它，只验门槛本身。开始作业 11-27 起只走圆弧进线，圆弧后 2 m 直线助跑也把横偏收回了：用从图纸起点开始
-    # （route start，还是原地转进线）复现到线头偏
+    # 这里关掉它，只验门槛本身
     @mock.patch.object(rp, 'RUNUP_BACK_M', 0.)
     def test_wrong_heading_start_backs_up_and_paints_from_the_head(self):
         # 2026-10-11 用户：第一个线头没过门槛不跳过线头往前喷，退回去重新助跑（见 test_launch_twist）
         car = Car(-3., 1.7, math.radians(100.), err_deg=27.)
-        m = mission(car, self.folder.name, cmd='route_start')
+        m = mission(car, self.folder.name)
         rows = run(m, car, 300.)
         first = next(i for i, r in enumerate(rows) if r['on'])
         self.assertTrue(any(r['message'].startswith('到线头时喷头离线') for r in rows[:first]))
@@ -61,12 +59,13 @@ class PaintStartGate(unittest.TestCase):
         self.assertEqual(len(on), 1)
         self.assertLess(abs(on[0]['x']), .05)          # 从线头开喷，没有拦掉的一截
 
-    # 同上：关掉 RUNUP_BACK_M、用 route start 复现到线头偏
+    # 2026-11-19 进线改成转正后顺线倒回 RUNUP_BACK_M：倒的这 1.5 m 已把 27° 航向错带来的横偏收回，到线头不再过门槛；
+    # 这里关掉它，只验门槛本身
     @mock.patch.object(rp, 'RUNUP_BACK_M', 0.)
     def test_wrong_heading_start_does_not_paint_until_within_5cm(self):
         # 退回去的次数用完（REENTRY_MAX）：照旧车照走、先不喷，到 5 cm 内才开
         car = Car(-3., 1.7, math.radians(100.), err_deg=27.)
-        m = mission(car, self.folder.name, cmd='route_start')
+        m = mission(car, self.folder.name)
         m.operations.record['reentries'] = lm.REENTRY_MAX
         rows = run(m, car, 200.)
         first = next(i for i, r in enumerate(rows) if r['on'])

@@ -1,8 +1,7 @@
 """接入时偏离路线：还没开喷就不结束作业，停车等定位对齐后从最近处重新接入（2026-10-10 用户）。
 
 复现 10-10 实录 16:05:00：开始作业时给控制的航向比融合差 58°（连续输出每秒只追 1°），原地转向转错方向，
-开出 0.4 m 就偏 40 cm，原来直接「中止：偏离路线太远」。11-27 起开始作业进线只走圆弧（不原地转），航向错了照样开偏、
-照样等对齐后重新接入。"""
+开出 0.4 m 就偏 40 cm，原来直接「中止：偏离路线太远」。"""
 from dataclasses import replace
 from pathlib import Path
 import math
@@ -22,8 +21,8 @@ from robot_core.kinematics import ChassisGeometry
 DT = .02
 GEO = ChassisGeometry(drive='differential', track_m=.675, diff_min_radius_m=.5)
 NOZZLE = (.24, -.4575)
-# 进线只走圆弧（11-27）：后方空地填 4 m，这些车位都放得下（线头左后方 1.7 m、车头朝北要 4 m）
-ROUTE = rp.RouteSpec(kind='path', points=((0., 0.), (12., 0.)), closed=False, cruise=.8, entry_space_m=4.)
+# 10-10 实录是原地转进线（app 选 pivot）；11-27 起 app 没带 entry_turn 时按圆弧，这里写明
+ROUTE = rp.RouteSpec(kind='path', points=((0., 0.), (12., 0.)), closed=False, cruise=.8, entry_turn='pivot')
 
 
 class Car:
@@ -49,11 +48,11 @@ class Car:
     to_local = staticmethod(lambda lat, lon: ((lon - 120.) / 1e-5, (lat - 30.) / 1e-5))
 
 
-def mission(car, folder, cmd='route_start_current'):
+def mission(car, folder, spec=ROUTE):
     cfg = replace(differential_config(PathConfig(cruise_mps=.8)), straight_imu_enabled=False)
     m = LineMission(car, SimpleNamespace(), IdleTracker(GEO), route_path=str(Path(folder) / 'route.json'),
                     path_config=cfg, nozzle_x=NOZZLE)
-    ok, message = m.command(dict(cmd=cmd, route=ROUTE.to_dict(digits=12),
+    ok, message = m.command(dict(cmd='route_start_current', route=spec.to_dict(digits=12),
                                  nozzle=dict(forward=NOZZLE[0], right=-NOZZLE[1])), 0.)
     assert ok, message
     return m

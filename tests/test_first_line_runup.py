@@ -45,7 +45,7 @@ class NoDryRun(unittest.TestCase):
         for car in (FAR, (-6., .05, 0.), (14., 1., math.pi)):
             with self.subTest(car=car):
                 info = {}
-                spec = replace(LINE, entry_space_m=rules.ENTRY_ARC_MIN_SPACE_M)
+                spec = LINE
                 sections, _ = rp.plan_current(spec, car, MIN_R, nozzle_x=NOZZLE, info=info)
                 self.assertNotIn('learn_m', info)
                 self.assertFalse(any(getattr(s, 'learn', False) for s in sections))
