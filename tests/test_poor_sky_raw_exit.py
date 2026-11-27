@@ -4,7 +4,8 @@ user_rules.POOR_SKY_EXIT_RAW_E_M）。
 29a2c10f 00:44:24 那条整条线判成楼下（这块场地 σ 一直 1.8–1.9 cm），线头段后车自己的原始 RTK 横偏 −3–−5 cm 走了
 13.6 m：拉回增益 0、只按 0.08°/m 慢修角度，偏的拉不回来（TDCP 核对 RTK 那段没漂，车是真偏了）。6 cm 是怕楼下两根天线
 各偏 2–4 cm 时误退；原始解要两根对得上（≤ 2 cm），这种不进来。用融合位置照旧 6 cm。
-仿真同 test_straight_raw_lateral（0.36 s 延迟车模型、两根天线原始解、σ 1.8 cm 进楼下模式）。"""
+仿真同 test_straight_raw_lateral（0.36 s 延迟车模型、两根天线原始解、σ 比进楼下门槛高一点进楼下模式，
+test_poor_sky.POOR_SIGMA；11-27 门槛 1.5 → 2.5 cm 以前用的 σ 1.8 cm）。"""
 from dataclasses import replace
 import math
 from pathlib import Path
@@ -15,10 +16,15 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / 'radar_system'), str(ROOT), str(ROOT / 'tests')]
 from line_cascade import ImuFirstConfig, ImuFirstGuide  # noqa: E402
 import user_rules as rules  # noqa: E402
-from test_straight_raw_lateral import run, worst  # noqa: E402
-from test_poor_sky import CFG, DT, NX, NY  # noqa: E402
+from test_straight_raw_lateral import run as _run, worst  # noqa: E402
+from test_poor_sky import CFG, DT, NX, NY, POOR_SIGMA  # noqa: E402
 
 OLD = dict(poor_sky_exit_raw_e_m=rules.POOR_SKY_EXIT_E_M)     # 改之前：原始解也按 6 cm
+
+
+def run(**kw):
+    """楼下：接收机报的 σ 过进楼下门槛。"""
+    return _run(sigma_m=POOR_SIGMA, **kw)
 
 
 def tail(rows, start=28.):
