@@ -1,8 +1,8 @@
 """进线可选圆弧（2026-11-19 用户：「可选圆弧还是原地，圆弧就是可以设置后方有多远的空地，最低要1.5m才允许圆弧」）。
 
 entry_turn='arc' 时只往前、按 Dubins 圆弧开到助跑起点车头已顺线，不停车接着助跑；整条接入车身不退到「车在助跑起点时
-车尾」后方 entry_space_m 以外，不到 2.5 m（2026-11-22 用户「默认就 2.5 m，不能再低」，原来 1.5）或哪个半径都放不下
-就照原地转进线；空地填得越大自动用越大的半径（最大 3 m）。"""
+车尾」后方 entry_space_m 以外，不到 2.0 m（2026-11-27 用户「后方空地 2 m」；11-22 起是 2.5，原来 1.5）或哪个半径都
+放不下就照原地转进线；空地填得越大自动用越大的半径（最大 3 m，最小 1.25 m）。"""
 from dataclasses import replace
 from pathlib import Path
 import math
@@ -63,19 +63,20 @@ class ArcEntry(unittest.TestCase):
     SIDE = line_car(-1., 3., -math.pi / 2)        # 线头侧面 3 m、车头对着线
 
     def test_below_minimum_space_stays_pivot(self):
-        self.assertEqual(rp.ENTRY_ARC_MIN_SPACE_M, 2.5)
-        for space in (0., 1.5, 2.0, 2.49):
+        self.assertEqual(rp.ENTRY_ARC_MIN_SPACE_M, 2.0)
+        for space in (0., 1.5, 1.99):
             self.assertEqual(plan(self.SIDE, space)[2], 'pivot', space)
 
-    def test_arc_with_2_5_m_only_forward_no_stop_and_stays_inside_space(self):
-        secs, entry_m, how = plan(self.SIDE, 2.5)
+    def test_arc_with_2_m_only_forward_no_stop_and_stays_inside_space(self):
+        secs, entry_m, how = plan(self.SIDE, 2.)
         self.assertEqual(how, 'arc')
         self.assertEqual([s.direction for s in secs], [1])                  # 一段往前，中间不停不转
         self.assertAlmostEqual(secs[-1].paint_from_m, entry_m, places=6)
         radii = [1 / abs(p.kappa) for p in secs[0].path.pieces if abs(p.kappa) > 1e-9]
-        self.assertGreaterEqual(min(radii), 1.5 - 1e-9)
+        self.assertGreaterEqual(min(radii), rp.ENTRY_ARC_RADII[-1] - 1e-9)
+        self.assertEqual(rp.ENTRY_ARC_RADII[-1], 1.25)
         worst, g = rearmost(secs, entry_m)
-        self.assertGreaterEqual(worst, g - 2.5 - 1e-6)
+        self.assertGreaterEqual(worst, g - 2. - 1e-6)
         # 直线助跑至少 ENTRY_ARC_MIN_STRAIGHT_M
         pieces = secs[0].path.pieces
         last_arc = max(i for i, p in enumerate(pieces) if abs(p.kappa) > 1e-9)
@@ -87,7 +88,7 @@ class ArcEntry(unittest.TestCase):
             secs = plan(self.SIDE, space)[0]
             return min(1 / abs(p.kappa) for p in secs[0].path.pieces if abs(p.kappa) > 1e-9)
         # 填的空地越大，自动换越大的圆弧（最大 ENTRY_ARC_RADII[0]）
-        radii = [radius(s) for s in (2.5, 3., 4., 6., 10.)]
+        radii = [radius(s) for s in (2., 2.5, 3., 4., 6., 10.)]
         self.assertEqual(radii, sorted(radii))
         self.assertLess(radii[0], radii[-1])
         self.assertAlmostEqual(radii[-1], rp.ENTRY_ARC_RADII[0])
@@ -97,7 +98,8 @@ class ArcEntry(unittest.TestCase):
         self.assertGreaterEqual(worst, g - 5. - 1e-6)
 
     def test_turning_round_at_the_far_end_needs_more_space(self):
-        # 刚画完同一条线、停在线尾外朝外：往前绕回来要更大的空地，2.5 m（默认、最低）就能圆弧，再少照原地
+        # 刚画完同一条线、停在线尾外朝外：往前绕回来要更大的空地。2.0 m（最低）用 R1.25 绕得回来、直线助跑照常 2 m，
+        # 2.4 m 起 R1.5 也放得下；再少照原地
         car = line_car(12.5, 0., 0.)
         spec = replace(LINE, points=((12., 0.), (0., 0.)))
         def how(space):
@@ -106,9 +108,17 @@ class ArcEntry(unittest.TestCase):
                             body=BODY, nozzle_x=NOZZLE, info=info)
             return info['entry_turn']
         self.assertEqual(how(1.5), 'pivot')
-        self.assertEqual(how(2.49), 'pivot')
+        self.assertEqual(how(1.99), 'pivot')
+        self.assertEqual(how(2.), 'arc')
         self.assertEqual(how(2.5), 'arc')
         self.assertEqual(how(3.), 'arc')
+        info = {}
+        secs, entry_m = rp.plan_current(replace(spec, entry_turn='arc', entry_space_m=2.), car, .556,
+                                        body=BODY, nozzle_x=NOZZLE, info=info)
+        pieces = secs[0].path.pieces
+        self.assertAlmostEqual(min(1 / abs(p.kappa) for p in pieces if abs(p.kappa) > 1e-9), 1.25)
+        last_arc = max(i for i, p in enumerate(pieces) if abs(p.kappa) > 1e-9)
+        self.assertAlmostEqual(secs[0].paint_from_m - sum(p.length for p in pieces[:last_arc + 1]), rp.RUN_UP_M, places=6)
 
     def test_no_pivot_needed_keeps_straight_reverse(self):
         # 车已在线上顺着线、在线头后面：原地方式本来就不转（直接倒到助跑起点），圆弧模式也照用，不绕大圈
