@@ -292,35 +292,43 @@ class TestZeroHoldRelease(unittest.TestCase):
         self.step(1.0, (.3, 0.0))
         self.assertGreater(min(abs(m.speed) for m in self.device.motors.values()), 50)
 
-    def test_job_zero_hold_hunting_faults_and_releases(self):
+    def test_job_stop_with_hunting_driver_releases_without_fault(self):
+        # 2026-11-19 用户：自动作业停车也放空。11-19 平地：零速闭环越摆越大、2 s 后转故障「控制权被切走」；
+        # 现在刹到零（或已反转）就放空，驱动器没机会摆，作业照常（仍是 NAVIGATION）
         self.drive(.3, 'navigation')
         self.hunt_all(.4)
+        took = self.step(4.0, (0.0, 0.0), until=lambda n: n.released, source='navigation')
+        self.assertIsNotNone(took)
+        self.assertLess(took, 1.0)
+        self.step(3.0, (0.0, 0.0), source='navigation')
+        self.assertEqual(self.node.authority.mode, 'NAVIGATION')
+        self.assertTrue(self.node.released)
+        self.assertFalse(any(self.speed_mode()))
+        self.assertLess(self.max_speed_mps(), .05)
+        self.assertIsNone(self.motion()['zero_hold_release_reason'])
+        self.step(1.0, (.3, 0.0), source='navigation')                       # 下一条指令照常开
+        self.assertTrue(all(self.speed_mode()))
+        self.assertGreater(min(abs(m.speed) for m in self.device.motors.values()), 50)
+
+    def test_job_wheels_keep_moving_after_release_still_faults(self):
+        # 兜底不变：作业中发零速、放空以后轮子还一直在走（溜坡、刹不住），2 s 后转故障
+        self.drive(.3, 'navigation')
+        self.hunt_all(.4, creep_mps=.15)
         took = self.step(4.0, (0.0, 0.0), until=lambda n: n.authority.mode != 'NAVIGATION', source='navigation')
-        self.assertIsNotNone(took, '作业中零速压不住应转故障')
-        self.assertGreaterEqual(took, oid_driver.ZERO_HOLD_JOB_FAULT_S)    # 作业中判得更严
-        self.assertLess(took, oid_driver.ZERO_HOLD_JOB_FAULT_S + .6)
+        self.assertIsNotNone(took, '作业中轮子一直停不下来应转故障')
         self.assertEqual(self.node.authority.mode, 'FAULT')
         self.assertEqual(self.node.authority.reason, 'zero_hold_oscillation')
-        self.assertTrue(self.node.released)                                 # 同一拍放空
-        self.assertFalse(any(self.speed_mode()))
-        self.assertEqual(self.motion()['zero_hold_release_reason'], 'wheels_moving')
+        self.assertTrue(self.node.released)
         self.assertEqual(motion_text.status_text('FAULT', 'zero_hold_oscillation'),
                          '故障锁存：停车锁轮时轮子一直来回动，已松开驱动器、中断作业')
-        self.step(2.0)
-        for m in self.device.motors.values():                                # 驱动器处理好了：零速不再振荡
-            del m.step
-        result = self.node.reset_motion(None, NS())
-        self.assertTrue(result.success, result.message)
-        self.assertEqual(self.node.authority.mode, 'IDLE')
 
-    def test_job_short_rebound_after_stop_keeps_zero_hold(self):
-        # 作业中停车后零速闭环回拉一下（约 1 s 就停住）：照旧锁零速，不放空、不停作业
+    def test_job_short_rebound_after_stop_releases_and_keeps_job(self):
+        # 作业中停车后零速闭环回拉一下：刹到零就放空，不停作业
         self.drive(.3, 'navigation')
         self.hunt_all(.4, seconds=1.0)
         self.step(4.0, (0.0, 0.0), source='navigation')
         self.assertEqual(self.node.authority.mode, 'NAVIGATION')
-        self.assertFalse(self.node.released)
-        self.assertTrue(all(self.speed_mode()))
+        self.assertTrue(self.node.released)
         self.assertIsNone(self.motion()['zero_hold_release_reason'])
 
     # ---- 急停：驱动器不回话、复位 ----

@@ -57,14 +57,25 @@ class TestAutomaticWheelRelease(unittest.TestCase):
         self.assertFalse(self.node.released)
         self.assertNotEqual(self.node._cmd[1], 0.0)
 
-    def test_automatic_job_keeps_control_at_zero_and_releases_after_pause_or_completion(self):
+    def test_automatic_job_stop_releases_and_next_command_drives_again(self):
+        # 2026-11-19 用户：自动作业停车也放空（不锁零速）；仍在作业（NAVIGATION），下一条指令照常开
         self.step(4.0)
         self.assertTrue(self.node.select_motion('navigation', NS(data=True), NS()).success)
         self.step(2.0, (.3, 0.0), 'navigation')
+        self.step(.02, (0.0, 0.0), 'navigation')
+        self.assertFalse(self.node.released)  # 先按停车斜坡制动
         self.step(2.0, (0.0, 0.0), 'navigation')
+        self.assertEqual(self.node.authority.mode, 'NAVIGATION')
+        self.assertTrue(self.node.released)
+        self.assertFalse(any(m.speed_mode for m in self.device.motors.values()))
+        self.step(1.0, (.3, 0.0), 'navigation')
         self.assertEqual(self.node.authority.mode, 'NAVIGATION')
         self.assertFalse(self.node.released)
         self.assertTrue(all(m.speed_mode for m in self.device.motors.values()))
+        self.assertGreater(min(abs(m.speed) for m in self.device.motors.values()), 50)
+        self.step(.02, (0.0, .2), 'navigation')  # 原地转向不放空
+        self.assertFalse(self.node.released)
+        self.step(2.0, (0.0, 0.0), 'navigation')
         self.assertTrue(self.node.select_motion('navigation', NS(data=False), NS()).success)
         self.step(.04)
         self.assertTrue(self.node.released)

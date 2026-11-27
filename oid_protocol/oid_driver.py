@@ -88,7 +88,9 @@ class DiffConfig:
 #   等读回「到零」再放空时车已经往回走了，每次往后退 2–10 cm。按指令放空不看读回，驱动器没有机会往回推；
 # - 其它停车（空闲、急停、故障、没收到松手零速的超时）：先发零速刹车，刹到零（wheels_slow：两轮读回都不超过
 #   HALL_STILL_MAX_MPS，或已经反转）马上放空，之后只读反馈，手推时保持放空；
-# - 自动作业（导航、跟随）中途发零速照旧锁零速，不放空；
+# - 自动作业（导航、跟随）中途发零速（换挡、原地转前后停稳、暂停）：同「其它停车」，刹到零就放空，不锁零速
+#   （2026-11-19 用户：「自动作业停车也改成放空」。11-19 平地路线作业 4 次倒车助跑停稳时零速闭环越摆越大，
+#   0.7 s 一换向、到 140–480 erpm，2 s 后兜底转故障「控制权被切走」；零速环调软由用户在上位机做）；
 # - 兜底（任何状态）：在发零速、过了正常刹车时间轮子还一直在动，就放空；作业中同时转故障（zero_hold_oscillation），
 #   作业中断、断点保留，复位后可「继续作业」；急停时驱动器不回话也放空。
 # 新的手动指令或自动作业重新取得控制时恢复速度闭环：起步从放空直接发目标转速。
@@ -688,12 +690,15 @@ class OidDriver(wd.WheeltecDriver):
         return reason, send
 
     def automatic_release_allowed(self, now, v, w):
-        """不在作业、没有手动运动请求时放空：开机还没有任何操作就直接放空；手动松手渐停到很慢就放空滑停；
-        其余发零速刹到轮速很小再放空。已放空后手推不能触发零速锁轮。"""
+        """没有运动请求时放空：开机还没有任何操作就直接放空；手动松手渐停到很慢就放空滑停；
+        其余发零速（含自动作业中途停车）刹到轮速很小再放空。已放空后手推不能触发零速锁轮。"""
         if self.push_mode:  # 仅兼容旧客户端的显式推行协议，新 App 不再提供此入口。
             return True
         if self.authority.mode in ('NAVIGATION', 'FOLLOW'):
-            return False
+            # 自动作业：这一拍要动就不放空；发零速时刹到零（或已反转）就放空，下一条非零指令从放空直接发目标转速
+            if v != 0.0 or w != 0.0:
+                return False
+            return self.released or self.wheels_slow(now)
         request = self.authority.request
         if self.authority.mode == 'MANUAL' and (request.vx != 0.0 or request.wz != 0.0):
             return False
