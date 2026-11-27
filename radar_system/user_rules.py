@@ -29,14 +29,20 @@ START_LEARN_HOLD_S = 1.0
 # 卫星可信 = 主天线固定 + 副天线固定 + 测向固定且基线在带内，三样都在这么久内来过；可信时不报任何定位错误（10-05）
 RTK_TRUSTED_FRESH_S = 1.0
 # 卫星数（10-06 定 20，10-08 改 17）：少于 SATS_MIN 不用；SATS_MIN–(SATS_FULL−1) 颗要同时满足
-# 接收机 σ ≤ LOW_SATS_MAX_SIGMA_M（10-08 2.0 → 2.7 cm；11-22 用户「17–19 颗也收到 2.5」，和 ≥ SATS_FULL 的 FIT_MAX_SIGMA_M 一样）、两天线距离误差 < LOW_SATS_MAX_PAIR_M、固定解；≥ SATS_FULL 照常
+# 接收机 σ ≤ LOW_SATS_MAX_SIGMA_M（10-08 2.0 → 2.7 cm；11-22 用户「17–19 颗也收到 2.5」，和 ≥ SATS_FULL 的 FIT_MAX_SIGMA_M 一样；
+# 11-26 用户「定位误差 2.5 cm 放宽到 3cm」，两个一起 3.0）、两天线距离误差 < LOW_SATS_MAX_PAIR_M、固定解；≥ SATS_FULL 照常
 SATS_MIN = 17
 SATS_FULL = 20
-LOW_SATS_MAX_SIGMA_M = 0.025
+LOW_SATS_MAX_SIGMA_M = 0.030
 LOW_SATS_MAX_PAIR_M = 0.03
-# 卫星位置可靠（直线拟合的四道关，10-06；10-07 两天线距离 3 → 5 cm）：接收机 σ ≤ 2.5 cm；两天线距离误差 ≤ 5 cm，
+# 卫星位置可靠（直线拟合的四道关，10-06；10-07 两天线距离 3 → 5 cm）：接收机 σ ≤ 3.0 cm；两天线距离误差 ≤ 5 cm，
 # 超了以后 0.5 s 再用；连续 2 帧不合格停用，连续合格 2 s 再用
-FIT_MAX_SIGMA_M = 0.025
+# σ 2.5 → 3.0 cm（11-26 用户「定位误差 2.5 cm 放宽到 3cm」）：11-26 楼下那条 22 m 线主天线 σ 2.05–2.75 cm（中位 2.30），
+# 2.5 时前 11.5 m 一拍没用上卫星，车头差 0.87° 按 IMU 走到偏 16 cm 才往回拉；3.0 时整条都能用
+FIT_MAX_SIGMA_M = 0.030
+# 圆上两条「卫星好时跟得更快」的快修（整圆好天慢修 arc_good_*、作业圆弧双天线径向快修 arc_rtk_*）原来借用 FIT_MAX_SIGMA_M；
+# 11-26 用户只说放宽定位误差门槛，这两条快修照旧按 2.5 cm（楼下 2.5–3 cm 不算「卫星好」）
+ARC_FAST_MAX_SIGMA_M = 0.025
 FIT_MAX_PAIR_M = 0.05
 FIT_PAIR_SETTLE_S = 0.5
 # 精度够就一定用（11-23 用户「如果精度 ≤2cm，应该都被采用」）：主天线固定解、接收机 σ = hypot(σn, σe) ≤ 这个值、

@@ -350,7 +350,7 @@ class PathConfig:
     arc_rtk_feedback_scale: float = 1.5  # 可靠原始双天线径向观测下的横向修正比例；不改变航向阻尼。
     # 整圆卫星好时的慢修（2026-10-11 用户「修复a」）。10-10 R2 实车圆：换算跟着测向绕圈晃约 0.6°、推算每米漂约 1 cm，按
     # arc_pull_m 1 m 才拉回一半，估计稳定落后卫星 1–2 cm（上面的快修那圈权重平均 0.09：单帧对不上就清零，攒不满）。
-    # 固定解、卫星 ≥ fit_full_sats、σ ≤ fit_max_sigma_m、两天线距离误差 ≤ arc_good_pair_max_m、离上次跳点
+    # 固定解、卫星 ≥ fit_full_sats、σ ≤ arc_fast_max_sigma_m、两天线距离误差 ≤ arc_good_pair_max_m、离上次跳点
     # ≥ arc_good_after_jump_m 时，慢修改按 arc_good_pull_*；那圈回放估计与卫星之差 95% 1.8 → 1.2 cm（加姿态零点 0.9），抖动不变。
     # 多路径多半只偏一根天线，两天线一比就退回原慢修（回放主天线慢漂 3 cm：一直快 2.7、只在好时快 1.7、原来 1.8 cm）。
     # 只用于整圆；作业圆弧另有一套
@@ -358,6 +358,9 @@ class PathConfig:
     arc_good_pull_rate_m: float = 0.05
     arc_good_pair_max_m: float = 0.02
     arc_good_after_jump_m: float = 1.0
+    # 上面两条快修（arc_rtk_*、arc_good_*）的 σ 门槛（user_rules.ARC_FAST_MAX_SIGMA_M，2.5 cm）：11-26 直线 / 普通卫星纠偏的
+    # 定位误差门槛放到 3.0 cm 时，这两条照旧
+    arc_fast_max_sigma_m: float = rules.ARC_FAST_MAX_SIGMA_M
 
     accel_jerk_mps3: float = 0.0   # 正向提速的加速度变化上限；0 保留原控制。减速/保护独立优先。
     turn_decel_mps2: float = .25   # 正常弯前舒适减速；故障/停车约束独立优先。
@@ -386,7 +389,7 @@ class PathConfig:
                      'arc_heading_tau_s', 'arc_pull_m', 'arc_pull_rate_m', 'arc_rtk_pull_m',
                      'arc_rtk_pull_rate_m', 'arc_rtk_pair_max_m', 'arc_rtk_settle_s', 'arc_rtk_fresh_s',
                      'arc_rtk_error_m', 'arc_rtk_feedback_scale', 'arc_good_pull_m', 'arc_good_pull_rate_m',
-                     'arc_good_pair_max_m', 'arc_good_after_jump_m', 'arc_partial_min_radius_m',
+                     'arc_good_pair_max_m', 'arc_good_after_jump_m', 'arc_fast_max_sigma_m', 'arc_partial_min_radius_m',
                      'arc_partial_rtk_pull_m', 'arc_partial_rtk_error_m', 'arc_partial_rtk_feedback_scale',
                      'arc_partial_tight_feedback_scale',
                      'arc_partial_heading_scale', 'arc_partial_response_delay_s', 'arc_partial_response_tau_s'):
@@ -1798,7 +1801,7 @@ class PathTracker:
                 and self._quality_frame_t is not None):
             sigma, sats, pair, fixed = quality
             paired = (fixed is True and secondary[3] is True
-                and math.isfinite(sigma) and sigma <= first.fit_max_sigma_m
+                and math.isfinite(sigma) and sigma <= cfg.arc_fast_max_sigma_m
                 and sats is not None and sats >= first.fit_min_sats
                 and pair is not None and math.isfinite(pair) and 0. <= pair <= cfg.arc_rtk_pair_max_m
                 and 0. <= now-self._quality_frame_t <= cfg.arc_rtk_fresh_s
@@ -1847,7 +1850,7 @@ class PathTracker:
             return False
         sigma, sats, pair, fixed = q
         return (fixed is True and sats is not None and sats >= first.fit_full_sats
-                and math.isfinite(sigma) and sigma <= first.fit_max_sigma_m
+                and math.isfinite(sigma) and sigma <= cfg.arc_fast_max_sigma_m
                 and pair is not None and math.isfinite(pair) and 0. <= pair <= cfg.arc_good_pair_max_m
                 and 0. <= self._imu_now-self._quality_frame_t <= cfg.arc_rtk_fresh_s
                 and (self._arc_hold_end is None or self._arc_travel-self._arc_hold_end >= cfg.arc_good_after_jump_m))

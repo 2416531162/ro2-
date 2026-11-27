@@ -288,7 +288,8 @@ class ImuFirstConfig:
     fit_full_sats: int = rules.SATS_FULL
     fit_low_sats_max_sigma_m: float = rules.LOW_SATS_MAX_SIGMA_M  # 10-08 下午用户 2.0 → 2.7 cm：10-06 22:08 那条线 8–14 m 17–19 颗、σ 2.2–2.4 cm，
                                                 # 卫星报的往右 2.7 cm 和地上实际一致，被 2.0 挡掉只按 IMU 走偏了；
-                                                # 11-22 用户收到 2.5（星少不能比 ≥20 颗松），那条线 2.2–2.4 cm 照样能用
+                                                # 11-22 用户收到 2.5（星少不能比 ≥20 颗松），那条线 2.2–2.4 cm 照样能用；
+                                                # 11-26 用户放宽到 3.0，和 fit_max_sigma_m 一起
     fit_low_sats_max_pair_m: float = rules.LOW_SATS_MAX_PAIR_M
     # 两根天线对不上（位置距离误差 ≥ antenna_pick_pair_m）时，用和 IMU 推算对得上的那根（10-08 用户）。10-06 22:08 那条线
     # 15–20 m 主天线被干扰往左 5–9 cm、两天线差到 9–10 cm，副天线和 IMU 都说车没偏（地上实际也没偏）。

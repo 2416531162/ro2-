@@ -371,7 +371,7 @@ class QualityGate(unittest.TestCase):
                 tr.set_rtk_quality(i * .1, *q)
         self.assertIsNone(tr._quality_bad_t)
         tr.set_rtk_quality(.3, .015, 16, .004)               # 卫星少
-        tr.set_rtk_quality(.4, .03, 28, .004)                # σ 大
+        tr.set_rtk_quality(.4, .035, 28, .004)               # σ 大（11-26 门槛 2.5 → 3.0 cm，原来的 3.0 cm 现在合格）
         self.assertAlmostEqual(tr._quality_bad_t, .4)
         tr.sync(1.5, (1.5, 0., 0.))
         self.assertFalse(tr._rtk_quality_ok())
