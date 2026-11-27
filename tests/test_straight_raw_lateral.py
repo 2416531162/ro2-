@@ -34,30 +34,45 @@ def fused_bias(x, peak=.05):
 
 
 def run(raw=True, feed_raw=True, length=36., v=.5, sigma_m=.018, peak=.05, pair_error=0., seed=4,
-        antenna_noise=.002, latency=.04):
+        antenna_noise=.002, latency=.04, push=None, rtk_bias=None, first=None, multipath=None):
     """直线 length 米、0.36 s 纯延迟底盘。融合位置 = 真位置 + fused_bias；原始解 = 真天线位置 + 噪声（pair_error：
-    副天线多偏左这么多，可以是走到哪米的函数）。返回 (每拍 (x, 真喷头横偏, 直线状态), tracker)。"""
+    副天线多偏左这么多，可以是走到哪米的函数）。push：(从哪米起, 车真往左挪多少 m，每走 1 m 挪 10 cm，IMU 看不见)；
+    rtk_bias：走到哪米 → 卫星（两根天线和融合位置一起）多偏左多少 m（楼下多路径共模）；first：ImuFirstConfig 要改的项；
+    multipath：(σ m, 相关长度 m)，两根天线各自一个按距离的 Gauss-Markov 横向误差（11-24 楼下那种，两根各偏各的）。返回 (每拍 (x, 真喷头横偏, 直线状态), tracker)。"""
     rng = random.Random(seed)
     cfg = differential_config(PathConfig(cruise_mps=v))
-    cfg = replace(cfg, straight_imu_first=replace(cfg.straight_imu_first, raw_lateral=raw))
+    cfg = replace(cfg, straight_imu_first=replace(cfg.straight_imu_first, raw_lateral=raw, **(first or {})))
     tr = PathTracker(Route((0., 0., 0.), [(length, 0.)]), cfg, GEO)
     tr.set_nozzle(NX, NY)
     x, psi, t, vv, w = 0., .1 * math.pi / 180., 0., 0., 0.
     y = .003 - NX * math.sin(psi)
     sent = deque([(0., 0., 0.)])
     past = deque([(0., x, y, psi)])
+    pushed = [0.]
+    mp = [0., 0.]
+    mp_last = [0.]
+
+    def mp_step(xx):
+        if multipath is None:
+            return
+        sig, L = multipath
+        dd = abs(xx - mp_last[0]); mp_last[0] = xx
+        a = math.exp(-dd / L)
+        for k in (0, 1):
+            mp[k] = a * mp[k] + sig * math.sqrt(1 - a * a) * rng.gauss(0, 1)
+    common = (lambda xx: rtk_bias(xx)) if rtk_bias is not None else (lambda xx: 0.)
 
     def pose():
-        return NS(x=x, y=y + fused_bias(x, peak), yaw=psi + .2 * math.pi / 180., speed=vv, yaw_rate=w,
+        return NS(x=x, y=y + fused_bias(x, peak) + common(x), yaw=psi + .2 * math.pi / 180., speed=vv, yaw_rate=w,
                   usable_for_control=True, quality='RTK_FIXED', reasons=(), correction_xy=(0., 0.),
                   correction_yaw=0., rtk_trusted=True)
 
-    def antenna(state, lever, extra=0.):
+    def antenna(state, lever, extra=0., k=0):
         _, bx, by, h = state
         ax, ay = lever
         extra = extra(bx) if callable(extra) else extra
         return (bx + math.cos(h) * ax - math.sin(h) * ay + rng.gauss(0, antenna_noise),
-                by + math.sin(h) * ax + math.cos(h) * ay + rng.gauss(0, antenna_noise) + extra)
+                by + math.sin(h) * ax + math.cos(h) * ay + rng.gauss(0, antenna_noise) + extra + common(bx) + mp[k])
 
     def inputs():
         tr.sync(t, (t, psi + 1.7, w))
@@ -66,8 +81,9 @@ def run(raw=True, feed_raw=True, length=36., v=.5, sigma_m=.018, peak=.05, pair_
         tr.set_motor_current(t, 2.2, 2.2)
         if feed_raw and int(round(t / DT)) % 5 == 0:                  # 10 Hz，测量时刻比此刻早 latency
             old = next((s for s in reversed(past) if s[0] <= t - latency), past[0])
-            tr.set_primary_fix(old[0], *antenna(old, MAIN), True, MAIN)
-            tr.set_secondary_fix(old[0], *antenna(old, SECOND, pair_error), True, SECOND)
+            mp_step(old[1])
+            tr.set_primary_fix(old[0], *antenna(old, MAIN, 0., 0), True, MAIN)
+            tr.set_secondary_fix(old[0], *antenna(old, SECOND, pair_error, 1), True, SECOND)
     inputs()
     assert tr.start(pose())
     rows = []
@@ -80,6 +96,10 @@ def run(raw=True, feed_raw=True, length=36., v=.5, sigma_m=.018, peak=.05, pair_
         _, vv, w = sent[0]
         x += vv * math.cos(psi) * DT
         y += vv * math.sin(psi) * DT
+        if push is not None and x >= push[0] and pushed[0] < push[1]:
+            dy = min(push[1] - pushed[0], .1 * abs(vv * DT))
+            y += dy
+            pushed[0] += dy
         psi += w * DT
         t += DT
         past.append((t, x, y, psi))

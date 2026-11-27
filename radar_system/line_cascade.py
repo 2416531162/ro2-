@@ -370,6 +370,8 @@ class ImuFirstConfig:
     poor_sky_exit_deg: float = rules.POOR_SKY_EXIT_DEG
     poor_sky_exit_sigma: float = 3.0
     poor_sky_exit_e_m: float = rules.POOR_SKY_EXIT_E_M
+    # 卫星横偏是两根天线原始解（PathTracker 原始解模式）时的出口门槛（11-27 用户，user_rules.POOR_SKY_EXIT_RAW_E_M）
+    poor_sky_exit_raw_e_m: float = rules.POOR_SKY_EXIT_RAW_E_M
     poor_sky_exit_m: float = rules.PERSIST_M
     # 卫星横偏用原始双天线固定解（11-27 用户，user_rules.STRAIGHT_RAW_*，PathTracker._straight_raw_lateral）：
     # 两根天线各自按 IMU 参考航向换算到喷头，差 ≤ raw_pair_m 才用；对不上沿用上次的最多 raw_hold_s；
@@ -396,7 +398,7 @@ class ImuFirstConfig:
                      'boost_max_bias_deg', 'grass_window_m', 'grass_on_a', 'grass_off_a', 'grass_min_speed_mps',
                      'grass_current_fresh_s', 'grass_fit_walk_b_deg', 'poor_sky_sigma_m', 'poor_sky_sigma_tau_s',
                      'poor_sky_beta_rate_deg', 'poor_sky_follow_e_m', 'poor_sky_exit_deg',
-                     'poor_sky_exit_sigma', 'poor_sky_exit_e_m', 'poor_sky_exit_m',
+                     'poor_sky_exit_sigma', 'poor_sky_exit_e_m', 'poor_sky_exit_raw_e_m', 'poor_sky_exit_m',
                      'raw_pair_m', 'raw_hold_s', 'raw_fresh_s'):
             value = getattr(self, name)
             if not math.isfinite(value) or value <= 0:
@@ -494,6 +496,7 @@ class ImuFirstGuide:
         self.grass_weight = 0.0      # 草地模式权重 0..1（跟踪器每拍给，见 ImuFirstConfig.grass_*）：拟合角度游走往 grass_fit_walk_b_deg 放
         self.poor_sky = False        # 楼下模式（ImuFirstConfig.poor_sky_*）：这条线进了就不退，除非出口
         self.poor_sky_exit = None    # 退出的原因：angle 角度对不上 / offset 车真偏了 / grass 草地；退了这条线不再进
+        self.raw_measured = False    # 这拍卫星横偏是不是两根天线原始解（update 的 raw）
         self._poor_far = (0, 0.0)    # 楼下模式里可信卫星说喷头同一边偏超过 poor_sky_exit_e_m 的 (边, 走了多远)
 
     def set_poor_sky(self, poor, grass):
@@ -605,13 +608,15 @@ class ImuFirstGuide:
         lim = math.sin(self.cfg.max_heading_fix_deg * DEG)
         return math.asin(max(-lim, min(lim, self._fit_now(self._travel)[1])))
 
-    def update(self, measured, rel, distance, dt, nozzle, rtk_ok, fast=False, steering=False, roll=None):
+    def update(self, measured, rel, distance, dt, nozzle, rtk_ok, fast=False, steering=False, roll=None, raw=False):
         """锁住偏移以后每拍一次。measured：卫星（融合位置，天线杠杆臂按 rel + β 改算）量的喷头横偏，m；
         rel：IMU 参考航向 − 线方向，rad；distance：这一拍往前走的路，m；nozzle：喷头（车体前, 左），m；
         rtk_ok：这一拍卫星位置可以用来修正；fast：对准阶段（调用方另判，推算开始 fast_m 内也算）；
         steering：IMU 内环已经在开（rtk_trim、rtk_fit 都关时，这以后卫星不再修正）；roll：此刻横滚（低通、扣零点，rad），
-        没有为空（不补侧滑）。返回喷头横偏估计。"""
+        没有为空（不补侧滑）。raw：measured 是两根天线原始解（两根对得上才给，楼下模式出口按 poor_sky_exit_raw_e_m）。
+        返回喷头横偏估计。"""
         cfg = self.cfg
+        self.raw_measured = bool(raw)
         self.fast = fast or self._travel < cfg.fast_m
         self._runup = bool(fast)
         if cfg.rtk_fit:
@@ -837,8 +842,10 @@ class ImuFirstGuide:
         self.fit_e = base + f['c']
         self.e = self._follow_position(measured, rel, distance, nozzle)
         if self.poor_sky and self.rtk_accepted and not self.fast:
-            # 楼下模式出口：可信卫星说喷头同一边偏超过 poor_sky_exit_e_m 走满 poor_sky_exit_m（车真偏了，要往回拉）
-            side = 0 if abs(measured) <= cfg.poor_sky_exit_e_m else (1 if measured > 0 else -1)
+            # 楼下模式出口：可信卫星说喷头同一边偏超过门槛走满 poor_sky_exit_m（车真偏了，要往回拉）。门槛：两根天线原始解
+            # poor_sky_exit_raw_e_m（两根对得上才给，楼下两根各偏几厘米的不进来），融合位置 poor_sky_exit_e_m
+            limit = cfg.poor_sky_exit_raw_e_m if getattr(self, 'raw_measured', False) else cfg.poor_sky_exit_e_m
+            side = 0 if abs(measured) <= limit else (1 if measured > 0 else -1)
             far = self._poor_far[1] + step if side and side == self._poor_far[0] else (step if side else 0.0)
             self._poor_far = (side, far)
             if side and far >= cfg.poor_sky_exit_m - 1e-9:

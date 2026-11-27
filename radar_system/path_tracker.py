@@ -1778,7 +1778,7 @@ class PathTracker:
                                bool(self._ground is not None and self._ground.grass))
             # steering：IMU 已经在开（上一拍权重 > 0）；rtk_trim、rtk_fit 都关时这以后卫星不再修正
             guide.update(measured, rel, max(0.0, pose.speed)*dt, dt, (nx, ny), rtk_ok, fast=st.s < self.paint_from_m,
-                         steering=self._straight_weight > 0.0, roll=self._roll_now(dt))
+                         steering=self._straight_weight > 0.0, roll=self._roll_now(dt), raw=raw_mode)
             if first.rtk_fit and entry_weight>0. and rtk_ok and guide.rtk_accepted:
                 # 助跑及线头交接仍只接纳原质量门和跳点门放行的位置；对齐权重平滑退到零。
                 guide.pull_to(measured, 1.0 - math.exp(-max(0.0, pose.speed)*dt*entry_weight / first.runup_rtk_tau_m))
