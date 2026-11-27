@@ -265,6 +265,8 @@ class FusionConfig:
     track_heading_sigma_floor_deg: float = 0.3
     # 还没攒够（测向还在修车头）时对车头：先把车头方差放到至少这么大（测向本身可能偏 2°），这次按卫星位移基本接过来
     track_heading_switch_sigma_deg: float = 2.0
+    # 一段里车头转过超过这么多（原地转）就从这帧重新起一段
+    track_heading_max_turn_deg: float = 30.0
     dual_heading_check_deg: float = 3.0
     # 判停稳（融合静止检测、任务层 robot_core.standstill）要不要卫星地速也静止：双天线有 BESTVEL 多普勒地速；
     # 单天线没有地速，只看轮子（2026-10-07 用户：「只要轮子不动就行」）
@@ -1972,6 +1974,12 @@ class GnssFusion:
             s.align = (xy[0], xy[1], off[0], off[1], s.odo, s.yaw, 0., 0., 0.)
             return
         fx0, fy0, ox0, oy0, odo, yaw, drx, dry, dist = s.align
+        if track:
+            # 这段开头的车头（从开头的杠杆臂方向反推）：转过 track_heading_max_turn_deg 以上（原地转）就从这帧重新起一段
+            start_yaw = math.atan2(oy0, ox0) - math.atan2(ay, ax)
+            if abs(_wrap(s.yaw - start_yaw)) > math.radians(cfg.track_heading_max_turn_deg):
+                s.align = (xy[0], xy[1], off[0], off[1], s.odo, s.yaw, 0., 0., 0.)
+                return
         d = s.odo - odo
         mid = yaw + _wrap(s.yaw - yaw) / 2
         drx, dry, dist = drx + d*math.cos(mid), dry + d*math.sin(mid), dist + abs(d)

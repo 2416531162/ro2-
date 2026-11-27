@@ -29,6 +29,7 @@ def cfg(init_only=True, **kw):
                    track_heading_ready_m=rules.TRACK_HEADING_READY_M,
                    track_heading_sigma_floor_deg=rules.TRACK_HEADING_SIGMA_FLOOR_DEG,
                    track_heading_switch_sigma_deg=rules.TRACK_HEADING_SWITCH_SIGMA_DEG,
+                   track_heading_max_turn_deg=rules.TRACK_HEADING_MAX_TURN_DEG,
                    dual_heading_check_deg=rules.DUAL_HEADING_CHECK_DEG, **kw)
 
 
@@ -88,9 +89,10 @@ class Rules(unittest.TestCase):
                 c = line_node.load_fusion_config(gf, path)
         self.assertIs(c.dual_heading_init_only, rules.DUAL_HEADING_INIT_ONLY)
         self.assertEqual((c.track_heading_distance_m, c.track_heading_ready_m, c.track_heading_sigma_floor_deg,
-                          c.track_heading_switch_sigma_deg, c.dual_heading_check_deg),
+                          c.track_heading_switch_sigma_deg, c.track_heading_max_turn_deg, c.dual_heading_check_deg),
                          (rules.TRACK_HEADING_DISTANCE_M, rules.TRACK_HEADING_READY_M, rules.TRACK_HEADING_SIGMA_FLOOR_DEG,
-                          rules.TRACK_HEADING_SWITCH_SIGMA_DEG, rules.DUAL_HEADING_CHECK_DEG))
+                          rules.TRACK_HEADING_SWITCH_SIGMA_DEG, rules.TRACK_HEADING_MAX_TURN_DEG, rules.DUAL_HEADING_CHECK_DEG))
+        self.assertEqual((rules.TRACK_HEADING_DISTANCE_M, rules.TRACK_HEADING_SIGMA_FLOOR_DEG), (1.0, 1.0))   # 用户「走 1m」
         with self.assertRaises(ValueError):
             gf.FusionConfig(dual_heading_init_only=1)
         for name in ('track_heading_distance_m', 'track_heading_ready_m', 'track_heading_sigma_floor_deg'):
@@ -130,7 +132,7 @@ class InitOnly(unittest.TestCase):
         rig.step(20, v=0., w=math.pi / 2.)        # 2 s × 90°/s = 180°
         p = rig.step(30, v=.8)
         self.assertEqual(rig.role()['role'], 'check')
-        self.assertLess(abs(rig.err_deg(p[-1])), .3)
+        self.assertLess(max(abs(rig.err_deg(q)) for q in p), .3)       # 跨原地转的那段不算对（转过 30° 重新起一段）
 
     def test_inconsistent_second_antenna_frames_do_not_block_the_alignment(self):
         # 楼下两根天线互检超 2 cm 的帧很多：这些帧不当一段的起点、终点，段照样攒满

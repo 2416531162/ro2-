@@ -436,6 +436,7 @@ def load_fusion_config(gnss_fusion, path):
     overrides.setdefault('track_heading_ready_m', user_rules.TRACK_HEADING_READY_M)
     overrides.setdefault('track_heading_sigma_floor_deg', user_rules.TRACK_HEADING_SIGMA_FLOOR_DEG)
     overrides.setdefault('track_heading_switch_sigma_deg', user_rules.TRACK_HEADING_SWITCH_SIGMA_DEG)
+    overrides.setdefault('track_heading_max_turn_deg', user_rules.TRACK_HEADING_MAX_TURN_DEG)
     overrides.setdefault('dual_heading_check_deg', user_rules.DUAL_HEADING_CHECK_DEG)
     # Gen5（HDA536T）：航向推算用 IMU 自己算的航向角（2026-09-28 用户要求）；原地转向转角大，
     # 按 3% 刻度误差加航向不确定度，测向按 20 ms 时间同步误差随转速降权。

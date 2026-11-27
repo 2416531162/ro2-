@@ -90,9 +90,10 @@
 19:59–22:19 约 −1.7°、00:43 起约 0°（变的原因不明），写死安装偏差总有时候是错的（11-22 写的 +1.7° 已改回 0）。
 
 - 车头 = IMU 航向角 + 偏移，偏移按 RTK 位移修（同单天线车的 `_imu_course`）：每走 `track_heading_distance_m`
-  （3 m）比一次「按融合车头 + 轮程推算的主天线位移」和「固定解实测的位移」的夹角。转弯、原地转由 IMU 记着；
-  位移不到窗口一半（原地转为主）不算。观测误差至少 `track_heading_sigma_floor_deg`（0.3°）。
-- 对过的路程攒够 `track_heading_ready_m`（3 m）后测向不再修车头，只在 `calibration()['dual_heading']` 给
+  （1 m，用户「走 1m 可以不」，原 3 m）比一次「按融合车头 + 轮程推算的主天线位移」和「固定解实测的位移」的夹角。
+  转弯、原地转由 IMU 记着；位移不到窗口一半（原地转为主）不算。观测误差至少 `track_heading_sigma_floor_deg`
+  （1°：1 m 的位移方向在楼下约差 1°）。
+- 对过的路程攒够 `track_heading_ready_m`（1 m）后测向不再修车头，只在 `calibration()['dual_heading']` 给
   `minus_fused_deg`（测向 − 融合车头，低通）、`disagree`（≥ `dual_heading_check_deg` 3°）。还没攒够时照旧按测向，
   对车头前把车头方差放到至少 `track_heading_switch_sigma_deg`（2°），第一次按位移就基本接过来。
 - 两根天线互检不过、离群的固定解照样用（楼下六成以上的帧这样；测向偏了推算对不上固定解本身就算离群）；
@@ -100,7 +101,9 @@
 - IMU 断了、和轮速对不上：这条车头没了，回到按测向，之后重新攒。
 - 开关 `dual_heading_init_only`（默认关，Gen5 在 `line_node.load_fusion_config` 按 `user_rules.DUAL_HEADING_INIT_ONLY` 开）。
 - 回放（当天 4 个时段 16 趟，每趟从头开）：直线喷线段融合车头 − 真车头（IMU + 这段 RTK 轨迹）绝对值中位
-  1.11 → 0.24°、p90 2.39 → 0.84°；安装偏差错写 1.7° 时 0.30 / 0.94°。测试 `tests/test_dual_heading_init_only.py`。
+  1.05 → 0.24°（1 m）、p90 2.39 → 0.95°；接管前走的路中位 1.1 m；31 次原地转停稳时车头误差中位 0.73 → 0.53°；
+  安装偏差错写 1.7° 时 0.24 / 1.01°。一段里车头转过 `track_heading_max_turn_deg`（30°，原地转）就从这帧重新起一段：
+  天线绕后轴甩，定位和 IMU 时刻差一点夹角就差很多。测试 `tests/test_dual_heading_init_only.py`。
 
 ## 一根天线被污染就用另一根（2026-11-21）
 

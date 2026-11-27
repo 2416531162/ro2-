@@ -96,11 +96,18 @@ GEN5_MOUNT_OFFSET_DEG = 0.0
 # → +0.14 / −0.28 / +0.26 / 0.00°；补偿错写 1.7° 时 0.30 / 0.94 / 2.3°（跟补偿值基本无关）。
 # 还在按测向（没攒够）时对车头，把那会儿的车头当只准到 TRACK_HEADING_SWITCH_SIGMA_DEG：测向本身就可能偏 2°，第一次按卫星位移
 # 对就基本接过来，不再被测向慢慢拉回去。
+# 3 → 1 m（11-27 用户「走 1m 可以不」）：1 m 的位移方向在楼下 RTK 慢偏 1–1.5 cm 时约差 1°，观测误差下限跟着 0.3 → 1°
+# （还按 0.3° 信它时回放里一次被带偏到 6.5°），一段里转过 TRACK_HEADING_MAX_TURN_DEG 重新起一段。同一回放（16 趟、
+# 31 次原地转）：喷线中车头误差中位 / p90 / 最大 原来 1.05 / 2.39 / 4.4°、3 m 0.40 / 1.00 / 2.3°、1 m 0.24 / 0.95 / 2.4°；
+# 接管前走的路中位 3 m 8.3 m → 1 m 1.1 m；原地转停稳时车头误差中位 0.73 / 0.68 / 0.53°。
 DUAL_HEADING_INIT_ONLY = True
-TRACK_HEADING_DISTANCE_M = 3.0
-TRACK_HEADING_READY_M = 3.0
-TRACK_HEADING_SIGMA_FLOOR_DEG = 0.3
+TRACK_HEADING_DISTANCE_M = 1.0
+TRACK_HEADING_READY_M = 1.0
+TRACK_HEADING_SIGMA_FLOOR_DEG = 1.0
 TRACK_HEADING_SWITCH_SIGMA_DEG = 2.0
+# 一段里车头转过超过这么多（原地转）就从这帧重新起一段：天线绕后轴甩，定位和 IMU 时刻差一点夹角就差很多（仿真原地转 180°
+# 后第一段 1 m 带偏 1.7°）；R3 圆 1 m 约转 17°，照样能对
+TRACK_HEADING_MAX_TURN_DEG = 30.0
 DUAL_HEADING_CHECK_DEG = 3.0
 # SCH16T 航向角刻度（11-23 实测真转一整圈多读约 0.46°，多读 0.127%）标定在 IMU 固件参数里，车上程序不再乘：
 # 用户「标定在imu的固件里面」→ 模块 0x2012 陀螺 Z 刻度 = −1270 ppm（发 0x401: 40 12 20 00 0A FB 00 00，存模块 flash）
