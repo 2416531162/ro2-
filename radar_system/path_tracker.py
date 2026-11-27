@@ -679,6 +679,8 @@ class PathTracker:
         self._receiver_bad_t = None
         self._secondary = None          # 副天线最近一帧 (测量时刻, x, y, 固定解, 车体系杠杆臂 (前, 左))
         self._primary = None            # 主天线同样保存原始坐标，可靠整圆观测不再叠加融合位置的滞后。
+        self._raw_hold = None           # 直线上次两根天线对上的喷头横偏 (时刻, 横偏 m, 哪段直线 s0)：_straight_raw_lateral
+        self._raw_status = {}
         self._quality = None            # 最近一帧 (σ m, 卫星数, 两天线距离误差 m 或 None, 固定解 True/False 或 None)
         self._sigma_lp = None           # σ 低通（ImuFirstConfig.poor_sky_sigma_tau_s，单帧先夹到 5 cm），m：楼下模式用
         self._imu_alignment = None      # 任务层的 line_cascade.ImuAlignment：上一条线对好的角度
@@ -918,6 +920,49 @@ class PathTracker:
                 return wrap(a[1]+wrap(b[1]-a[1])*(t-a[0])/(b[0]-a[0]))
         last=rows[-1]
         return wrap(last[1]+last[2]*(t-last[0])) if 0 <= t-last[0] <= .05 else None
+
+    def _straight_raw_mode(self):
+        """直线卫星横偏按原始双天线（ImuFirstConfig.raw_lateral）：开着、且两根天线的原始解都收到过。"""
+        first = self.cfg.straight_imu_first
+        return (first is not None and first.rtk_fit and first.raw_lateral
+                and self._primary is not None and self._secondary is not None)
+
+    def _straight_raw_lateral(self, guide, piece, hint, speed, h):
+        """直线喷头横偏的原始双天线观测（ImuFirstConfig.raw_*，user_rules.STRAIGHT_RAW_*，11-27 用户「改用原始 RTK」）。
+
+        两根天线最近的固定解各自按测量时刻的 IMU 参考航向（IMU + 偏移 + β，不用双天线测向：楼下测向会被带偏几度）
+        从天线倒推后轴，同 measured 的算法换算到喷头，再按 IMU 推到此刻（h：此刻 IMU 参考航向 + β − 线方向）；
+        两根差 ≤ raw_pair_m 才用、取平均。对不上 / 不新鲜时沿用上次对上的最多 raw_hold_s（同一段直线）。
+        返回喷头横偏 m，没有为 None。"""
+        cfg, first, now = self.cfg, self.cfg.straight_imu_first, self._imu_now
+        nx, ny = self._straight_nozzle
+        values, pair = [], None
+        for fix in (self._primary, self._secondary):
+            t, x, y, fixed, (ax, ay) = fix
+            yaw = self._imu_yaw_at(t) if fixed and now is not None and 0.0 <= now - t <= first.raw_fresh_s else None
+            if yaw is None:
+                values = None
+                break
+            heading = wrap(yaw + guide.offset + guide.beta)
+            c, s = math.cos(heading), math.sin(heading)
+            _, lat, _, _ = self.locate(x - (c*ax - s*ay), y - (s*ax + c*ay), heading, hint)
+            ht = wrap(heading - piece.yaw)
+            e = lat + (nx - cfg.track_x_m)*math.sin(ht) + ny*(math.cos(ht) - 1.0)
+            values.append(e + speed*(now - t)*math.sin(h))
+        if values is not None:
+            pair = values[0] - values[1]
+            if abs(pair) <= first.raw_pair_m:
+                self._raw_hold = (now, 0.5*(values[0] + values[1]), piece.s0)
+        hold, out = self._raw_hold, None
+        if hold is not None and hold[2] == piece.s0 and 0.0 <= now - hold[0] <= first.raw_hold_s:
+            out = hold[1] + speed*(now - hold[0])*math.sin(h)
+        self._raw_status = dict(raw_e=out, raw_pair_m=pair,
+                                raw_age_s=None if hold is None or hold[2] != piece.s0 else now - hold[0])
+        return out
+
+    def _raw_lateral_status(self):
+        return dict(raw_mode=self._straight_raw_mode(), raw_e=self._raw_status.get('raw_e'),
+                    raw_pair_m=self._raw_status.get('raw_pair_m'), raw_age_s=self._raw_status.get('raw_age_s'))
 
     def _arc_raw_radial(self, piece):
         """两天线分别换算到喷头；测量时刻对齐后，径向观测一致才取均值。"""
@@ -1627,6 +1672,7 @@ class PathTracker:
                               crab=align.predict_crab(self._imu_now))
         eligible = eligible and guide.locked
         measured = None
+        self._raw_status = {}
         if guide.locked:
             reference = wrap(imu_yaw + guide.offset)
             rel = wrap(reference - piece.yaw)
@@ -1658,9 +1704,20 @@ class PathTracker:
                                                   else baseline_ok))
             # 融合已经改用副天线定位（主天线被污染或没固定，gnss_fusion FusionConfig.secondary_*）：融合位置就是好的那根，
             # 两天线距离误差、测向基线、主天线接收机质量都不挡，也不再另选天线
-            fused_second = first.rtk_fit and getattr(pose, 'position_antenna', 'main') == 'second'
-            pick = self._pick_antenna(guide, heading, st.s, base_lat, measured) if first.rtk_fit and not fused_second else None
-            if fused_second:
+            raw_mode = self._straight_raw_mode()
+            fused_second = first.rtk_fit and not raw_mode and getattr(pose, 'position_antenna', 'main') == 'second'
+            pick = (self._pick_antenna(guide, heading, st.s, base_lat, measured)
+                    if first.rtk_fit and not fused_second and not raw_mode else None)
+            if raw_mode:
+                # 卫星横偏改用两根天线的原始固定解（_straight_raw_lateral，11-27 用户）：不经过融合位置（楼下测向被带偏时
+                # 融合位置跟着偏、β 被带着往反方向修）。两根对得上就是对两根天线的互检，所以同选天线那支一样，
+                # 两天线距离误差、测向基线不再挡，接收机质量照常要合格；对不上这拍卫星不可用（按 IMU 推算）。
+                # 卫星不可用时 measured 只在这条线第一拍当初值，照旧给融合位置算的。
+                raw = self._straight_raw_lateral(guide, piece, st.s, max(0.0, pose.speed), h)
+                rtk_ok = raw is not None and position_ok and (precise or self._receiver_quality_ok())
+                if raw is not None:
+                    measured = raw
+            elif fused_second:
                 rtk_ok = position_ok
             elif pick is not None:
                 # 两根天线对不上、有一根和 IMU 推算对得上：用它，两天线的距离误差、测向基线都不再挡（2026-11-21 用户：
@@ -1731,7 +1788,8 @@ class PathTracker:
             self._straight_guided = None
             self._straight_status = dict(active=False, weight=0.0, eligible=eligible, control_law='imu_first',
                                          runup_wait=runup_wait, baseline_ok=baseline_ok, **guide.status(),
-                                         **self._antenna_status(), **(align.status() if align is not None else {}))
+                                         **self._antenna_status(), **self._raw_lateral_status(),
+                                         **(align.status() if align is not None else {}))
             return legacy_w
 
         if old_weight == 0.0 and self._launch_weight == 0.0:
@@ -1787,7 +1845,7 @@ class PathTracker:
             sigma_lp_cm=None if self._sigma_lp is None else round(100 * self._sigma_lp, 3),
             target_rate_deg_s=math.degrees(self._straight_target_rate), aligning=aligning, baseline_ok=baseline_ok,
             outer_e=guide.e, outer_e_rtk=measured, inner_wz=inner_w, legacy_wz=legacy_w, final_wz=output,
-            **guide.status(), **self._antenna_status(), **self._straight_core.status(),
+            **guide.status(), **self._antenna_status(), **self._raw_lateral_status(), **self._straight_core.status(),
             **(align.status() if align is not None else {}))
         return output
 

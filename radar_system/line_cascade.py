@@ -371,6 +371,13 @@ class ImuFirstConfig:
     poor_sky_exit_sigma: float = 3.0
     poor_sky_exit_e_m: float = rules.POOR_SKY_EXIT_E_M
     poor_sky_exit_m: float = rules.PERSIST_M
+    # 卫星横偏用原始双天线固定解（11-27 用户，user_rules.STRAIGHT_RAW_*，PathTracker._straight_raw_lateral）：
+    # 两根天线各自按 IMU 参考航向换算到喷头，差 ≤ raw_pair_m 才用；对不上沿用上次的最多 raw_hold_s；
+    # 一帧超过 raw_fresh_s 不新鲜。从没收到过两根天线原始解时照旧用融合位置。
+    raw_lateral: bool = rules.STRAIGHT_RAW_LATERAL
+    raw_pair_m: float = rules.STRAIGHT_RAW_PAIR_M
+    raw_hold_s: float = rules.STRAIGHT_RAW_HOLD_S
+    raw_fresh_s: float = rules.STRAIGHT_RAW_FRESH_S
 
     def __post_init__(self):
         for name in ('observer_m', 'fast_observer_m', 'max_heading_fix_deg', 'k_e', 'max_bias_deg', 'rate_deg_s', 'jump_m',
@@ -389,12 +396,15 @@ class ImuFirstConfig:
                      'boost_max_bias_deg', 'grass_window_m', 'grass_on_a', 'grass_off_a', 'grass_min_speed_mps',
                      'grass_current_fresh_s', 'grass_fit_walk_b_deg', 'poor_sky_sigma_m', 'poor_sky_sigma_tau_s',
                      'poor_sky_beta_rate_deg', 'poor_sky_follow_e_m', 'poor_sky_exit_deg',
-                     'poor_sky_exit_sigma', 'poor_sky_exit_e_m', 'poor_sky_exit_m'):
+                     'poor_sky_exit_sigma', 'poor_sky_exit_e_m', 'poor_sky_exit_m',
+                     'raw_pair_m', 'raw_hold_s', 'raw_fresh_s'):
             value = getattr(self, name)
             if not math.isfinite(value) or value <= 0:
                 raise ValueError(name + ' 必须是有限正数')
         if type(self.grass_enabled) is not bool:
             raise ValueError('grass_enabled 必须是 True 或 False')
+        if type(self.raw_lateral) is not bool:
+            raise ValueError('raw_lateral 必须是 True 或 False')
         if type(self.poor_sky_enabled) is not bool:
             raise ValueError('poor_sky_enabled 必须是 True 或 False')
         if not (math.isfinite(self.poor_sky_pull_scale) and 0.0 <= self.poor_sky_pull_scale <= 1.0):
