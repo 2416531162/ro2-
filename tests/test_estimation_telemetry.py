@@ -13,7 +13,9 @@ sys.path.insert(0, os.path.join(ROOT, 'radar_system'))
 sys.path.insert(0, os.path.join(ROOT, 'tests'))
 
 import app_link as al  # noqa: E402
+import line_cascade as lc  # noqa: E402
 import line_mission as lm  # noqa: E402
+import path_tracker as pt  # noqa: E402
 
 
 class EstimationTelemetryTest(unittest.TestCase):
@@ -28,19 +30,27 @@ class EstimationTelemetryTest(unittest.TestCase):
                 'reasons': [], 'rtk_trusted': True, 'hold_age_s': 0.05, 'hold_limit_s': 9.0,
                 'speed_source': 'wheel', 'yaw_source': 'imu',
             },
+            'alignment': {
+                'state': 'ready', 'source': 'drive', 'sigma_deg': 0.24,
+                'drive_m': 4.2, 'min_m': 3.0, 'age_s': 15.0,
+            },
             'tracker': {
                 'state': 'RUNNING', 'reason': '', 'e': 0.008, 'heading_err_deg': 0.2,
                 's': 8.0, 'length': 30.0, 'v_cmd': 0.8, 'gear': 'forward',
                 'section': 1, 'sections': 2, 'switching': False, 'pivoting': False,
+                'learn': False,
                 'straight_hold': {
                     'active': True, 'weight': 1.0, 'control_law': 'imu_first',
                     'first_mode': 'rtk', 'first_locked': True, 'first_rtk_accepted': True,
+                    'rtk_gate': 'precise', 'rtk_precise': True,
                     'first_poor_sky': True, 'first_poor_sky_exit': None,
                     'grass': False, 'ground_a': 2.6, 'first_position_follow': False,
                     'pull_boost': False, 'rtk_antenna': 'main', 'first_source': 'carried',
                     'baseline_ok': True, 'first_fast': False,
                     'first_e': 0.0082, 'outer_e_rtk': 0.0214, 'first_innovation': 0.0132,
                     'first_beta_deg': 0.246, 'first_crab_deg': -0.118,
+                    'error_deg': 0.34, 'bias_deg': -0.45,
+                    'first_fit_points': 18, 'first_fit_sigma_deg': 0.21,
                     'first_imu_only_s': 1.44, 'first_jumps': 2, 'sigma_lp_cm': 1.842,
                 },
                 'arc_hold': {'active': False, 'weight': 0.0},
@@ -57,11 +67,21 @@ class EstimationTelemetryTest(unittest.TestCase):
         self.assertEqual(est['hold_limit_s'], 9.0)
         self.assertEqual(est['speed_source'], 'wheel')
         self.assertEqual(est['yaw_source'], 'imu')
+        self.assertNotIn('learn', est)
+        align = est['alignment']
+        self.assertEqual(align['state'], 'ready')
+        self.assertEqual(align['source'], 'drive')
+        self.assertEqual(align['sigma_deg'], 0.24)
+        self.assertEqual(align['drive_m'], 4.2)
+        self.assertEqual(align['min_m'], 3.0)
+        self.assertEqual(align['age_s'], 15.0)
         st = est['straight']
         self.assertTrue(st['active'])
         self.assertEqual(st['law'], 'imu_first')
         self.assertEqual(st['mode'], 'rtk')
         self.assertTrue(st['rtk_accepted'])
+        self.assertEqual(st['rtk_gate'], 'precise')
+        self.assertTrue(st['rtk_precise'])
         self.assertTrue(st['poor_sky'])
         self.assertFalse(st['grass'])
         self.assertEqual(st['ground_a'], 2.6)
@@ -72,10 +92,21 @@ class EstimationTelemetryTest(unittest.TestCase):
         self.assertEqual(st['diff_m'], 0.0132)
         self.assertEqual(st['beta_deg'], 0.25)
         self.assertEqual(st['crab_deg'], -0.12)
+        self.assertEqual(st['err_deg'], 0.34)
+        self.assertEqual(st['bias_deg'], -0.45)
+        self.assertEqual(st['fit_points'], 18)
+        self.assertEqual(st['fit_sigma_deg'], 0.21)
         self.assertEqual(st['imu_only_s'], 1.4)
         self.assertEqual(st['jumps'], 2)
         self.assertEqual(st['sigma_lp_cm'], 1.84)
         self.assertNotIn('arc', est)
+
+        # 首条空跑学车头段仅在行驶中透传 learn=True
+        ln_learn = self._base_line()
+        ln_learn['tracker']['learn'] = True
+        self.assertTrue(al.line_telemetry(ln_learn, 100.0)['estimation']['learn'])
+        ln_learn['tracker']['switching'] = True
+        self.assertNotIn('learn', al.line_telemetry(ln_learn, 100.0)['estimation'])
 
     def test_forwards_arc_estimation_and_suppresses_during_switching_or_idle(self):
         ln = self._base_line()
@@ -115,11 +146,15 @@ class EstimationTelemetryTest(unittest.TestCase):
         self.assertNotIn('estimation', al.line_telemetry(legacy, 100.0))
 
         bad = self._base_line()
+        bad['alignment'] = {'state': 'bogus', 'sigma_deg': -1.0}
         bad['pose'].update(hold_age_s=math.nan, hold_limit_s=-1.0, position_antenna='third',
                            speed_source='gps', yaw_source='mag', rtk_trusted='yes')
         bad['tracker']['straight_hold'].update(first_e=math.inf, first_jumps=-3, first_mode='unknown',
-                                               first_poor_sky_exit='other', rtk_antenna='ant3')
+                                               first_poor_sky_exit='other', rtk_antenna='ant3',
+                                               rtk_gate='weird', error_deg=math.nan,
+                                               first_fit_points=-2, first_fit_sigma_deg=math.inf)
         est = al.line_telemetry(bad, 100.0)['estimation']
+        self.assertNotIn('alignment', est)
         self.assertNotIn('rtk_trusted', est)
         self.assertNotIn('position_antenna', est)
         self.assertNotIn('hold_age_s', est)
@@ -131,8 +166,12 @@ class EstimationTelemetryTest(unittest.TestCase):
         self.assertIsNone(est['straight']['mode'])
         self.assertIsNone(est['straight']['poor_sky_exit'])
         self.assertIsNone(est['straight']['antenna'])
+        self.assertIsNone(est['straight']['rtk_gate'])
+        self.assertIsNone(est['straight']['err_deg'])
+        self.assertIsNone(est['straight']['fit_points'])
+        self.assertIsNone(est['straight']['fit_sigma_deg'])
 
-    def test_line_mission_status_exports_hold_and_sensor_sources(self):
+    def test_line_mission_status_exports_hold_sensor_sources_and_alignment(self):
         fusion = SimpleNamespace(config=SimpleNamespace(rtk_hold_s=9.0), to_geodetic=lambda x, y: (30.0, 120.0))
         m = lm.LineMission(fusion=fusion, samples=None)
         m.pose = SimpleNamespace(
@@ -140,12 +179,77 @@ class EstimationTelemetryTest(unittest.TestCase):
             sigma_xy=0.04, sigma_yaw=0.01, reasons=('rtk_hold',), rtk_trusted=False,
             position_antenna='second', hold_age_s=2.456, speed_source='gnss_doppler', yaw_source='imu',
         )
-        p = m.status()['pose']
+        st = m.status()
+        p = st['pose']
         self.assertEqual(p['position_antenna'], 'second')
         self.assertEqual(p['hold_age_s'], 2.46)
         self.assertEqual(p['hold_limit_s'], 9.0)
         self.assertEqual(p['speed_source'], 'gnss_doppler')
         self.assertEqual(p['yaw_source'], 'imu')
+        self.assertEqual(st['alignment']['state'], 'none')
+        self.assertGreater(st['alignment']['min_m'], 0.0)
+
+    def test_rtk_gate_reason_covers_all_rejection_causes(self):
+        path = pt.Path((0.0, 0.0, 0.0), [(20.0, 0.0)])
+        cfg = pt.PathConfig(straight_imu_first=lc.ImuFirstConfig(rtk_trim=False, rtk_fit=True))
+        tr = pt.PathTracker(path, cfg)
+        tr._raw_status = {}
+        self.assertEqual(tr._rtk_gate_reason(True, True, True, True, True, None, False), 'precise')
+        self.assertEqual(tr._rtk_gate_reason(False, True, True, True, True, None, False), 'ok')
+        self.assertEqual(tr._rtk_gate_reason(False, False, False, True, True, None, False), 'position_untrusted')
+
+        tr._quality = (0.012, 30, 0.01, False)
+        self.assertEqual(tr._rtk_gate_reason(False, True, False, True, False, None, False), 'not_fixed')
+        tr._quality = (0.012, 12, 0.01, True)
+        self.assertEqual(tr._rtk_gate_reason(False, True, False, True, False, None, False), 'sats_low')
+        tr._quality = (0.045, 30, 0.01, True)
+        self.assertEqual(tr._rtk_gate_reason(False, True, False, True, False, None, False), 'sigma_high')
+        tr._quality = (0.025, 30, 0.08, True)
+        self.assertEqual(tr._rtk_gate_reason(False, True, False, True, False, None, False), 'pair_high')
+        tr._quality = (0.018, 19, 0.035, True)
+        self.assertEqual(tr._rtk_gate_reason(False, True, False, True, False, None, False), 'low_sats_pair')
+        tr._quality = (0.015, 30, 0.01, True)
+        self.assertEqual(tr._rtk_gate_reason(False, True, False, True, False, None, False), 'quality_settling')
+        self.assertEqual(tr._rtk_gate_reason(False, True, False, False, True, None, False), 'baseline_out')
+        tr._raw_status = {'raw_pair_m': None}
+        self.assertEqual(tr._rtk_gate_reason(False, True, False, True, True, None, False, raw_missing=True), 'not_fixed')
+        tr._raw_status = {'raw_pair_m': 0.08}
+        self.assertEqual(tr._rtk_gate_reason(False, True, False, True, True, None, False, raw_missing=True), 'pair_high')
+
+        # 观测器模式（rtk_fit=False）被挡时归为 baseline_out
+        tr_obs = pt.PathTracker(path, pt.PathConfig(straight_imu_first=lc.ImuFirstConfig(rtk_fit=False)))
+        self.assertEqual(tr_obs._rtk_gate_reason(False, True, False, False, True, None, False), 'baseline_out')
+
+    def test_imu_alignment_summary_states(self):
+        align = lc.ImuAlignment()
+        self.assertEqual(align.summary()['state'], 'none')
+        align._imu_t = 10.0
+        self.assertEqual(align.summary(10.0)['state'], 'none')
+        # 学习中（未走满 min_m）
+        align.drive.samples.append((9.5, 0.1, 1.5))
+        s_learn = align.summary(10.0)
+        self.assertEqual(s_learn['state'], 'learning')
+        self.assertEqual(s_learn['drive_m'], 1.5)
+        # 走满 min_m 且收敛 -> drive_ready
+        align.drive.samples.clear()
+        for i in range(10):
+            align.drive.samples.append((5.0 + i * 0.4, 0.1, 0.4))
+        s_drive = align.summary(10.0)
+        self.assertEqual(s_drive['state'], 'drive_ready')
+        self.assertGreaterEqual(s_drive['drive_m'], align.drive.cfg.min_m)
+        self.assertLessEqual(s_drive['sigma_deg'], align.drive.cfg.max_sigma_deg)
+        # 已有记住的换算 -> ready (line)
+        align.obs = (8.0, 0.0, 0.1, math.radians(0.18), 0.0)
+        s_ready = align.summary(10.0)
+        self.assertEqual(s_ready['state'], 'ready')
+        self.assertEqual(s_ready['source'], 'line')
+        self.assertEqual(s_ready['age_s'], 2.0)
+        # 由开机行驶采纳 -> ready (drive)
+        align.adopted = (8.0, 0.1, math.radians(0.18), 4.0)
+        s_adopted = align.summary(10.0)
+        self.assertEqual(s_adopted['state'], 'ready')
+        self.assertEqual(s_adopted['source'], 'drive')
+        self.assertEqual(s_adopted['drive_m'], 4.0)
 
 
 if __name__ == '__main__':

@@ -1473,6 +1473,7 @@ class LineMission:
                                                  accel=self.path_cfg.accel_mps2,
                                                  lateral_accel=self.path_cfg.lat_accel_mps2),
                                calibration=calibration, diag=self._diag(calibration), tilt=tilt,
+                               alignment=self._imu_alignment.summary(self._last_tick),
                                imu_hold_test=self._imu_hold_test_status(),
                                rtk_events=self._jump_events(), operations=self.operations.status()))
 

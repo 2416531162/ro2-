@@ -675,15 +675,30 @@ def _line_estimation(ln):
             out['speed_source'] = pose['speed_source']
         if pose.get('yaw_source') in ('imu', 'wheel'):
             out['yaw_source'] = pose['yaw_source']
+    align = ln.get('alignment') if isinstance(ln.get('alignment'), dict) else None
+    if align and align.get('state') in ('ready', 'drive_ready', 'learning', 'none'):
+        a_out = {'state': align['state']}
+        if align.get('source') in ('line', 'drive'):
+            a_out['source'] = align['source']
+        for k, d in (('sigma_deg', 2), ('drive_m', 1), ('min_m', 1), ('age_s', 0), ('max_sigma_deg', 2)):
+            v = _num(align.get(k), d)
+            if v is not None and v >= 0:
+                a_out[k] = v
+        out['alignment'] = a_out
 
     # 只在行驶中（非切换、非原地转向）透传直线 / 圆弧控制器状态，避免暂停或换段时显示上一段的旧状态
     running = (ln.get('phase') == 'RUNNING' and tr is not None and tr.get('state') == 'RUNNING'
                and not tr.get('switching') and not tr.get('pivoting'))
     if running:
+        if tr.get('learn') is True:
+            out['learn'] = True
         sh = tr.get('straight_hold') if isinstance(tr.get('straight_hold'), dict) else None
         if sh and (sh.get('active') is True or sh.get('control_law') in ('imu_first', 'imu_launch')):
             law = sh.get('control_law') if sh.get('control_law') in ('imu_first', 'imu_launch') else None
             w_raw = sh.get('launch_weight') if law == 'imu_launch' else sh.get('weight')
+            gate = sh.get('rtk_gate')
+            valid_gates = ('ok', 'precise', 'position_untrusted', 'not_fixed', 'sats_low', 'sigma_high',
+                           'pair_high', 'low_sats_pair', 'quality_settling', 'baseline_out', 'quality_gate')
             s_out = {
                 'active': sh.get('active') is True,
                 'law': law,
@@ -691,6 +706,8 @@ def _line_estimation(ln):
                 'mode': sh.get('first_mode') if sh.get('first_mode') in ('rtk', 'imu') else None,
                 'locked': sh.get('first_locked') if type(sh.get('first_locked')) is bool else None,
                 'rtk_accepted': sh.get('first_rtk_accepted') if type(sh.get('first_rtk_accepted')) is bool else None,
+                'rtk_gate': gate if gate in valid_gates else None,
+                'rtk_precise': sh.get('rtk_precise') is True,
                 'poor_sky': sh.get('first_poor_sky') is True,
                 'poor_sky_exit': sh.get('first_poor_sky_exit') if sh.get('first_poor_sky_exit') in ('angle', 'offset', 'grass') else None,
                 'grass': sh.get('grass') is True,
@@ -706,6 +723,10 @@ def _line_estimation(ln):
                 'diff_m': _num(sh.get('first_innovation'), 4),
                 'beta_deg': _num(sh.get('first_beta_deg'), 2),
                 'crab_deg': _num(sh.get('first_crab_deg'), 2),
+                'err_deg': _num(sh.get('error_deg'), 2),
+                'bias_deg': _num(sh.get('bias_deg'), 2),
+                'fit_points': _nonneg_int(sh.get('first_fit_points')),
+                'fit_sigma_deg': _num(sh.get('first_fit_sigma_deg'), 2),
                 'imu_only_s': _num(sh.get('first_imu_only_s'), 1),
                 'jumps': _nonneg_int(sh.get('first_jumps')),
                 'sigma_lp_cm': _num(sh.get('sigma_lp_cm'), 2),

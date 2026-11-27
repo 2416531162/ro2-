@@ -1047,6 +1047,41 @@ class PathTracker:
         bad = self._fit_bad_t if fit else self._baseline_bad_t
         return bad is None or self._imu_now is None or self._imu_now - bad > first.baseline_hold_s
 
+    def _rtk_gate_reason(self, precise, position_ok, rtk_ok, fit_baseline_ok, quality_ok, pick, fused_second, raw_missing=False):
+        """只读：返回直线卫星纠偏的门槛放行/拒绝原因，不改变控制。"""
+        if rtk_ok:
+            return 'precise' if precise else 'ok'
+        if raw_missing:
+            return 'not_fixed' if self._raw_status.get('raw_pair_m') is None else 'pair_high'
+        if not position_ok:
+            return 'position_untrusted'
+        first = self.cfg.straight_imu_first
+        if first is None or fused_second:
+            return 'quality_gate'
+        if not first.rtk_fit:
+            return 'baseline_out'
+        q = self._quality
+        if q is not None:
+            sigma, sats, pair, fixed = q
+            if fixed is False:
+                return 'not_fixed'
+            if sats is not None and sats < first.fit_min_sats:
+                return 'sats_low'
+            if math.isfinite(sigma):
+                max_s = first.fit_max_sigma_m if (sats is not None and sats >= first.fit_full_sats) else first.fit_low_sats_max_sigma_m
+                if sigma > max_s:
+                    return 'sigma_high'
+            if pick is None and pair is not None and math.isfinite(pair) and pair > first.fit_max_pair_m:
+                return 'pair_high'
+            if (pick is None and sats is not None and sats < first.fit_full_sats
+                    and (pair is None or not math.isfinite(pair) or pair >= first.fit_low_sats_max_pair_m)):
+                return 'low_sats_pair'
+        if (pick is None and not quality_ok) or (pick is not None and not self._receiver_quality_ok()):
+            return 'quality_settling'
+        if pick is None and not fit_baseline_ok:
+            return 'baseline_out'
+        return 'quality_gate'
+
     def set_nozzle(self, forward, left=0.0):
         """实际喷头相对后轴中心；整场使用其规划时同一份偏移。"""
         if not all(math.isfinite(v) for v in (forward, left)):
@@ -1672,6 +1707,8 @@ class PathTracker:
                               crab=align.predict_crab(self._imu_now))
         eligible = eligible and guide.locked
         measured = None
+        rtk_gate = None
+        rtk_precise = False
         self._raw_status = {}
         if guide.locked:
             reference = wrap(imu_yaw + guide.offset)
@@ -1700,20 +1737,23 @@ class PathTracker:
             position_ok = precise or (self._runup_position_trusted(pose)
                                       if self.runup_speed_mps is not None and starting
                                       else not st.integral_frozen)
-            rtk_ok = position_ok and (precise or (self._baseline_ok(fit=True) and self._rtk_quality_ok() if first.rtk_fit
-                                                  else baseline_ok))
+            fit_baseline_ok = self._baseline_ok(fit=True) if first.rtk_fit else baseline_ok
+            quality_ok = self._rtk_quality_ok() if first.rtk_fit else True
+            rtk_ok = position_ok and (precise or (fit_baseline_ok and quality_ok))
             # 融合已经改用副天线定位（主天线被污染或没固定，gnss_fusion FusionConfig.secondary_*）：融合位置就是好的那根，
             # 两天线距离误差、测向基线、主天线接收机质量都不挡，也不再另选天线
             raw_mode = self._straight_raw_mode()
             fused_second = first.rtk_fit and not raw_mode and getattr(pose, 'position_antenna', 'main') == 'second'
             pick = (self._pick_antenna(guide, heading, st.s, base_lat, measured)
                     if first.rtk_fit and not fused_second and not raw_mode else None)
+            raw_missing = False
             if raw_mode:
                 # 卫星横偏改用两根天线的原始固定解（_straight_raw_lateral，11-27 用户）：不经过融合位置（楼下测向被带偏时
                 # 融合位置跟着偏、β 被带着往反方向修）。两根对得上就是对两根天线的互检，所以同选天线那支一样，
                 # 两天线距离误差、测向基线不再挡，接收机质量照常要合格；对不上这拍卫星不可用（按 IMU 推算）。
                 # 卫星不可用时 measured 只在这条线第一拍当初值，照旧给融合位置算的。
                 raw = self._straight_raw_lateral(guide, piece, st.s, max(0.0, pose.speed), h)
+                raw_missing = raw is None
                 rtk_ok = raw is not None and position_ok and (precise or self._receiver_quality_ok())
                 if raw is not None:
                     measured = raw
@@ -1725,6 +1765,8 @@ class PathTracker:
                 # 测向照样不用、车头靠 IMU）；接收机质量照常要合格
                 rtk_ok = position_ok and (precise or self._receiver_quality_ok())
                 measured += pick[1]
+            rtk_precise = bool(precise)
+            rtk_gate = self._rtk_gate_reason(precise, position_ok, rtk_ok, fit_baseline_ok, quality_ok, pick, fused_second, raw_missing)
             # 用副天线时，融合位置（跟着被干扰的主天线）比副天线多偏的那段沿线法向挪回去，报给 app（地图喷线、作业报告）
             self._antenna['shift'] = None if pick is None or pick[0] != 'second' else (
                 -math.sin(piece.yaw) * pick[1], math.cos(piece.yaw) * pick[1])
@@ -1844,6 +1886,7 @@ class PathTracker:
             grass_weight=round(guide.grass_weight, 4),
             sigma_lp_cm=None if self._sigma_lp is None else round(100 * self._sigma_lp, 3),
             target_rate_deg_s=math.degrees(self._straight_target_rate), aligning=aligning, baseline_ok=baseline_ok,
+            rtk_gate=rtk_gate, rtk_precise=rtk_precise, learn=bool(self.learn),
             outer_e=guide.e, outer_e_rtk=measured, inner_wz=inner_w, legacy_wz=legacy_w, final_wz=output,
             **guide.status(), **self._antenna_status(), **self._raw_lateral_status(), **self._straight_core.status(),
             **(align.status() if align is not None else {}))
@@ -2645,7 +2688,8 @@ class PathTracker:
         return dict(state=st.state, reason=st.reason, e=st.e, heading_err_deg=math.degrees(st.heading_err),
                     s=st.s, length=st.length, kappa_ref=st.kappa_ref, v_cmd=st.v_cmd, kappa=st.kappa,
                     integral=st.integral, trim_kappa=-self.cfg.ki_per_m2 * st.integral, stats=dict(st.stats),
-                    integral_frozen=st.integral_frozen, straight_hold=dict(self._straight_status),
+                    integral_frozen=st.integral_frozen, learn=bool(self.learn),
+                    straight_hold=dict(self._straight_status),
                     arc_hold=dict(self._arc_status), launch_settle=dict(self._settle) if self._settle else None)
 
 
@@ -3382,5 +3426,6 @@ class SectionTracker:
                     pivot_recoveries=self._pivot_recoveries,
                     constant_straight_speed=self.constant_speed_here(),
                     constant_arc_speed=self.constant_arc_speed_here(),
+                    learn=bool(self.trackers[self.index].learn),
                     straight_hold=dict(self.trackers[self.index]._straight_status),
                     arc_hold=dict(self.trackers[self.index]._arc_status))

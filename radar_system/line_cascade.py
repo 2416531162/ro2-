@@ -1368,6 +1368,41 @@ class ImuAlignment:
                     align_drive_sigma_deg=None if drive is None else deg(drive[1]),
                     align_adopted_m=None if self.adopted is None else round(self.adopted[3], 2))
 
+    def summary(self, now=None):
+        """只读：车头换算记忆 / 开机行驶学习的当前进度（供平板显示首条是否免空跑）。"""
+        t = self._imu_t if now is None else now
+        cfg = self.drive.cfg
+        if t is None or not math.isfinite(t):
+            return dict(state='none', min_m=round(cfg.min_m, 1))
+        if self.remembered():
+            o = self.pending or self.obs
+            pred = self.predict(t) if self.pending is None else None
+            sig = pred[1] if pred is not None else o[3]
+            from_drive = (self.pending is None and self.adopted is not None
+                          and self.obs is not None and abs(self.obs[0] - self.adopted[0]) < 1e-6)
+            return dict(state='ready', source='drive' if from_drive else 'line',
+                        sigma_deg=None if sig is None else round(math.degrees(sig), 2),
+                        age_s=round(max(0.0, t - o[0]), 0),
+                        drive_m=None if not from_drive else round(self.adopted[3], 1),
+                        min_m=round(cfg.min_m, 1))
+        dist = sum(w for ts, _, w in self.drive.samples if ts >= t - cfg.keep_s)
+        est = None
+        if dist >= cfg.min_m:
+            if self._drive_status is not None and 0.0 <= t - self._drive_status[0] < 1.0:
+                est = self._drive_status[1]
+            else:
+                est = self.drive.estimate(t)
+                self._drive_status = (t, est)
+        if est is not None:
+            sig_deg = round(math.degrees(est[1]), 2)
+            ready = est[1] <= math.radians(cfg.max_sigma_deg)
+            return dict(state='drive_ready' if ready else 'learning',
+                        drive_m=round(est[2], 1), min_m=round(cfg.min_m, 1),
+                        sigma_deg=sig_deg, max_sigma_deg=round(cfg.max_sigma_deg, 2))
+        if dist > 0.05:
+            return dict(state='learning', drive_m=round(dist, 1), min_m=round(cfg.min_m, 1))
+        return dict(state='none', drive_m=0.0, min_m=round(cfg.min_m, 1))
+
 
 def paint_weight(cfg, along_m):
     """开喷处后 along_m 米时线头段之后那组参数（往回拉、死区、草地模式）的权重：head_m 内 0，再 head_blend_m 内线性到 1。"""
