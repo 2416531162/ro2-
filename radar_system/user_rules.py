@@ -71,6 +71,23 @@ OUTPUT_SNAP_DEG = 2.0
 # 测向变浮点但主、副天线都固定：航向不确定度放宽到这么多照样走（09-27「测向变浮点不能停，靠 IMU 维持」）。
 # 融合（gnss_fusion.HEADING_HOLD_SIGMA_DEG）和任务层（line_mission.GYRO_HOLD_SIGMA_YAW_DEG）用同一个值
 HEADING_HOLD_SIGMA_DEG = 2.0
+# 测向被楼面反射带偏时不跟着走（11-27 用户「改」，gnss_fusion FusionConfig.heading_course_*）：
+# 10-10 20:03 那条 48 m 线：楼下测向在 s 12–28 m 比实际行驶方向偏 +2.7–3.6°，IMU 是直的（和陀螺积分一致、不漂），
+# 融合航向按直行 2 s 时间常数跟过去偏了 2–3°，融合位置跟着推偏，RTK 被当离群降权。
+# 做法（不报错、不停车，10-05 规矩照旧）：直线上从开头起比「各自相对 IMU 变了多少」——测向（最近 HEADING_COURSE_DUAL_S 平均）、
+# 最近 HEADING_COURSE_WINDOW_M 固定解拟合的行驶方向。测向变了 > HEADING_COURSE_SUSPECT_DEG、行驶方向没变
+# （≤ HEADING_COURSE_AGREE_DEG，IMU 和卫星轨迹两票对测向一票）：这帧测向换成「这段直线开头的测向 + IMU 之后转过的角」，
+# 已经被拖过去的也拉回来；测向变化回到 HEADING_COURSE_RELEASE_DEG 以内、或行驶方向也变到 2 × AGREE 就恢复。
+# 两个起点按 HEADING_COURSE_BASE_TAU_S 慢慢跟（IMU 零漂这种慢变化不算）。转弯、IMU 断着照旧全信测向。
+# 一上来就偏的（安装偏差）不算「变了」，照旧交给测向偏差在线学习。
+# 离线三趟实录：48 m 线 s 12–24 m 全判上（测向变 +2.3–3.5°、轨迹 ±0.3°），19:59 那条测向变 −1.2–2.0° 也判上，20:01 那条基本不判。
+HEADING_COURSE_CHECK = True
+HEADING_COURSE_WINDOW_M = 3.0
+HEADING_COURSE_DUAL_S = 2.0
+HEADING_COURSE_SUSPECT_DEG = 1.0
+HEADING_COURSE_RELEASE_DEG = 0.6
+HEADING_COURSE_AGREE_DEG = 0.5
+HEADING_COURSE_BASE_TAU_S = 30.0
 
 # ───────────── 二、卫星断了、传感器不好时 ─────────────
 
@@ -143,6 +160,18 @@ POOR_SKY_EXIT_E_M = 0.06
 #   现在 2.43 / 3.28；×0 2.65 / 1.81；×0.25 2.48 / 2.61；×0.5 2.45 / 2.94（线头都不变）
 #   带过来的角度错（今天没修记忆时）最大偏差：现在 2.46，×0 3.40，×0.25 2.55，×0.5 2.39；看不见的侧滑 0.1°：2.66 / 3.31 / 2.95 / 2.83
 POOR_SKY_PULL_SCALE = 0.0
+# 直线的卫星横偏改用原始双天线固定解（11-27 用户「直线控制改用原始 RTK 算横偏，不再用融合位置；两根对得上才用」）：
+# 10-10 20:03 那条 48 m 线（车端 c13812e，地上实测前半段往右鼓约 10 cm、后半段直）：楼下双天线测向被反射带偏 +2–3.6°
+# （约 10 m），融合航向跟着偏，融合位置按它推、RTK 又被当离群降权，比 RTK 偏左 4–5 cm；直线拿融合位置当卫星横偏，
+# β 往右修约 0.3°，车本来是直的被修成往右走。IMU 航向和陀螺积分一致、没漂。
+# 现在：两根天线最近的固定解各自按测量时刻的 IMU 参考航向（含 β）换算到喷头，两根差 ≤ STRAIGHT_RAW_PAIR_M 才用、取平均；
+# 对不上沿用上次对上的最多 STRAIGHT_RAW_HOLD_S（同一段直线，按 IMU 往前推），再不行这拍按卫星不可用（IMU 推算）。
+# 一帧固定解超过 STRAIGHT_RAW_FRESH_S 不算新鲜。从没收到过两根天线的原始解（单天线车、老任务层、仿真）照旧用融合位置。
+# 离线三趟实录（两根差 ≤ 2 cm、沿用 0.5 s）：喷线时间 78%（48 m 楼下那条）/ 94% / 97% 有卫星可用。
+STRAIGHT_RAW_LATERAL = True
+STRAIGHT_RAW_PAIR_M = 0.02
+STRAIGHT_RAW_HOLD_S = 0.5
+STRAIGHT_RAW_FRESH_S = 0.3
 
 # ───────────── 四、起步、助跑、线头 ─────────────
 

@@ -6,6 +6,7 @@
 import bisect
 import dataclasses
 import math
+from collections import deque
 from dataclasses import dataclass
 from wheel_scale import WheelScale
 import user_rules as rules
@@ -206,6 +207,18 @@ class FusionConfig:
     heading_correlation_s: float = 0.25
     heading_straight_tau_s: float = 2.0
     heading_turn_tau_s: float = 0.15
+    # 测向被楼面反射带偏（user_rules.HEADING_COURSE_*，11-27 用户）：直线上从开头起比「各自相对 IMU 变了多少」——
+    # 测向（最近 heading_course_dual_s 平均）和最近 heading_course_window_m 固定解拟合的行驶方向。测向变了
+    # > heading_course_suspect_deg、行驶方向没变（≤ heading_course_agree_deg）：这帧测向换成「这段直线开头的测向 + IMU 之后转过的角」；
+    # 测向变化回到 heading_course_release_deg 以内、或行驶方向也变到 2 × agree 就恢复。两个起点按
+    # heading_course_base_tau_s 慢慢跟（IMU 零漂这种慢变化吸收掉）。转弯、IMU 断着照旧全信测向，不报错（10-05 规矩照旧）。
+    heading_course_check: bool = rules.HEADING_COURSE_CHECK
+    heading_course_window_m: float = rules.HEADING_COURSE_WINDOW_M
+    heading_course_dual_s: float = rules.HEADING_COURSE_DUAL_S
+    heading_course_suspect_deg: float = rules.HEADING_COURSE_SUSPECT_DEG
+    heading_course_release_deg: float = rules.HEADING_COURSE_RELEASE_DEG
+    heading_course_agree_deg: float = rules.HEADING_COURSE_AGREE_DEG
+    heading_course_base_tau_s: float = rules.HEADING_COURSE_BASE_TAU_S
     heading_turn_rate_deg_s: float = 3.0
     gyro_margin_deg_s: float = 0.5
     stationary_speed_mps: float = 0.002
@@ -270,7 +283,8 @@ class FusionConfig:
             if name == 'yaw_input':
                 continue
             if name in ('continuous_output', 'heading_bias_learning', 'wheel_increment_enabled',
-                        'wheel_scale_auto', 'sensor_failover_enabled', 'tilt_compensation_enabled', 'ground_speed_still'):
+                        'wheel_scale_auto', 'sensor_failover_enabled', 'tilt_compensation_enabled', 'ground_speed_still',
+                        'heading_course_check'):
                 if type(value) is not bool:
                     raise ValueError(name + ' 必须是布尔值')
                 continue
@@ -297,6 +311,8 @@ class FusionConfig:
             raise ValueError('history_max_samples 必须是至少 10 的整数')
         if self.hold_wheel_scale_error > 1:
             raise ValueError('推算比例误差必须是 0–1 的比例')
+        if self.heading_course_release_deg > self.heading_course_suspect_deg:
+            raise ValueError('heading_course_release_deg 不能大于 heading_course_suspect_deg')
 
 
 @dataclass(frozen=True)
@@ -607,6 +623,15 @@ class _State:
         self.output_x = self.output_y = self.output_yaw = 0.0
         self.predicted_turn = self.scale_turn = 0.0
         self.last_turn_t = -math.inf
+        # 测向被带偏（FusionConfig.heading_course_*）：直线上最近的固定解 (时刻, 主天线 x, y, 推算累计转角)、最近的测向
+        # (时刻, 测向车头 − 推算累计转角)；base 这段直线开头 [测向 − IMU, 行驶方向 − IMU, 上次更新时刻]；suspect 是不是判成
+        # 测向被带偏；两个变化（度）给状态看；replaced 换过几帧测向
+        self.course_fix = deque()
+        self.course_dual = deque()
+        self.course_base = None
+        self.course_suspect = False
+        self.course_dual_deg = self.course_track_deg = None
+        self.course_replaced = 0
         self.heading_sample_t = -math.inf   # 上一帧测向的时刻（增益按帧间隔限幅）
         self.heading_recovery_t = -math.inf # 最近一次按测向快校的时刻
         self.heading_innovation = self.heading_test_ratio = 0.0
@@ -1388,6 +1413,7 @@ class GnssFusion:
         rate = self._turn_rate()
         var = math.radians(max(cfg.heading_floor_deg, sample.sigma_heading_deg)) ** 2 + (rate * cfg.heading_sync_s) ** 2
         yaw = _wrap(raw + self._mount - s.heading_bias)
+        self._course_note_dual(sample.t, yaw)
         self._adaptive_heading(sample, yaw, raw, var, trusted)
 
     def _adaptive_heading(self, sample, yaw, raw, variance, trusted):
@@ -1396,14 +1422,19 @@ class GnssFusion:
         增益照常限幅：直行慢校、转弯或和推算差得多时快校；限幅通过放大 R 实现，转弯/接回时不把角度差学成 IMU 漂移率。
         """
         s, cfg = self._s, self.config
+        imu_ok = not s.imu_mismatch and sample.t - s.imu_valid_t <= cfg.sensor_timeout_s
+        turning = sample.t - s.last_turn_t <= 1.0
+        # 测向被带偏（IMU 和卫星轨迹都说车头没变、只有测向变了，heading_course_*）：这帧换成这段直线开头的测向 + IMU 转过的角
+        suspect = imu_ok and not turning and self._course_suspect(sample.t)
+        if suspect:
+            yaw = _wrap(s.predicted_turn + s.course_base[0])
+            s.course_replaced += 1
         residual = _wrap(yaw - s.yaw)
         innovation = s.p[7] + variance
         s.heading_innovation = residual
         s.heading_test_ratio = residual * residual / max(1e-20, cfg.innovation_gate_sigma ** 2 * innovation)
         elapsed = sample.t - s.heading_sample_t
         s.heading_sample_t = sample.t
-        imu_ok = not s.imu_mismatch and sample.t - s.imu_valid_t <= cfg.sensor_timeout_s
-        turning = sample.t - s.last_turn_t <= 1.0
         if trusted:
             gap = sample.t - s.sat_yaw_t
             if 0 < gap <= cfg.heading_timeout_s:
@@ -1442,11 +1473,80 @@ class GnssFusion:
         variance = max(variance, s.p[7] * (1.0 / max_gain - 1.0))
         s.heading_gain = s.p[7] / (s.p[7] + variance)
         aligned = not cfg.continuous_output or abs(_wrap(s.yaw - s.output_yaw)) <= math.radians(0.05)
-        learn_drift = (imu_ok and not turning and not recovering and aligned
+        learn_drift = (imu_ok and not turning and not recovering and aligned and not suspect
                        and sample.t - s.heading_recovery_t > cfg.heading_straight_tau_s
                        and abs(residual) <= math.radians(0.3))
         self._yaw_observation(yaw, variance, gate=False, update_bias=learn_drift)
         s.heading_t, s.heading_ok, s.raw_yaw, s.raw_heading_var = sample.t, True, raw, variance
+
+    def _course_clear(self):
+        s = self._s
+        s.course_fix.clear()
+        s.course_dual.clear()
+        s.course_base = None
+        s.course_suspect = False
+        s.course_dual_deg = s.course_track_deg = None
+
+    def _course_note_fix(self, sample, xy):
+        """测向被带偏的参照（heading_course_*）：直线上往前走着的固定解记下主天线位置和推算累计转角；转弯、慢、倒车、
+        不是固定解就从头来（开头重新定）。只留刚好够 heading_course_window_m 的那段。"""
+        s, cfg = self._s, self.config
+        if not cfg.heading_course_check:
+            return
+        if (xy is None or sample.sol not in _FIXED or not s.yaw_ready or not s.position_ready
+                or sample.t - s.last_turn_t <= 1.0 or s.speed < cfg.course_min_speed_mps):
+            self._course_clear()
+            return
+        fx = s.course_fix
+        fx.append((sample.t, xy[0], xy[1], s.predicted_turn))
+        while len(fx) >= 2 and math.hypot(fx[1][1] - fx[-1][1], fx[1][2] - fx[-1][2]) >= cfg.heading_course_window_m:
+            fx.popleft()
+
+    def _course_note_dual(self, t, yaw):
+        s, cfg = self._s, self.config
+        if cfg.heading_course_check and s.course_fix:
+            s.course_dual.append((t, _wrap(yaw - s.predicted_turn)))
+            while s.course_dual[0][0] < t - cfg.heading_course_dual_s:
+                s.course_dual.popleft()
+
+    def _course_suspect(self, t):
+        """测向是不是被带偏了（heading_course_*）：从这段直线开头起，测向相对 IMU 变了多少、固定解拟合的行驶方向相对 IMU
+        变了多少。窗口没走满、测向没攒够 heading_course_dual_s 时不判。"""
+        s, cfg = self._s, self.config
+        fx, du = s.course_fix, s.course_dual
+        if (not cfg.heading_course_check or len(fx) < 10 or not du
+                or du[-1][0] - du[0][0] < 0.9 * cfg.heading_course_dual_s
+                or math.hypot(fx[-1][1] - fx[0][1], fx[-1][2] - fx[0][2]) < 0.95 * cfg.heading_course_window_m):
+            s.course_suspect = False
+            return False
+        n = len(fx)
+        mx, my = sum(p[1] for p in fx) / n, sum(p[2] for p in fx) / n
+        sxx = sum((p[1] - mx) ** 2 for p in fx)
+        syy = sum((p[2] - my) ** 2 for p in fx)
+        sxy = sum((p[1] - mx) * (p[2] - my) for p in fx)
+        course = 0.5 * math.atan2(2 * sxy, sxx - syy)            # 主轴方向，再按首尾定朝向
+        if math.cos(course) * (fx[-1][1] - fx[0][1]) + math.sin(course) * (fx[-1][2] - fx[0][2]) < 0:
+            course += math.pi
+        turn = math.atan2(sum(math.sin(p[3]) for p in fx), sum(math.cos(p[3]) for p in fx))
+        track = _wrap(course - turn)                                 # 行驶方向 − IMU
+        dual = math.atan2(sum(math.sin(v) for _, v in du), sum(math.cos(v) for _, v in du))   # 测向 − IMU
+        if s.course_base is None:
+            s.course_base = [dual, track, t]
+        base = s.course_base
+        dd, dc = _wrap(dual - base[0]), _wrap(track - base[1])
+        s.course_dual_deg, s.course_track_deg = math.degrees(dd), math.degrees(dc)
+        if s.course_suspect:
+            s.course_suspect = (abs(dd) > math.radians(cfg.heading_course_release_deg)
+                                and abs(dc) <= 2 * math.radians(cfg.heading_course_agree_deg))
+        else:
+            s.course_suspect = (abs(dd) > math.radians(cfg.heading_course_suspect_deg)
+                                and abs(dc) <= math.radians(cfg.heading_course_agree_deg))
+        if not s.course_suspect:
+            # 慢变化（IMU 零漂等）吸收掉；判成带偏的那段起点不动
+            k = min(1.0, max(0.0, t - base[2]) / cfg.heading_course_base_tau_s)
+            base[0], base[1] = _wrap(base[0] + k * dd), _wrap(base[1] + k * dc)
+        base[2] = t
+        return s.course_suspect
 
     def _turn_rate(self):
         """现在转得多快（rad/s）：IMU 能用就用 IMU，否则差速车用轮速里程计，都没有为 0。"""
@@ -1545,6 +1645,7 @@ class GnssFusion:
             sample, xy = pick
         trusted = xy is not None and sample.sol in _FIXED and len(xy) > 3 and bool(xy[3])
         self._mark_trust(sample.t, trusted)
+        self._course_note_fix(sample, xy)
         if sample.inertial_only and sample.sol not in _FIXED:
             s.position_quality='DEAD_RECKONING'
             s.fix_reason='rtk_float' if xy is not None else 'fix_unavailable'
@@ -2203,6 +2304,8 @@ class GnssFusion:
             'raw_gyro_bias_deg_s': math.degrees(s.raw_gyro_bias) if cfg.yaw_input == 'angle' else None,
             'heading_filter': {'innovation_deg': math.degrees(s.heading_innovation),
                                'test_ratio': s.heading_test_ratio, 'gain': s.heading_gain,
+                               'course_suspect': s.course_suspect, 'course_dual_change_deg': s.course_dual_deg,
+                               'course_track_change_deg': s.course_track_deg, 'course_replaced': s.course_replaced,
                                'bias_kind': 'angle_drift' if cfg.yaw_input == 'angle' else 'gyro_bias'},
             'alignment': {'x_m': s.x - s.output_x if cfg.continuous_output and s.output_ready else 0.0,
                           'y_m': s.y - s.output_y if cfg.continuous_output and s.output_ready else 0.0,
