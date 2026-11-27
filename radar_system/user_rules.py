@@ -105,9 +105,11 @@ TRACK_HEADING_DISTANCE_M = 1.0
 TRACK_HEADING_READY_M = 1.0
 TRACK_HEADING_SIGMA_FLOOR_DEG = 1.0
 TRACK_HEADING_SWITCH_SIGMA_DEG = 2.0
-# 一段里车头转过超过这么多（原地转）就从这帧重新起一段：天线绕后轴甩，定位和 IMU 时刻差一点夹角就差很多（仿真原地转 180°
-# 后第一段 1 m 带偏 1.7°）；R3 圆 1 m 约转 17°，照样能对
+# 一段里车头转过超过这么多、而且比半径 TRACK_HEADING_MIN_RADIUS_M 的圆弧转得还急（原地转）就从这帧重新起一段：天线绕后轴甩，
+# 定位和 IMU 时刻差一点夹角就差很多（仿真原地转 180° 后第一段 1 m 带偏 1.7°）。边走边转的照样对：R3 圆 1 m 约转 17°，
+# 圆弧进线 R1.5 / R1.25 1 m 转 38° / 46°（11-27 用户「1.5m 的半径能行不」，原来只按转角挡，小圆弧一段都对不上）
 TRACK_HEADING_MAX_TURN_DEG = 30.0
+TRACK_HEADING_MIN_RADIUS_M = 0.5
 DUAL_HEADING_CHECK_DEG = 3.0
 # SCH16T 航向角刻度（11-23 实测真转一整圈多读约 0.46°，多读 0.127%）标定在 IMU 固件参数里，车上程序不再乘：
 # 用户「标定在imu的固件里面」→ 模块 0x2012 陀螺 Z 刻度 = −1270 ppm（发 0x401: 40 12 20 00 0A FB 00 00，存模块 flash）

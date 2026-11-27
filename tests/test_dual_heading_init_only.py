@@ -30,6 +30,7 @@ def cfg(init_only=True, **kw):
                    track_heading_sigma_floor_deg=rules.TRACK_HEADING_SIGMA_FLOOR_DEG,
                    track_heading_switch_sigma_deg=rules.TRACK_HEADING_SWITCH_SIGMA_DEG,
                    track_heading_max_turn_deg=rules.TRACK_HEADING_MAX_TURN_DEG,
+                   track_heading_min_radius_m=rules.TRACK_HEADING_MIN_RADIUS_M,
                    dual_heading_check_deg=rules.DUAL_HEADING_CHECK_DEG, **kw)
 
 
@@ -45,9 +46,10 @@ class Rig:
         for i in range(n):
             self.t = t = round(self.t + .1, 6)
             dt = .1
+            mid = self.h + .5 * w * dt              # 按中点车头推位置：真圆弧、没有侧滑
             self.h += w * dt
-            self.x += v * math.cos(self.h) * dt
-            self.y += v * math.sin(self.h) * dt
+            self.x += v * math.cos(mid) * dt
+            self.y += v * math.sin(mid) * dt
             f = self.f
             f.add_wheel(gf.WheelSample(t, v, w))
             if imu:
@@ -89,9 +91,11 @@ class Rules(unittest.TestCase):
                 c = line_node.load_fusion_config(gf, path)
         self.assertIs(c.dual_heading_init_only, rules.DUAL_HEADING_INIT_ONLY)
         self.assertEqual((c.track_heading_distance_m, c.track_heading_ready_m, c.track_heading_sigma_floor_deg,
-                          c.track_heading_switch_sigma_deg, c.track_heading_max_turn_deg, c.dual_heading_check_deg),
+                          c.track_heading_switch_sigma_deg, c.track_heading_max_turn_deg, c.track_heading_min_radius_m,
+                          c.dual_heading_check_deg),
                          (rules.TRACK_HEADING_DISTANCE_M, rules.TRACK_HEADING_READY_M, rules.TRACK_HEADING_SIGMA_FLOOR_DEG,
-                          rules.TRACK_HEADING_SWITCH_SIGMA_DEG, rules.TRACK_HEADING_MAX_TURN_DEG, rules.DUAL_HEADING_CHECK_DEG))
+                          rules.TRACK_HEADING_SWITCH_SIGMA_DEG, rules.TRACK_HEADING_MAX_TURN_DEG,
+                          rules.TRACK_HEADING_MIN_RADIUS_M, rules.DUAL_HEADING_CHECK_DEG))
         self.assertEqual((rules.TRACK_HEADING_DISTANCE_M, rules.TRACK_HEADING_SIGMA_FLOOR_DEG), (1.0, 1.0))   # 用户「走 1m」
         with self.assertRaises(ValueError):
             gf.FusionConfig(dual_heading_init_only=1)
@@ -133,6 +137,23 @@ class InitOnly(unittest.TestCase):
         p = rig.step(30, v=.8)
         self.assertEqual(rig.role()['role'], 'check')
         self.assertLess(max(abs(rig.err_deg(q)) for q in p), .3)       # 跨原地转的那段不算对（转过 30° 重新起一段）
+
+    def test_tight_entry_arc_still_aligns(self):
+        # 圆弧进线 R1.25 / R1.5（11-27 用户「1.5m 的半径能行不」）：1 m 转 38–46°，边走边转照样按位移对车头；原来只按转角挡、
+        # 一段都对不上，测向的 2° 一直留着
+        for radius in (1.25, 1.5):
+            with self.subTest(radius=radius):
+                rig = Rig()
+                p = rig.step(134, v=.45, w=-.45 / radius)          # 沿圆弧走 6 m
+                st = rig.role()
+                self.assertEqual(st['role'], 'check')
+                self.assertGreaterEqual(st['track_aligns'], 4)
+                self.assertLess(abs(rig.err_deg(p[-1])), .3)
+                old = Rig()
+                old.f.config = replace(old.f.config, track_heading_min_radius_m=1e6)   # 只按转角挡
+                q = old.step(134, v=.45, w=-.45 / radius)
+                self.assertEqual(old.role()['track_aligns'], 0)
+                self.assertGreater(abs(old.err_deg(q[-1])), 1.5)
 
     def test_inconsistent_second_antenna_frames_do_not_block_the_alignment(self):
         # 楼下两根天线互检超 2 cm 的帧很多：这些帧不当一段的起点、终点，段照样攒满
