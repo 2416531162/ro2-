@@ -1,8 +1,8 @@
 """进线可选圆弧（2026-11-19 用户：「可选圆弧还是原地，圆弧就是可以设置后方有多远的空地，最低要1.5m才允许圆弧」）。
 
 entry_turn='arc' 时只往前、按 Dubins 圆弧开到助跑起点车头已顺线，不停车接着助跑；整条接入车身不退到「车在助跑起点时
-车尾」后方 entry_space_m 以外，不到 2.0 m（2026-11-27 用户「后方空地 2 m」；11-22 起是 2.5，原来 1.5）或哪个半径都
-放不下就照原地转进线；空地填得越大自动用越大的半径（最大 3 m，最小 1.25 m）。"""
+车尾」后方 entry_space_m 以外，不到 1.5 m（2026-11-27 用户「后方空地 2 m」→「大于 1.5m 应该也够了吧」；11-22 起是 2.5，
+原来 1.5）或哪个半径都放不下就照原地转进线；空地填得越大自动用越大的半径（最大 3 m，最小 1.25 m）。"""
 from dataclasses import replace
 from pathlib import Path
 import math
@@ -63,8 +63,8 @@ class ArcEntry(unittest.TestCase):
     SIDE = line_car(-1., 3., -math.pi / 2)        # 线头侧面 3 m、车头对着线
 
     def test_below_minimum_space_stays_pivot(self):
-        self.assertEqual(rp.ENTRY_ARC_MIN_SPACE_M, 2.0)
-        for space in (0., 1.5, 1.99):
+        self.assertEqual(rp.ENTRY_ARC_MIN_SPACE_M, 1.5)
+        for space in (0., 1.0, 1.49):
             self.assertEqual(plan(self.SIDE, space)[2], 'pivot', space)
 
     def test_arc_with_2_m_only_forward_no_stop_and_stays_inside_space(self):
@@ -98,8 +98,8 @@ class ArcEntry(unittest.TestCase):
         self.assertGreaterEqual(worst, g - 5. - 1e-6)
 
     def test_turning_round_at_the_far_end_needs_more_space(self):
-        # 刚画完同一条线、停在线尾外朝外：往前绕回来要更大的空地。2.0 m（最低）用 R1.25 绕得回来、直线助跑照常 2 m，
-        # 2.4 m 起 R1.5 也放得下；再少照原地
+        # 刚画完同一条线、停在线尾外朝外：往前绕回来要更大的空地。1.5 m（最低）放不下照原地，1.75 / 2.0 m 用 R1.25 绕得回来、
+        # 直线助跑照常 2 m，2.4 m 起 R1.5 也放得下
         car = line_car(12.5, 0., 0.)
         spec = replace(LINE, points=((12., 0.), (0., 0.)))
         def how(space):
@@ -107,8 +107,9 @@ class ArcEntry(unittest.TestCase):
             rp.plan_current(replace(spec, entry_turn='arc', entry_space_m=space), car, .556,
                             body=BODY, nozzle_x=NOZZLE, info=info)
             return info['entry_turn']
+        self.assertEqual(how(1.0), 'pivot')
         self.assertEqual(how(1.5), 'pivot')
-        self.assertEqual(how(1.99), 'pivot')
+        self.assertEqual(how(1.75), 'arc')
         self.assertEqual(how(2.), 'arc')
         self.assertEqual(how(2.5), 'arc')
         self.assertEqual(how(3.), 'arc')

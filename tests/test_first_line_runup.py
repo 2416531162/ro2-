@@ -94,7 +94,7 @@ class ArcDryRun(unittest.TestCase):
     def test_arc_entry_and_arc_return_never_stop(self):
         for car in self.CARS:
             with self.subTest(car=car):
-                sections, entry, info = self.plan(car, rules.ENTRY_ARC_MIN_SPACE_M)
+                sections, entry, info = self.plan(car, 2.)
                 self.assertEqual(info['learn_turn'], 'arc')
                 self.assertEqual(info['learn_m'], rp.LEARN_M)
                 self.assertTrue(all(s.direction == 1 for s in sections))                 # 不倒车
@@ -114,6 +114,15 @@ class ArcDryRun(unittest.TestCase):
                 radii = [1 / abs(p.kappa) for s in sections for p in s.path.pieces if abs(p.kappa) > 1e-9]
                 self.assertGreaterEqual(min(radii), rules.ENTRY_ARC_RADII[-1] - 1e-9)
                 self.assertFalse(getattr(paint, 'first_line', False))                    # 画线那段有空跑学好的
+
+    def test_minimum_space_still_returns_on_an_arc(self):
+        # 后方空地最低 1.5 m：空跑后照样圆弧绕回、不停车接着助跑；线尾掉头开到 G 放不下圆弧时那下照原来停一次
+        for car in self.CARS:
+            with self.subTest(car=car):
+                sections, _, info = self.plan(car, rules.ENTRY_ARC_MIN_SPACE_M)
+                self.assertEqual(info['learn_turn'], 'arc')
+                k = [getattr(s, 'learn', False) for s in sections].index(True)
+                self.assertTrue(all(s.continuous_after for s in sections[k:-1]))
 
     def test_pivot_entry_still_returns_on_an_arc(self):
         # 进线选原地转：开到 G 照原来（停一次），空跑后照样圆弧绕回、不停车接着助跑
