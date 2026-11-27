@@ -23,7 +23,7 @@ from types import SimpleNamespace
 
 import route_plan
 from line_cascade import REASON_TEXT, ImuAlignment
-from path_tracker import DIFF_REVERSE_MPS, DIFF_SETTLE_S, PathConfig, SectionTracker, differential_config
+from path_tracker import DIFF_REVERSE_MPS, DIFF_SETTLE_S, PathConfig, PivotRebound, SectionTracker, differential_config
 from route_operations import RouteOperations
 from rtk_hold_budget import DegradedSpeedLimiter
 from paint_quality import RTK_LOST_PAINT_STOP_S
@@ -268,6 +268,7 @@ class LineMission:
         self._rtk_quality = None        # 最近一帧主天线定位 (测量时刻, σ m, 卫星数, 两天线距离误差 m, 固定解)：直线卫星纠偏只在合格时用
         self._fix2 = None               # 最近一帧副天线 (测量时刻, 本地 x, y, 固定解, 两天线标称距离 m)：两根对不上时直线选天线用
         self._imu_alignment = ImuAlignment()    # 上一条线对好的 IMU → 地面方向，开头基线不对时借（跨作业保留）
+        self._pivot_rebound = PivotRebound()    # 原地转停下后的车头回弹补偿，按左 / 右转各学一个（跨作业保留）
         self._wheel_still = None        # 轮子说车停着 (从什么时候起, 最近一帧轮速时刻)；在动为 None
         self._wheel_t = None
         self._fix2_t = None             # 副天线最近一次固定解的时刻
@@ -875,6 +876,9 @@ class LineMission:
             share = getattr(tracker, 'share_imu_alignment', None)
             if callable(share):
                 share(self._imu_alignment)
+            share_rebound = getattr(tracker, 'share_pivot_rebound', None)
+            if callable(share_rebound):
+                share_rebound(self._pivot_rebound)
             nozzle = getattr(tracker, 'set_nozzle', None)
             if callable(nozzle):
                 forward, left, _ = self._job_nozzle()

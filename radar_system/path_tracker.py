@@ -2706,6 +2706,44 @@ def paint_window(section, s, tail_extra=0.):
     return 0,getattr(section,'paint_from_m',0.),section.path.length if end is None else end
 
 
+class PivotRebound:
+    """原地转停下后的车头回弹补偿（user_rules.PIVOT_REBOUND_*，11-27 用户「做」）：按转的方向（左 / 右）各记一个补偿量，
+    往那边转时多转这么多。每次停稳量离真目标还差多少（没转够为正），补偿量 = 这次用的 + gain × 差，限在 0..max；
+    差超过 outlier（被推、打滑）不学。任务层持有一个，跨作业接着用。"""
+
+    def __init__(self, prior_deg=rules.PIVOT_REBOUND_PRIOR_DEG, gain=rules.PIVOT_REBOUND_GAIN,
+                 max_deg=rules.PIVOT_REBOUND_MAX_DEG, outlier_deg=rules.PIVOT_REBOUND_OUTLIER_DEG):
+        for name, value in (('prior_deg', prior_deg), ('max_deg', max_deg), ('outlier_deg', outlier_deg)):
+            if not math.isfinite(value) or value < 0:
+                raise ValueError(name + ' 必须是有限非负数')
+        if not (math.isfinite(gain) and 0 < gain <= 1):
+            raise ValueError('gain 必须在 (0, 1]')
+        if prior_deg > max_deg:
+            raise ValueError('prior_deg 不能大于 max_deg')
+        self.gain, self.max, self.outlier = gain, math.radians(max_deg), math.radians(outlier_deg)
+        self.value = {1: math.radians(prior_deg), -1: math.radians(prior_deg)}
+        self.samples = {1: 0, -1: 0}
+        self.last = None
+
+    def compensation(self, direction):
+        """往 direction（+1 左转 / −1 右转）转时多转多少，rad。"""
+        return self.value[1 if direction > 0 else -1]
+
+    def learn(self, direction, used, short):
+        """一次原地转停稳：used 这次多转的（rad），short 停稳后离真目标还差（rad，没转够为正）。"""
+        key = 1 if direction > 0 else -1
+        rejected = not (math.isfinite(used) and math.isfinite(short)) or abs(short) > self.outlier
+        if not rejected:
+            self.value[key] = max(0.0, min(self.max, used + self.gain * short))
+            self.samples[key] += 1
+        self.last = dict(direction=key, used_deg=math.degrees(used) if math.isfinite(used) else None,
+                         short_deg=math.degrees(short) if math.isfinite(short) else None, rejected=rejected)
+
+    def status(self):
+        return dict(left_deg=math.degrees(self.value[1]), right_deg=math.degrees(self.value[-1]),
+                    left_n=self.samples[1], right_n=self.samples[-1], last=None if self.last is None else dict(self.last))
+
+
 class Section:
     """分段路径里的一段：direction=+1 前进、−1 倒车。path 按行进方向画：倒车段的 yaw 是车头 + π，曲率也按行进方向。"""
 
@@ -2964,6 +3002,11 @@ class SectionTracker:
         self._pivot_brake_s = self._pivot_rollback_s = self._pivot_settle_s = 0.0
         self._pivot_recovering = False
         self._pivot_recoveries = 0
+        # 原地转回弹补偿（PivotRebound，任务层 share_pivot_rebound 给）：没给就不补偿，照原来转。
+        # _pivot_target 这次的真目标车头，_pivot_comp 这次多转的（rad）
+        self._rebound = None
+        self._pivot_target = None
+        self._pivot_comp = 0.0
         self._pivot_delay_s = self.cfg.delay_s+.025 if self.cfg.delay_s>0 else 0.0
         self._turns = 0                 # 这次起步 / 换段已经原地转了几次（补转计数）
         self._turn_clock = 0.0
@@ -3086,6 +3129,10 @@ class SectionTracker:
         for sec,tracker in zip(self.sections,self.trackers):
             # 短倒车独立学习参考，不把倒车暂态标定写回正式喷线的跨线参考。
             tracker.share_imu_alignment(alignment if sec.direction>0 else None)
+
+    def share_pivot_rebound(self, rebound):
+        """任务层给原地转回弹补偿（PivotRebound，跨作业接着学）；None 不补偿。"""
+        self._rebound = rebound
 
     def set_nozzle(self, forward, left=0.0):
         for tracker in self.trackers:
@@ -3228,6 +3275,10 @@ class SectionTracker:
             self._pivot_remaining = wrap(self._pivot-pose.yaw)
             self._pivot_last_yaw = pose.yaw
             self._pivot_direction = math.copysign(1.0,self._pivot_remaining)
+            # 回弹补偿：往这边多转一点，停下回弹后正好在真目标（PivotRebound）
+            self._pivot_target = self._pivot
+            self._pivot_comp = self._rebound.compensation(self._pivot_direction) if self._rebound is not None else 0.0
+            self._pivot_remaining += self._pivot_direction*self._pivot_comp
             self._pivot_braking = self._pivot_slowing = False
             self._pivot_rate_excess = 0.0
             self._pivot_brake_s = self._pivot_rollback_s = self._pivot_settle_s = 0.0
@@ -3385,6 +3436,10 @@ class SectionTracker:
             self._pivot_settle_s = self._pivot_settle_s+dt if still else 0.0
             if self._pivot_settle_s>=self.settle_s-1e-9 and actual<=self.pivot_min:
                 # 欠转先按上面的 short 恢复；真正越过目标则交回 _switch 的有界反向补转。
+                if self._rebound is not None and self._pivot_target is not None:
+                    # 停稳了：离真目标还差多少（没转够为正）学到这个方向的回弹补偿上
+                    self._rebound.learn(self._pivot_direction, self._pivot_comp,
+                                        self._pivot_direction*wrap(self._pivot_target-pose.yaw))
                 self._pivot, self._w, self._still, self._wait = None, 0.0, self.settle_s, 0.0
             return 0.0, 0.0
         self._pivot_settle_s = 0.0
@@ -3424,6 +3479,8 @@ class SectionTracker:
                     pivoting=self._pivot is not None, integral_frozen=st.integral_frozen,
                     pivot_recovering=self._pivot_recovering if self._pivot is not None else False,
                     pivot_recoveries=self._pivot_recoveries,
+                    pivot_comp_deg=math.degrees(self._pivot_comp) if self._pivot is not None else 0.0,
+                    pivot_rebound=None if self._rebound is None else self._rebound.status(),
                     constant_straight_speed=self.constant_speed_here(),
                     constant_arc_speed=self.constant_arc_speed_here(),
                     learn=bool(self.trackers[self.index].learn),

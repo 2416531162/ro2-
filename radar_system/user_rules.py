@@ -221,6 +221,16 @@ ENTRY_ARC_MIN_SPACE_M = 2.5
 ENTRY_ARC_RADII = (3.0, 2.5, 2.0, 1.5)
 # 原地转：车头差超过这么多才转（09-30）
 PIVOT_MIN_DEG = 5.0
+# 原地转回弹补偿（11-27 用户「做」，path_tracker.PivotRebound）：c30c07fd 实测 7 趟原地转，停下后车头都往回弹 1.4–3.3°，
+# 加上刹得早一点，停稳后都没转够 1.5–4.9°（中位 2.8°，方向总是和转的方向相反）；差在 PIVOT_MIN_DEG 以内不补转，
+# 全留给 2 m 助跑，喷线起点车头还偏 0.2–1.0°，线头前 1–2 m 冲出 1 cm 左右（每趟起步都有点歪）。
+# 现在：按转的方向（左 / 右）各记一个补偿量，转的时候多转这么多；每次停稳量离真目标还差多少（没转够为正），
+# 补偿量 += PIVOT_REBOUND_GAIN × 差，限在 0..PIVOT_REBOUND_MAX_DEG；差超过 PIVOT_REBOUND_OUTLIER_DEG（被推、打滑）不学。
+# 任务层持有，跨作业接着用；开机从 PIVOT_REBOUND_PRIOR_DEG 开始。不加补转动作（09-30 小指令推不动、反复补转卡住那个问题不碰）。
+PIVOT_REBOUND_PRIOR_DEG = 2.0
+PIVOT_REBOUND_GAIN = 0.5
+PIVOT_REBOUND_MAX_DEG = 4.0
+PIVOT_REBOUND_OUTLIER_DEG = 8.0
 # 离正式路线 3 m 以内不用转场速度，降到画线速度准备接入（10-07）
 APPROACH_ZONE_M = 3.0
 
