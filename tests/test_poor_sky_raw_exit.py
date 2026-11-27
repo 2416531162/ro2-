@@ -5,7 +5,7 @@ user_rules.POOR_SKY_EXIT_RAW_E_M）。
 13.6 m：拉回增益 0、只按 0.08°/m 慢修角度，偏的拉不回来（TDCP 核对 RTK 那段没漂，车是真偏了）。6 cm 是怕楼下两根天线
 各偏 2–4 cm 时误退；原始解要两根对得上（≤ 2 cm），这种不进来。用融合位置照旧 6 cm。
 仿真同 test_straight_raw_lateral（0.36 s 延迟车模型、两根天线原始解、σ 比进楼下门槛高一点进楼下模式，
-test_poor_sky.POOR_SIGMA；11-27 门槛 1.5 → 2.5 cm 以前用的 σ 1.8 cm）。"""
+test_poor_sky.POOR_SIGMA；11-27 门槛 1.5 → 2.0 cm 以前用的 σ 1.8 cm）。"""
 from dataclasses import replace
 import math
 from pathlib import Path

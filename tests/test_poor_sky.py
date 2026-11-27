@@ -5,7 +5,7 @@
 1. 跨线带过去的 IMU 换算（ImuAlignment）：车停着时 IMU 偏航的变化是 IMU 自己的（06:58 固件静止修正一下拨了 +4.12°，
    陀螺一直 0），换算跟着挪、不算转角；跨线学习（漂移、刻度）删掉（用户「删掉学习」），只带上一条线的。
    原来学成漂移 +0.35°/min、刻度 −0.44%，后面带过去的换算错 1.7–3.4°。
-2. 楼下模式（ImuFirstConfig.poor_sky_*）：σ 低通 > 2.5 cm（11-27 1.5 → 2.5，user_rules.POOR_SKY_SIGMA_M）、不是草地，这条直线开头 6 m 以后靠 IMU 和对好的角度走——
+2. 楼下模式（ImuFirstConfig.poor_sky_*）：σ 低通 > 2 cm（11-27 1.5 → 2.0，user_rules.POOR_SKY_SIGMA_M）、不是草地，这条直线开头 6 m 以后靠 IMU 和对好的角度走——
    线头段之后不往回拉，拟合角度用到车头上每米最多改 0.08°（user_rules.POOR_SKY_BETA_RATE_DEG）；拟合角度对不上（> 0.6°）、卫星说偏 > 6 cm 走满 1 m、
    认出草地就退回平常。"""
 import math
@@ -299,8 +299,8 @@ class ClosedLoop(unittest.TestCase):
         self.assertFalse(any(r[2].get('first_poor_sky') for r in on))
 
     def test_1_8_cm_sigma_is_no_longer_poor_sky(self):
-        # 11-27 用户「超过 1.5 cm 这个改成 2.5」：56300f6a 那块场地 σ 1.8–1.9 cm 整条线都判成楼下、2 cm 不修；现在照平常走
-        self.assertEqual(rules.POOR_SKY_SIGMA_M, .025)
+        # 11-27 用户「超过 1.5 cm 这个改成 2.5」→「改成 2 cm 吧」：56300f6a 那块场地 σ 1.8–1.9 cm 整条线都判成楼下、2 cm 不修；现在照平常走
+        self.assertEqual(rules.POOR_SKY_SIGMA_M, .02)
         on, off = run(3, .018), run(3, .018, poor_enabled=False)
         self.assertEqual([r[:2] for r in on], [r[:2] for r in off])
         self.assertFalse(any(r[2].get('first_poor_sky') for r in on))
