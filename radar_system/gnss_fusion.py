@@ -255,6 +255,17 @@ class FusionConfig:
     # 偏移）+ 轮程推算的位移之间的夹角就是车头偏移的误差。车身摆、转弯、原地转都由 IMU 记着，不要求走直；还没定车头时走
     # course_init_distance_m 定第一次，之后每走这么远修一次。0 = 不用（双天线有测向）
     course_align_distance_m: float = 0.0
+    # 双天线测向只用来开机定初值和做检查（user_rules.DUAL_HEADING_INIT_ONLY，Gen5 在 line_node 开）：双天线车也按上面的
+    # IMU 对齐（_imu_course）每走 track_heading_distance_m 用卫星位移对一次车头；对过的路程攒够 track_heading_ready_m 后
+    # 测向不再修车头，只算「测向 − 融合车头」给状态看；IMU 断了 / 对不上轮速时照旧按测向。每次对的观测误差至少
+    # track_heading_sigma_floor_deg
+    dual_heading_init_only: bool = False
+    track_heading_distance_m: float = 3.0
+    track_heading_ready_m: float = 3.0
+    track_heading_sigma_floor_deg: float = 0.3
+    # 还没攒够（测向还在修车头）时对车头：先把车头方差放到至少这么大（测向本身可能偏 2°），这次按卫星位移基本接过来
+    track_heading_switch_sigma_deg: float = 2.0
+    dual_heading_check_deg: float = 3.0
     # 判停稳（融合静止检测、任务层 robot_core.standstill）要不要卫星地速也静止：双天线有 BESTVEL 多普勒地速；
     # 单天线没有地速，只看轮子（2026-10-07 用户：「只要轮子不动就行」）
     ground_speed_still: bool = True
@@ -286,7 +297,7 @@ class FusionConfig:
                 continue
             if name in ('continuous_output', 'heading_bias_learning', 'wheel_increment_enabled',
                         'wheel_scale_auto', 'sensor_failover_enabled', 'tilt_compensation_enabled', 'ground_speed_still',
-                        'heading_course_check'):
+                        'heading_course_check', 'dual_heading_init_only'):
                 if type(value) is not bool:
                     raise ValueError(name + ' 必须是布尔值')
                 continue
@@ -605,6 +616,11 @@ class _State:
         # 单天线 IMU 对齐（_imu_course）的这一段：(卫星 x, y, 杠杆臂 x, y, 轮程, 车头, 推算 x, y, 走过的路程)；
         # 元组，历史快照回放时跟着恢复
         self.align = None
+        # 测向只定初值（FusionConfig.dual_heading_init_only）：按卫星位移对过车头的路程、够了没有、测向 − 融合车头（低通，rad）
+        self.track_m = 0.0
+        self.track_ready = False
+        self.track_aligns = self.track_rejected = 0
+        self.dual_check = None
         self.imu_yaw = None                 # 上一帧 IMU 航向角（yaw_input = 'angle'）
         self.mismatch_since = None          # 差速车：IMU 转向与轮速里程计相反从什么时候开始
         self.imu_mismatch = False           # 确认相反后一直为真，IMU 不再用
@@ -1442,6 +1458,9 @@ class GnssFusion:
             if 0 < gap <= cfg.heading_timeout_s:
                 s.sat_rate, s.sat_rate_t = _wrap(yaw - s.sat_yaw) / gap, sample.t
             s.sat_yaw, s.sat_yaw_t = yaw, sample.t
+        if not imu_ok and (s.track_ready or s.track_m):
+            # IMU 断了 / 和轮速对不上：「IMU + 卫星位移」这条车头没了，回到按测向（之后重新攒）
+            s.track_ready, s.track_m, s.align = False, 0.0, None
         if trusted and not imu_ok and s.yaw_ready:
             # 卫星可信、IMU 断着（IMU 只是辅助）：航向直接取测向，主天线位置不动、后轴点按新航向改算；
             # 两帧测向之间按测向算的转速推（见 _predict）
@@ -1455,6 +1474,12 @@ class GnssFusion:
             return
         if not s.yaw_ready:
             self._yaw_observation(yaw, variance)
+            s.heading_t, s.heading_ok, s.raw_yaw, s.raw_heading_var = sample.t, True, raw, variance
+            return
+        if cfg.dual_heading_init_only and s.track_ready:
+            # 车头已按卫星位移对好：测向只做检查（测向 − 融合车头，按 heading_straight_tau_s 低通），不修车头
+            a = -math.expm1(-min(0.2, max(0.001, elapsed if math.isfinite(elapsed) else 0.05)) / cfg.heading_straight_tau_s)
+            s.dual_check = residual if s.dual_check is None else _wrap(s.dual_check + a * _wrap(residual - s.dual_check))
             s.heading_t, s.heading_ok, s.raw_yaw, s.raw_heading_var = sample.t, True, raw, variance
             return
         # 和推算差得多（超过 innovation_gate_sigma 个 σ）：错的是推算，承认推算过于自信、按测向快校
@@ -1869,9 +1894,20 @@ class GnssFusion:
 
     def _position_course(self, sample, xy):
         s, cfg = self._s, self.config
-        if (s.outlier_since is not None
-                or (cfg.dual_weight_m > 0 and len(xy) > 2 and xy[2] is not None and xy[2] > cfg.dual_weight_m)):
-            s.align = None
+        bad = (s.outlier_since is not None
+               or (cfg.dual_weight_m > 0 and len(xy) > 2 and xy[2] is not None and xy[2] > cfg.dual_weight_m))
+        track = cfg.dual_heading_init_only and cfg.course_align_distance_m <= 0
+        imu_ok = not s.imu_mismatch and s.t is not None and s.t - s.imu_valid_t <= cfg.sensor_timeout_s
+        if track and not imu_ok:
+            s.align = None              # 车头是「IMU + 卫星位移修的偏移」：IMU 断了这条没了，回到按测向（_adaptive_heading）
+        if track and s.yaw_ready and imu_ok:
+            # 双天线车也按卫星位移对车头（测向只定初值）：两根天线对不上、离群的帧照样用（楼下两根天线互检过 2 cm 的帧
+            # 六成以上；测向偏了时推算对不上固定解，离群本身就是测向偏造成的）。RTK 跳了（suspect）的进不来；对好以后
+            # 一次差超过 3σ 的不修（_imu_course）
+            self._imu_course(sample, xy, track=True)
+        if bad:
+            if not track:
+                s.align = None
             self._end_segment()
             return  # 降权、离群位置不作为航向冲突的独立恢复证据。
         if cfg.course_align_distance_m > 0:
@@ -1920,7 +1956,7 @@ class GnssFusion:
                     c, sn = math.cos(s.yaw), math.sin(s.yaw)
                     s.x, s.y = xy[0] - (c*ax - sn*ay), xy[1] - (sn*ax + c*ay)
 
-    def _imu_course(self, sample, xy):
+    def _imu_course(self, sample, xy, track=False):
         """单天线定车头 / 修车头偏移（course_align_distance_m > 0）：车头 = IMU 航向角 + 偏移，偏移按卫星位移修。
 
         一段里按融合车头（还没定时是 IMU 航向角加任意偏移）和轮程逐帧推算后轴中心的位移，加上杠杆臂随车头转的那点，就是
@@ -1939,7 +1975,10 @@ class GnssFusion:
         d = s.odo - odo
         mid = yaw + _wrap(s.yaw - yaw) / 2
         drx, dry, dist = drx + d*math.cos(mid), dry + d*math.sin(mid), dist + abs(d)
-        need = cfg.course_align_distance_m if s.yaw_ready or cfg.course_init_distance_m <= 0 else cfg.course_init_distance_m
+        if track:
+            need = cfg.track_heading_distance_m
+        else:
+            need = cfg.course_align_distance_m if s.yaw_ready or cfg.course_init_distance_m <= 0 else cfg.course_init_distance_m
         if dist < need:
             s.align = (fx0, fy0, ox0, oy0, s.odo, s.yaw, drx, dry, dist)
             return
@@ -1954,9 +1993,22 @@ class GnssFusion:
             return
         sigma = max(ALIGN_FIX_SIGMA_M, cfg.fix_sigma_scale * max(sample.sigma_n, sample.sigma_e))
         var = (2 * sigma / shift) ** 2
+        if track:
+            var = max(var, math.radians(cfg.track_heading_sigma_floor_deg) ** 2)
+            if not s.track_ready:
+                p = list(s.p)
+                p[7] = max(p[7], math.radians(cfg.track_heading_switch_sigma_deg) ** 2)
+                s.p = tuple(p)
+            elif delta * delta > 9. * (s.p[7] + var):
+                s.track_rejected += 1
+                return                  # 对好以后 IMU 记着车头，一段差这么多是卫星跳了 / 打滑，不修
         first = not s.yaw_ready
         if self._yaw_observation(_wrap(s.yaw + delta), var, update_bias=False):
             s.course_t = s.t
+            if track:
+                s.track_m += shift
+                s.track_aligns += 1
+                s.track_ready = s.track_ready or s.track_m >= cfg.track_heading_ready_m
             if first:
                 # 同 _position_course：第一次定下车头时位置按这帧固定解和刚定的车头直接对齐
                 ax, ay, _ = self._lever()
@@ -2300,6 +2352,11 @@ class GnssFusion:
                              'conflict': s.t is not None and s.t-s.motion_conflict_t <= 1.0,
                              'error_mps': s.motion_error_rate},
             'segments': segments,
+            'dual_heading': {'role': ('check' if s.track_ready else 'steer') if cfg.dual_heading_init_only else 'steer',
+                             'track_m': s.track_m, 'track_aligns': s.track_aligns, 'track_rejected': s.track_rejected,
+                             'minus_fused_deg': None if s.dual_check is None else math.degrees(s.dual_check),
+                             'disagree': (s.dual_check is not None
+                                          and abs(math.degrees(s.dual_check)) >= cfg.dual_heading_check_deg)},
             'heading_bias_learned_deg': math.degrees(s.heading_bias) if cfg.heading_bias_learning else None,
             'heading_bias_updates': s.heading_bias_updates,
             'gyro_bias_deg_s': math.degrees(s.bias),

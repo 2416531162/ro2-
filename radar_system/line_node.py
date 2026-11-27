@@ -428,8 +428,15 @@ def load_fusion_config(gnss_fusion, path):
     if antenna is None or (len(antenna) == 2 and all(isinstance(v, (int, float)) and abs(v - h) < 1e-6
                                                      for v, h in zip(antenna, GEN5_ANTENNA_HAND))):
         overrides['antenna_xy'] = user_rules.GEN5_ANTENNA_XY
-    # 测向安装偏差：文件里是没标定过的 0（或没写）时用这台车实测的 +1.7°（heading_mount，2026-11-22 用户）
+    # 测向安装偏差：文件里是没标定过的 0（或没写）时用 heading_mount.GEN5_MOUNT_OFFSET_DEG（11-22 定 1.7°，11-27 改回 0）
     overrides['mount_offset_deg'] = heading_mount.mount_offset(overrides.get('mount_offset_deg'))
+    # 测向只用来开机定初值和做检查，车头按 IMU + 卫星位移（user_rules.DUAL_HEADING_INIT_ONLY、TRACK_HEADING_*）
+    overrides.setdefault('dual_heading_init_only', user_rules.DUAL_HEADING_INIT_ONLY)
+    overrides.setdefault('track_heading_distance_m', user_rules.TRACK_HEADING_DISTANCE_M)
+    overrides.setdefault('track_heading_ready_m', user_rules.TRACK_HEADING_READY_M)
+    overrides.setdefault('track_heading_sigma_floor_deg', user_rules.TRACK_HEADING_SIGMA_FLOOR_DEG)
+    overrides.setdefault('track_heading_switch_sigma_deg', user_rules.TRACK_HEADING_SWITCH_SIGMA_DEG)
+    overrides.setdefault('dual_heading_check_deg', user_rules.DUAL_HEADING_CHECK_DEG)
     # Gen5（HDA536T）：航向推算用 IMU 自己算的航向角（2026-09-28 用户要求）；原地转向转角大，
     # 按 3% 刻度误差加航向不确定度，测向按 20 ms 时间同步误差随转速降权。
     # IMU 始终提供连续转动；可信双天线慢校直行漂移，明显转弯后及时收敛。
