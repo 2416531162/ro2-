@@ -1684,35 +1684,63 @@ def plan_current(spec, car_pose, min_radius, *, body=None, max_entry_m=MAX_ENTRY
         entry, entry_m = arc
     if entry_m > max_entry_m:
         raise ValueError('车离路线太远（接入路线 %.0f m，最多 %.0f m），请先把车开近些' % (entry_m, max_entry_m))
-    learn = None
+    learn = learn_turn = None
     if first_line and run.kind == 'path':
-        # 开机第一条先空跑学换算，再原地掉头开回起点画（_learn_loop）；接入远近照上面算，空跑和开回的路程不算进 MAX_ENTRY_M
-        learn = _learn_loop(route[0], car_pose, entry_fn, nozzle_x)
+        # 开机第一条先空跑学换算，再圆弧绕回起点接着助跑画（_learn_loop，绕不回来照原地掉头开回）；接入远近照上面算，
+        # 空跑和绕回的路程不算进 MAX_ENTRY_M
+        learn = _learn_loop(route[0], car_pose, entry_fn, nozzle_x, run.entry_space_m, body, _inside_turn(run, route[0]),
+                            arc_lead=run.entry_turn == 'arc')
         if learn is not None:
-            entry, entry_m, learn = learn
+            entry, entry_m, learn, learn_turn = learn
     if info is not None:
         info['learn_m'] = LEARN_M if learn is not None else 0.0
+        info['learn_turn'] = learn_turn
     sections = _planned_sections(entry, route, 'route_'+run.kind+'_')
     if learn is not None:
         sections[learn].learn = True          # 空跑学换算；画线那段开头有学好的换算，不再按没有记忆
+        if learn_turn == 'arc':
+            for sec in sections[learn:len(entry) - 1]:
+                sec.continuous_after = True   # 空跑 → 圆弧绕回 → 助跑画线一路不停车（相切、都往前）
     elif first_line and run.kind == 'path':
         sections[len(entry) - 1].first_line = True
     return (_circle_paint_end(sections, run) if run.kind == 'circle' else sections), entry_m + run_in
 
 
 # 开机第一条（没有学好的 IMU 换算，LineMission.first_line_no_memory）先在这条线上空跑学：从助跑起点 G 开过线头、再往前
-# LEARN_M 不喷，停下原地掉头，直线开回 G，原地转正，再助跑画整条（_via_runup 往前开过去，不倒车）。
-# 2026-11-23 用户「允许开机第一段在两个点中间直走学习但不喷」「必须在内学习」「空跑后，不要倒回来」；
-# 2026-11-25 用户「空跑不要圆弧了，直线原地掉头去起点」（原来圆弧往路线里面那一侧绕回 G、不停车接着助跑）。
-# 来回两次原地转各 180°：IMU 转角刻度误差（SCH16T 实测每圈多读约 0.46°）已标定在 IMU 固件参数里（0x2012 −1270 ppm）
+# LEARN_M 不喷，然后只往前按圆弧往路线里面那一侧绕回 G（arc_entry split，后方空地照 entry_space_m），不停车接着助跑画整条。
+# 2026-11-23 用户「允许开机第一段在两个点中间直走学习但不喷」「必须在内学习」「空跑后，不要倒回来」「丝滑转回来接上喷的线，
+# 中间不要停」；11-25 用户「空跑不要圆弧了，直线原地掉头去起点」改成停下原地掉头、直线开回 G、原地转正再助跑；
+# 11-27 用户「空跑改成圆弧」改回圆弧：原地掉头 + 停车起步每次车头摆 2–4°（单边轮换向晚动、两轮跟不上起步斜坡、前万向轮
+# 从横着翻回来），第一条线头被它带歪。圆弧放不下（后方空地不够、往里那一侧绕不开）时照 11-25 原地掉头开回。
+# 圆弧到 G 断开成单独一段：画线那段从 G 起用学到的换算（圆弧和助跑画线放在同一段时仿真第一条线头最差 3.06 cm）。
+# IMU 转角刻度误差（SCH16T 实测每圈多读约 0.46°）已标定在 IMU 固件参数里（0x2012 −1270 ppm）
 LEARN_M = rules.FIRST_LINE_LEARN_M
-def _learn_loop(first, car, entry_fn, nozzle_x):
-    """开机第一条的空跑学换算 + 原地掉头开回起点：(分段, 接入路程米, 空跑那段的下标)；第一条开头不是够 LEARN_M 的直线、
-    接入最后不是往前开时 None（照原来直接画，第一条按没有记忆拟合）。"""
+INSIDE_MIN_M = 0.1             # 路线其余点的重心离第一条线不到这么远（单条线）：不挑哪一侧
+
+
+def _inside_turn(spec, first):
+    """路线里面在第一条线的哪一侧：+1 左、−1 右、0 分不出（单条线、点都在线上）。"""
+    _, (x0, y0, h0), _ = first
+    pts = spec.points
+    if not pts:
+        return 0
+    side = sum(-(x - x0) * math.sin(h0) + (y - y0) * math.cos(h0) for x, y in pts) / len(pts)
+    return 0 if abs(side) < INSIDE_MIN_M else (1 if side > 0 else -1)
+
+
+def _learn_loop(first, car, entry_fn, nozzle_x, space_m=0.0, body=None, turn=0, arc_lead=False):
+    """开机第一条的空跑学换算 + 绕回起点：(分段, 接入路程米, 空跑那段的下标, 'arc' 圆弧绕回 / 'pivot' 原地掉头开回)；
+    第一条开头不是够 LEARN_M 的直线、接入最后不是往前开时 None（照原来直接画，第一条按没有记忆拟合）。
+    arc_lead（路线选了圆弧进线）：开到 G 也按圆弧进线、不停车直接接空跑；放不下照原来的接入。"""
     pieces = list(first[2])
     if LEARN_M <= 0 or not pieces or abs(pieces[0][1]) > 1e-12 or pieces[0][0] < LEARN_M - 1e-9:
         return None
-    lead, lead_m = entry_fn((first[0], first[1], []), car, nozzle_x)
+    bare = (first[0], first[1], [])
+    lead = arc_entry(bare, car, space_m, body) if arc_lead and space_m else None
+    if lead is not None and lead[0] and lead[0][-1][0] > 0:
+        lead, lead_m = lead
+    else:
+        lead, lead_m = entry_fn(bare, car, nozzle_x)
     if not lead or lead[-1][0] < 0:
         return None
     lead = list(lead)
@@ -1723,8 +1751,11 @@ def _learn_loop(first, car, entry_fn, nozzle_x):
     x, y, yaw = start
     for length, k in run:
         x, y, yaw = advance(x, y, yaw, length, k)
+    loop = arc_entry(first, (x, y, yaw), space_m, body, split=True, first_turn=turn) if space_m else None
+    if loop is not None:
+        return lead + list(loop[0]), lead_m + LEARN_M + loop[1], len(lead) - 1, 'arc'
     back, back_m = _via_runup(first, (x, y, yaw), 1)     # 原地掉头、车头对着 G 开过去、原地转正、助跑接第一条
-    return lead + list(back), lead_m + LEARN_M + back_m, len(lead) - 1
+    return lead + list(back), lead_m + LEARN_M + back_m, len(lead) - 1, 'pivot'
 
 
 def plan(spec, car_pose, min_radius, *, body=None, max_entry_m=MAX_ENTRY_M, nozzle_x=None, info=None, first_line=False):

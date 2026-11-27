@@ -20,6 +20,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / 'radar_system'), str(ROOT), str(ROOT / 'tests')]
 import route_plan as rp
+import user_rules as rules
 from line_cascade import ImuAlignment, ImuFirstConfig, ImuFirstGuide
 from line_mission import IdleTracker, LineMission
 from live_cruise import label_sections
@@ -48,7 +49,8 @@ def geometry(sections):
 
 class DryRun(unittest.TestCase):
     """开机第一条空跑（11-25 用户「空跑不要圆弧了，直线原地掉头去起点」）：助跑起点 G 开过线头 LEARN_M，原地掉头、
-    直线开回 G，原地转正再助跑画线；全程往前、不走弧线，后方空地填 0 也照样空跑。"""
+    直线开回 G，原地转正再助跑画线；全程往前、不走弧线。11-27 起后方空地够时改回圆弧绕回（ArcDryRun），
+    后方空地没填（0）时照这样。"""
 
     def test_turn_back_in_place_to_the_start(self):
         for car in (FAR, (-6., .05, 0.), (14., 1., math.pi)):
@@ -75,6 +77,55 @@ class DryRun(unittest.TestCase):
                 self.assertFalse(any(s.continuous_after for s in sections))             # 掉头处停车原地转
                 self.assertFalse(any(getattr(s, 'first_line', False) for s in sections))  # 画线那段有空跑学好的
                 self.assertAlmostEqual(entry - plain_entry, 2 * (rp.LEARN_M + rp.RUN_UP_M), places=6)
+
+
+class ArcDryRun(unittest.TestCase):
+    """空跑改回圆弧绕回（11-27 用户「空跑改成圆弧」）：后方空地够（≥ ENTRY_ARC_MIN_SPACE_M）时空跑过线头 LEARN_M 后只往前
+    按圆弧绕回 G、不停车接着助跑；路线选了圆弧进线时开到 G 也走圆弧，全程不停车、不原地转。放不下照原地掉头开回。"""
+    BODY = (.911, .604, .39)
+    CARS = ((-5., 3., 0.), (22.5, 0., 0.), (-1., 1., 0.), FAR)
+
+    def plan(self, car, space, turn='arc'):
+        info = {}
+        spec = replace(LINE, points=((0., 0.), (22., 0.)), entry_turn=turn, entry_space_m=space)
+        sections, entry = rp.plan_current(spec, car, MIN_R, body=self.BODY, nozzle_x=NOZZLE, info=info, first_line=True)
+        return sections, entry, info
+
+    def test_arc_entry_and_arc_return_never_stop(self):
+        for car in self.CARS:
+            with self.subTest(car=car):
+                sections, entry, info = self.plan(car, rules.ENTRY_ARC_MIN_SPACE_M)
+                self.assertEqual(info['learn_turn'], 'arc')
+                self.assertEqual(info['learn_m'], rp.LEARN_M)
+                self.assertTrue(all(s.direction == 1 for s in sections))                 # 不倒车
+                self.assertTrue(all(s.continuous_after for s in sections[:-1]))          # 一路不停车、不原地转
+                k = [getattr(s, 'learn', False) for s in sections].index(True)
+                paint = sections[-1]
+                g, h0 = paint.path.pose(0.)[:2], paint.path.pose(0.)[2]
+                # 空跑那段开过线头 LEARN_M（G 往前 RUN_UP_M + LEARN_M），之后的圆弧绕回到 G、车头顺线
+                learn = sections[k]
+                end = learn.path.pose(learn.path.length)
+                along = (end[0] - g[0]) * math.cos(h0) + (end[1] - g[1]) * math.sin(h0)
+                self.assertAlmostEqual(along, rp.RUN_UP_M + rp.LEARN_M, delta=1e-6)
+                self.assertLess(abs(rp.wrap(end[2] - h0)), 1e-6)
+                back = sections[-2]
+                self.assertLess(math.dist(back.path.pose(back.path.length)[:2], g), 1e-6)
+                self.assertLess(abs(rp.wrap(back.path.pose(back.path.length)[2] - h0)), 1e-6)
+                radii = [1 / abs(p.kappa) for s in sections for p in s.path.pieces if abs(p.kappa) > 1e-9]
+                self.assertGreaterEqual(min(radii), rules.ENTRY_ARC_RADII[-1] - 1e-9)
+                self.assertFalse(getattr(paint, 'first_line', False))                    # 画线那段有空跑学好的
+
+    def test_pivot_entry_still_returns_on_an_arc(self):
+        # 进线选原地转：开到 G 照原来（停一次），空跑后照样圆弧绕回、不停车接着助跑
+        sections, _, info = self.plan(FAR, rules.ENTRY_ARC_MIN_SPACE_M, turn='pivot')
+        self.assertEqual(info['learn_turn'], 'arc')
+        k = [getattr(s, 'learn', False) for s in sections].index(True)
+        self.assertTrue(all(s.continuous_after for s in sections[k:-1]))
+
+    def test_no_space_falls_back_to_turning_in_place(self):
+        sections, _, info = self.plan(FAR, 0.)
+        self.assertEqual(info['learn_turn'], 'pivot')
+        self.assertFalse(any(s.continuous_after for s in sections))
 
 
 class NoDryRun(unittest.TestCase):

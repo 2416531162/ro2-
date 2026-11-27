@@ -992,7 +992,8 @@ class LineMission:
         turns = ('，原地转向 %d 次' % tracker.pivots if tracker.pivots else '') + \
                 ('，圆弧掉头 %d 次' % info['arc_turns'] if info.get('arc_turns') else '') + \
                 ('，倒车 %d 次' % reverses if reverses else '') + \
-                ('，开机第一条先空跑 %.0f m 学车头再掉头回起点画' % info['learn_m'] if info.get('learn_m') else '') + \
+                ('，开机第一条先空跑 %.0f m 学车头再%s回起点画' % (info['learn_m'], '圆弧绕' if info.get('learn_turn') == 'arc' else '掉头')
+                 if info.get('learn_m') else '') + \
                 ('，车头已在开机后行驶的 %.0f m 里学好，不空跑' % info['drive_learned_m'] if info.get('drive_learned_m') else '')
         self.message = '申请控制权（接入 %.1f m，全程 %.1f m%s）' % (entry_m, tracker.length, turns)
         return True, self.message
