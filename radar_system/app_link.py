@@ -572,6 +572,7 @@ def line_telemetry(line, now):
     tr = ln.get('tracker') or {}
     stats = tr.get('stats') or {}
     pose = ln.get('pose')
+    estimation = _line_estimation(ln)
     return {
         'stale': False, 'phase': ln.get('phase'), 'message': ln.get('message'),
         # 融合正在按哪种天线算（single 时杠杆臂是右天线位置）；phase ORIENTING 时 orient 是定车头走了多远
@@ -580,6 +581,7 @@ def line_telemetry(line, now):
         **({'operations': ln['operations']} if ln.get('operations') is not None else {}),
         **({'imu_hold_test': ln['imu_hold_test']} if ln.get('imu_hold_test') is not None else {}),
         **({'imu_sources': ln['imu_sources']} if isinstance(ln.get('imu_sources'),dict) else {}),
+        **({'estimation': estimation} if estimation is not None else {}),
         'cruise': _num(ln.get('cruise')), 'motion_mode': ln.get('motion_mode'),
         'points': {},       # 原来是 A、B 点；定点画线删了，留空对象，遥测格式不变
         'pose': None if not pose else {
@@ -643,6 +645,89 @@ def _line_diag(d):
             'yaw_rate': _num(d.get('yaw_rate'), 4), 'rtk_along_m': _num(d.get('rtk_along_m'), 4),
             'rtk_left_m': _num(d.get('rtk_left_m'), 4), 'position_outliers': d.get('position_outliers'),
             'position_resets': d.get('position_resets'), 'jumps': d.get('jumps')}
+
+
+def _nonneg_int(v):
+    return v if type(v) is int and v >= 0 else None
+
+
+def _line_estimation(ln):
+    """实时推算与控制来源（只读，透传 /line/status 已有字段，供平板显示现在靠卫星还是 IMU、在靠什么维持）。"""
+    pose = ln.get('pose') if isinstance(ln.get('pose'), dict) else None
+    tr = ln.get('tracker') if isinstance(ln.get('tracker'), dict) else None
+    out = {}
+    if pose is not None:
+        if type(pose.get('rtk_trusted')) is bool:
+            out['rtk_trusted'] = pose['rtk_trusted']
+        ant = pose.get('position_antenna')
+        if ant in ('main', 'second'):
+            out['position_antenna'] = ant
+        corr = _num(pose.get('antenna_corrected_m'), 4)
+        if corr is not None and corr >= 0:
+            out['antenna_corrected_m'] = corr
+        hold_age = _num(pose.get('hold_age_s'), 2)
+        if hold_age is not None and hold_age >= 0:
+            out['hold_age_s'] = hold_age
+        hold_limit = _num(pose.get('hold_limit_s'), 1)
+        if hold_limit is not None and hold_limit > 0:
+            out['hold_limit_s'] = hold_limit
+        if pose.get('speed_source') in ('wheel', 'gnss_doppler'):
+            out['speed_source'] = pose['speed_source']
+        if pose.get('yaw_source') in ('imu', 'wheel'):
+            out['yaw_source'] = pose['yaw_source']
+
+    # 只在行驶中（非切换、非原地转向）透传直线 / 圆弧控制器状态，避免暂停或换段时显示上一段的旧状态
+    running = (ln.get('phase') == 'RUNNING' and tr is not None and tr.get('state') == 'RUNNING'
+               and not tr.get('switching') and not tr.get('pivoting'))
+    if running:
+        sh = tr.get('straight_hold') if isinstance(tr.get('straight_hold'), dict) else None
+        if sh and (sh.get('active') is True or sh.get('control_law') in ('imu_first', 'imu_launch')):
+            law = sh.get('control_law') if sh.get('control_law') in ('imu_first', 'imu_launch') else None
+            w_raw = sh.get('launch_weight') if law == 'imu_launch' else sh.get('weight')
+            s_out = {
+                'active': sh.get('active') is True,
+                'law': law,
+                'weight': _num(w_raw, 2),
+                'mode': sh.get('first_mode') if sh.get('first_mode') in ('rtk', 'imu') else None,
+                'locked': sh.get('first_locked') if type(sh.get('first_locked')) is bool else None,
+                'rtk_accepted': sh.get('first_rtk_accepted') if type(sh.get('first_rtk_accepted')) is bool else None,
+                'poor_sky': sh.get('first_poor_sky') is True,
+                'poor_sky_exit': sh.get('first_poor_sky_exit') if sh.get('first_poor_sky_exit') in ('angle', 'offset', 'grass') else None,
+                'grass': sh.get('grass') is True,
+                'ground_a': _num(sh.get('ground_a'), 1),
+                'position_follow': sh.get('first_position_follow') is True,
+                'pull_boost': sh.get('pull_boost') is True,
+                'antenna': sh.get('rtk_antenna') if sh.get('rtk_antenna') in ('main', 'second') else None,
+                'source': sh.get('first_source') if sh.get('first_source') in ('learned', 'borrowed', 'carried') else None,
+                'baseline_ok': sh.get('baseline_ok') if type(sh.get('baseline_ok')) is bool else None,
+                'fast': sh.get('first_fast') is True,
+                'e_imu_m': _num(sh.get('first_e'), 4),
+                'e_rtk_m': _num(sh.get('outer_e_rtk'), 4),
+                'diff_m': _num(sh.get('first_innovation'), 4),
+                'beta_deg': _num(sh.get('first_beta_deg'), 2),
+                'crab_deg': _num(sh.get('first_crab_deg'), 2),
+                'imu_only_s': _num(sh.get('first_imu_only_s'), 1),
+                'jumps': _nonneg_int(sh.get('first_jumps')),
+                'sigma_lp_cm': _num(sh.get('sigma_lp_cm'), 2),
+            }
+            out['straight'] = s_out
+        ah = tr.get('arc_hold') if isinstance(tr.get('arc_hold'), dict) else None
+        if ah and ah.get('active') is True:
+            a_out = {
+                'active': True,
+                'weight': _num(ah.get('weight'), 2),
+                'partial': ah.get('partial_arc') is True,
+                'radial_source': ah.get('radial_source') if ah.get('radial_source') in ('rtk_paired', 'rtk_slow', 'imu_hold') else None,
+                'radial_rtk_weight': _num(ah.get('radial_rtk_weight'), 2),
+                'good_sky': ah.get('good_sky') is True,
+                'holding': ah.get('holding') is True,
+                'rtk_ok': ah.get('rtk_ok') if type(ah.get('rtk_ok')) is bool else None,
+                'e_imu_m': _num(ah.get('e_est'), 4),
+                'e_rtk_m': _num(ah.get('e_rtk'), 4),
+                'jumps': _nonneg_int(ah.get('jumps')),
+            }
+            out['arc'] = a_out
+    return out or None
 
 
 STRAIGHT_KEYS = ('run', 'state', 'reason', 'target_deg', 'yaw_deg', 'error_deg', 'max_error_deg',

@@ -1419,11 +1419,23 @@ class LineMission:
         correction = getattr(self.tracker, 'position_correction', None)
         shift = correction() if callable(correction) and p is not None else None
         dx, dy = shift if shift is not None else (0.0, 0.0)
+        hold_age = getattr(p, 'hold_age_s', None) if p is not None else None
+        hold_limit = getattr(getattr(self.fusion, 'config', None), 'rtk_hold_s', None)
+        speed_src = getattr(p, 'speed_source', None) if p is not None else None
+        yaw_src = getattr(p, 'yaw_source', None) if p is not None else None
         pose = None if p is None else dict(
             x=round(p.x + dx, 3), y=round(p.y + dy, 3), yaw_deg=round(math.degrees(p.yaw), 2),
             **({'antenna_corrected_m': round(math.hypot(dx, dy), 3)} if shift is not None else {}),
             # 融合改用副天线定位（主天线被污染或没固定）时标出来
             **({'position_antenna': 'second'} if getattr(p, 'position_antenna', 'main') == 'second' else {}),
+            **({'hold_age_s': round(float(hold_age), 2)}
+               if not isinstance(hold_age, bool) and isinstance(hold_age, (int, float))
+               and math.isfinite(hold_age) and hold_age >= 0 else {}),
+            **({'hold_limit_s': round(float(hold_limit), 1)}
+               if not isinstance(hold_limit, bool) and isinstance(hold_limit, (int, float))
+               and math.isfinite(hold_limit) and hold_limit > 0 else {}),
+            **({'speed_source': speed_src} if speed_src in ('wheel', 'gnss_doppler') else {}),
+            **({'yaw_source': yaw_src} if yaw_src in ('imu', 'wheel') else {}),
             speed=round(p.speed, 3), quality=p.quality, usable=p.usable_for_control,
             sigma_xy=round(p.sigma_xy, 4), sigma_yaw_deg=round(math.degrees(p.sigma_yaw), 3),
             reasons=list(p.reasons), rtk_trusted=bool(getattr(p, 'rtk_trusted', False)))
