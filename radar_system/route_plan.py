@@ -125,7 +125,8 @@ class RouteSpec:
     cruise: float = DEFAULT_PAINT_SPEED
     turn: str = 'arc'            # 差速车连线路线急弯的转法，见 TURNS；阿克曼车、圆、路点折线不用
     entry_turn: str = 'arc'      # 差速车进线的转法，见 ENTRY_TURNS
-    entry_space_m: float = math.inf  # 圆弧进线：车停在助跑起点时车尾后方还有多少米空地；app 没设为无限长（见 arc_entry）
+    entry_space_m: float = math.inf  # 车停在助跑起点时车尾后方还有多少米空地；app 没设为无限长。11-28 起不影响走法，照存照回传
+    entry_runup_m: float = rules.RUN_UP_M   # 圆弧进线后的直线助跑（app 可调，ENTRY_RUNUP_RANGE，见 arc_entry）
     # 圆：后轴从圆上哪个方位角出发（rad，东 0、逆时针为正）；None 为最南点。开始作业时按车的位置临时换
     # （见 start_from_nearest），不存盘、不发给 app
     start_angle: float = None
@@ -142,7 +143,8 @@ class RouteSpec:
                     center=None if self.center is None else r(self.center), radius=self.radius,
                     clockwise=self.clockwise, laps=self.laps, turn_radius=self.turn_radius, cruise=self.cruise,
                     turn=self.turn, entry_turn=self.entry_turn,
-                    entry_space=self.entry_space_m if math.isfinite(self.entry_space_m) else 0.0)   # 0 = 没设
+                    entry_space=self.entry_space_m if math.isfinite(self.entry_space_m) else 0.0,   # 0 = 没设
+                    entry_runup=self.entry_runup_m)
 
 
 def _number(value, name, lo, hi):
@@ -194,12 +196,13 @@ def parse_spec(d, *, geodetic=False):
     entry_space = _number(d.get('entry_space', 0.0), '后方空地', *ENTRY_SPACE_RANGE)
     if entry_space <= 0.0:
         entry_space = math.inf      # 没设（旧 app、旧路线、存盘写的 0）：无限长，不检查（11-27 用户）
+    entry_runup = _number(d.get('entry_runup', RUN_UP_M), '进线助跑', *ENTRY_RUNUP_RANGE)
     return RouteSpec(kind=kind, points=points, closed=flags['closed'], center=center,
                      radius=_number(d.get('radius', 3.0), '圆半径', *CIRCLE_RADIUS_RANGE),
                      clockwise=flags['clockwise'], laps=laps if flags['closed'] or kind == 'circle' else 1,
                      turn_radius=_number(d.get('turn_radius', 2.5), '转弯半径', *TURN_RADIUS_RANGE),
                      cruise=_number(d.get('cruise', DEFAULT_PAINT_SPEED), '速度', *CRUISE_RANGE), turn=turn,
-                     entry_turn=entry_turn, entry_space_m=entry_space)
+                     entry_turn=entry_turn, entry_space_m=entry_space, entry_runup_m=entry_runup)
 
 
 def wrap(a):
@@ -1155,18 +1158,18 @@ def pivot_entry(first, car, nozzle_x=0.0):
     return _via_runup(first, car, 1)
 
 
-# 圆弧进线（ENTRY_TURNS arc，见 _entry）：只往前、按 Dubins 最短路开到助跑起点 G 时车头已顺线，接着助跑，中间不停车不原地转
+# 圆弧进线（ENTRY_TURNS arc，见 _entry）：只往前、按 Dubins 开到助跑起点 G 时车头已顺线，接着直线助跑，中间不停车不原地转
 # （起步扭头来自原地转后单边轮换向，圆弧两轮同向就没有）。半径就用 app 设的转弯半径（路线的 turn_radius，2026-11-27 用户
-# 「进线直径按照app设置的来」；原来按后方空地从 3 m 往 1.25 m 自动挑）。R1 实车只转出 79%，app 设 1 m 时进线也照它。
-# 后方空地（entry_space_m，车在 G 时车尾后方还有多少米）app 没设就当无限长、不检查（11-27 用户「后方空地默认无限长，除非app
-# 自己设置了」）；设了：车身四角尽量不退到「车在 G 时车尾」后方 entry_space_m − ENTRY_ARC_MARGIN_M 以外（车本来就在更后面的
-# 照它自己的位置算），放不下时圆弧接上线的位置往线头挪（少一点助跑，直线助跑至少 ENTRY_ARC_MIN_STRAIGHT_M）；怎么挪都放不下
-# 也照走（11-27 用户「车子又看不见，选择了圆弧，就直接走呀」），挑往后退得最少的。原来放不下照原地转、11-27 上午改成不开始。
-ENTRY_ARC_MARGIN_M = 0.1
+# 「进线直径按照app设置的来」）；R1 实车只转出 79%，app 设 1 m 时进线也照它。直线助跑用路线的 entry_runup_m（app 可调，
+# 默认 RUN_UP_M 2 m，11-28 用户「保持助跑2m」「这个助跑要在app可调」）。
+# 掉头尽量在场内一侧转（11-28 用户「圆弧在内场转，外场极限转完刚好接上2m助跑」）：同一半径的几种 Dubins 走法里挑车身往
+# 线头外（线方向的反方向）伸得最少的，差不到 ENTRY_ARC_OUTSIDE_TIE_M 的挑短的。车头朝外掉头回来时，掉头的圆一半在 G 的场内
+# 一侧、一半在外侧，转完正好在 G 接上助跑——车身最远到 G 外一个半径再加车身（物理下限：G 处车头要朝里，之前车头朝外，
+# 中间车头横着的那一下离 G 至少一个半径）。后方空地（entry_space_m）不再影响走法（原来用它挑半径、挪接上线的位置，
+# 11-27 用户「车子又看不见，选择了圆弧，就直接走呀」），只照存、照回传。
 ENTRY_ARC_STEP_M = 0.05
-# 车头在后轴前 0.91 m：掉头进线时车头会扫到 G 后方，空地紧时圆弧接上线的位置往线头挪（少一点助跑），直线助跑至少留这么多
-ENTRY_ARC_MIN_STRAIGHT_M = 1.0
-ENTRY_ARC_SHIFT_STEP_M = 0.1
+ENTRY_ARC_OUTSIDE_TIE_M = 0.1
+ENTRY_RUNUP_RANGE = (1.0, 5.0)
 
 
 def _default_body():
@@ -1188,42 +1191,36 @@ def _body_min_along(x, y, yaw, body, h0, x0, y0):
     return best
 
 
-def arc_entry(first, car, radius, space_m=math.inf, body=None):
-    """圆弧进线：(分段, 接入路程米)。radius 是 app 设的转弯半径；space_m 后方空地，无限长（app 没设）不检查。
-    空地放不下也照走（见上），不返回空。"""
+def arc_entry(first, car, radius, runup=RUN_UP_M, body=None):
+    """圆弧进线：(分段, 接入路程米)。radius 是 app 设的转弯半径，runup 圆弧后的直线助跑（app 设的 entry_runup_m）；
+    走法挑往线头外伸得最少的（见上）。"""
+    body = body or _default_body()
     _, (x0, y0, h0), pieces = first
-    run = RUN_UP_M
-    gx, gy = _offset((x0, y0), h0, -run)
-    shift, way = 0.0, dubins(tuple(car), (gx, gy, h0), radius)
-    if math.isfinite(space_m):
-        body = body or _default_body()
-        limit = min(_body_min_along(gx, gy, h0, body, h0, x0, y0) - (space_m - ENTRY_ARC_MARGIN_M),
-                    _body_min_along(*car, body, h0, x0, y0))
-        best = None             # (最靠后的车身角, 挪多少, 走法)
-        steps = int((run - ENTRY_ARC_MIN_STRAIGHT_M) / ENTRY_ARC_SHIFT_STEP_M + 1e-9) + 1
-        for a in (i * ENTRY_ARC_SHIFT_STEP_M for i in range(steps)):
-            w = dubins(tuple(car), _offset((gx, gy), h0, a) + (h0,), radius)
-            x, y, yaw = car
-            worst = math.inf
-            for length, k in w:
-                n = max(1, int(math.ceil(length / ENTRY_ARC_STEP_M)))
-                for _ in range(n):
-                    x, y, yaw = advance(x, y, yaw, length / n, k)
-                    worst = min(worst, _body_min_along(x, y, yaw, body, h0, x0, y0))
-            if best is None or worst > best[0] + 1e-9:
-                best = (worst, a, w)
-            if worst >= limit - 1e-9:
-                break           # 放得下：挪得最少的那个
-        _, shift, way = best
-    moved = sum(length for length, _ in way)
+    gx, gy = _offset((x0, y0), h0, -runup)
+    ranked = []
+    for way in dubins_all(tuple(car), (gx, gy, h0), radius):
+        x, y, yaw = car
+        worst = _body_min_along(x, y, yaw, body, h0, x0, y0)
+        for length, k in way:
+            n = max(1, int(math.ceil(length / ENTRY_ARC_STEP_M)))
+            for _ in range(n):
+                x, y, yaw = advance(x, y, yaw, length / n, k)
+                worst = min(worst, _body_min_along(x, y, yaw, body, h0, x0, y0))
+        ranked.append((worst, sum(length for length, _ in way), way))
+    if not ranked:
+        raise ValueError('无法规划接入路线')
+    # 接入不超过 MAX_ENTRY_M 的走法里挑（往场内绕的可能很长，大半径线尾掉头往回要 30 m 以上）；都超了才不管长度
+    ranked = [r for r in ranked if r[1] + runup <= MAX_ENTRY_M] or ranked
+    best = max(w for w, _, _ in ranked)
+    _, moved, way = min((r for r in ranked if r[0] >= best - ENTRY_ARC_OUTSIDE_TIE_M), key=lambda r: r[1])
     out = _PivotSections(tuple(car))
     for length, k in way:
         out.add(1, length, k)
-    out.pose = _offset((gx, gy), h0, shift) + (h0,)   # Dubins 终点已验算到 1e-6 以内；接着助跑，同一段不停车
-    out.add(1, run - shift, 0.0)
+    out.pose = (gx, gy, h0)     # Dubins 终点已验算到 1e-6 以内；接着助跑，同一段不停车
+    out.add(1, runup, 0.0)
     for length, k in pieces:
         out.add(1, length, k)
-    return out.out, moved + run - shift
+    return out.out, moved + runup
 
 
 def runup_entry(first, car, nozzle_x):
@@ -1245,20 +1242,20 @@ def runup_entry(first, car, nozzle_x):
     return _via_runup(first, car, -1 if along + run > 0.0 else 1)
 
 
-def _entry(first, car, nozzle_x, entry_fn, turn='arc', radius=2.5, space_m=math.inf, body=None):
+def _entry(first, car, nozzle_x, entry_fn, turn='arc', radius=2.5, runup=RUN_UP_M, body=None):
     """差速车进线（开始作业、从图纸起点开始、续画 / 补画）：(分段, 接入路程米, 'straight' / 'pivot' / 'arc')。
 
     原地方式（entry_fn：pivot_entry / runup_entry）本来就一下都不原地转——车已顺着线，直着开进来或直着倒到助跑起点——
     两种都照用（'straight'）。要原地转时按 app 选的 turn（路线的 entry_turn，2026-11-27 用户「根据app实际选择」）：
       pivot  照原地方式（'pivot'）；
-      arc    按 app 设的转弯半径 radius 走圆弧（arc_entry，'arc'）：只往前、一段不停车、两轮一路不换向；
-             后方空地 space_m 只用来挑圆弧接上线的位置，放不下也照走（车看不见后面）。"""
+      arc    按 app 设的转弯半径 radius 走圆弧（arc_entry，'arc'）、接 app 设的直线助跑 runup：只往前、一段不停车、
+             两轮一路不换向；掉头尽量在场内一侧转。"""
     entry, entry_m = entry_fn(first, car, nozzle_x)
     if _turned(entry, car[2]) <= 1e-9:
         return entry, entry_m, 'straight'
     if turn == 'pivot':
         return entry, entry_m, 'pivot'
-    return arc_entry(first, car, radius, space_m, body) + ('arc',)
+    return arc_entry(first, car, radius, runup, body) + ('arc',)
 
 # ---- 路线本身（不含接入段）----
 
@@ -1391,8 +1388,8 @@ def _dubins_words(alpha, beta, d):
     return out
 
 
-def dubins(start, goal, radius):
-    """start、goal 为 (x, y, yaw)。返回最短的 [(长度, 曲率), …]（去掉零长度段；已在终点时为空）。
+def dubins_all(start, goal, radius):
+    """start、goal 为 (x, y, yaw)。所有成立的 Dubins 走法 [[(长度, 曲率), …], …]（去掉零长度段；已在终点时为 [[]]）。
 
     每个候选都积分验算终点，公式或数值出错的候选直接丢掉，不会把车带到别处。
     """
@@ -1400,12 +1397,12 @@ def dubins(start, goal, radius):
     dx, dy = goal[0] - x0, goal[1] - y0
     dist = math.hypot(dx, dy)
     if dist < 1e-9 and abs(wrap(goal[2] - yaw0)) < 1e-9:
-        return []
+        return [[]]
     theta = math.atan2(dy, dx)
     alpha, beta = _mod2pi(yaw0 - theta), _mod2pi(goal[2] - theta)
     k = 1.0 / radius
     curv = {'L': k, 'R': -k, 'S': 0.0}
-    best = None
+    out = []
     for word, *lengths in _dubins_words(alpha, beta, dist / radius):
         pieces = [(u * radius, curv[c]) for c, u in zip(word, lengths) if u * radius > 1e-6]
         x, y, yaw = start
@@ -1413,12 +1410,16 @@ def dubins(start, goal, radius):
             x, y, yaw = advance(x, y, yaw, length, kappa)
         if math.hypot(x - goal[0], y - goal[1]) > 1e-6 * max(1.0, dist) or abs(wrap(yaw - goal[2])) > 1e-6:
             continue
-        total = sum(length for length, _ in pieces)
-        if best is None or total < best[0] - 1e-9:
-            best = (total, pieces)
-    if best is None:
+        out.append(pieces)
+    return out
+
+
+def dubins(start, goal, radius):
+    """start、goal 为 (x, y, yaw)。返回最短的 [(长度, 曲率), …]（去掉零长度段；已在终点时为空）。"""
+    ways = dubins_all(start, goal, radius)
+    if not ways:
         raise ValueError('无法规划接入路线')
-    return best[1]
+    return min(ways, key=lambda w: sum(length for length, _ in w))
 
 
 def route_length(spec, min_radius, nozzle_x=None):
@@ -1513,7 +1514,7 @@ def start_from_nearest(spec, car_pose, min_radius, *, body=None, nozzle_x=None):
             def cost(c):
                 route, entry_fn, _ = _circle_route(c[1], car_pose, min_radius, nozzle_x)
                 sections = _entry((1, route[0][1], []), car_pose, nozzle_x, entry_fn, spec.entry_turn, spec.turn_radius,
-                                  spec.entry_space_m, body)[0]
+                                  spec.entry_runup_m, body)[0]
                 return entry_seconds(sections, yaw)
             return min(cands, key=lambda c: (round(cost(c), 6), c[0]))[1]
     elif spec.closed and len(spec.points) >= 3:
@@ -1681,7 +1682,7 @@ def plan_current(spec, car_pose, min_radius, *, body=None, max_entry_m=MAX_ENTRY
     if run.kind != 'circle':
         entry_fn, run_in = _entry_fn(route[0], car_pose, nozzle_x), 0.0
     entry, entry_m, how = _entry(route[0], car_pose, nozzle_x, entry_fn, run.entry_turn, run.turn_radius,
-                                 run.entry_space_m, body)
+                                 run.entry_runup_m, body)
     if info is not None:
         info['entry_turn'] = how
     if entry_m > max_entry_m:
@@ -1709,7 +1710,7 @@ def plan(spec, car_pose, min_radius, *, body=None, max_entry_m=MAX_ENTRY_M, nozz
             if info is not None and spec.turn == 'arc':
                 info['arc_turns'] = corners
             entry, entry_m, how = _entry(route[0], car_pose, nozzle_x, pivot_entry, spec.entry_turn, spec.turn_radius,
-                                         spec.entry_space_m, body)
+                                         spec.entry_runup_m, body)
             if info is not None:
                 info['entry_turn'] = how
         elif body is None:
@@ -1725,7 +1726,7 @@ def plan(spec, car_pose, min_radius, *, body=None, max_entry_m=MAX_ENTRY_M, nozz
         start, loop = loop_pieces(spec, min_radius, nozzle_x)
         route, run_in = _circle_run_in(spec, [(1, start, _circle_run_out(spec, loop))])
         entry, entry_m, how = _entry(route[0], car_pose, nozzle_x, pivot_entry, spec.entry_turn, spec.turn_radius,
-                                     spec.entry_space_m, body)
+                                     spec.entry_runup_m, body)
         if info is not None:
             info['entry_turn'] = how
         if entry_m > max_entry_m:

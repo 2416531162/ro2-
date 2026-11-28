@@ -138,7 +138,7 @@ def entry_to(sections, car, radius):
 def pivot_entry_to(sections, car, radius, nozzle, spec=None, body=None):
     """差速车接入剩下的第一段（与开始作业同一套，route_plan.plan_current / route_plan._entry）：进线按路线 spec 的
     entry_turn（app 选的，没有路线按 RouteSpec 默认）：车已顺着线就直着开进来 / 直着倒到助跑起点；要转时 arc 按
-    turn_radius 圆弧开上线（后方空地 entry_space_m 只挑接上线的位置），pivot 水泵离起点 NEAR_START_M 以内倒车助跑、
+    turn_radius 圆弧开上线、接 entry_runup_m 直线助跑，pivot 水泵离起点 NEAR_START_M 以内倒车助跑、
     更远原地转向开到助跑起点。助跑与第一段接成一段（中间不停车，水泵到起点时已稳住），
     返回 (整趟分段, 接入路程米, 只含接入的分段（预览画接入用）)。第一段是倒车时退回 entry_to。"""
     first = sections[0]
@@ -153,7 +153,7 @@ def pivot_entry_to(sections, car, radius, nozzle, spec=None, body=None):
 
     def enter(pieces):
         return rp._entry((1, (x0, y0, h0), pieces), car, nozzle, entry_fn, spec.entry_turn, spec.turn_radius,
-                         spec.entry_space_m, body)[:2]
+                         spec.entry_runup_m, body)[:2]
     joined, length = enter(pieces)
     if length > rp.MAX_ENTRY_M:
         raise ValueError('接入路线 %.1f m，超过 %.0f m；请先手动开近断点' % (length, rp.MAX_ENTRY_M))

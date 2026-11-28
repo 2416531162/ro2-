@@ -1,14 +1,16 @@
 """进线按 app 选的（2026-11-27 用户「原地转也先不要删除，根据app实际选择」；没带按圆弧）。
 
 圆弧进线：只往前、按 Dubins 圆弧开到助跑起点车头已顺线，不停车接着助跑；半径就是 app 设的转弯半径（turn_radius，
-「进线直径按照app设置的来」）；后方空地 app 没设就当无限长、不检查（「后方空地默认无限长，除非app自己设置了」），设了只用来
-挑圆弧接上线的位置（少一点直线助跑），放不下也照走（「车子又看不见，选择了圆弧，就直接走呀」）。车已顺着线、不用原地转
+「进线直径按照app设置的来」）；圆弧后直线助跑默认 2 m、app 可调（entry_runup，11-28 用户「保持助跑2m」「这个助跑要在app可调」）；
+掉头尽量在场内一侧转（「圆弧在内场转，外场极限转完刚好接上2m助跑」）：几种走法里挑往线头外伸得最少的。后方空地不再影响
+走法、放不下也照走（「车子又看不见，选择了圆弧，就直接走呀」）。车已顺着线、不用原地转
 （直着开进来 / 直着倒到助跑起点）照旧。原地转进线（entry_turn='pivot'）见 test_entry_choice。"""
 from dataclasses import replace
 from pathlib import Path
 import math
 import sys
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / 'radar_system'), str(ROOT)]
@@ -58,9 +60,10 @@ class Spec(unittest.TestCase):
         self.assertEqual(rp.parse_spec(old.to_dict()).entry_space_m, math.inf)
         pivot = rp.parse_spec(dict(LINE.to_dict(), entry_turn='pivot', turn='pivot'))   # app 选了原地转：照它
         self.assertEqual((pivot.entry_turn, pivot.turn), ('pivot', 'pivot'))
-        spec = rp.parse_spec(replace(LINE, entry_space_m=2.).to_dict())
-        self.assertEqual(spec.entry_space_m, 2.)
-        for bad in (dict(entry_turn='loop'), dict(entry_space=-1)):
+        spec = rp.parse_spec(replace(LINE, entry_space_m=2., entry_runup_m=3.).to_dict())
+        self.assertEqual((spec.entry_space_m, spec.entry_runup_m), (2., 3.))
+        self.assertEqual(old.entry_runup_m, rp.RUN_UP_M)                         # app 没带：2 m
+        for bad in (dict(entry_turn='loop'), dict(entry_space=-1), dict(entry_runup=.5), dict(entry_runup=6)):
             with self.assertRaises(ValueError):
                 rp.parse_spec(dict(LINE.to_dict(), **bad))
         import field_planner
@@ -75,6 +78,14 @@ def runup_straight(sec):
     pieces = sec.path.pieces
     last = max(i for i, p in enumerate(pieces) if abs(p.kappa) > 1e-9 and p.s0 < sec.paint_from_m)
     return sec.paint_from_m - (pieces[last].s0 + pieces[last].length)
+
+
+_DUBINS_ALL = rp.dubins_all
+
+
+def shortest_only(start, goal, radius):
+    """只留最短的走法（对照：原来按最短走）。"""
+    return [min(_DUBINS_ALL(start, goal, radius), key=lambda w: sum(v for v, _ in w))]
 
 
 class ArcEntry(unittest.TestCase):
@@ -98,28 +109,42 @@ class ArcEntry(unittest.TestCase):
                     self.assertTrue(all(abs(r - radius) < 1e-9 for r in arc_radii(secs)))
                     self.assertAlmostEqual(secs[0].paint_from_m, entry_m, places=6)
 
-    def test_no_space_set_never_refuses_and_keeps_full_runup(self):
-        # 后方空地没设（无限长）：不检查，直线助跑照常 RUN_UP_M；离线头近、车头横着、反着的都直接走圆弧
+    def test_runup_follows_the_app_and_never_refuses(self):
+        # 圆弧后直线助跑按 app 的 entry_runup（默认 2 m）；离线头近、车头横着、反着的都直接走圆弧，后方空地设多少都不挡
         cars = (self.SIDE, line_car(-4., 0., math.pi), line_car(-4., 0., math.radians(30.)), line_car(.2, .1, math.pi / 2))
         for car in cars:
-            with self.subTest(car=car):
-                secs, _, how = self.go(car, turn_radius=1.25)
-                self.assertEqual(how, 'arc')
-                self.assertEqual(len(secs), 1)
-                self.assertAlmostEqual(runup_straight(secs[0]), rp.RUN_UP_M, places=6)
+            for runup in (None, 1., 3.):
+                with self.subTest(car=car, runup=runup):
+                    kw = {} if runup is None else dict(entry_runup_m=runup)
+                    secs, _, how = self.go(car, turn_radius=1.25, entry_space_m=.5, **kw)
+                    self.assertEqual(how, 'arc')
+                    self.assertEqual(len(secs), 1)
+                    self.assertAlmostEqual(runup_straight(secs[0]), runup or rp.RUN_UP_M, places=6)
 
-    def test_space_set_moves_the_join_and_still_goes_when_short(self):
-        # 设了后方空地：放得下照常（2 m 助跑）；放不下把圆弧接上线的位置往线头挪（直线助跑最少 ENTRY_ARC_MIN_STRAIGHT_M），
-        # 挪到头也放不下照走（R2 线尾掉头往回，车身甩到助跑起点车尾后 3.5 m，填 2 m 也走）
-        secs, entry_m, _ = self.go(self.SIDE, turn_radius=1.25, entry_space_m=3.)
-        self.assertAlmostEqual(runup_straight(secs[0]), rp.RUN_UP_M, places=6)
-        secs, entry_m, _ = self.go(self.SIDE, turn_radius=1.25, entry_space_m=2.)
-        self.assertAlmostEqual(runup_straight(secs[0]), rp.ENTRY_ARC_MIN_STRAIGHT_M, places=6)
-        worst, g = rearmost(secs, entry_m)
-        self.assertGreaterEqual(worst, g - 2. - 1e-6)
-        secs, _, how = self.go(self.FAR, self.BACK, turn_radius=2., entry_space_m=2.)
-        self.assertEqual(how, 'arc')
-        self.assertAlmostEqual(runup_straight(secs[0]), rp.ENTRY_ARC_MIN_STRAIGHT_M, places=6)
+    def test_turns_on_the_field_side(self):
+        # 掉头尽量在场内一侧：车身往线头外伸得不比最短走法多；最远到助跑起点外一个半径再加车身（物理下限）。
+        # 画完线尾掉头往回最明显：直径 4 m 最短走法伸出线头外约 6.6 m，现在约 4.8 m（接入长一些）
+        def outside(secs):
+            sec = secs[0]
+            x0, y0, h0 = sec.path.pose(sec.paint_from_m)
+            nx, ny = rp.nozzle_at(x0, y0, h0, *rp.nozzle_point(NOZZLE))
+            return -min(rp._body_min_along(*sec.path.pose(min(i * .02, sec.paint_from_m)), BODY, h0, nx, ny)
+                        for i in range(int(sec.paint_from_m / .02) + 1))
+        cars = ((self.SIDE, LINE), (line_car(3., 1.5, math.pi), LINE), (line_car(3., 3., -math.pi / 2), LINE),
+                (self.FAR, self.BACK))
+        for radius in (1.25, 2.):
+            for car, spec in cars:
+                with self.subTest(radius=radius, car=car):
+                    secs, _, _ = self.go(car, spec, turn_radius=radius)
+                    got = outside(secs)
+                    with mock.patch.object(rp, 'dubins_all', shortest_only):
+                        shortest = outside(self.go(car, spec, turn_radius=radius)[0])
+                    self.assertLessEqual(got, shortest + 1e-6)
+                    self.assertLess(got, rp.RUN_UP_M + NOZZLE[0] + radius + .65)
+        secs, _, _ = self.go(self.FAR, self.BACK, turn_radius=2.)
+        with mock.patch.object(rp, 'dubins_all', shortest_only):
+            shortest = outside(self.go(self.FAR, self.BACK, turn_radius=2.)[0])
+        self.assertLess(outside(secs), shortest - 1.)
 
     def test_no_pivot_needed_keeps_straight_in(self):
         # 车已顺着线：喷头在线头后面直接倒到助跑起点、在助跑起点后方直着开进来，圆弧、原地都一样
