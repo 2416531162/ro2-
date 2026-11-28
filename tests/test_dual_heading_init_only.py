@@ -173,15 +173,16 @@ class InitOnly(unittest.TestCase):
         self.assertTrue(p[-1].heading_calibrated)
 
     def test_wrong_heading_after_takeover_recovers(self):
-        # 对好以后车头整个错了 5°（IMU 航向角在走着时跳、别的原因）：一段差超过 3σ 当跳点不修，连着 3 段都这样就重新对上，
-        # 不会一直挡着错到底（11-27 删跨线记忆时加，TRACK_HEADING_RECOVER_N）
+        # 对好以后车头整个错了 8°（IMU 航向角在走着时跳、别的原因）：一段差超过 3σ 当跳点不修，连着 3 段都这样就重新对上，
+        # 不会一直挡着错到底（11-27 删跨线记忆时加，TRACK_HEADING_RECOVER_N）。错 5° 时车头方差走几米就涨到放得进来，
+        # 用不上这个；超过 ALIGN_MAX_DEG（10°）的段直接不算，也不在这里
         for recover in (True, False):
             with self.subTest(recover=recover):
-                rig = Rig()
+                rig = Rig(yaw_input='angle')             # 'rate' 只用陀螺，IMU 航向角跳了不起作用
                 if not recover:
                     rig.f.config = replace(rig.f.config, track_heading_recover_n=10 ** 6)
                 rig.step(80)
-                rig.imu_jump = math.radians(5.)
+                rig.imu_jump = math.radians(8.)
                 p = rig.step(100)                          # 再走 8 m
                 if recover:
                     self.assertLess(abs(rig.err_deg(p[-1])), .5)

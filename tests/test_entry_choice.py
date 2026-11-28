@@ -1,5 +1,6 @@
 """接入走法（2026-10-07 用户）：定点画线车在点后面时直接往后倒一点，不要原地转一圈再转回来；
-画圆从接入最省事的地方开始（直接走最近的接入口）。只做纯规划测试。"""
+画圆从接入最省事的地方开始（直接走最近的接入口）。只做纯规划测试。这里测的是原地转进线（app 选 entry_turn='pivot'；
+11-27 起 app 没带时按圆弧，圆弧进线见 test_arc_entry）。"""
 import math
 from pathlib import Path
 import sys
@@ -48,7 +49,7 @@ def line_car(q, side=0., yaw=0.):
     return rp.axle_for((q, side), yaw, *NOZZLE) + (yaw,)
 
 
-LINE = rp.RouteSpec(kind='path', points=((0., 0.), (10., 0.)), closed=False, cruise=.8)
+LINE = rp.RouteSpec(kind='path', points=((0., 0.), (10., 0.)), closed=False, cruise=.8, entry_turn='pivot')
 
 
 class LineEntry(unittest.TestCase):
@@ -104,7 +105,7 @@ class LineEntry(unittest.TestCase):
     def test_far_entry_still_goes_forward_when_reverse_saves_little(self):
         # 起点正后方、喷头在侧面：倒过去和开过去转的角度一样，照旧往前开
         car = (0., 0., 0.)
-        spec = rp.RouteSpec(kind='path', points=((-1.0, 0.), (-6., 0.)), closed=False)
+        spec = rp.RouteSpec(kind='path', points=((-1.0, 0.), (-6., 0.)), closed=False, entry_turn='pivot')
         sections, _ = rp.plan_current(spec, car, MIN_R, nozzle_x=NOZZLE)
         m = moves(sections, car)
         # 到 G 要原地转时先到 G 前方 RUNUP_BACK_M 转正再顺线倒回；去转正点开过去还是倒过去按哪个转得少，倒得很短
@@ -143,7 +144,8 @@ class ReverseRunup(unittest.TestCase):
 
     def test_corner_reverse_in_route_unchanged(self):
         # 路线中间拐角的倒车（原地转 + 倒车回拐角）后的助跑照旧
-        rect = rp.RouteSpec(kind='path', points=((0., 0.), (6., 0.), (6., 4.), (0., 4.)), closed=True, cruise=.8)
+        rect = rp.RouteSpec(kind='path', points=((0., 0.), (6., 0.), (6., 4.), (0., 4.)), closed=True, cruise=.8,
+                            turn='pivot', entry_turn='pivot')
         tr, secs = self.tracker(line_car(-3.), spec=rect)
         first = next(k for k, s in enumerate(secs) if s.field_role == 'paint')
         later = [k for k in range(first+1, len(secs)) if secs[k].direction > 0 > secs[k-1].direction]
@@ -154,7 +156,8 @@ class ReverseRunup(unittest.TestCase):
 
 class CircleEntry(unittest.TestCase):
     def setUp(self):
-        self.spec = rp.RouteSpec(kind='circle', center=(0., 0.), radius=1.5, clockwise=True, laps=1, cruise=.8)
+        self.spec = rp.RouteSpec(kind='circle', center=(0., 0.), radius=1.5, clockwise=True, laps=1, cruise=.8,
+                                 entry_turn='pivot')
 
     def plan(self, car):
         sections, entry_m = rp.plan_current(self.spec, car, MIN_R, nozzle_x=NOZZLE)

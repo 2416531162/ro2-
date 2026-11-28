@@ -176,6 +176,8 @@ LIVE_CRUISE_JERK_MPS3 = .3
 LAUNCH_HOLD_MAX_S = 3.0
 LAUNCH_HOLD_MAX_M = 1.0
 LAUNCH_HEADING_LIMIT_RAD = math.radians(2.0)
+# 进线圆弧最后这么多米就开始攒直线 IMU 换算样本（user_rules.ENTRY_ARC_LEARN_M，见 PathTracker._entry_arc_learn）
+ENTRY_ARC_LEARN_M = rules.ENTRY_ARC_LEARN_M
 
 @dataclass(frozen=True)
 class PathConfig:
@@ -1495,6 +1497,22 @@ class PathTracker:
     def paint_start_allowed(self):
         return self.paint_start_guard is None or self.paint_start_guard.started
 
+    def _entry_arc_learn(self, piece, pose):
+        """进线圆弧最后 ENTRY_ARC_LEARN_M 米、接着就是要喷的直线、融合车头已按 IMU + RTK 位移对好
+        （FusedPose.heading_calibrated）：返回后面那条直线（_straight_control 在圆弧上就给它攒 IMU 换算样本，
+        转上直线时已锁住或攒了一大半，不用再等约 1 s）；不是这种情况返回 None。换算照样只从这条线开头的融合车头学。"""
+        if (ENTRY_ARC_LEARN_M <= 0 or piece is None or piece.straight or self._straight_guide is None
+                or getattr(pose, 'heading_calibrated', False) is not True):
+            return None
+        pieces = self.path.pieces
+        i = pieces.index(piece)
+        ahead = next((p for p in pieces[i + 1:] if p.straight), None)
+        if ahead is None or any(p.straight or abs(p.kappa) * p.length > math.radians(90.) for p in pieces[i + 1:pieces.index(ahead)]):
+            return None
+        if not (ahead.s0 - ENTRY_ARC_LEARN_M <= self.st.s < ahead.s0 and ahead.s0 <= self.paint_from_m < ahead.s0 + ahead.length):
+            return None
+        return ahead
+
     def _straight_control(self, pose, dt, speed, legacy_w):
         """直线在行进方向坐标内复用稳向与横偏控制；路线仍管理车速、停车及弯道交接。"""
         cfg, st = self.cfg, self.st
@@ -1510,7 +1528,16 @@ class PathTracker:
             index=self.path.pieces.index(piece)
             if self._straight_stitch(self.path.pieces,index):piece=self.path.pieces[index-1]
         if piece is None or not piece.straight:
-            self._reset_straight()
+            ahead = self._entry_arc_learn(piece, pose)
+            if ahead is None:
+                self._reset_straight()
+                return legacy_w
+            if self._straight_piece is not ahead:
+                armed = self._launch_armed and self._straight_piece is None
+                self._reset_straight()
+                self._launch_armed = armed
+                self._straight_piece = ahead
+            self._straight_guide.learn_offset(wrap(pose.yaw - imu_yaw), gyro)
             return legacy_w
         if piece is not self._straight_piece:
             if not self._same_straight_run(piece,self._straight_piece):

@@ -3,11 +3,10 @@ import math
 from pathlib import Path
 import sys
 import unittest
-from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / 'radar_system'), str(ROOT)]
-from line_cascade import ImuAlignment, ImuFirstConfig, ImuFirstGuide, imu_first_target, wrap
+from line_cascade import ImuFirstConfig, ImuFirstGuide, imu_first_target, wrap
 from test_imu_first_straight import closed_loop
 from test_late_correction import run
 
@@ -64,20 +63,6 @@ class ObservationContinuity(unittest.TestCase):
             g.update(.05, 0., .016, DT, (.24, -.4575), True)
         self.assertEqual(g.jumps_accepted, 0)
         self.assertEqual(g.mode, 'imu')
-
-    def test_bad_quality_does_not_calibrate_the_next_line(self):
-        alignment = ImuAlignment()
-        updates = []
-        original = alignment.update_line
-        def record(token, now, *args):
-            updates.append(now)
-            return original(token, now, *args)
-        with patch.object(alignment, 'update_line', side_effect=record):
-            tr, _, _ = closed_loop('imu_fit', length=40., seconds=70., alignment=alignment,
-                quality=lambda t: (.008, 30, .005) if t < 20. else (.04, 15, .08))
-        self.assertEqual(tr.st.state, 'DONE')
-        self.assertTrue(updates)
-        self.assertLess(max(updates), 20.1)
 
 
 class SmoothReference(unittest.TestCase):

@@ -27,7 +27,7 @@ class FieldPlanService:
                      request.get('paint_speed',DEFAULT_PAINT_SPEED),request.get('transit_speed',DEFAULT_TRANSIT_SPEED),
                      yaw_rate=limits.get('pivot_rate',.8),yaw_accel=limits.get('pivot_accel',1.0),
                      accel=limits.get('accel',.5),lateral_accel=limits.get('lateral_accel',.05),
-                     turn=request.get('turn','pivot'),turn_radius=request.get('turn_radius',1.0))
+                     turn=request.get('turn','arc'),turn_radius=request.get('turn_radius',1.0))   # 没带按圆弧（11-27）
         start=(pose['x'],pose['y'],math.radians(pose['yaw_deg']))
         result=plan(request.get('job'),start,cfg)
         token=str(uuid.uuid4())

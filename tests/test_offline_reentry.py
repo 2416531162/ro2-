@@ -21,7 +21,8 @@ from robot_core.kinematics import ChassisGeometry
 DT = .02
 GEO = ChassisGeometry(drive='differential', track_m=.675, diff_min_radius_m=.5)
 NOZZLE = (.24, -.4575)
-ROUTE = rp.RouteSpec(kind='path', points=((0., 0.), (12., 0.)), closed=False, cruise=.8)
+# 10-10 实录是原地转进线（app 选 pivot）；11-27 起 app 没带 entry_turn 时按圆弧，这里写明
+ROUTE = rp.RouteSpec(kind='path', points=((0., 0.), (12., 0.)), closed=False, cruise=.8, entry_turn='pivot')
 
 
 class Car:
@@ -47,11 +48,11 @@ class Car:
     to_local = staticmethod(lambda lat, lon: ((lon - 120.) / 1e-5, (lat - 30.) / 1e-5))
 
 
-def mission(car, folder):
+def mission(car, folder, spec=ROUTE):
     cfg = replace(differential_config(PathConfig(cruise_mps=.8)), straight_imu_enabled=False)
     m = LineMission(car, SimpleNamespace(), IdleTracker(GEO), route_path=str(Path(folder) / 'route.json'),
                     path_config=cfg, nozzle_x=NOZZLE)
-    ok, message = m.command(dict(cmd='route_start_current', route=ROUTE.to_dict(digits=12),
+    ok, message = m.command(dict(cmd='route_start_current', route=spec.to_dict(digits=12),
                                  nozzle=dict(forward=NOZZLE[0], right=-NOZZLE[1])), 0.)
     assert ok, message
     return m

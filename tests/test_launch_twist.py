@@ -5,7 +5,8 @@
 或都不换向时在 2° 以内。
 
 1. 规划（RUNUP_BACK_M = 1.5：11-19 开、11-21 关、11-28 用户「也要稳定的备选方案」重新打开）：助跑起点要原地转正时，
-   改在前方 RUNUP_BACK_M 处转正、再直线倒回助跑起点，起步前万向轮顺过来、两轮一起换向。
+   改在前方 RUNUP_BACK_M 处转正、再直线倒回助跑起点，起步前万向轮顺过来、两轮一起换向。这里都是原地转进线（app 选
+   entry_turn='pivot'；11-27 起 app 没带时按圆弧）；圆弧进线一段往前、两轮一路不换向，见 ArcEntryNoTwist。
 2. 作业第一个线头没过起喷门槛：渐停、退回去重新助跑（与接入时偏离同一套），不再跳过线头往前喷。"""
 from dataclasses import replace
 from pathlib import Path
@@ -25,7 +26,7 @@ from path_tracker import PathConfig, differential_config
 from test_offline_reentry import DT, GEO, NOZZLE, Car, mission, run
 from types import SimpleNamespace
 
-LINE = rp.RouteSpec(kind='path', points=((0., 0.), (12., 0.)), closed=False, cruise=.8)
+LINE = rp.RouteSpec(kind='path', points=((0., 0.), (12., 0.)), closed=False, cruise=.8, entry_turn='pivot')
 TRACK = .675
 DEAD_S = .35         # 实录：换向的轮子比另一个晚动 0.1–0.5 s（编码器不动），18:34 那次 0.36 s
 
@@ -56,7 +57,7 @@ BACK_ON = 1.5        # 打开时的回倒长度
 
 class RunupPlan(unittest.TestCase):
     def test_on_by_default(self):
-        # 2026-11-28 用户「也要稳定的备选方案」：原地进线转正后顺线倒回 1.5 m 再起步（圆弧放不下或选了原地时）
+        # 2026-11-28 用户「也要稳定的备选方案」：原地进线转正后顺线倒回 1.5 m 再起步（app 选了原地进线时）
         self.assertEqual(rp.RUNUP_BACK_M, BACK_ON)
         secs, _ = rp.plan_current(LINE, BESIDE, .556, nozzle_x=NOZZLE)
         *_, (d2, l2, t2), (d3, _, t3) = headings(secs, BESIDE[2])
@@ -69,7 +70,7 @@ class RunupPlan(unittest.TestCase):
     def test_after_finishing_the_same_line_backwards(self):
         # 打开回倒时：刚把同一条线反方向画完、停在线尾外，最后一下顺线倒回再起步，不在助跑起点原地转
         car = line_car(12.5, 0., 0.)
-        spec = rp.RouteSpec(kind='path', points=((12., 0.), (0., 0.)), closed=False, cruise=.8)
+        spec = rp.RouteSpec(kind='path', points=((12., 0.), (0., 0.)), closed=False, cruise=.8, entry_turn='pivot')
         secs, _ = rp.plan_current(spec, car, .556, nozzle_x=NOZZLE)
         *_, (d2, l2, _), (d3, _, t3) = headings(secs, car[2])
         self.assertEqual((d2, d3), (-1, 1))
@@ -111,6 +112,7 @@ class WheelDeadCar(Car):
         super().__init__(*a, **k)
         self.last = [0, 0]
         self.dead = [0., 0.]
+        self.reversals = 0           # 轮子换向（晚动）几次
 
     def step(self, vx, wz):
         wheels = [vx - wz * TRACK / 2, vx + wz * TRACK / 2]
@@ -119,6 +121,7 @@ class WheelDeadCar(Car):
             if sign and self.last[i] and sign != self.last[i] and self.dead[i] <= 0.:
                 self.dead[i] = DEAD_S
                 self.last[i] = sign
+                self.reversals += 1
             elif sign and not self.last[i]:
                 self.last[i] = sign
             if self.dead[i] > 0.:
@@ -157,6 +160,30 @@ class LaunchTwist(unittest.TestCase):
         self.assertLess(new_twist, 1.5)
         self.assertLess(new_head, old_head)
         self.assertLess(new_head, 1.)
+
+
+class ArcEntryNoTwist(unittest.TestCase):
+    def test_arc_entry_never_reverses_a_wheel(self):
+        # 圆弧进线（app 选 arc，没带时也是它）：从 BESIDE（原地转进线要转过去倒到助跑起点、再原地转正起步，换向的轮子晚动、
+        # 车头扭 4° 以上）按 app 设的转弯半径一段往前开上线，两轮一路不换向，线头横偏 1 cm 以内
+        for radius in (1.25, 2.):
+            with self.subTest(radius=radius), tempfile.TemporaryDirectory() as folder:
+                car = WheelDeadCar(*BESIDE)
+                m = mission(car, folder, replace(LINE, entry_turn='arc', turn_radius=radius))
+                self.assertEqual(len(m.tracker.sections), 1)
+                sec = m.tracker.sections[0]
+                self.assertAlmostEqual(min(1 / abs(p.kappa) for p in sec.path.pieces if abs(p.kappa) > 1e-9), radius)
+                head = None
+                for i in range(int(90. / DT)):
+                    vx, wz, _ = m.tick(i * DT, 'NAVIGATION')
+                    car.step(vx, wz)
+                    st = m.tracker.trackers[0].st
+                    if m.phase == 'RUNNING' and st.s >= sec.paint_from_m:
+                        head = abs(st.e or 0.) * 100
+                        break
+                self.assertEqual(car.reversals, 0)
+                self.assertIsNotNone(head)
+                self.assertLess(head, 1.)
 
 
 class RedoRunup(unittest.TestCase):
@@ -199,7 +226,8 @@ class RedoRunup(unittest.TestCase):
 
     def test_later_head_is_not_redone(self):
         # 拐角后的第二条线：第一条已经喷过，重新接入要从头跑，照旧车照走、先不喷
-        spec = rp.RouteSpec(kind='path', points=((0., 0.), (6., 0.), (6., 5.)), closed=False, cruise=.8)
+        spec = rp.RouteSpec(kind='path', points=((0., 0.), (6., 0.), (6., 5.)), closed=False, cruise=.8,
+                            turn='pivot', entry_turn='pivot')
         car = Car(*line_car(-6., 2., 0.))
         cfg = replace(differential_config(PathConfig(cruise_mps=.8)), straight_imu_enabled=False)
         m = LineMission(car, SimpleNamespace(), IdleTracker(GEO),

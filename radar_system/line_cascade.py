@@ -469,7 +469,7 @@ class ImuFirstGuide:
         self.jumps_accepted = 0
         self._persist = None         # rtk_fit：最近同一边差超过 persist_e_m / 2 的连续点 (路程, 差)
         self.persists = 0            # 认过几次真偏
-        self.rtk_accepted = False    # 当前观测实际通过质量及跳点门，供跨线标定使用
+        self.rtk_accepted = False    # 当前观测实际通过质量及跳点门（遥测 straight.rtk_accepted）
         self.target_rate = 0.0       # 平滑目标的连续角速度，rad/s
         self._fit = None             # rtk_fit：(起点横偏, IMU 推算横移, [c, b, r, k], P, 当前这一格 [Σ路程, Σ残差, 个数, 起点, Σ∫横滚])
         self.crab = 0.0              # 此刻补的侧滑角（k × 横滚），rad；目标车头再减它（见 ImuFirstConfig.crab_*）

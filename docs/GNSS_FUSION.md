@@ -97,7 +97,20 @@
   `minus_fused_deg`（测向 − 融合车头，低通）、`disagree`（≥ `dual_heading_check_deg` 3°）。还没攒够时照旧按测向，
   对车头前把车头方差放到至少 `track_heading_switch_sigma_deg`（2°），第一次按位移就基本接过来。
 - 两根天线互检不过、离群的固定解照样用（楼下六成以上的帧这样；测向偏了推算对不上固定解本身就算离群）；
-  RTK 完好性判跳（suspect）的不用；接过来以后一段差超过 3σ 的不修（`track_rejected`）。
+  RTK 完好性判跳（suspect）的不用；接过来以后一段差超过 3σ 的当跳点不修（`track_rejected`）。
+- 错了能回来（11-27 删跨线记忆时加）：接过来以后连着 `track_heading_recover_n`（3，`user_rules.TRACK_HEADING_RECOVER_N`）
+  段都差超过 3σ、彼此差不到 `track_heading_recover_spread_deg`（1°），就不是跳点、是车头本身错了（IMU 航向角走着时跳、
+  开头就错）：把车头方差放到这个差的平方，按这段重新对上（`track_recovered`）。没有这个，3σ 门一直挡着、错到底
+  （仿真错 8°：有它走 5 m 回到 0.1° 以内，没有一直错 8°）。错 5° 以内车头方差走几米就涨到放得进来，用不上它；
+  一段差超过 `ALIGN_MAX_DEG`（10°）的照旧整段不算，也不进这个计数。
+- 车停稳不跟 IMU 航向角（`still_freeze_yaw`，默认开，只在 `yaw_input='angle'` 时起作用）：轮子停够
+  `stationary_time_s`、这一帧陀螺（扣静止零偏）不到 `gyro_margin_deg_s`，航向角的变化当 IMU 自己的，车头不动。
+  11-24 06:58 车停着，SCH16T 固件静止修正一下把航向角拨了 +4.12°（陀螺读数 0），静止时每分钟还漂 0.5–0.95°；
+  原来靠跨线带的换算跟着挪，11-27 删了跨线记忆，融合自己不跟。判断放在 `_yaw_rate` 里：推算（`_predict` 按下一帧
+  航向角差匀速转过去）、挑下一帧陀螺（`_add`）、尖峰判断（`_imu`）三处一样——只在 `_imu` 里改来不及，`_predict`
+  已经把这一下积进车头了。
+- 位姿 `heading_calibrated`：开了 `dual_heading_init_only`、车头已按位移对好（`track_ready`）时为 true。这时测向基线
+  出界不影响车头，直线照常按融合车头学 IMU 换算（`path_tracker._straight_first`）；还靠测向时为 false。
 - IMU 断了、和轮速对不上：这条车头没了，回到按测向，之后重新攒。
 - 开关 `dual_heading_init_only`（默认关，Gen5 在 `line_node.load_fusion_config` 按 `user_rules.DUAL_HEADING_INIT_ONLY` 开）。
 - 回放（当天 4 个时段 16 趟，每趟从头开）：直线喷线段融合车头 − 真车头（IMU + 这段 RTK 轨迹）绝对值中位
@@ -345,6 +358,8 @@ Gen5 上，`line_node` 默认设 `yaw_input='angle'`：两次测向之间转了�
   - 2026-10-03 由 70 提到 150：原地转起步驱动器冲过头，车身实际 81°/s，轮速读数落后，70°/s 把真实转动当尖峰丢了。
   - 航向清零、传感器重启引起的跳变当尖峰丢掉，下一帧从新的角度接着算差。
 - **静止零偏**：航向角 0.01° 一格，单帧的差不能当零偏观测，所以航向角模式不做静止零偏观测，漂移由双天线测向估。
+- **停稳不跟**（`still_freeze_yaw`，2026-11-27）：车停稳、陀螺不转时航向角的变化不跟（固件静止修正、静止漂），
+  见「双天线测向只用来开机定初值和做检查」一节。
 - **数据来源**：`line_node` 从 `/imu/data` 取航向角（四元数的偏航）和陀螺交给融合，`/imu` 不进融合，同一帧不送两遍。
 
 原地转向的两项误差模型（Gen5 默认打开，旧车为 0）：
@@ -618,6 +633,7 @@ BESTVEL 的 `sol` 接受常用位置解类型、`DOPPLER_VELOCITY` 或驱动已�
 | `wheel_scale` | `1.0` | 乘在输入轮速上的已确认修正系数 |
 | `yaw_input` | `'rate'` | 航向推算：`'rate'` 积分陀螺 z 轴；`'angle'` 用 IMU 航向角的增量（Gen5 默认） |
 | `yaw_resolution_deg` | `0.01` | IMU 航向角分辨率，放宽航向角模式的尖峰门限，° |
+| `still_freeze_yaw` | `True` | 航向角模式车停稳、陀螺不转时不跟 IMU 航向角的变化（固件静止修正、静止漂） |
 | `yaw_scale_sigma` | `0.0` | 整段累计转角的相关刻度误差；观测后按增益衰减累计量（Gen5 0.03） |
 | `heading_sync_s` | `0.0` | 测向与 IMU 的时间同步误差，测向误差加「角速度 × 它」，s（Gen5 默认 0.02） |
 | `gyro_noise_deg_s` | `0.034` | 单个陀螺样本白噪声标准差，°/s |
