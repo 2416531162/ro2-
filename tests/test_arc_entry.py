@@ -9,6 +9,7 @@ from dataclasses import replace
 from pathlib import Path
 import math
 import sys
+import time
 import unittest
 from unittest import mock
 
@@ -179,6 +180,29 @@ class ArcEntry(unittest.TestCase):
                 info = {}
                 rp.plan_current(replace(rect, turn=turn), car, .556, body=BODY, nozzle_x=NOZZLE, info=info)
                 self.assertEqual(info['arc_turns'], arcs)
+
+    def test_body_min_along_matches_four_corners(self):
+        for yaw in (-2.7, -math.pi / 2, 0.0, 0.73, math.pi):
+            for h0 in (-1.9, 0.0, 1.15, math.pi):
+                x, y, x0, y0 = 3.2, -1.7, -0.5, 2.4
+                front, rear, half = BODY
+                c, s_ = math.cos(yaw), math.sin(yaw)
+                ux, uy = math.cos(h0), math.sin(h0)
+                brute = min(
+                    (x + f * c - l * s_ - x0) * ux + (y + f * s_ + l * c - y0) * uy
+                    for f in (front, -rear) for l in (half, -half)
+                )
+                self.assertAlmostEqual(rp._body_min_along(x, y, yaw, BODY, h0, x0, y0), brute, places=12)
+
+    def test_distant_circle_arc_entry_stays_fast(self):
+        # 直线段按 O(1) 端点投影计算，远距离画圆的 74 个候选起点不再随距离线性膨胀
+        circle = rp.RouteSpec(kind='circle', center=(0., 0.), radius=3., cruise=.6,
+                              turn_radius=1.5, entry_turn='arc', entry_runup_m=2.0)
+        t0 = time.perf_counter()
+        with self.assertRaisesRegex(ValueError, '车离路线太远'):
+            rp.plan_current(circle, (500., 0., 0.), .556, body=BODY, nozzle_x=NOZZLE)
+        elapsed = time.perf_counter() - t0
+        self.assertLess(elapsed, 0.5, f'distant circle plan_current took {elapsed:.3f}s')
 
 
 class LearnOnTheArc(unittest.TestCase):

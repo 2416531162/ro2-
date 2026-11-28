@@ -1186,31 +1186,58 @@ def _body_min_along(x, y, yaw, body, h0, x0, y0):
     """车身四角在线方向（h0，过 (x0, y0)）上最靠后的坐标。"""
     front, rear, half = body
     c, s_ = math.cos(yaw), math.sin(yaw)
-    u = math.cos(h0), math.sin(h0)
-    best = math.inf
-    for f in (front, -rear):
-        for l in (half, -half):
-            px, py = x + f * c - l * s_, y + f * s_ + l * c
-            best = min(best, (px - x0) * u[0] + (py - y0) * u[1])
-    return best
+    ux, uy = math.cos(h0), math.sin(h0)
+    a = c * ux + s_ * uy
+    b = -s_ * ux + c * uy
+    return (x - x0) * ux + (y - y0) * uy + min(front * a, -rear * a) - abs(half * b)
 
 
 def arc_entry(first, car, radius, runup=RUN_UP_M, body=None):
     """圆弧进线：(分段, 接入路程米)。radius 是 app 设的转弯半径，runup 圆弧后的直线助跑（app 设的 entry_runup_m）；
     走法挑往线头外伸得最少的（见上）。"""
     body = body or _default_body()
+    front, rear, half = body
     _, (x0, y0, h0), pieces = first
-    gx, gy = _offset((x0, y0), h0, -runup)
+    ux, uy = math.cos(h0), math.sin(h0)
+    gx, gy = x0 - runup * ux, y0 - runup * uy
+    cx0, cy0, cyaw0 = car
+    c0, s0 = math.cos(cyaw0), math.sin(cyaw0)
+    a0 = c0 * ux + s0 * uy
+    b0 = -s0 * ux + c0 * uy
+    start_worst = (cx0 - x0) * ux + (cy0 - y0) * uy + min(front * a0, -rear * a0) - abs(half * b0)
     ranked = []
     for way in dubins_all(tuple(car), (gx, gy, h0), radius):
-        x, y, yaw = car
-        worst = _body_min_along(x, y, yaw, body, h0, x0, y0)
+        x, y, yaw = cx0, cy0, cyaw0
+        worst = start_worst
+        total = 0.0
         for length, k in way:
-            n = max(1, int(math.ceil(length / ENTRY_ARC_STEP_M)))
-            for _ in range(n):
-                x, y, yaw = advance(x, y, yaw, length / n, k)
-                worst = min(worst, _body_min_along(x, y, yaw, body, h0, x0, y0))
-        ranked.append((worst, sum(length for length, _ in way), way))
+            total += length
+            if abs(k) < 1e-12:
+                # 直线段航向不变，车身沿线方向的投影随弧长线性变化，最值只出现在起点（已计）或终点
+                c, s_ = math.cos(yaw), math.sin(yaw)
+                x += length * c
+                y += length * s_
+                a = c * ux + s_ * uy
+                b = -s_ * ux + c * uy
+                v = (x - x0) * ux + (y - y0) * uy + min(front * a, -rear * a) - abs(half * b)
+                if v < worst:
+                    worst = v
+            else:
+                n = max(1, int(math.ceil(length / ENTRY_ARC_STEP_M)))
+                dk = k * (length / n)
+                c, s_ = math.cos(yaw), math.sin(yaw)
+                for _ in range(n):
+                    yaw += dk
+                    c2, s2 = math.cos(yaw), math.sin(yaw)
+                    x += (s2 - s_) / k
+                    y -= (c2 - c) / k
+                    c, s_ = c2, s2
+                    a = c * ux + s_ * uy
+                    b = -s_ * ux + c * uy
+                    v = (x - x0) * ux + (y - y0) * uy + min(front * a, -rear * a) - abs(half * b)
+                    if v < worst:
+                        worst = v
+        ranked.append((worst, total, way))
     if not ranked:
         raise ValueError('无法规划接入路线')
     # 接入不超过 MAX_ENTRY_M 的走法里挑（往场内绕的可能很长，大半径线尾掉头往回要 30 m 以上）；都超了才不管长度
