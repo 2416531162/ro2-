@@ -4,8 +4,8 @@
 车头往它那边扭 4–5°（18:34 那趟扭 5.6°，到线头喷头偏 6 cm，被起喷门槛挡掉 0.72 m 线头）；两轮一起换向（直线倒车后）
 或都不换向时在 2° 以内。
 
-1. 规划（现在关着，RUNUP_BACK_M = 0）：助跑起点要原地转正时，改在前方 RUNUP_BACK_M 处转正、再直线倒回助跑起点，
-   起步时两轮一起换向。测试按打开时（1.0 m）检查。
+1. 规划（RUNUP_BACK_M = 1.5：11-19 开、11-21 关、11-28 用户「也要稳定的备选方案」重新打开）：助跑起点要原地转正时，
+   改在前方 RUNUP_BACK_M 处转正、再直线倒回助跑起点，起步前万向轮顺过来、两轮一起换向。
 2. 作业第一个线头没过起喷门槛：渐停、退回去重新助跑（与接入时偏离同一套），不再跳过线头往前喷。"""
 from dataclasses import replace
 from pathlib import Path
@@ -55,13 +55,15 @@ BACK_ON = 1.5        # 打开时的回倒长度
 
 
 class RunupPlan(unittest.TestCase):
-    def test_off_by_default_plan_unchanged(self):
-        # 2026-11-19 晚 用户：按「对准助跑起点开过去、转正直接起步」走，起步扭头交给控制
-        self.assertEqual(rp.RUNUP_BACK_M, 0.)
+    def test_on_by_default(self):
+        # 2026-11-28 用户「也要稳定的备选方案」：原地进线转正后顺线倒回 1.5 m 再起步（圆弧放不下或选了原地时）
+        self.assertEqual(rp.RUNUP_BACK_M, BACK_ON)
         secs, _ = rp.plan_current(LINE, BESIDE, .556, nozzle_x=NOZZLE)
-        *_, (d2, _, t2), (d3, _, _) = headings(secs, BESIDE[2])
+        *_, (d2, l2, t2), (d3, _, t3) = headings(secs, BESIDE[2])
         self.assertEqual((d2, d3), (-1, 1))
-        self.assertGreater(abs(t2), 150.)          # 转过去倒到助跑起点，到了再转正就起步
+        self.assertAlmostEqual(l2, BACK_ON)
+        self.assertGreater(abs(t2), 5.)            # 先在助跑起点前方原地转正
+        self.assertLess(abs(t3), 1e-6)             # 倒完不再转，直接往前起步
 
     @mock.patch.object(rp, 'RUNUP_BACK_M', BACK_ON)
     def test_after_finishing_the_same_line_backwards(self):
