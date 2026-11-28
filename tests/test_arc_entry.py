@@ -181,5 +181,59 @@ class ArcEntry(unittest.TestCase):
                 self.assertEqual(info['arc_turns'], arcs)
 
 
+class LearnOnTheArc(unittest.TestCase):
+    """进线圆弧最后 ENTRY_ARC_LEARN_M 米就给后面那条直线攒 IMU 换算样本（融合车头已按 IMU + RTK 位移对好时），转上直线
+    不清掉、接着攒（11-28 用户「1.2开始」）。换算照样只从这条线开头的融合车头学。"""
+
+    def tracker(self):
+        from types import SimpleNamespace as NS
+        from path_tracker import PathConfig, SectionTracker, differential_config
+        from robot_core.kinematics import ChassisGeometry
+        from live_cruise import label_sections
+        secs, entry_m = rp.plan_current(replace(LINE, turn_radius=2.), ArcEntry.SIDE, .556, body=BODY, nozzle_x=NOZZLE)
+        label_sections(secs, entry_m, .8)
+        route = SectionTracker(secs, differential_config(PathConfig(cruise_mps=.8)),
+                               ChassisGeometry(drive='differential', track_m=.675, diff_min_radius_m=.5),
+                               constant_straight_speed=True)
+        tr = route.trackers[0]
+        tr.set_nozzle(*NOZZLE)
+        tr.st.state = 'RUNNING'
+        ahead = next(p for p in tr.path.pieces if p.straight and p.s0 <= tr.paint_from_m < p.s0 + p.length)
+        return tr, ahead, NS
+
+    def run_to(self, tr, NS, s_from, s_to, calibrated, t0=0.):
+        t, s = t0, s_from
+        while s < s_to:
+            s += .01
+            t += .02
+            x, y, yaw = tr.path.pose(s)
+            tr.sync(t, (t, yaw - 1., math.radians(2.)))
+            tr.st.s = s
+            pose = NS(x=x, y=y, yaw=yaw, speed=.5, yaw_rate=0., usable_for_control=True, quality='RTK_FIXED',
+                      rtk_trusted=True, reasons=(), correction_xy=(0., 0.), correction_yaw=0., heading_calibrated=calibrated)
+            tr._straight_control(pose, .02, .5, 0.)
+        return t
+
+    def test_samples_start_on_the_last_part_of_the_arc(self):
+        import path_tracker
+        self.assertEqual(path_tracker.ENTRY_ARC_LEARN_M, .5)
+        tr, ahead, NS = self.tracker()
+        g = tr._straight_guide
+        t = self.run_to(tr, NS, ahead.s0 - 2., ahead.s0 - .6, True)
+        self.assertIsNone(g.offset)                                   # 圆弧前面还不攒
+        t = self.run_to(tr, NS, ahead.s0 - .6, ahead.s0 - .01, True, t)
+        n = g.offset_n
+        self.assertGreater(n, 30)                                     # 最后 0.5 m 攒上了
+        self.assertAlmostEqual(g.offset, 1., places=6)
+        self.run_to(tr, NS, ahead.s0 - .01, ahead.s0 + .2, True, t)
+        self.assertTrue(g.locked)                                     # 转上直线接着攒、没清掉，很快锁住
+        self.assertEqual(g.source, 'learned')
+
+    def test_not_before_the_heading_is_calibrated(self):
+        tr, ahead, NS = self.tracker()
+        self.run_to(tr, NS, ahead.s0 - .6, ahead.s0 - .01, False)
+        self.assertIsNone(tr._straight_guide.offset)                 # 车头还靠测向：照原来，转上直线才学
+
+
 if __name__ == '__main__':
     unittest.main()
